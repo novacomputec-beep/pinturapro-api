@@ -23,7 +23,8 @@ app.use(cors({
 }))
 
 // Rate limit global: 100 requisições por IP a cada 15 minutos
-app.set('trust proxy', 1)app.use(rateLimit({
+app.set('trust proxy', 1)
+app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
