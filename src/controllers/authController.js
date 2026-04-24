@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
-const supabase = require('../utils/supabase')
+const { pool } = require('../utils/supabase')
 
 const gerarToken = (usuario) => jwt.sign(
   { id: usuario.id, role: usuario.role },
@@ -8,41 +8,31 @@ const gerarToken = (usuario) => jwt.sign(
   { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
 )
 
-// POST /auth/cadastro
 const cadastrar = async (req, res) => {
   try {
-    const { nome, email, telefone, senha, cidade, latitude, longitude,
+    const { nome, email, telefone, senha, cidade,
             especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj } = req.body
 
-    // Verifica se e-mail já existe
-    const { data: existente } = await supabase
-      .from('usuarios')
-      .select('id')
-      .eq('email', email)
-      .single()
-
-    if (existente) {
+    const existente = await pool.query(
+      'SELECT id FROM usuarios WHERE email = $1', [email]
+    )
+    if (existente.rows.length > 0) {
       return res.status(409).json({ erro: 'E-mail já cadastrado' })
     }
 
     const senha_hash = await bcrypt.hash(senha, 12)
 
-    const { data: usuario, error } = await supabase
-      .from('usuarios')
-      .insert({
-        nome, email, telefone, senha_hash, cidade,
-        latitude, longitude,
-        especialidades: especialidades || [],
-        anos_experiencia: anos_experiencia || 0,
-        tamanho_equipe: tamanho_equipe || 1,
-        cpf_cnpj,
-        role: 'assinante'
-      })
-      .select('id, nome, email, role')
-      .single()
+    const result = await pool.query(
+      `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade,
+        especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'assinante')
+       RETURNING id, nome, email, role`,
+      [nome, email, telefone, senha_hash, cidade,
+       especialidades || [], anos_experiencia || 0,
+       tamanho_equipe || 1, cpf_cnpj]
+    )
 
-    if (error) throw error
-
+    const usuario = result.rows[0]
     const token = gerarToken(usuario)
     res.status(201).json({ usuario, token })
 
@@ -52,20 +42,20 @@ const cadastrar = async (req, res) => {
   }
 }
 
-// POST /auth/login
 const login = async (req, res) => {
   try {
     const { email, senha } = req.body
 
-    const { data: usuario, error } = await supabase
-      .from('usuarios')
-      .select('id, nome, email, role, senha_hash, ativo')
-      .eq('email', email)
-      .single()
+    const result = await pool.query(
+      'SELECT id, nome, email, role, senha_hash, ativo FROM usuarios WHERE email = $1',
+      [email]
+    )
 
-    if (error || !usuario) {
+    if (result.rows.length === 0) {
       return res.status(401).json({ erro: 'E-mail ou senha incorretos' })
     }
+
+    const usuario = result.rows[0]
 
     if (!usuario.ativo) {
       return res.status(403).json({ erro: 'Conta desativada' })
@@ -76,24 +66,10 @@ const login = async (req, res) => {
       return res.status(401).json({ erro: 'E-mail ou senha incorretos' })
     }
 
-    // Busca assinatura ativa
-    const { data: assinatura } = await supabase
-      .from('assinaturas')
-      .select('status, plano, proximo_vencimento')
-      .eq('usuario_id', usuario.id)
-      .eq('status', 'ativa')
-      .single()
-
     const token = gerarToken(usuario)
-
     res.json({
-      usuario: {
-        id: usuario.id,
-        nome: usuario.nome,
-        email: usuario.email,
-        role: usuario.role
-      },
-      assinatura: assinatura || null,
+      usuario: { id: usuario.id, nome: usuario.nome, email: usuario.email, role: usuario.role },
+      assinatura: null,
       token
     })
 
@@ -103,46 +79,26 @@ const login = async (req, res) => {
   }
 }
 
-// GET /auth/perfil
 const perfil = async (req, res) => {
   try {
-    const { data: usuario } = await supabase
-      .from('usuarios')
-      .select('id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, avatar_url, role')
-      .eq('id', req.usuario.id)
-      .single()
-
-    const { data: assinatura } = await supabase
-      .from('assinaturas')
-      .select('plano, status, proximo_vencimento')
-      .eq('usuario_id', req.usuario.id)
-      .order('criado_em', { ascending: false })
-      .limit(1)
-      .single()
-
-    res.json({ usuario, assinatura })
+    const result = await pool.query(
+      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role FROM usuarios WHERE id = $1',
+      [req.usuario.id]
+    )
+    res.json({ usuario: result.rows[0], assinatura: null })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar perfil' })
   }
 }
 
-// PUT /auth/perfil
 const atualizarPerfil = async (req, res) => {
   try {
-    const campos = ['nome', 'telefone', 'cidade', 'latitude', 'longitude',
-                    'especialidades', 'anos_experiencia', 'tamanho_equipe']
-    const atualizacao = {}
-    campos.forEach(c => { if (req.body[c] !== undefined) atualizacao[c] = req.body[c] })
-
-    const { data, error } = await supabase
-      .from('usuarios')
-      .update(atualizacao)
-      .eq('id', req.usuario.id)
-      .select('id, nome, email, cidade')
-      .single()
-
-    if (error) throw error
-    res.json(data)
+    const { nome, telefone, cidade } = req.body
+    const result = await pool.query(
+      'UPDATE usuarios SET nome=$1, telefone=$2, cidade=$3 WHERE id=$4 RETURNING id, nome, email, cidade',
+      [nome, telefone, cidade, req.usuario.id]
+    )
+    res.json(result.rows[0])
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar perfil' })
   }
