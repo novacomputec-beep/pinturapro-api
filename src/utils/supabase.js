@@ -1,15 +1,14 @@
 const { createClient } = require('@supabase/supabase-js')
+const { Pool } = require('pg')
 
-const supabaseUrl = process.env.SUPABASE_URL
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+)
 
-if (!supabaseUrl || !supabaseKey) {
-  console.error('ERRO: Variáveis SUPABASE_URL ou SUPABASE_SERVICE_KEY não definidas')
-}
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+})
 
-console.log('Supabase URL:', supabaseUrl)
-console.log('Supabase Key inicio:', supabaseKey ? supabaseKey.substring(0, 20) : 'NULA')
-
-const supabase = createClient(supabaseUrl, supabaseKey)
-
-module.exports = supabase
+module.exports = { supabase, pool }
