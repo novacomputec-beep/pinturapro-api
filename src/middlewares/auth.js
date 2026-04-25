@@ -1,7 +1,6 @@
 const jwt = require('jsonwebtoken')
-const supabase = require('../utils/supabase')
+const { pool } = require('../utils/supabase')
 
-// Verifica se o token JWT é válido e se o usuário tem assinatura ativa
 const autenticar = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization
@@ -12,15 +11,16 @@ const autenticar = async (req, res, next) => {
     const token = authHeader.split(' ')[1]
     const decoded = jwt.verify(token, process.env.JWT_SECRET)
 
-    const { data: usuario, error } = await supabase
-      .from('usuarios')
-      .select('id, nome, email, role, ativo')
-      .eq('id', decoded.id)
-      .single()
+    const result = await pool.query(
+      'SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1',
+      [decoded.id]
+    )
 
-    if (error || !usuario) {
+    if (result.rows.length === 0) {
       return res.status(401).json({ erro: 'Usuário não encontrado' })
     }
+
+    const usuario = result.rows[0]
 
     if (!usuario.ativo) {
       return res.status(403).json({ erro: 'Conta desativada' })
@@ -29,34 +29,35 @@ const autenticar = async (req, res, next) => {
     req.usuario = usuario
     next()
   } catch (err) {
+    console.error('Erro auth:', err.message)
     return res.status(401).json({ erro: 'Token inválido ou expirado' })
   }
 }
 
-// Verifica se o assinante tem assinatura ativa
 const exigirAssinaturaAtiva = async (req, res, next) => {
   if (req.usuario.role === 'admin' || req.usuario.role === 'aprovador') {
     return next()
   }
 
-  const { data: assinatura } = await supabase
-    .from('assinaturas')
-    .select('status')
-    .eq('usuario_id', req.usuario.id)
-    .eq('status', 'ativa')
-    .single()
+  try {
+    const result = await pool.query(
+      `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
+      [req.usuario.id]
+    )
 
-  if (!assinatura) {
-    return res.status(403).json({
-      erro: 'Assinatura inativa. Renove seu plano para acessar as obras.',
-      codigo: 'ASSINATURA_INATIVA'
-    })
+    if (result.rows.length === 0) {
+      return res.status(403).json({
+        erro: 'Assinatura inativa. Renove seu plano para acessar as obras.',
+        codigo: 'ASSINATURA_INATIVA'
+      })
+    }
+
+    next()
+  } catch (err) {
+    return res.status(500).json({ erro: 'Erro ao verificar assinatura' })
   }
-
-  next()
 }
 
-// Verifica se é admin ou aprovador
 const exigirAdmin = (req, res, next) => {
   if (!['admin', 'aprovador'].includes(req.usuario.role)) {
     return res.status(403).json({ erro: 'Acesso negado' })
@@ -64,7 +65,6 @@ const exigirAdmin = (req, res, next) => {
   next()
 }
 
-// Verifica se é somente admin
 const exigirSuperAdmin = (req, res, next) => {
   if (req.usuario.role !== 'admin') {
     return res.status(403).json({ erro: 'Acesso restrito ao administrador' })
