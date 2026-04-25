@@ -24,8 +24,8 @@ const cadastrar = async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade,
-        especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'assinante')
+        especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'assinante',true)
        RETURNING id, nome, email, role`,
       [nome, email, telefone, senha_hash, cidade,
        especialidades || [], anos_experiencia || 0,
@@ -33,6 +33,14 @@ const cadastrar = async (req, res) => {
     )
 
     const usuario = result.rows[0]
+
+    // Cria assinatura ativa automaticamente
+    await pool.query(
+      `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
+       VALUES ($1, 'mensal', 99.90, 'ativa')`,
+      [usuario.id]
+    )
+
     const token = gerarToken(usuario)
     res.status(201).json({ usuario, token })
 
@@ -66,10 +74,22 @@ const login = async (req, res) => {
       return res.status(401).json({ erro: 'E-mail ou senha incorretos' })
     }
 
+    const assinaturaResult = await pool.query(
+      `SELECT status, plano, proximo_vencimento FROM assinaturas
+       WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
+      [usuario.id]
+    )
+
     const token = gerarToken(usuario)
+
     res.json({
-      usuario: { id: usuario.id, nome: usuario.nome, email: usuario.email, role: usuario.role },
-      assinatura: null,
+      usuario: {
+        id: usuario.id,
+        nome: usuario.nome,
+        email: usuario.email,
+        role: usuario.role
+      },
+      assinatura: assinaturaResult.rows[0] || null,
       token
     })
 
@@ -85,7 +105,17 @@ const perfil = async (req, res) => {
       'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role FROM usuarios WHERE id = $1',
       [req.usuario.id]
     )
-    res.json({ usuario: result.rows[0], assinatura: null })
+
+    const assinaturaResult = await pool.query(
+      `SELECT plano, status, proximo_vencimento FROM assinaturas
+       WHERE usuario_id = $1 ORDER BY criado_em DESC LIMIT 1`,
+      [req.usuario.id]
+    )
+
+    res.json({
+      usuario: result.rows[0],
+      assinatura: assinaturaResult.rows[0] || null
+    })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar perfil' })
   }
