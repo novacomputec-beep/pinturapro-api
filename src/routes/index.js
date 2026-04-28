@@ -8,6 +8,7 @@ const authCtrl         = require('../controllers/authController')
 const obrasCtrl        = require('../controllers/obrasController')
 const candidaturasCtrl = require('../controllers/candidaturasController')
 const mensagensCtrl    = require('../controllers/mensagensController')
+const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 
 // ============================================================
@@ -49,6 +50,14 @@ router.post('/mensagens',                       autenticar, exigirAssinaturaAtiv
 router.get('/mensagens/obra/:obra_id',          autenticar, mensagensCtrl.porObra)
 router.get('/mensagens/pendentes',              autenticar, exigirAdmin, mensagensCtrl.pendentes)
 router.post('/mensagens/:id/responder',         autenticar, exigirAdmin, mensagensCtrl.responder)
+
+// ============================================================
+// PAGAMENTOS
+// ============================================================
+router.post('/pagamentos/criar-assinatura',     autenticar, pagamentoCtrl.criarAssinatura)
+router.post('/pagamentos/webhook',              pagamentoCtrl.webhook)
+router.post('/pagamentos/acesso-gratuito',      autenticar, exigirAdmin, pagamentoCtrl.darAcessoGratuito)
+router.get('/pagamentos/assinantes',            autenticar, exigirAdmin, pagamentoCtrl.listarAssinantes)
 
 // ============================================================
 // DASHBOARD
