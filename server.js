@@ -1,29 +1,29 @@
 require('dotenv').config()
-
-const express    = require('express')
-const cors       = require('cors')
-const helmet     = require('helmet')
-const rateLimit  = require('express-rate-limit')
-const routes     = require('./src/routes')
+const express = require('express')
+const cors = require('cors')
+const rateLimit = require('express-rate-limit')
+const routes = require('./src/routes')
 
 const app = express()
+const PORT = process.env.PORT || 3000
 
-// ============================================================
-// SEGURANÇA
-// ============================================================
+// Trust proxy
+app.set('trust proxy', 1)
 
-app.use(helmet())
-
+// CORS — libera o painel admin e o app
 app.use(cors({
   origin: [
-    process.env.FRONTEND_URL || 'http://localhost:8081',
-    process.env.ADMIN_URL    || 'http://localhost:3001'
+    'https://pinturapro-painel-production.up.railway.app',
+    'http://localhost:3000',
+    'http://localhost:8081',
+    'exp://',
   ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }))
 
-// Rate limit global: 100 requisições por IP a cada 15 minutos
-app.set('trust proxy', 1)
+// Rate limit global
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -32,19 +32,13 @@ app.use(rateLimit({
 
 // Rate limit mais restrito para login/cadastro
 app.use('/api/auth/login',    rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }))
-app.use('/api/auth/cadastro', rateLimit({ windowMs: 60 * 60 * 1000, max: 5  }))
+app.use('/api/auth/cadastro', rateLimit({ windowMs: 60 * 60 * 1000, max: 5 }))
 
-// ============================================================
-// PARSING
-// ============================================================
-
+// Parsing
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
 
-// ============================================================
-// ROTAS
-// ============================================================
-
+// Rotas
 app.use('/api', routes)
 
 // Rota raiz
@@ -57,36 +51,16 @@ app.get('/', (req, res) => {
   })
 })
 
-// ============================================================
-// ERRO 404
-// ============================================================
-
+// Erro 404
 app.use((req, res) => {
-  res.status(404).json({ erro: `Rota não encontrada: ${req.method} ${req.path}` })
+  res.status(404).json({ erro: 'Rota não encontrada' })
 })
-
-// ============================================================
-// TRATAMENTO GLOBAL DE ERROS
-// ============================================================
-
-app.use((err, req, res, next) => {
-  console.error('Erro não tratado:', err)
-  res.status(500).json({ erro: 'Erro interno do servidor' })
-})
-
-// ============================================================
-// START
-// ============================================================
-
-const PORT = process.env.PORT || 3000
 
 app.listen(PORT, () => {
   console.log(`
-  ╔══════════════════════════════════════╗
-  ║   PinturaPro API — v1.0.0            ║
-  ║   Rodando em http://localhost:${PORT}   ║
-  ╚══════════════════════════════════════╝
+╔══════════════════════════════════════╗
+║   PinturaPro API — v1.0.0            ║
+║   Rodando em http://localhost:${PORT}   ║
+╚══════════════════════════════════════╝
   `)
 })
-
-module.exports = app
