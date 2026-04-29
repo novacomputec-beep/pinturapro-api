@@ -1,4 +1,5 @@
 const { pool } = require('../utils/supabase')
+const { notificarNovaObra } = require('../services/notificacaoService')
 
 const listar = async (req, res) => {
   try {
@@ -79,14 +80,34 @@ const detalhe = async (req, res) => {
 
 const criar = async (req, res) => {
   try {
-    const { titulo, categoria, valor, cidade, bairro, latitude, longitude, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags } = req.body
+    const {
+      titulo, categoria, valor, cidade, bairro,
+      latitude, longitude, metragem,
+      prazo_execucao_dias, horas_para_expirar,
+      descricao, tags
+    } = req.body
+
     const expira_em = new Date(Date.now() + (horas_para_expirar || 48) * 3600 * 1000)
+
     const result = await pool.query(
-      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, latitude, longitude, metragem, prazo_execucao_dias, expira_em, descricao, tags, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'aberta') RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro, latitude, longitude, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || []]
+      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro,
+        latitude, longitude, metragem, prazo_execucao_dias, expira_em, descricao, tags, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'aberta')
+       RETURNING *`,
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro,
+       latitude, longitude, metragem, prazo_execucao_dias,
+       expira_em.toISOString(), descricao, tags || []]
     )
-    res.status(201).json(result.rows[0])
+
+    const obra = result.rows[0]
+
+    // Notifica todos os pintores sobre a nova obra
+    notificarNovaObra(pool, obra).catch(err =>
+      console.error('Erro ao enviar notificações:', err)
+    )
+
+    res.status(201).json(obra)
+
   } catch (err) {
     console.error('Erro ao criar obra:', err)
     res.status(500).json({ erro: 'Erro ao criar obra' })
@@ -96,10 +117,14 @@ const criar = async (req, res) => {
 const editar = async (req, res) => {
   try {
     const { titulo, categoria, valor, cidade, bairro, metragem, prazo_execucao_dias, descricao, tags, status } = req.body
+
     const result = await pool.query(
-      `UPDATE obras SET titulo=$1, categoria=$2, valor=$3, cidade=$4, bairro=$5, metragem=$6, prazo_execucao_dias=$7, descricao=$8, tags=$9, status=$10 WHERE id=$11 RETURNING *`,
+      `UPDATE obras SET titulo=$1, categoria=$2, valor=$3, cidade=$4, bairro=$5,
+       metragem=$6, prazo_execucao_dias=$7, descricao=$8, tags=$9, status=$10
+       WHERE id=$11 RETURNING *`,
       [titulo, categoria, valor, cidade, bairro, metragem, prazo_execucao_dias, descricao, tags, status, req.params.id]
     )
+
     res.json(result.rows[0])
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao editar obra' })
