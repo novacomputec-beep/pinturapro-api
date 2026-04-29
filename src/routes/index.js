@@ -10,6 +10,7 @@ const candidaturasCtrl = require('../controllers/candidaturasController')
 const mensagensCtrl    = require('../controllers/mensagensController')
 const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
+const { notificarNovaObra } = require('../services/notificacaoService')
 
 // ============================================================
 // AUTH
@@ -18,6 +19,20 @@ router.post('/auth/cadastro',       authCtrl.cadastrar)
 router.post('/auth/login',          authCtrl.login)
 router.get('/auth/perfil',          autenticar, authCtrl.perfil)
 router.put('/auth/perfil',          autenticar, authCtrl.atualizarPerfil)
+
+// Registrar token de notificação
+router.post('/auth/push-token', autenticar, async (req, res) => {
+  try {
+    const { token } = req.body
+    await pool.query(
+      'UPDATE usuarios SET push_token = $1 WHERE id = $2',
+      [token, req.usuario.id]
+    )
+    res.json({ mensagem: 'Token registrado' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao registrar token' })
+  }
+})
 
 // ============================================================
 // OBRAS
