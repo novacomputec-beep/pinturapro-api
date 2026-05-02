@@ -11,7 +11,8 @@ const gerarToken = (usuario) => jwt.sign(
 const cadastrar = async (req, res) => {
   try {
     const { nome, email, telefone, senha, cidade,
-            especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj } = req.body
+            especialidades, anos_experiencia, tamanho_equipe,
+            cpf_cnpj, tipo_conta } = req.body
 
     const existente = await pool.query(
       'SELECT id FROM usuarios WHERE email = $1', [email]
@@ -22,24 +23,36 @@ const cadastrar = async (req, res) => {
 
     const senha_hash = await bcrypt.hash(senha, 12)
 
+    // Define o role baseado no tipo de conta
+    const role = tipo_conta === 'dono_obra' ? 'dono_obra' : 'assinante'
+
     const result = await pool.query(
       `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade,
         especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'assinante',true)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true)
        RETURNING id, nome, email, role`,
       [nome, email, telefone, senha_hash, cidade,
        especialidades || [], anos_experiencia || 0,
-       tamanho_equipe || 1, cpf_cnpj]
+       tamanho_equipe || 1, cpf_cnpj, role]
     )
 
     const usuario = result.rows[0]
 
-    // Cria assinatura como PENDENTE até o pagamento ser confirmado
-    await pool.query(
-      `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
-       VALUES ($1, 'mensal', 99.90, 'pendente')`,
-      [usuario.id]
-    )
+    // Pintor: cria assinatura pendente
+    // Dono de obra: cria assinatura ativa gratuita
+    if (role === 'dono_obra') {
+      await pool.query(
+        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
+         VALUES ($1, 'mensal', 0, 'ativa', 'gratuito')`,
+        [usuario.id]
+      )
+    } else {
+      await pool.query(
+        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
+         VALUES ($1, 'mensal', 99.90, 'pendente')`,
+        [usuario.id]
+      )
+    }
 
     const token = gerarToken(usuario)
     res.status(201).json({ usuario, token })
