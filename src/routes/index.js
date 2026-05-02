@@ -33,17 +33,29 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
 })
 
 // ============================================================
-// OBRAS — pintores
+// OBRAS — rotas específicas ANTES das rotas com parâmetro
 // ============================================================
-router.get('/obras',                autenticar, exigirAssinaturaAtiva, obrasCtrl.listar)
-router.get('/obras/:id',            autenticar, exigirAssinaturaAtiva, obrasCtrl.detalhe)
-router.post('/obras',               autenticar, exigirAdmin,           obrasCtrl.criar)
-router.put('/obras/:id',            autenticar, exigirAdmin,           obrasCtrl.editar)
-router.delete('/obras/:id',         autenticar, exigirAdmin,           obrasCtrl.encerrar)
 
-// ============================================================
-// OBRAS — dono de obra
-// ============================================================
+// Dono de obra — listar suas obras
+router.get('/obras/minhas', autenticar, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT o.*,
+        (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
+        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
+       FROM obras o
+       WHERE o.criado_por = $1
+       ORDER BY o.criado_em DESC`,
+      [req.usuario.id]
+    )
+    res.json({ obras: result.rows })
+  } catch (err) {
+    console.error('Erro ao buscar obras do dono:', err)
+    res.status(500).json({ erro: 'Erro ao buscar obras' })
+  }
+})
+
+// Dono de obra — cadastrar obra
 router.post('/obras/dono', autenticar, async (req, res) => {
   try {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
@@ -72,28 +84,59 @@ router.post('/obras/dono', autenticar, async (req, res) => {
   }
 })
 
-router.get('/obras/minhas', autenticar, async (req, res) => {
+// Admin — aprovação de obras
+router.get('/obras-aprovacao', autenticar, exigirAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT o.*,
-        (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
+      `SELECT o.*, u.nome as dono_nome, u.email as dono_email, u.telefone as dono_telefone,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
        FROM obras o
-       WHERE o.criado_por = $1
-       ORDER BY o.criado_em DESC`,
-      [req.usuario.id]
+       JOIN usuarios u ON o.criado_por = u.id
+       WHERE o.enviada_por_dono = true AND o.status_aprovacao = 'pendente'
+       ORDER BY o.criado_em DESC`
     )
     res.json({ obras: result.rows })
   } catch (err) {
-    res.status(500).json({ erro: 'Erro ao buscar obras' })
+    res.status(500).json({ erro: 'Erro ao buscar obras para aprovação' })
   }
 })
+
+router.post('/obras-aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    await pool.query(
+      `UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta' WHERE id = $1`,
+      [req.params.id]
+    )
+    res.json({ mensagem: 'Obra aprovada e publicada!' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao aprovar obra' })
+  }
+})
+
+router.post('/obras-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    await pool.query(
+      `UPDATE obras SET status_aprovacao = 'recusada', status = 'cancelada' WHERE id = $1`,
+      [req.params.id]
+    )
+    res.json({ mensagem: 'Obra recusada' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao recusar obra' })
+  }
+})
+
+// Rotas gerais de obras — com parâmetro :id DEPOIS das específicas
+router.get('/obras',                autenticar, exigirAssinaturaAtiva, obrasCtrl.listar)
+router.get('/obras/:id',            autenticar, exigirAssinaturaAtiva, obrasCtrl.detalhe)
+router.post('/obras',               autenticar, exigirAdmin,           obrasCtrl.criar)
+router.put('/obras/:id',            autenticar, exigirAdmin,           obrasCtrl.editar)
+router.delete('/obras/:id',         autenticar, exigirAdmin,           obrasCtrl.encerrar)
 
 // ============================================================
 // UPLOAD DE MÍDIAS
 // ============================================================
-router.post('/upload',      autenticar, exigirAdmin,    upload.single('arquivo'), uploadMidia)
-router.post('/upload/dono', autenticar,                 upload.single('arquivo'), uploadMidia)
+router.post('/upload',      autenticar, exigirAdmin, upload.single('arquivo'), uploadMidia)
+router.post('/upload/dono', autenticar,              upload.single('arquivo'), uploadMidia)
 
 // ============================================================
 // CANDIDATURAS
@@ -148,49 +191,6 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
   } catch (err) {
     console.error('Erro dashboard:', err)
     res.status(500).json({ erro: 'Erro ao buscar métricas' })
-  }
-})
-
-// ============================================================
-// APROVAÇÃO DE OBRAS (admin)
-// ============================================================
-router.get('/obras-aprovacao', autenticar, exigirAdmin, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT o.*, u.nome as dono_nome, u.email as dono_email, u.telefone as dono_telefone,
-        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
-       FROM obras o
-       JOIN usuarios u ON o.criado_por = u.id
-       WHERE o.enviada_por_dono = true AND o.status_aprovacao = 'pendente'
-       ORDER BY o.criado_em DESC`
-    )
-    res.json({ obras: result.rows })
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao buscar obras para aprovação' })
-  }
-})
-
-router.post('/obras-aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
-  try {
-    await pool.query(
-      `UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta' WHERE id = $1`,
-      [req.params.id]
-    )
-    res.json({ mensagem: 'Obra aprovada e publicada!' })
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao aprovar obra' })
-  }
-})
-
-router.post('/obras-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req, res) => {
-  try {
-    await pool.query(
-      `UPDATE obras SET status_aprovacao = 'recusada', status = 'cancelada' WHERE id = $1`,
-      [req.params.id]
-    )
-    res.json({ mensagem: 'Obra recusada' })
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao recusar obra' })
   }
 })
 
