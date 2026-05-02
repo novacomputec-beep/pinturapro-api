@@ -1,11 +1,6 @@
-const { MercadoPagoConfig, Preference } = require('mercadopago')
 const { pool } = require('../utils/supabase')
 
-const client = new MercadoPagoConfig({
-  accessToken: process.env.MP_ACCESS_TOKEN
-})
-
-const preference = new Preference(client)
+const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN
 
 const criarAssinatura = async (req, res) => {
   try {
@@ -14,8 +9,13 @@ const criarAssinatura = async (req, res) => {
     const valor = plano === 'anual' ? 999.00 : 99.90
     const descricao = `PinturaPro — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`
 
-    const resultado = await preference.create({
-      body: {
+    const response = await fetch('https://api.mercadopago.com/checkout/preferences', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${MP_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
         items: [
           {
             title: descricao,
@@ -33,10 +33,21 @@ const criarAssinatura = async (req, res) => {
         },
         auto_return: 'approved',
         notification_url: 'https://pinturapro-api-production.up.railway.app/api/pagamentos/webhook'
-      }
+      })
     })
 
-    res.json({ init_point: resultado.init_point, id: resultado.id })
+    const data = await response.json()
+
+    if (!response.ok) {
+      console.error('Erro MP:', data)
+      return res.status(500).json({ erro: 'Erro ao criar pagamento' })
+    }
+
+    res.json({
+      init_point: data.init_point,
+      sandbox_init_point: data.sandbox_init_point,
+      id: data.id
+    })
 
   } catch (err) {
     console.error('Erro ao criar preferência MP:', err)
@@ -68,10 +79,11 @@ const webhook = async (req, res) => {
   try {
     const { type, data } = req.body
 
-    if (type === 'payment') {
-      const { Payment } = require('mercadopago')
-      const paymentClient = new Payment(client)
-      const pagamento = await paymentClient.get({ id: data.id })
+    if (type === 'payment' && data?.id) {
+      const response = await fetch(`https://api.mercadopago.com/v1/payments/${data.id}`, {
+        headers: { 'Authorization': `Bearer ${MP_ACCESS_TOKEN}` }
+      })
+      const pagamento = await response.json()
 
       if (pagamento.status === 'approved' && pagamento.external_reference) {
         const [usuarioId, plano] = pagamento.external_reference.split('|')
