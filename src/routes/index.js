@@ -10,7 +10,6 @@ const candidaturasCtrl = require('../controllers/candidaturasController')
 const mensagensCtrl    = require('../controllers/mensagensController')
 const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
-const { notificarNovaObra } = require('../services/notificacaoService')
 
 // ============================================================
 // AUTH
@@ -20,7 +19,6 @@ router.post('/auth/login',          authCtrl.login)
 router.get('/auth/perfil',          autenticar, authCtrl.perfil)
 router.put('/auth/perfil',          autenticar, authCtrl.atualizarPerfil)
 
-// Registrar token de notificação
 router.post('/auth/push-token', autenticar, async (req, res) => {
   try {
     const { token } = req.body
@@ -71,6 +69,9 @@ router.post('/mensagens/:id/responder',         autenticar, exigirAdmin, mensage
 // ============================================================
 router.post('/pagamentos/criar-assinatura',     autenticar, pagamentoCtrl.criarAssinatura)
 router.post('/pagamentos/webhook',              pagamentoCtrl.webhook)
+router.get('/pagamentos/sucesso',               pagamentoCtrl.sucesso)
+router.get('/pagamentos/falha',                 (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
+router.get('/pagamentos/pendente',              (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
 router.post('/pagamentos/acesso-gratuito',      autenticar, exigirAdmin, pagamentoCtrl.darAcessoGratuito)
 router.get('/pagamentos/assinantes',            autenticar, exigirAdmin, pagamentoCtrl.listarAssinantes)
 

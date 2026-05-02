@@ -1,64 +1,86 @@
-const { MercadoPagoConfig, PreApproval, Payment } = require('mercadopago')
+const { MercadoPagoConfig, Preference } = require('mercadopago')
 const { pool } = require('../utils/supabase')
 
 const client = new MercadoPagoConfig({
   accessToken: process.env.MP_ACCESS_TOKEN
 })
 
-const preApproval = new PreApproval(client)
+const preference = new Preference(client)
 
-// POST /pagamentos/criar-assinatura
 const criarAssinatura = async (req, res) => {
   try {
     const { plano = 'mensal' } = req.body
     const usuario = req.usuario
-    const valor = plano === 'anual' ? 83.25 : 99.90
+    const valor = plano === 'anual' ? 999.00 : 99.90
+    const descricao = `PinturaPro — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`
 
-    const resultado = await preApproval.create({
+    const resultado = await preference.create({
       body: {
-        payer_email: usuario.email,
-        reason: `PinturaPro — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`,
-        external_reference: usuario.id,
-        auto_recurring: {
-          frequency: 1,
-          frequency_type: plano === 'anual' ? 'years' : 'months',
-          transaction_amount: valor,
-          currency_id: 'BRL'
+        items: [
+          {
+            title: descricao,
+            quantity: 1,
+            unit_price: valor,
+            currency_id: 'BRL'
+          }
+        ],
+        payer: { email: usuario.email },
+        external_reference: `${usuario.id}|${plano}`,
+        back_urls: {
+          success: 'https://pinturapro-api-production.up.railway.app/api/pagamentos/sucesso',
+          failure: 'https://pinturapro-api-production.up.railway.app/api/pagamentos/falha',
+          pending: 'https://pinturapro-api-production.up.railway.app/api/pagamentos/pendente'
         },
-        back_url: 'https://pinturapro-painel-production.up.railway.app',
-        status: 'pending'
+        auto_return: 'approved',
+        notification_url: 'https://pinturapro-api-production.up.railway.app/api/pagamentos/webhook'
       }
     })
 
-    res.json({
-      init_point: resultado.init_point,
-      id: resultado.id
-    })
+    res.json({ init_point: resultado.init_point, id: resultado.id })
 
   } catch (err) {
-    console.error('Erro ao criar assinatura MP:', err)
+    console.error('Erro ao criar preferência MP:', err)
     res.status(500).json({ erro: 'Erro ao criar assinatura' })
   }
 }
 
-// POST /pagamentos/webhook
+const sucesso = async (req, res) => {
+  try {
+    const { external_reference, status } = req.query
+
+    if (status === 'approved' && external_reference) {
+      const [usuarioId, plano] = external_reference.split('|')
+      await pool.query(
+        `UPDATE assinaturas SET status = 'ativa', plano = $1, atualizado_em = NOW() WHERE usuario_id = $2`,
+        [plano || 'mensal', usuarioId]
+      )
+      console.log(`Pagamento aprovado para usuário ${usuarioId}`)
+    }
+
+    res.redirect('https://pinturapro-painel-production.up.railway.app')
+  } catch (err) {
+    console.error('Erro no retorno de pagamento:', err)
+    res.redirect('https://pinturapro-painel-production.up.railway.app')
+  }
+}
+
 const webhook = async (req, res) => {
   try {
     const { type, data } = req.body
 
-    if (type === 'subscription_preapproval') {
-      const assinatura = await preApproval.get({ id: data.id })
+    if (type === 'payment') {
+      const { Payment } = require('mercadopago')
+      const paymentClient = new Payment(client)
+      const pagamento = await paymentClient.get({ id: data.id })
 
-      const usuarioId = assinatura.external_reference
-      const status = assinatura.status === 'authorized' ? 'ativa' : 'cancelada'
-
-      await pool.query(
-        `UPDATE assinaturas SET status = $1, mp_subscription_id = $2, atualizado_em = NOW()
-         WHERE usuario_id = $3`,
-        [status, assinatura.id, usuarioId]
-      )
-
-      console.log(`Assinatura ${data.id} atualizada para ${status}`)
+      if (pagamento.status === 'approved' && pagamento.external_reference) {
+        const [usuarioId, plano] = pagamento.external_reference.split('|')
+        await pool.query(
+          `UPDATE assinaturas SET status = 'ativa', plano = $1, atualizado_em = NOW() WHERE usuario_id = $2`,
+          [plano || 'mensal', usuarioId]
+        )
+        console.log(`Webhook: pagamento aprovado para ${usuarioId}`)
+      }
     }
 
     res.sendStatus(200)
@@ -68,7 +90,6 @@ const webhook = async (req, res) => {
   }
 }
 
-// POST /pagamentos/acesso-gratuito (admin only)
 const darAcessoGratuito = async (req, res) => {
   try {
     const { usuario_id } = req.body
@@ -80,14 +101,12 @@ const darAcessoGratuito = async (req, res) => {
 
     if (assinaturaExiste.rows.length > 0) {
       await pool.query(
-        `UPDATE assinaturas SET status = 'ativa', tipo = 'gratuito', atualizado_em = NOW()
-         WHERE usuario_id = $1`,
+        `UPDATE assinaturas SET status = 'ativa', tipo = 'gratuito', atualizado_em = NOW() WHERE usuario_id = $1`,
         [usuario_id]
       )
     } else {
       await pool.query(
-        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
-         VALUES ($1, 'mensal', 0, 'ativa', 'gratuito')`,
+        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo) VALUES ($1, 'mensal', 0, 'ativa', 'gratuito')`,
         [usuario_id]
       )
     }
@@ -100,7 +119,6 @@ const darAcessoGratuito = async (req, res) => {
   }
 }
 
-// GET /pagamentos/assinantes (admin only)
 const listarAssinantes = async (req, res) => {
   try {
     const result = await pool.query(`
@@ -117,4 +135,4 @@ const listarAssinantes = async (req, res) => {
   }
 }
 
-module.exports = { criarAssinatura, webhook, darAcessoGratuito, listarAssinantes }
+module.exports = { criarAssinatura, sucesso, webhook, darAcessoGratuito, listarAssinantes }
