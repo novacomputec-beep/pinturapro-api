@@ -26,6 +26,10 @@ const criarAssinatura = async (req, res) => {
         ],
         payer: { email: usuario.email },
         external_reference: `${usuario.id}|${plano}`,
+        payment_methods: {
+          excluded_payment_types: [],
+          installments: 1
+        },
         back_urls: {
           success: 'https://pinturapro-api-production.up.railway.app/api/pagamentos/sucesso',
           failure: 'https://pinturapro-api-production.up.railway.app/api/pagamentos/falha',
