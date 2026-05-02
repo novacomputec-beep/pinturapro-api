@@ -34,10 +34,10 @@ const cadastrar = async (req, res) => {
 
     const usuario = result.rows[0]
 
-    // Cria assinatura ativa automaticamente
+    // Cria assinatura como PENDENTE até o pagamento ser confirmado
     await pool.query(
       `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
-       VALUES ($1, 'mensal', 99.90, 'ativa')`,
+       VALUES ($1, 'mensal', 99.90, 'pendente')`,
       [usuario.id]
     )
 
