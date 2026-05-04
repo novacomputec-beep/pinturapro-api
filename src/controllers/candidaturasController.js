@@ -1,4 +1,5 @@
 const { pool } = require('../utils/supabase')
+const { gerarEEnviarContrato } = require('../services/contratoService')
 
 const candidatar = async (req, res) => {
   try {
@@ -113,6 +114,11 @@ const aprovar = async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ erro: 'Candidatura não encontrada' })
     }
+
+    // Gera e envia contrato por e-mail
+    gerarEEnviarContrato(id).catch(err =>
+      console.error('Erro ao gerar contrato:', err)
+    )
 
     res.json(result.rows[0])
 
