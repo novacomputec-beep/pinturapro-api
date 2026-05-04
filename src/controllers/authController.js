@@ -14,9 +14,7 @@ const cadastrar = async (req, res) => {
             especialidades, anos_experiencia, tamanho_equipe,
             cpf_cnpj, tipo_conta } = req.body
 
-    const existente = await pool.query(
-      'SELECT id FROM usuarios WHERE email = $1', [email]
-    )
+    const existente = await pool.query('SELECT id FROM usuarios WHERE email = $1', [email])
     if (existente.rows.length > 0) {
       return res.status(409).json({ erro: 'E-mail já cadastrado' })
     }
@@ -24,7 +22,9 @@ const cadastrar = async (req, res) => {
     const senha_hash = await bcrypt.hash(senha, 12)
 
     // Define o role baseado no tipo de conta
-    const role = tipo_conta === 'dono_obra' ? 'dono_obra' : 'assinante'
+    let role = 'assinante'
+    if (tipo_conta === 'dono_obra') role = 'dono_obra'
+    else if (tipo_conta === 'prestador') role = 'prestador'
 
     const result = await pool.query(
       `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade,
@@ -38,12 +38,17 @@ const cadastrar = async (req, res) => {
 
     const usuario = result.rows[0]
 
-    // Pintor: cria assinatura pendente
-    // Dono de obra: cria assinatura ativa gratuita
+    // Define assinatura baseado no tipo
     if (role === 'dono_obra') {
       await pool.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
          VALUES ($1, 'mensal', 0, 'ativa', 'gratuito')`,
+        [usuario.id]
+      )
+    } else if (role === 'prestador') {
+      await pool.query(
+        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
+         VALUES ($1, 'mensal', 49.90, 'pendente')`,
         [usuario.id]
       )
     } else {
