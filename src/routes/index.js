@@ -11,7 +11,6 @@ const mensagensCtrl    = require('../controllers/mensagensController')
 const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 
-// Middleware para verificar se é prestador de serviços
 const exigirPrestador = async (req, res, next) => {
   try {
     if (req.usuario.role !== 'prestador' && req.usuario.role !== 'admin') {
@@ -33,10 +32,12 @@ const exigirPrestador = async (req, res, next) => {
 // ============================================================
 // AUTH
 // ============================================================
-router.post('/auth/cadastro',       authCtrl.cadastrar)
-router.post('/auth/login',          authCtrl.login)
-router.get('/auth/perfil',          autenticar, authCtrl.perfil)
-router.put('/auth/perfil',          autenticar, authCtrl.atualizarPerfil)
+router.post('/auth/cadastro',        authCtrl.cadastrar)
+router.post('/auth/login',           authCtrl.login)
+router.get('/auth/perfil',           autenticar, authCtrl.perfil)
+router.put('/auth/perfil',           autenticar, authCtrl.atualizarPerfil)
+router.post('/auth/alterar-senha',   autenticar, authCtrl.alterarSenha)
+router.post('/auth/esqueci-senha',   authCtrl.esqueciSenha)
 
 router.post('/auth/push-token', autenticar, async (req, res) => {
   try {
@@ -117,11 +118,11 @@ router.post('/obras-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req,
   }
 })
 
-router.get('/obras',      autenticar, exigirAssinaturaAtiva, obrasCtrl.listar)
-router.get('/obras/:id',  autenticar, exigirAssinaturaAtiva, obrasCtrl.detalhe)
-router.post('/obras',     autenticar, exigirAdmin,           obrasCtrl.criar)
-router.put('/obras/:id',  autenticar, exigirAdmin,           obrasCtrl.editar)
-router.delete('/obras/:id', autenticar, exigirAdmin,         obrasCtrl.encerrar)
+router.get('/obras',        autenticar, exigirAssinaturaAtiva, obrasCtrl.listar)
+router.get('/obras/:id',    autenticar, exigirAssinaturaAtiva, obrasCtrl.detalhe)
+router.post('/obras',       autenticar, exigirAdmin,           obrasCtrl.criar)
+router.put('/obras/:id',    autenticar, exigirAdmin,           obrasCtrl.editar)
+router.delete('/obras/:id', autenticar, exigirAdmin,           obrasCtrl.encerrar)
 
 // ============================================================
 // REPAROS — rotas específicas ANTES das rotas com parâmetro
@@ -155,7 +156,6 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     )
     res.status(201).json(result.rows[0])
   } catch (err) {
-    console.error('Erro ao criar reparo:', err)
     res.status(500).json({ erro: 'Erro ao cadastrar reparo' })
   }
 })
@@ -253,7 +253,6 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
     )
     res.json(result.rows[0])
   } catch (err) {
-    console.error('Erro upload reparo:', err)
     res.status(500).json({ erro: 'Erro ao fazer upload' })
   }
 })
