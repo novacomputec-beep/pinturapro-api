@@ -50,7 +50,7 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
 })
 
 // ============================================================
-// OBRAS — rotas específicas ANTES das rotas com parâmetro
+// OBRAS
 // ============================================================
 router.get('/obras/minhas', autenticar, async (req, res) => {
   try {
@@ -125,7 +125,7 @@ router.put('/obras/:id',    autenticar, exigirAdmin,           obrasCtrl.editar)
 router.delete('/obras/:id', autenticar, exigirAdmin,           obrasCtrl.encerrar)
 
 // ============================================================
-// REPAROS — rotas específicas ANTES das rotas com parâmetro
+// REPAROS
 // ============================================================
 router.get('/reparos/minhas', autenticar, async (req, res) => {
   try {
@@ -258,7 +258,7 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
 })
 
 // ============================================================
-// UPLOAD DE MÍDIAS
+// UPLOAD
 // ============================================================
 router.post('/upload',      autenticar, exigirAdmin, upload.single('arquivo'), uploadMidia)
 router.post('/upload/dono', autenticar,              upload.single('arquivo'), uploadMidia)
@@ -284,13 +284,14 @@ router.post('/mensagens/:id/responder',   autenticar, exigirAdmin, mensagensCtrl
 // ============================================================
 // PAGAMENTOS
 // ============================================================
-router.post('/pagamentos/criar-assinatura', autenticar, pagamentoCtrl.criarAssinatura)
-router.post('/pagamentos/webhook',          pagamentoCtrl.webhook)
-router.get('/pagamentos/sucesso',           pagamentoCtrl.sucesso)
-router.get('/pagamentos/falha',             (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
-router.get('/pagamentos/pendente',          (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
-router.post('/pagamentos/acesso-gratuito',  autenticar, exigirAdmin, pagamentoCtrl.darAcessoGratuito)
-router.get('/pagamentos/assinantes',        autenticar, exigirAdmin, pagamentoCtrl.listarAssinantes)
+router.post('/pagamentos/criar-assinatura',   autenticar, pagamentoCtrl.criarAssinatura)
+router.post('/pagamentos/webhook',            pagamentoCtrl.webhook)
+router.post('/pagamentos/webhook-pagbank',    pagamentoCtrl.webhookPagbank)
+router.get('/pagamentos/sucesso',             pagamentoCtrl.sucesso)
+router.get('/pagamentos/falha',               (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
+router.get('/pagamentos/pendente',            (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
+router.post('/pagamentos/acesso-gratuito',    autenticar, exigirAdmin, pagamentoCtrl.darAcessoGratuito)
+router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamentoCtrl.listarAssinantes)
 
 // ============================================================
 // DASHBOARD
