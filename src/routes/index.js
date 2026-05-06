@@ -50,6 +50,38 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
 })
 
 // ============================================================
+// USUARIOS — admin
+// ============================================================
+router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { id } = req.params
+    // Não permite excluir o próprio admin
+    if (id === req.usuario.id) {
+      return res.status(400).json({ erro: 'Não é possível excluir sua própria conta' })
+    }
+    // Verifica se usuário existe
+    const usuario = await pool.query('SELECT id, role FROM usuarios WHERE id = $1', [id])
+    if (usuario.rows.length === 0) {
+      return res.status(404).json({ erro: 'Usuário não encontrado' })
+    }
+    if (usuario.rows[0].role === 'admin') {
+      return res.status(400).json({ erro: 'Não é possível excluir um administrador' })
+    }
+    // Exclui em cascata
+    await pool.query('DELETE FROM assinaturas WHERE usuario_id = $1', [id])
+    await pool.query('DELETE FROM candidaturas WHERE usuario_id = $1', [id])
+    await pool.query('DELETE FROM mensagens WHERE usuario_id = $1', [id])
+    await pool.query('DELETE FROM interesse_reparos WHERE usuario_id = $1', [id])
+    await pool.query('DELETE FROM negociacoes WHERE autor_id = $1', [id])
+    await pool.query('DELETE FROM usuarios WHERE id = $1', [id])
+    res.json({ mensagem: 'Usuário excluído com sucesso' })
+  } catch (err) {
+    console.error('Erro ao excluir usuário:', err)
+    res.status(500).json({ erro: 'Erro ao excluir usuário' })
+  }
+})
+
+// ============================================================
 // OBRAS — rotas específicas ANTES das rotas com parâmetro :id
 // ============================================================
 router.get('/obras/minhas', autenticar, async (req, res) => {
@@ -123,7 +155,6 @@ router.post('/obras',       autenticar, exigirAdmin,           obrasCtrl.criar)
 router.put('/obras/:id',    autenticar, exigirAdmin,           obrasCtrl.editar)
 router.delete('/obras/:id', autenticar, exigirAdmin,           obrasCtrl.encerrar)
 
-// Detalhe da obra com contador de visitas — DEVE VIR DEPOIS das rotas acima
 router.get('/obras/:id', autenticar, exigirAssinaturaAtiva, async (req, res) => {
   try {
     await pool.query(
@@ -143,11 +174,7 @@ router.get('/obras/:id', autenticar, exigirAssinaturaAtiva, async (req, res) => 
       `SELECT id, status, valor_oferta, mensagem_oferta FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
       [req.params.id, req.usuario.id]
     )
-    res.json({
-      obra: result.rows[0],
-      midias: midias.rows,
-      minha_candidatura: minhaCandidatura.rows[0] || null
-    })
+    res.json({ obra: result.rows[0], midias: midias.rows, minha_candidatura: minhaCandidatura.rows[0] || null })
   } catch (err) {
     console.error('Erro ao buscar obra:', err)
     res.status(500).json({ erro: 'Erro ao buscar obra' })
@@ -258,7 +285,6 @@ router.post('/reparos/:id/interesse', autenticar, exigirPrestador, async (req, r
   }
 })
 
-// Detalhe do reparo com contador de visitas — DEVE VIR DEPOIS das rotas acima
 router.get('/reparos/:id', autenticar, exigirPrestador, async (req, res) => {
   try {
     await pool.query(
@@ -299,7 +325,7 @@ router.post('/upload',      autenticar, exigirAdmin, upload.single('arquivo'), u
 router.post('/upload/dono', autenticar,              upload.single('arquivo'), uploadMidia)
 
 // ============================================================
-// CANDIDATURAS — rotas específicas ANTES das rotas com parâmetro :id
+// CANDIDATURAS
 // ============================================================
 router.post('/candidaturas', autenticar, exigirAssinaturaAtiva, async (req, res) => {
   try {
@@ -358,22 +384,16 @@ router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
     const { id } = req.params
     const candidatura = await pool.query(
       `SELECT c.*, o.criado_por as dono_id, o.titulo, u.push_token
-       FROM candidaturas c
-       JOIN obras o ON c.obra_id = o.id
-       JOIN usuarios u ON c.usuario_id = u.id
-       WHERE c.id = $1`,
-      [id]
+       FROM candidaturas c JOIN obras o ON c.obra_id = o.id JOIN usuarios u ON c.usuario_id = u.id
+       WHERE c.id = $1`, [id]
     )
-    if (candidatura.rows.length === 0) {
-      return res.status(404).json({ erro: 'Candidatura não encontrada' })
-    }
+    if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
     const cand = candidatura.rows[0]
     if (req.usuario.id !== cand.dono_id && req.usuario.id !== cand.usuario_id) {
       return res.status(403).json({ erro: 'Sem permissão' })
     }
     const negociacao = await pool.query(
-      `INSERT INTO negociacoes (candidatura_id, autor_id, tipo, valor, mensagem)
-       VALUES ($1, $2, 'contra_oferta', $3, $4) RETURNING *`,
+      `INSERT INTO negociacoes (candidatura_id, autor_id, tipo, valor, mensagem) VALUES ($1, $2, 'contra_oferta', $3, $4) RETURNING *`,
       [id, req.usuario.id, valor, mensagem]
     )
     const ehDono = req.usuario.id === cand.dono_id
@@ -381,24 +401,17 @@ router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
     if (!ehDono) {
       const donoResult = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [cand.dono_id])
       if (donoResult.rows[0]?.push_token) {
-        await enviarPushNotificacao(
-          donoResult.rows[0].push_token,
-          '💰 Nova contra-oferta!',
+        await enviarPushNotificacao(donoResult.rows[0].push_token, '💰 Nova contra-oferta!',
           `Um pintor propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${cand.titulo}"`,
-          { tipo: 'contra_oferta', candidatura_id: id }
-        )
+          { tipo: 'contra_oferta', candidatura_id: id })
       }
     } else if (cand.push_token) {
-      await enviarPushNotificacao(
-        cand.push_token,
-        '💰 O dono fez uma contra-oferta!',
+      await enviarPushNotificacao(cand.push_token, '💰 O dono fez uma contra-oferta!',
         `Nova proposta de R$ ${Number(valor).toLocaleString('pt-BR')} para "${cand.titulo}"`,
-        { tipo: 'contra_oferta', candidatura_id: id }
-      )
+        { tipo: 'contra_oferta', candidatura_id: id })
     }
     res.status(201).json(negociacao.rows[0])
   } catch (err) {
-    console.error('Erro ao negociar:', err)
     res.status(500).json({ erro: 'Erro ao registrar negociação' })
   }
 })
@@ -406,11 +419,8 @@ router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
 router.get('/candidaturas/:id/negociacoes', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT n.*, u.nome as autor_nome, u.role as autor_role
-       FROM negociacoes n
-       JOIN usuarios u ON n.autor_id = u.id
-       WHERE n.candidatura_id = $1
-       ORDER BY n.criado_em ASC`,
+      `SELECT n.*, u.nome as autor_nome, u.role as autor_role FROM negociacoes n
+       JOIN usuarios u ON n.autor_id = u.id WHERE n.candidatura_id = $1 ORDER BY n.criado_em ASC`,
       [req.params.id]
     )
     res.json({ negociacoes: result.rows })
@@ -457,7 +467,7 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
       assinantes_ativos: totalAssinantes,
       receita_mensal: totalAssinantes * 99.90,
       candidaturas_pendentes: parseInt(candidaturas.rows[0].count),
-      obras_para_apovar: parseInt(obrasAprovacao.rows[0].count),
+      obras_para_aprovar: parseInt(obrasAprovacao.rows[0].count),
       reparos_para_aprovar: parseInt(reparosAprovacao.rows[0].count)
     })
   } catch (err) {
