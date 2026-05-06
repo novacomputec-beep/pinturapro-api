@@ -14,7 +14,6 @@ const criarAssinatura = async (req, res) => {
     const { plano = 'mensal' } = req.body
     const usuario = req.usuario
 
-    // Busca CPF/CNPJ e telefone do usuário no banco
     const usuarioResult = await pool.query(
       'SELECT nome, email, cpf_cnpj, telefone FROM usuarios WHERE id = $1',
       [usuario.id]
@@ -26,7 +25,6 @@ const criarAssinatura = async (req, res) => {
       return res.status(400).json({ erro: 'CPF ou CNPJ inválido. Atualize seu perfil com um documento válido.' })
     }
 
-    // Extrai telefone
     const telLimpo = (dadosUsuario?.telefone || '').replace(/\D/g, '')
     const telArea = telLimpo.substring(0, 2) || '34'
     const telNumero = telLimpo.substring(2) || '999999999'
@@ -50,18 +48,8 @@ const criarAssinatura = async (req, res) => {
         tax_id: taxId,
         phones: [{ country: '55', area: telArea, number: telNumero, type: 'MOBILE' }]
       },
-      items: [
-        {
-          reference_id: `plano_${plano}`,
-          name: descricao,
-          quantity: 1,
-          unit_amount: valor
-        }
-      ],
-      payment_methods: [
-        { type: 'CREDIT_CARD' },
-        { type: 'PIX' }
-      ],
+      items: [{ reference_id: `plano_${plano}`, name: descricao, quantity: 1, unit_amount: valor }],
+      payment_methods: [{ type: 'CREDIT_CARD' }, { type: 'PIX' }],
       redirect_url: `${APP_URL}/pagamentos/sucesso`,
       notification_urls: [`${APP_URL}/pagamentos/webhook-pagbank`],
       soft_descriptor: 'PinturaPro'
@@ -69,11 +57,7 @@ const criarAssinatura = async (req, res) => {
 
     const response = await fetch(`${PAGBANK_URL}/orders`, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${PAGBANK_TOKEN}`,
-        'Content-Type': 'application/json',
-        'x-api-version': '4.0'
-      },
+      headers: { 'Authorization': `Bearer ${PAGBANK_TOKEN}`, 'Content-Type': 'application/json', 'x-api-version': '4.0' },
       body: JSON.stringify(body)
     })
 
@@ -88,11 +72,7 @@ const criarAssinatura = async (req, res) => {
       || data.links?.find(l => l.rel === 'pay')?.href
       || data.links?.[0]?.href
 
-    res.json({
-      init_point: linkPagamento,
-      order_id: data.id,
-      status: data.status
-    })
+    res.json({ init_point: linkPagamento, order_id: data.id, status: data.status })
 
   } catch (err) {
     console.error('Erro ao criar preferência PagBank:', err)
@@ -109,7 +89,6 @@ const sucesso = async (req, res) => {
         `UPDATE assinaturas SET status = 'ativa', plano = $1, atualizado_em = NOW() WHERE usuario_id = $2`,
         [plano || 'mensal', usuarioId]
       )
-      console.log(`Pagamento aprovado para usuário ${usuarioId}`)
     }
     res.redirect('https://pinturapro-painel-production.up.railway.app')
   } catch (err) {
@@ -128,12 +107,10 @@ const webhookPagbank = async (req, res) => {
           `UPDATE assinaturas SET status = 'ativa', plano = $1, atualizado_em = NOW() WHERE usuario_id = $2`,
           [plano || 'mensal', usuarioId]
         )
-        console.log(`Webhook PagBank: pagamento aprovado para ${usuarioId}`)
       }
     }
     res.sendStatus(200)
   } catch (err) {
-    console.error('Erro no webhook PagBank:', err)
     res.sendStatus(200)
   }
 }
@@ -189,8 +166,8 @@ const listarAssinantes = async (req, res) => {
              a.status, a.plano, a.tipo, a.criado_em
       FROM usuarios u
       LEFT JOIN assinaturas a ON a.usuario_id = u.id
-      WHERE u.role IN ('assinante', 'prestador')
-      ORDER BY a.criado_em DESC
+      WHERE u.role IN ('assinante', 'prestador', 'dono_obra')
+      ORDER BY u.role ASC, u.nome ASC
     `)
     res.json({ assinantes: result.rows })
   } catch (err) {
