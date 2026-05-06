@@ -3,6 +3,7 @@ const express = require('express')
 const cors = require('cors')
 const rateLimit = require('express-rate-limit')
 const routes = require('./src/routes')
+const { verificarObrasComBaixoEngajamento } = require('./src/services/alertaService')
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -10,7 +11,7 @@ const PORT = process.env.PORT || 3000
 // Trust proxy
 app.set('trust proxy', 1)
 
-// CORS — libera o painel admin e o app
+// CORS
 app.use(cors({
   origin: [
     'https://pinturapro-painel-production.up.railway.app',
@@ -43,18 +44,33 @@ app.use('/api', routes)
 
 // Rota raiz
 app.get('/', (req, res) => {
-  res.json({
-    api: 'PinturaPro API',
-    versao: '1.0.0',
-    status: 'online',
-    docs: '/api/health'
-  })
+  res.json({ api: 'PinturaPro API', versao: '1.0.0', status: 'online', docs: '/api/health' })
 })
 
 // Erro 404
 app.use((req, res) => {
   res.status(404).json({ erro: 'Rota não encontrada' })
 })
+
+// ============================================================
+// AGENDADOR DE ALERTAS
+// ============================================================
+const iniciarAgendador = () => {
+  // Verifica engajamento a cada 8 horas
+  const INTERVALO = 8 * 60 * 60 * 1000
+
+  // Roda imediatamente na inicialização (após 1 minuto)
+  setTimeout(() => {
+    verificarObrasComBaixoEngajamento()
+  }, 60 * 1000)
+
+  // Roda a cada 8 horas
+  setInterval(() => {
+    verificarObrasComBaixoEngajamento()
+  }, INTERVALO)
+
+  console.log('Agendador de alertas iniciado — rodando a cada 8 horas')
+}
 
 app.listen(PORT, () => {
   console.log(`
@@ -63,4 +79,5 @@ app.listen(PORT, () => {
 ║   Rodando em http://localhost:${PORT}   ║
 ╚══════════════════════════════════════╝
   `)
+  iniciarAgendador()
 })
