@@ -4,12 +4,34 @@ const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN
 const PAGBANK_URL = 'https://sandbox.api.pagseguro.com'
 const APP_URL = 'https://pinturapro-api-production.up.railway.app/api'
 
+const limparCpfCnpj = (str) => {
+  if (!str) return null
+  return str.replace(/\D/g, '')
+}
+
 const criarAssinatura = async (req, res) => {
   try {
     const { plano = 'mensal' } = req.body
     const usuario = req.usuario
 
-    let valor = 9990 // em centavos
+    // Busca CPF/CNPJ e telefone do usuário no banco
+    const usuarioResult = await pool.query(
+      'SELECT nome, email, cpf_cnpj, telefone FROM usuarios WHERE id = $1',
+      [usuario.id]
+    )
+    const dadosUsuario = usuarioResult.rows[0]
+    const taxId = limparCpfCnpj(dadosUsuario?.cpf_cnpj)
+
+    if (!taxId || (taxId.length !== 11 && taxId.length !== 14)) {
+      return res.status(400).json({ erro: 'CPF ou CNPJ inválido. Atualize seu perfil com um documento válido.' })
+    }
+
+    // Extrai telefone
+    const telLimpo = (dadosUsuario?.telefone || '').replace(/\D/g, '')
+    const telArea = telLimpo.substring(0, 2) || '34'
+    const telNumero = telLimpo.substring(2) || '999999999'
+
+    let valor = 9990
     let descricao = 'PinturaPro — Plano Mensal'
 
     if (usuario.role === 'prestador') {
@@ -23,10 +45,10 @@ const criarAssinatura = async (req, res) => {
     const body = {
       reference_id: `${usuario.id}|${plano}`,
       customer: {
-        name: usuario.nome || 'Cliente PinturaPro',
-        email: usuario.email,
-        tax_id: '00000000000', // CPF placeholder — ideal pedir no cadastro
-        phones: [{ country: '55', area: '34', number: '999999999', type: 'MOBILE' }]
+        name: dadosUsuario?.nome || 'Cliente PinturaPro',
+        email: dadosUsuario?.email || usuario.email,
+        tax_id: taxId,
+        phones: [{ country: '55', area: telArea, number: telNumero, type: 'MOBILE' }]
       },
       items: [
         {
@@ -62,7 +84,6 @@ const criarAssinatura = async (req, res) => {
       return res.status(500).json({ erro: 'Erro ao criar pagamento', detalhe: data })
     }
 
-    // Pega o link de pagamento
     const linkPagamento = data.links?.find(l => l.rel === 'PAY')?.href
       || data.links?.find(l => l.rel === 'pay')?.href
       || data.links?.[0]?.href
@@ -99,7 +120,6 @@ const sucesso = async (req, res) => {
 const webhookPagbank = async (req, res) => {
   try {
     const { reference_id, charges } = req.body
-
     if (reference_id && charges?.length > 0) {
       const charge = charges[0]
       if (charge.status === 'PAID') {
@@ -118,7 +138,6 @@ const webhookPagbank = async (req, res) => {
   }
 }
 
-// Mantemos o webhook do MP por compatibilidade
 const webhook = async (req, res) => {
   try {
     const { type, data } = req.body
