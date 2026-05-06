@@ -70,7 +70,7 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     // Exclui em cascata
     await pool.query('DELETE FROM assinaturas WHERE usuario_id = $1', [id])
     await pool.query('DELETE FROM candidaturas WHERE usuario_id = $1', [id])
-    await pool.query('DELETE FROM mensagens WHERE usuario_id = $1', [id])
+    await pool.query('DELETE FROM mensagens WHERE autor_id = $1', [id])
     await pool.query('DELETE FROM interesse_reparos WHERE usuario_id = $1', [id])
     await pool.query('DELETE FROM negociacoes WHERE autor_id = $1', [id])
     await pool.query('DELETE FROM usuarios WHERE id = $1', [id])
