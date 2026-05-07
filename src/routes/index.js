@@ -50,16 +50,14 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
 })
 
 // ============================================================
-// USUARIOS — admin
+// USUARIOS
 // ============================================================
 router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    // Não permite excluir o próprio admin
     if (id === req.usuario.id) {
       return res.status(400).json({ erro: 'Não é possível excluir sua própria conta' })
     }
-    // Verifica se usuário existe
     const usuario = await pool.query('SELECT id, role FROM usuarios WHERE id = $1', [id])
     if (usuario.rows.length === 0) {
       return res.status(404).json({ erro: 'Usuário não encontrado' })
@@ -67,7 +65,6 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     if (usuario.rows[0].role === 'admin') {
       return res.status(400).json({ erro: 'Não é possível excluir um administrador' })
     }
-    // Exclui em cascata
     await pool.query('DELETE FROM assinaturas WHERE usuario_id = $1', [id])
     await pool.query('DELETE FROM candidaturas WHERE usuario_id = $1', [id])
     await pool.query('DELETE FROM mensagens WHERE autor_id = $1', [id])
@@ -136,6 +133,9 @@ router.post('/obras-aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req,
   try {
     await pool.query(`UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta' WHERE id = $1`, [req.params.id])
     res.json({ mensagem: 'Obra aprovada e publicada!' })
+    // Notifica pintores sobre nova obra
+    const { notificarPintoresSobreNovaObra } = require('../services/alertaService')
+    notificarPintoresSobreNovaObra(req.params.id).catch(err => console.error('Erro notificar pintores:', err))
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao aprovar obra' })
   }
@@ -234,6 +234,9 @@ router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (re
   try {
     await pool.query(`UPDATE reparos SET status_aprovacao = 'aprovada', status = 'aberta' WHERE id = $1`, [req.params.id])
     res.json({ mensagem: 'Reparo aprovado e publicado!' })
+    // Notifica prestadores sobre novo reparo
+    const { notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
+    notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores:', err))
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao aprovar reparo' })
   }

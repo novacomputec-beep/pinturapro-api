@@ -72,6 +72,16 @@ const cadastrar = async (req, res) => {
     const token = gerarToken(usuario)
     res.status(201).json({ usuario, token })
 
+    // Envia boas-vindas após resposta (não bloqueia)
+    setTimeout(async () => {
+      try {
+        const { enviarBoasVindas } = require('../services/alertaService')
+        await enviarBoasVindas(usuario.id)
+      } catch (err) {
+        console.error('Erro ao enviar boas-vindas:', err)
+      }
+    }, 3000)
+
   } catch (err) {
     console.error('Erro no cadastro:', err)
     res.status(500).json({ erro: 'Erro ao criar conta' })
@@ -155,33 +165,21 @@ const atualizarPerfil = async (req, res) => {
 const alterarSenha = async (req, res) => {
   try {
     const { senha_atual, nova_senha } = req.body
-
     if (!senha_atual || !nova_senha) {
       return res.status(400).json({ erro: 'Informe a senha atual e a nova senha' })
     }
     if (nova_senha.length < 8) {
       return res.status(400).json({ erro: 'A nova senha deve ter pelo menos 8 caracteres' })
     }
-
-    const result = await pool.query(
-      'SELECT senha_hash FROM usuarios WHERE id = $1',
-      [req.usuario.id]
-    )
-
+    const result = await pool.query('SELECT senha_hash FROM usuarios WHERE id = $1', [req.usuario.id])
     const senhaValida = await bcrypt.compare(senha_atual, result.rows[0].senha_hash)
     if (!senhaValida) {
       return res.status(401).json({ erro: 'Senha atual incorreta' })
     }
-
     const nova_hash = await bcrypt.hash(nova_senha, 12)
-    await pool.query(
-      'UPDATE usuarios SET senha_hash = $1 WHERE id = $2',
-      [nova_hash, req.usuario.id]
-    )
-
+    await pool.query('UPDATE usuarios SET senha_hash = $1 WHERE id = $2', [nova_hash, req.usuario.id])
     res.json({ mensagem: 'Senha alterada com sucesso' })
   } catch (err) {
-    console.error('Erro ao alterar senha:', err)
     res.status(500).json({ erro: 'Erro ao alterar senha' })
   }
 }
@@ -189,29 +187,22 @@ const alterarSenha = async (req, res) => {
 const esqueciSenha = async (req, res) => {
   try {
     const { email } = req.body
+    if (!email) return res.status(400).json({ erro: 'Informe o e-mail' })
 
-    if (!email) {
-      return res.status(400).json({ erro: 'Informe o e-mail' })
-    }
-
-    // Sempre retorna sucesso para não revelar se o e-mail existe
     res.json({ mensagem: 'Se este e-mail estiver cadastrado, você receberá as instruções em breve.' })
 
-    // Busca o usuário de forma assíncrona
     const result = await pool.query('SELECT id, nome, email FROM usuarios WHERE email = $1', [email])
     if (result.rows.length === 0) return
 
     const usuario = result.rows[0]
     const token = crypto.randomBytes(32).toString('hex')
-    const expira = new Date(Date.now() + 3600000) // 1 hora
+    const expira = new Date(Date.now() + 3600000)
 
-    // Salva o token de redefinição
     await pool.query(
       `UPDATE usuarios SET reset_token = $1, reset_token_expira = $2 WHERE id = $3`,
       [token, expira, usuario.id]
     )
 
-    // Envia o e-mail
     await transporter.sendMail({
       from: `PinturaPro <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
       to: email,
@@ -223,19 +214,16 @@ const esqueciSenha = async (req, res) => {
           </div>
           <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
             <h2>Olá, ${usuario.nome}!</h2>
-            <p>Recebemos uma solicitação para redefinir a senha da sua conta.</p>
             <p>Seu código de redefinição é:</p>
             <div style="background: #0a0a0a; color: #E8833A; font-size: 32px; font-weight: bold; text-align: center; padding: 20px; border-radius: 8px; letter-spacing: 8px; margin: 20px 0;">
               ${token.substring(0, 6).toUpperCase()}
             </div>
             <p style="color: #666; font-size: 13px;">Este código expira em 1 hora.</p>
-            <p style="color: #666; font-size: 13px;">Se você não solicitou a redefinição, ignore este e-mail.</p>
             <p><strong>Equipe PinturaPro</strong></p>
           </div>
         </div>
       `
     })
-
   } catch (err) {
     console.error('Erro ao processar esqueci senha:', err)
   }

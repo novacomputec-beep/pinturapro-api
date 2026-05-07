@@ -3,15 +3,13 @@ const express = require('express')
 const cors = require('cors')
 const rateLimit = require('express-rate-limit')
 const routes = require('./src/routes')
-const { verificarObrasComBaixoEngajamento } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando } = require('./src/services/alertaService')
 
 const app = express()
 const PORT = process.env.PORT || 3000
 
-// Trust proxy
 app.set('trust proxy', 1)
 
-// CORS
 app.use(cors({
   origin: [
     'https://pinturapro-painel-production.up.railway.app',
@@ -24,52 +22,49 @@ app.use(cors({
   credentials: true
 }))
 
-// Rate limit global
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
 }))
 
-// Rate limit mais restrito para login/cadastro
 app.use('/api/auth/login',    rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }))
 app.use('/api/auth/cadastro', rateLimit({ windowMs: 60 * 60 * 1000, max: 5 }))
 
-// Parsing
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
 
-// Rotas
 app.use('/api', routes)
 
-// Rota raiz
 app.get('/', (req, res) => {
   res.json({ api: 'PinturaPro API', versao: '1.0.0', status: 'online', docs: '/api/health' })
 })
 
-// Erro 404
 app.use((req, res) => {
   res.status(404).json({ erro: 'Rota não encontrada' })
 })
 
-// ============================================================
-// AGENDADOR DE ALERTAS
-// ============================================================
 const iniciarAgendador = () => {
-  // Verifica engajamento a cada 8 horas
-  const INTERVALO = 8 * 60 * 60 * 1000
+  const INTERVALO_ENGAJAMENTO = 8 * 60 * 60 * 1000  // 8 horas
+  const INTERVALO_EXPIRACAO = 60 * 60 * 1000         // 1 hora
 
-  // Roda imediatamente na inicialização (após 1 minuto)
+  // Roda após 1 minuto da inicialização
   setTimeout(() => {
     verificarObrasComBaixoEngajamento()
+    verificarObrasExpirando()
   }, 60 * 1000)
 
-  // Roda a cada 8 horas
+  // Engajamento a cada 8 horas
   setInterval(() => {
     verificarObrasComBaixoEngajamento()
-  }, INTERVALO)
+  }, INTERVALO_ENGAJAMENTO)
 
-  console.log('Agendador de alertas iniciado — rodando a cada 8 horas')
+  // Expiração a cada 1 hora
+  setInterval(() => {
+    verificarObrasExpirando()
+  }, INTERVALO_EXPIRACAO)
+
+  console.log('Agendador iniciado — engajamento: 8h, expiração: 1h')
 }
 
 app.listen(PORT, () => {
