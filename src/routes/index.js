@@ -38,6 +38,7 @@ router.get('/auth/perfil',           autenticar, authCtrl.perfil)
 router.put('/auth/perfil',           autenticar, authCtrl.atualizarPerfil)
 router.post('/auth/alterar-senha',   autenticar, authCtrl.alterarSenha)
 router.post('/auth/esqueci-senha',   authCtrl.esqueciSenha)
+
 // Upload foto de perfil
 router.post('/auth/foto-perfil', autenticar, upload.single('arquivo'), async (req, res) => {
   try {
@@ -50,6 +51,7 @@ router.post('/auth/foto-perfil', autenticar, upload.single('arquivo'), async (re
     res.status(500).json({ erro: 'Erro ao enviar foto' })
   }
 })
+
 router.post('/auth/push-token', autenticar, async (req, res) => {
   try {
     const { token } = req.body
@@ -144,7 +146,6 @@ router.post('/obras-aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req,
   try {
     await pool.query(`UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta' WHERE id = $1`, [req.params.id])
     res.json({ mensagem: 'Obra aprovada e publicada!' })
-    // Notifica pintores sobre nova obra
     const { notificarPintoresSobreNovaObra } = require('../services/alertaService')
     notificarPintoresSobreNovaObra(req.params.id).catch(err => console.error('Erro notificar pintores:', err))
   } catch (err) {
@@ -217,12 +218,19 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     }
     const { titulo, categoria, descricao, valor_estimado, cidade, bairro, tags } = req.body
     const expira_em = new Date(Date.now() + 720 * 3600 * 1000)
+
+    // Aprovação automática para reparos domésticos!
     const result = await pool.query(
       `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags, status, status_aprovacao, expira_em)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'rascunho','pendente',$9) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'aberta','aprovada',$9) RETURNING *`,
       [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags || [], expira_em.toISOString()]
     )
     res.status(201).json(result.rows[0])
+
+    // Notifica prestadores automaticamente
+    const { notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
+    notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
+
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao cadastrar reparo' })
   }
@@ -245,7 +253,6 @@ router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (re
   try {
     await pool.query(`UPDATE reparos SET status_aprovacao = 'aprovada', status = 'aberta' WHERE id = $1`, [req.params.id])
     res.json({ mensagem: 'Reparo aprovado e publicado!' })
-    // Notifica prestadores sobre novo reparo
     const { notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
     notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores:', err))
   } catch (err) {
