@@ -38,7 +38,18 @@ router.get('/auth/perfil',           autenticar, authCtrl.perfil)
 router.put('/auth/perfil',           autenticar, authCtrl.atualizarPerfil)
 router.post('/auth/alterar-senha',   autenticar, authCtrl.alterarSenha)
 router.post('/auth/esqueci-senha',   authCtrl.esqueciSenha)
-
+// Upload foto de perfil
+router.post('/auth/foto-perfil', autenticar, upload.single('arquivo'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
+    const { uploadArquivo } = require('../services/uploadService')
+    const resultado = await uploadArquivo(req.file)
+    await pool.query('UPDATE usuarios SET foto_url = $1 WHERE id = $2', [resultado.secure_url, req.usuario.id])
+    res.json({ foto_url: resultado.secure_url })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao enviar foto' })
+  }
+})
 router.post('/auth/push-token', autenticar, async (req, res) => {
   try {
     const { token } = req.body

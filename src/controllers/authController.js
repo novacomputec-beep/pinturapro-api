@@ -72,7 +72,6 @@ const cadastrar = async (req, res) => {
     const token = gerarToken(usuario)
     res.status(201).json({ usuario, token })
 
-    // Envia boas-vindas após resposta (não bloqueia)
     setTimeout(async () => {
       try {
         const { enviarBoasVindas } = require('../services/alertaService')
@@ -93,7 +92,7 @@ const login = async (req, res) => {
     const { email, senha } = req.body
 
     const result = await pool.query(
-      'SELECT id, nome, email, role, senha_hash, ativo FROM usuarios WHERE email = $1',
+      'SELECT id, nome, email, role, senha_hash, ativo, foto_url FROM usuarios WHERE email = $1',
       [email]
     )
 
@@ -121,7 +120,13 @@ const login = async (req, res) => {
     const token = gerarToken(usuario)
 
     res.json({
-      usuario: { id: usuario.id, nome: usuario.nome, email: usuario.email, role: usuario.role },
+      usuario: {
+        id: usuario.id,
+        nome: usuario.nome,
+        email: usuario.email,
+        role: usuario.role,
+        foto_url: usuario.foto_url || null
+      },
       assinatura: assinaturaResult.rows[0] || null,
       token
     })
@@ -135,7 +140,7 @@ const login = async (req, res) => {
 const perfil = async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role FROM usuarios WHERE id = $1',
+      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url FROM usuarios WHERE id = $1',
       [req.usuario.id]
     )
     const assinaturaResult = await pool.query(
@@ -153,7 +158,7 @@ const atualizarPerfil = async (req, res) => {
   try {
     const { nome, telefone, cidade } = req.body
     const result = await pool.query(
-      'UPDATE usuarios SET nome=$1, telefone=$2, cidade=$3 WHERE id=$4 RETURNING id, nome, email, cidade',
+      'UPDATE usuarios SET nome=$1, telefone=$2, cidade=$3 WHERE id=$4 RETURNING id, nome, email, cidade, foto_url',
       [nome, telefone, cidade, req.usuario.id]
     )
     res.json(result.rows[0])
