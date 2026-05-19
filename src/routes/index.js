@@ -1,9 +1,7 @@
 const express = require('express')
 const router = express.Router()
-
 const { autenticar, exigirAssinaturaAtiva, exigirAdmin } = require('../middlewares/auth')
 const { pool } = require('../utils/supabase')
-
 const authCtrl         = require('../controllers/authController')
 const obrasCtrl        = require('../controllers/obrasController')
 const candidaturasCtrl = require('../controllers/candidaturasController')
@@ -39,7 +37,6 @@ router.put('/auth/perfil',           autenticar, authCtrl.atualizarPerfil)
 router.post('/auth/alterar-senha',   autenticar, authCtrl.alterarSenha)
 router.post('/auth/esqueci-senha',   authCtrl.esqueciSenha)
 
-// Upload foto de perfil
 router.post('/auth/foto-perfil', autenticar, upload.single('arquivo'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
@@ -68,16 +65,10 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
 router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    if (id === req.usuario.id) {
-      return res.status(400).json({ erro: 'Não é possível excluir sua própria conta' })
-    }
+    if (id === req.usuario.id) return res.status(400).json({ erro: 'Não é possível excluir sua própria conta' })
     const usuario = await pool.query('SELECT id, role FROM usuarios WHERE id = $1', [id])
-    if (usuario.rows.length === 0) {
-      return res.status(404).json({ erro: 'Usuário não encontrado' })
-    }
-    if (usuario.rows[0].role === 'admin') {
-      return res.status(400).json({ erro: 'Não é possível excluir um administrador' })
-    }
+    if (usuario.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
+    if (usuario.rows[0].role === 'admin') return res.status(400).json({ erro: 'Não é possível excluir um administrador' })
     await pool.query('DELETE FROM assinaturas WHERE usuario_id = $1', [id])
     await pool.query('DELETE FROM candidaturas WHERE usuario_id = $1', [id])
     await pool.query('DELETE FROM mensagens WHERE autor_id = $1', [id])
@@ -92,7 +83,7 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
 })
 
 // ============================================================
-// OBRAS — rotas específicas ANTES das rotas com parâmetro :id
+// OBRAS
 // ============================================================
 router.get('/obras/minhas', autenticar, async (req, res) => {
   try {
@@ -169,10 +160,7 @@ router.delete('/obras/:id', autenticar, exigirAdmin,           obrasCtrl.encerra
 
 router.get('/obras/:id', autenticar, exigirAssinaturaAtiva, async (req, res) => {
   try {
-    await pool.query(
-      `UPDATE obras SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`,
-      [req.params.id]
-    )
+    await pool.query(`UPDATE obras SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
     const result = await pool.query(
       `SELECT o.*,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
@@ -194,7 +182,7 @@ router.get('/obras/:id', autenticar, exigirAssinaturaAtiva, async (req, res) => 
 })
 
 // ============================================================
-// REPAROS — rotas específicas ANTES das rotas com parâmetro :id
+// REPAROS
 // ============================================================
 router.get('/reparos/minhas', autenticar, async (req, res) => {
   try {
@@ -216,21 +204,16 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar reparos' })
     }
-    const { titulo, categoria, descricao, valor_estimado, cidade, bairro, tags } = req.body
+    const { titulo, categoria, descricao, valor_estimado, cidade, bairro, tags, prazo_atendimento_horas } = req.body
     const expira_em = new Date(Date.now() + 720 * 3600 * 1000)
-
-    // Aprovação automática para reparos domésticos!
     const result = await pool.query(
-      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags, status, status_aprovacao, expira_em)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'aberta','aprovada',$9) RETURNING *`,
-      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags || [], expira_em.toISOString()]
+      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'aberta','aprovada',$9,$10) RETURNING *`,
+      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null]
     )
     res.status(201).json(result.rows[0])
-
-    // Notifica prestadores automaticamente
     const { notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
-
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao cadastrar reparo' })
   }
@@ -306,12 +289,79 @@ router.post('/reparos/:id/interesse', autenticar, exigirPrestador, async (req, r
   }
 })
 
-router.get('/reparos/:id', autenticar, exigirPrestador, async (req, res) => {
+// Match — prestador confirma que está a caminho
+router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) => {
   try {
+    const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Este reparo já tem um prestador a caminho' })
     await pool.query(
-      `UPDATE reparos SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`,
+      `UPDATE reparos SET match_feito_em = NOW(), match_usuario_id = $1 WHERE id = $2`,
+      [req.usuario.id, req.params.id]
+    )
+    const dono = await pool.query(
+      `SELECT u.push_token FROM reparos r JOIN usuarios u ON r.criado_por = u.id WHERE r.id = $1`,
       [req.params.id]
     )
+    if (dono.rows[0]?.push_token) {
+      const { enviarPushNotificacao } = require('../services/alertaService')
+      await enviarPushNotificacao(
+        dono.rows[0].push_token,
+        '🔧 Profissional a caminho!',
+        `Um prestador confirmou que está indo até você para "${reparo.rows[0].titulo}"`,
+        { tipo: 'match_reparo', reparo_id: req.params.id }
+      )
+    }
+    res.json({ mensagem: 'Match confirmado! Contagem regressiva iniciada.', match_feito_em: new Date() })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao confirmar match' })
+  }
+})
+
+// Encerrar reparo (dono ou prestador)
+router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
+  try {
+    const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    const r = reparo.rows[0]
+    const ehDono = r.criado_por === req.usuario.id
+    const ehPrestador = r.match_usuario_id === req.usuario.id
+    const ehAdmin = req.usuario.role === 'admin'
+    if (!ehDono && !ehPrestador && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar este reparo' })
+    await pool.query(`UPDATE reparos SET status = 'encerrada', status_aprovacao = 'encerrada' WHERE id = $1`, [req.params.id])
+    const { enviarPushNotificacao } = require('../services/alertaService')
+    if (ehDono && r.match_usuario_id) {
+      const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
+      if (prestador.rows[0]?.push_token) {
+        await enviarPushNotificacao(prestador.rows[0].push_token, '✅ Reparo encerrado!',
+          `O solicitante encerrou o reparo "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id })
+      }
+    } else if (ehPrestador) {
+      const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.criado_por])
+      if (dono.rows[0]?.push_token) {
+        await enviarPushNotificacao(dono.rows[0].push_token, '✅ Serviço concluído!',
+          `O prestador concluiu o reparo "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id })
+      }
+    }
+    res.json({ mensagem: 'Reparo encerrado com sucesso!' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao encerrar reparo' })
+  }
+})
+
+// Expirar match — reparo volta para disponível
+router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
+  try {
+    await pool.query(`UPDATE reparos SET match_feito_em = NULL, match_usuario_id = NULL WHERE id = $1`, [req.params.id])
+    res.json({ mensagem: 'Match expirado, reparo disponível novamente' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao expirar match' })
+  }
+})
+
+router.get('/reparos/:id', autenticar, exigirPrestador, async (req, res) => {
+  try {
+    await pool.query(`UPDATE reparos SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
     const result = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
     const midias = await pool.query(`SELECT * FROM midias_reparos WHERE reparo_id = $1 ORDER BY ordem`, [req.params.id])
@@ -351,20 +401,10 @@ router.post('/upload/dono', autenticar,              upload.single('arquivo'), u
 router.post('/candidaturas', autenticar, exigirAssinaturaAtiva, async (req, res) => {
   try {
     const { obra_id, referencias, valor_oferta, mensagem_oferta } = req.body
-    const obraResult = await pool.query(
-      `SELECT id, titulo, status FROM obras WHERE id = $1 AND status = 'aberta'`,
-      [obra_id]
-    )
-    if (obraResult.rows.length === 0) {
-      return res.status(404).json({ erro: 'Obra não encontrada ou não está disponível' })
-    }
-    const existente = await pool.query(
-      `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
-      [obra_id, req.usuario.id]
-    )
-    if (existente.rows.length > 0) {
-      return res.status(409).json({ erro: 'Você já demonstrou interesse nesta obra' })
-    }
+    const obraResult = await pool.query(`SELECT id, titulo, status FROM obras WHERE id = $1 AND status = 'aberta'`, [obra_id])
+    if (obraResult.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada ou não está disponível' })
+    const existente = await pool.query(`SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`, [obra_id, req.usuario.id])
+    if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse nesta obra' })
     const result = await pool.query(
       `INSERT INTO candidaturas (obra_id, usuario_id, referencias, valor_oferta, mensagem_oferta, status)
        VALUES ($1, $2, $3, $4, $5, 'pendente') RETURNING *`,
@@ -410,9 +450,7 @@ router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
     )
     if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
     const cand = candidatura.rows[0]
-    if (req.usuario.id !== cand.dono_id && req.usuario.id !== cand.usuario_id) {
-      return res.status(403).json({ erro: 'Sem permissão' })
-    }
+    if (req.usuario.id !== cand.dono_id && req.usuario.id !== cand.usuario_id) return res.status(403).json({ erro: 'Sem permissão' })
     const negociacao = await pool.query(
       `INSERT INTO negociacoes (candidatura_id, autor_id, tipo, valor, mensagem) VALUES ($1, $2, 'contra_oferta', $3, $4) RETURNING *`,
       [id, req.usuario.id, valor, mensagem]
