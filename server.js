@@ -3,6 +3,7 @@ const express = require('express')
 const cors = require('cors')
 const rateLimit = require('express-rate-limit')
 const routes = require('./src/routes')
+const { pool } = require('./src/utils/supabase')
 const { verificarObrasComBaixoEngajamento, verificarObrasExpirando } = require('./src/services/alertaService')
 
 const app = express()
@@ -22,12 +23,16 @@ app.use(cors({
   credentials: true
 }))
 
+// Rate limit global — aumentado para não bloquear uso legítimo do app
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
 }))
 
+// Rate limits específicos para rotas sensíveis
 app.use('/api/auth/login',    rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }))
 app.use('/api/auth/cadastro', rateLimit({ windowMs: 60 * 60 * 1000, max: 5 }))
 
@@ -36,30 +41,51 @@ app.use(express.urlencoded({ extended: true }))
 
 app.use('/api', routes)
 
-app.get('/', (req, res) => {
-  res.json({ api: 'PinturaPro API', versao: '1.0.0', status: 'online', docs: '/api/health' })
+// Health check real — verifica banco de dados
+app.get('/', async (req, res) => {
+  try {
+    await pool.query('SELECT 1')
+    res.json({
+      api: 'PinturaPro API',
+      versao: '1.0.0',
+      status: 'online',
+      banco: 'conectado',
+      uptime: Math.floor(process.uptime()) + 's'
+    })
+  } catch (err) {
+    res.status(503).json({
+      api: 'PinturaPro API',
+      status: 'degradado',
+      banco: 'erro',
+      detalhe: err.message
+    })
+  }
 })
 
+// Rota não encontrada
 app.use((req, res) => {
   res.status(404).json({ erro: 'Rota não encontrada' })
 })
 
-const iniciarAgendador = () => {
-  const INTERVALO_ENGAJAMENTO = 8 * 60 * 60 * 1000  // 8 horas
-  const INTERVALO_EXPIRACAO = 60 * 60 * 1000         // 1 hora
+// Error handler global — captura erros não tratados nas rotas
+app.use((err, req, res, next) => {
+  console.error('Erro não tratado:', err.message)
+  res.status(500).json({ erro: 'Erro interno do servidor. Tente novamente.' })
+})
 
-  // Roda após 1 minuto da inicialização
+const iniciarAgendador = () => {
+  const INTERVALO_ENGAJAMENTO = 8 * 60 * 60 * 1000
+  const INTERVALO_EXPIRACAO   = 60 * 60 * 1000
+
   setTimeout(() => {
     verificarObrasComBaixoEngajamento()
     verificarObrasExpirando()
   }, 60 * 1000)
 
-  // Engajamento a cada 8 horas
   setInterval(() => {
     verificarObrasComBaixoEngajamento()
   }, INTERVALO_ENGAJAMENTO)
 
-  // Expiração a cada 1 hora
   setInterval(() => {
     verificarObrasExpirando()
   }, INTERVALO_EXPIRACAO)

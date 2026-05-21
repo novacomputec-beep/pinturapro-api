@@ -1,3 +1,4 @@
+require('dotenv').config()
 const express = require('express')
 const router = express.Router()
 const { autenticar, exigirAssinaturaAtiva, exigirAdmin } = require('../middlewares/auth')
@@ -8,19 +9,34 @@ const candidaturasCtrl = require('../controllers/candidaturasController')
 const mensagensCtrl    = require('../controllers/mensagensController')
 const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
+const { uploadArquivo } = require('../services/uploadService')
+const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
+
+// Cache de assinatura para prestadores (reutiliza o mesmo padrão do auth)
+const cachePrestadores = new Map()
+const CACHE_TTL = 5 * 60 * 1000 // 5 minutos
 
 const exigirPrestador = async (req, res, next) => {
   try {
     if (req.usuario.role !== 'prestador' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Acesso restrito a prestadores de serviços' })
     }
+    if (req.usuario.role === 'admin') return next()
+
+    const cached = cachePrestadores.get(req.usuario.id)
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      if (!cached.ativa) return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os reparos.' })
+      return next()
+    }
+
     const assinatura = await pool.query(
       `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
       [req.usuario.id]
     )
-    if (assinatura.rows.length === 0) {
-      return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os reparos.' })
-    }
+    const ativa = assinatura.rows.length > 0
+    cachePrestadores.set(req.usuario.id, { ativa, timestamp: Date.now() })
+
+    if (!ativa) return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os reparos.' })
     next()
   } catch (err) {
     res.status(500).json({ erro: 'Erro de autenticação' })
@@ -40,7 +56,6 @@ router.post('/auth/esqueci-senha',   authCtrl.esqueciSenha)
 router.post('/auth/foto-perfil', autenticar, upload.single('arquivo'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
-    const { uploadArquivo } = require('../services/uploadService')
     const resultado = await uploadArquivo(req.file)
     await pool.query('UPDATE usuarios SET foto_url = $1 WHERE id = $2', [resultado.secure_url, req.usuario.id])
     res.json({ foto_url: resultado.secure_url })
@@ -137,7 +152,6 @@ router.post('/obras-aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req,
   try {
     await pool.query(`UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta' WHERE id = $1`, [req.params.id])
     res.json({ mensagem: 'Obra aprovada e publicada!' })
-    const { notificarPintoresSobreNovaObra } = require('../services/alertaService')
     notificarPintoresSobreNovaObra(req.params.id).catch(err => console.error('Erro notificar pintores:', err))
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao aprovar obra' })
@@ -212,7 +226,6 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
       [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null]
     )
     res.status(201).json(result.rows[0])
-    const { notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao cadastrar reparo' })
@@ -236,7 +249,6 @@ router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (re
   try {
     await pool.query(`UPDATE reparos SET status_aprovacao = 'aprovada', status = 'aberta' WHERE id = $1`, [req.params.id])
     res.json({ mensagem: 'Reparo aprovado e publicado!' })
-    const { notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
     notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores:', err))
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao aprovar reparo' })
@@ -289,7 +301,6 @@ router.post('/reparos/:id/interesse', autenticar, exigirPrestador, async (req, r
   }
 })
 
-// Match — prestador confirma que está a caminho
 router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
@@ -304,7 +315,6 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) 
       [req.params.id]
     )
     if (dono.rows[0]?.push_token) {
-      const { enviarPushNotificacao } = require('../services/alertaService')
       await enviarPushNotificacao(
         dono.rows[0].push_token,
         '🔧 Profissional a caminho!',
@@ -318,7 +328,6 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) 
   }
 })
 
-// Encerrar reparo (dono ou prestador)
 router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
@@ -329,7 +338,6 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
     const ehAdmin = req.usuario.role === 'admin'
     if (!ehDono && !ehPrestador && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar este reparo' })
     await pool.query(`UPDATE reparos SET status = 'encerrada', status_aprovacao = 'encerrada' WHERE id = $1`, [req.params.id])
-    const { enviarPushNotificacao } = require('../services/alertaService')
     if (ehDono && r.match_usuario_id) {
       const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
       if (prestador.rows[0]?.push_token) {
@@ -349,7 +357,6 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
   }
 })
 
-// Expirar match — reparo volta para disponível
 router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
   try {
     await pool.query(`UPDATE reparos SET match_feito_em = NULL, match_usuario_id = NULL WHERE id = $1`, [req.params.id])
@@ -376,7 +383,6 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
   try {
     const { reparo_id, ordem } = req.body
     if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
-    const { uploadArquivo } = require('../services/uploadService')
     const resultado = await uploadArquivo(req.file)
     const tipo = req.file.mimetype.startsWith('video/') ? 'video' : 'foto'
     const result = await pool.query(
@@ -415,7 +421,6 @@ router.post('/candidaturas', autenticar, exigirAssinaturaAtiva, async (req, res)
       [obra_id]
     )
     if (dono.rows[0]?.push_token) {
-      const { enviarPushNotificacao } = require('../services/alertaService')
       const temOferta = valor_oferta && valor_oferta > 0
       await enviarPushNotificacao(
         dono.rows[0].push_token,
@@ -456,7 +461,6 @@ router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
       [id, req.usuario.id, valor, mensagem]
     )
     const ehDono = req.usuario.id === cand.dono_id
-    const { enviarPushNotificacao } = require('../services/alertaService')
     if (!ehDono) {
       const donoResult = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [cand.dono_id])
       if (donoResult.rows[0]?.push_token) {
