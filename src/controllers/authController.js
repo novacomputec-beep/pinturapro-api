@@ -26,7 +26,21 @@ const cadastrar = async (req, res) => {
             especialidades, anos_experiencia, tamanho_equipe,
             cpf_cnpj, tipo_conta } = req.body
 
-    const existente = await pool.query('SELECT id FROM usuarios WHERE email = $1', [email])
+    // Validações básicas
+    if (!nome || !email || !senha) {
+      return res.status(400).json({ erro: 'Nome, e-mail e senha são obrigatórios' })
+    }
+    if (senha.length < 8) {
+      return res.status(400).json({ erro: 'A senha deve ter pelo menos 8 caracteres' })
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ erro: 'E-mail inválido' })
+    }
+
+    // Sanitiza email para evitar variações do mesmo endereço
+    const emailNormalizado = email.toLowerCase().trim()
+
+    const existente = await pool.query('SELECT id FROM usuarios WHERE email = $1', [emailNormalizado])
     if (existente.rows.length > 0) {
       return res.status(409).json({ erro: 'E-mail já cadastrado' })
     }
@@ -42,7 +56,7 @@ const cadastrar = async (req, res) => {
         especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true)
        RETURNING id, nome, email, role`,
-      [nome, email, telefone, senha_hash, cidade,
+      [nome, emailNormalizado, telefone, senha_hash, cidade,
        especialidades || [], anos_experiencia || 0,
        tamanho_equipe || 1, cpf_cnpj, role]
     )
@@ -72,14 +86,15 @@ const cadastrar = async (req, res) => {
     const token = gerarToken(usuario)
     res.status(201).json({ usuario, token })
 
-    setTimeout(async () => {
+    // Envia boas-vindas de forma assíncrona sem bloquear a resposta
+    setImmediate(async () => {
       try {
         const { enviarBoasVindas } = require('../services/alertaService')
         await enviarBoasVindas(usuario.id)
       } catch (err) {
         console.error('Erro ao enviar boas-vindas:', err)
       }
-    }, 3000)
+    })
 
   } catch (err) {
     console.error('Erro no cadastro:', err)
@@ -91,11 +106,18 @@ const login = async (req, res) => {
   try {
     const { email, senha } = req.body
 
+    if (!email || !senha) {
+      return res.status(400).json({ erro: 'E-mail e senha são obrigatórios' })
+    }
+
+    const emailNormalizado = email.toLowerCase().trim()
+
     const result = await pool.query(
       'SELECT id, nome, email, role, senha_hash, ativo, foto_url FROM usuarios WHERE email = $1',
-      [email]
+      [emailNormalizado]
     )
 
+    // Mensagem genérica para não revelar se o e-mail existe ou não
     if (result.rows.length === 0) {
       return res.status(401).json({ erro: 'E-mail ou senha incorretos' })
     }
@@ -157,9 +179,14 @@ const perfil = async (req, res) => {
 const atualizarPerfil = async (req, res) => {
   try {
     const { nome, telefone, cidade } = req.body
+
+    if (!nome || !nome.trim()) {
+      return res.status(400).json({ erro: 'Nome é obrigatório' })
+    }
+
     const result = await pool.query(
       'UPDATE usuarios SET nome=$1, telefone=$2, cidade=$3 WHERE id=$4 RETURNING id, nome, email, cidade, foto_url',
-      [nome, telefone, cidade, req.usuario.id]
+      [nome.trim(), telefone, cidade, req.usuario.id]
     )
     res.json(result.rows[0])
   } catch (err) {
@@ -175,6 +202,9 @@ const alterarSenha = async (req, res) => {
     }
     if (nova_senha.length < 8) {
       return res.status(400).json({ erro: 'A nova senha deve ter pelo menos 8 caracteres' })
+    }
+    if (senha_atual === nova_senha) {
+      return res.status(400).json({ erro: 'A nova senha deve ser diferente da senha atual' })
     }
     const result = await pool.query('SELECT senha_hash FROM usuarios WHERE id = $1', [req.usuario.id])
     const senhaValida = await bcrypt.compare(senha_atual, result.rows[0].senha_hash)
@@ -194,23 +224,27 @@ const esqueciSenha = async (req, res) => {
     const { email } = req.body
     if (!email) return res.status(400).json({ erro: 'Informe o e-mail' })
 
+    const emailNormalizado = email.toLowerCase().trim()
+
+    // Responde antes de processar — não revela se o e-mail existe
     res.json({ mensagem: 'Se este e-mail estiver cadastrado, você receberá as instruções em breve.' })
 
-    const result = await pool.query('SELECT id, nome, email FROM usuarios WHERE email = $1', [email])
+    const result = await pool.query('SELECT id, nome, email FROM usuarios WHERE email = $1', [emailNormalizado])
     if (result.rows.length === 0) return
 
     const usuario = result.rows[0]
-    const token = crypto.randomBytes(32).toString('hex')
-    const expira = new Date(Date.now() + 3600000)
+    const tokenCompleto = crypto.randomBytes(32).toString('hex')
+    const codigoExibido = tokenCompleto.substring(0, 6).toUpperCase()
+    const expira = new Date(Date.now() + 3600000) // 1 hora
 
     await pool.query(
       `UPDATE usuarios SET reset_token = $1, reset_token_expira = $2 WHERE id = $3`,
-      [token, expira, usuario.id]
+      [tokenCompleto, expira, usuario.id]
     )
 
     await transporter.sendMail({
       from: `PinturaPro <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
-      to: email,
+      to: emailNormalizado,
       subject: 'PinturaPro — Redefinição de senha',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -221,9 +255,9 @@ const esqueciSenha = async (req, res) => {
             <h2>Olá, ${usuario.nome}!</h2>
             <p>Seu código de redefinição é:</p>
             <div style="background: #0a0a0a; color: #E8833A; font-size: 32px; font-weight: bold; text-align: center; padding: 20px; border-radius: 8px; letter-spacing: 8px; margin: 20px 0;">
-              ${token.substring(0, 6).toUpperCase()}
+              ${codigoExibido}
             </div>
-            <p style="color: #666; font-size: 13px;">Este código expira em 1 hora.</p>
+            <p style="color: #666; font-size: 13px;">Este código expira em 1 hora. Se você não solicitou a redefinição, ignore este e-mail.</p>
             <p><strong>Equipe PinturaPro</strong></p>
           </div>
         </div>
