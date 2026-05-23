@@ -78,22 +78,32 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
 // USUARIOS
 // ============================================================
 router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
+  const client = await pool.connect()
   try {
     const { id } = req.params
     if (id === req.usuario.id) return res.status(400).json({ erro: 'Não é possível excluir sua própria conta' })
-    const usuario = await pool.query('SELECT id, role FROM usuarios WHERE id = $1', [id])
+
+    const usuario = await client.query('SELECT id, role FROM usuarios WHERE id = $1', [id])
     if (usuario.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
     if (usuario.rows[0].role === 'admin') return res.status(400).json({ erro: 'Não é possível excluir um administrador' })
-    await pool.query('DELETE FROM assinaturas WHERE usuario_id = $1', [id])
-    await pool.query('DELETE FROM candidaturas WHERE usuario_id = $1', [id])
-    await pool.query('DELETE FROM mensagens WHERE autor_id = $1', [id])
-    await pool.query('DELETE FROM interesse_reparos WHERE usuario_id = $1', [id])
-    await pool.query('DELETE FROM negociacoes WHERE autor_id = $1', [id])
-    await pool.query('DELETE FROM usuarios WHERE id = $1', [id])
+
+    // Transação garante que todos os deletes acontecem juntos ou nenhum acontece
+    await client.query('BEGIN')
+    await client.query('DELETE FROM assinaturas WHERE usuario_id = $1', [id])
+    await client.query('DELETE FROM candidaturas WHERE usuario_id = $1', [id])
+    await client.query('DELETE FROM mensagens WHERE autor_id = $1', [id])
+    await client.query('DELETE FROM interesse_reparos WHERE usuario_id = $1', [id])
+    await client.query('DELETE FROM negociacoes WHERE autor_id = $1', [id])
+    await client.query('DELETE FROM usuarios WHERE id = $1', [id])
+    await client.query('COMMIT')
+
     res.json({ mensagem: 'Usuário excluído com sucesso' })
   } catch (err) {
+    await client.query('ROLLBACK')
     console.error('Erro ao excluir usuário:', err)
     res.status(500).json({ erro: 'Erro ao excluir usuário' })
+  } finally {
+    client.release()
   }
 })
 
@@ -102,14 +112,19 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
 // ============================================================
 router.get('/obras/minhas', autenticar, async (req, res) => {
   try {
+    const page  = parseInt(req.query.page)  || 1
+    const limit = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+
     const result = await pool.query(
       `SELECT o.*,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
-       FROM obras o WHERE o.criado_por = $1 ORDER BY o.criado_em DESC`,
-      [req.usuario.id]
+       FROM obras o WHERE o.criado_por = $1 ORDER BY o.criado_em DESC
+       LIMIT $2 OFFSET $3`,
+      [req.usuario.id, limit, offset]
     )
-    res.json({ obras: result.rows })
+    res.json({ obras: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar obras' })
   }
@@ -135,14 +150,20 @@ router.post('/obras/dono', autenticar, async (req, res) => {
 
 router.get('/obras-aprovacao', autenticar, exigirAdmin, async (req, res) => {
   try {
+    const page  = parseInt(req.query.page)  || 1
+    const limit = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+
     const result = await pool.query(
       `SELECT o.*, u.nome as dono_nome, u.email as dono_email, u.telefone as dono_telefone,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
        FROM obras o JOIN usuarios u ON o.criado_por = u.id
        WHERE o.enviada_por_dono = true AND o.status_aprovacao = 'pendente'
-       ORDER BY o.criado_em DESC`
+       ORDER BY o.criado_em DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
     )
-    res.json({ obras: result.rows })
+    res.json({ obras: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar obras para aprovação' })
   }
@@ -167,10 +188,24 @@ router.post('/obras-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req,
   }
 })
 
-router.get('/obras',        autenticar, exigirAssinaturaAtiva, obrasCtrl.listar)
-router.post('/obras',       autenticar, exigirAdmin,           obrasCtrl.criar)
-router.put('/obras/:id',    autenticar, exigirAdmin,           obrasCtrl.editar)
-router.delete('/obras/:id', autenticar, exigirAdmin,           obrasCtrl.encerrar)
+router.get('/obras', autenticar, exigirAssinaturaAtiva, async (req, res) => {
+  try {
+    const page  = parseInt(req.query.page)  || 1
+    const limit = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+    // Delega para o controller mas injeta paginação via query
+    req.query.page  = page
+    req.query.limit = limit
+    req.query.offset = offset
+    return obrasCtrl.listar(req, res)
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar obras' })
+  }
+})
+
+router.post('/obras',       autenticar, exigirAdmin, obrasCtrl.criar)
+router.put('/obras/:id',    autenticar, exigirAdmin, obrasCtrl.editar)
+router.delete('/obras/:id', autenticar, exigirAdmin, obrasCtrl.encerrar)
 
 router.get('/obras/:id', autenticar, exigirAssinaturaAtiva, async (req, res) => {
   try {
@@ -200,14 +235,19 @@ router.get('/obras/:id', autenticar, exigirAssinaturaAtiva, async (req, res) => 
 // ============================================================
 router.get('/reparos/minhas', autenticar, async (req, res) => {
   try {
+    const page  = parseInt(req.query.page)  || 1
+    const limit = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+
     const result = await pool.query(
       `SELECT r.*,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa
-       FROM reparos r WHERE r.criado_por = $1 ORDER BY r.criado_em DESC`,
-      [req.usuario.id]
+       FROM reparos r WHERE r.criado_por = $1 ORDER BY r.criado_em DESC
+       LIMIT $2 OFFSET $3`,
+      [req.usuario.id, limit, offset]
     )
-    res.json({ reparos: result.rows })
+    res.json({ reparos: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar reparos' })
   }
@@ -234,12 +274,18 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
 
 router.get('/reparos/aprovacao', autenticar, exigirAdmin, async (req, res) => {
   try {
+    const page  = parseInt(req.query.page)  || 1
+    const limit = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+
     const result = await pool.query(
       `SELECT r.*, u.nome as dono_nome, u.email as dono_email, u.telefone as dono_telefone
        FROM reparos r JOIN usuarios u ON r.criado_por = u.id
-       WHERE r.status_aprovacao = 'pendente' ORDER BY r.criado_em DESC`
+       WHERE r.status_aprovacao = 'pendente' ORDER BY r.criado_em DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
     )
-    res.json({ reparos: result.rows })
+    res.json({ reparos: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar reparos' })
   }
@@ -266,7 +312,11 @@ router.post('/reparos/aprovacao/:id/recusar', autenticar, exigirAdmin, async (re
 
 router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
   try {
+    const page  = parseInt(req.query.page)  || 1
+    const limit = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
     const { categoria } = req.query
+
     let query = `
       SELECT r.*,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
@@ -274,13 +324,19 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
       FROM reparos r
       WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()`
     const params = []
+
     if (categoria && categoria !== 'todas') {
       params.push(categoria)
       query += ` AND r.categoria = $${params.length}`
     }
-    query += ` ORDER BY r.criado_em DESC`
+
+    params.push(limit)
+    query += ` ORDER BY r.criado_em DESC LIMIT $${params.length}`
+    params.push(offset)
+    query += ` OFFSET $${params.length}`
+
     const result = await pool.query(query, params)
-    res.json({ reparos: result.rows })
+    res.json({ reparos: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar reparos' })
   }
@@ -290,7 +346,7 @@ router.post('/reparos/:id/interesse', autenticar, exigirPrestador, async (req, r
   try {
     const { mensagem } = req.body
     const existente = await pool.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
-    if (existente.rows.length > 0) return res.status(409).json({ erro: 'Voce ja demonstrou interesse neste reparo' })
+    if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse neste reparo' })
     const result = await pool.query(
       `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem) VALUES ($1, $2, $3) RETURNING *`,
       [req.params.id, req.usuario.id, mensagem]
@@ -317,7 +373,7 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) 
     if (dono.rows[0]?.push_token) {
       await enviarPushNotificacao(
         dono.rows[0].push_token,
-        '🔧 Profissional a caminho!',
+        '🚀 Profissional a caminho!',
         `Um prestador confirmou que está indo até você para "${reparo.rows[0].titulo}"`,
         { tipo: 'match_reparo', reparo_id: req.params.id }
       )
@@ -333,9 +389,9 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
     const r = reparo.rows[0]
-    const ehDono = r.criado_por === req.usuario.id
+    const ehDono      = r.criado_por === req.usuario.id
     const ehPrestador = r.match_usuario_id === req.usuario.id
-    const ehAdmin = req.usuario.role === 'admin'
+    const ehAdmin     = req.usuario.role === 'admin'
     if (!ehDono && !ehPrestador && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar este reparo' })
     await pool.query(`UPDATE reparos SET status = 'encerrada', status_aprovacao = 'encerrada' WHERE id = $1`, [req.params.id])
     if (ehDono && r.match_usuario_id) {
@@ -357,8 +413,18 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
   }
 })
 
+// Correção: apenas dono do reparo ou prestador do match pode expirar o match
 router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
   try {
+    const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    const r = reparo.rows[0]
+    const ehDono      = r.criado_por === req.usuario.id
+    const ehPrestador = r.match_usuario_id === req.usuario.id
+    const ehAdmin     = req.usuario.role === 'admin'
+    if (!ehDono && !ehPrestador && !ehAdmin) {
+      return res.status(403).json({ erro: 'Sem permissão para expirar este match' })
+    }
     await pool.query(`UPDATE reparos SET match_feito_em = NULL, match_usuario_id = NULL WHERE id = $1`, [req.params.id])
     res.json({ mensagem: 'Match expirado, reparo disponível novamente' })
   } catch (err) {
@@ -371,7 +437,7 @@ router.get('/reparos/:id', autenticar, exigirPrestador, async (req, res) => {
     await pool.query(`UPDATE reparos SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
     const result = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
-    const midias = await pool.query(`SELECT * FROM midias_reparos WHERE reparo_id = $1 ORDER BY ordem`, [req.params.id])
+    const midias   = await pool.query(`SELECT * FROM midias_reparos WHERE reparo_id = $1 ORDER BY ordem`, [req.params.id])
     const interesse = await pool.query(`SELECT id, status FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
     res.json({ reparo: result.rows[0], midias: midias.rows, meu_interesse: interesse.rows[0] || null })
   } catch (err) {
@@ -424,7 +490,7 @@ router.post('/candidaturas', autenticar, exigirAssinaturaAtiva, async (req, res)
       const temOferta = valor_oferta && valor_oferta > 0
       await enviarPushNotificacao(
         dono.rows[0].push_token,
-        temOferta ? '💰 Nova contra-oferta recebida!' : '👷 Novo interesse na sua obra!',
+        temOferta ? '🎨 Nova contra-oferta recebida!' : '👀 Novo interesse na sua obra!',
         temOferta
           ? `Um pintor fez uma oferta de R$ ${Number(valor_oferta).toLocaleString('pt-BR')} para "${dono.rows[0].titulo}"`
           : `Um pintor demonstrou interesse em "${dono.rows[0].titulo}"`,
@@ -464,12 +530,12 @@ router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
     if (!ehDono) {
       const donoResult = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [cand.dono_id])
       if (donoResult.rows[0]?.push_token) {
-        await enviarPushNotificacao(donoResult.rows[0].push_token, '💰 Nova contra-oferta!',
+        await enviarPushNotificacao(donoResult.rows[0].push_token, '🎨 Nova contra-oferta!',
           `Um pintor propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${cand.titulo}"`,
           { tipo: 'contra_oferta', candidatura_id: id })
       }
     } else if (cand.push_token) {
-      await enviarPushNotificacao(cand.push_token, '💰 O dono fez uma contra-oferta!',
+      await enviarPushNotificacao(cand.push_token, '🎨 O dono fez uma contra-oferta!',
         `Nova proposta de R$ ${Number(valor).toLocaleString('pt-BR')} para "${cand.titulo}"`,
         { tipo: 'contra_oferta', candidatura_id: id })
     }
