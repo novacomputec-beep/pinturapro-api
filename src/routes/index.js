@@ -315,13 +315,16 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
     const offset = (page - 1) * limit
     const { categoria } = req.query
 
+    // $1 reservado para o usuario_id (filtro de bloqueados)
+    const params = [req.usuario.id]
+
     let query = `
       SELECT r.*,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa
       FROM reparos r
-      WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()`
-    const params = []
+      WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()
+        AND NOT ($1::uuid = ANY(COALESCE(r.prestadores_bloqueados, '{}')))`
 
     if (categoria && categoria !== 'todas') {
       params.push(categoria)
@@ -422,7 +425,15 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     if (!ehDono && !ehPrestador && !ehAdmin) {
       return res.status(403).json({ erro: 'Sem permissão para expirar este match' })
     }
-    await pool.query(`UPDATE reparos SET match_feito_em = NULL, match_usuario_id = NULL WHERE id = $1`, [req.params.id])
+    // Grava o prestador na lista negra antes de limpar o match
+    await pool.query(
+      `UPDATE reparos SET
+        match_feito_em = NULL,
+        match_usuario_id = NULL,
+        prestadores_bloqueados = array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid)
+       WHERE id = $1`,
+      [req.params.id, r.match_usuario_id]
+    )
     res.json({ mensagem: 'Match expirado, reparo disponível novamente' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao expirar match' })
