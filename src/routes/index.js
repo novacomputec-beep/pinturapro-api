@@ -440,6 +440,173 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
   }
 })
 
+// Prestador solicita mais tempo — envia motivo e notifica dono
+router.post('/reparos/:id/pedir-tempo', autenticar, async (req, res) => {
+  try {
+    const { motivo } = req.body
+    const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    const r = reparo.rows[0]
+
+    if (r.match_usuario_id !== req.usuario.id) {
+      return res.status(403).json({ erro: 'Apenas o prestador do match pode solicitar mais tempo' })
+    }
+
+    await pool.query(
+      `UPDATE reparos SET pedido_tempo_status = 'aguardando_tempo', pedido_tempo_motivo = $1, pedido_tempo_minutos = NULL WHERE id = $2`,
+      [motivo, req.params.id]
+    )
+
+    // Notifica o dono
+    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.criado_por])
+    if (dono.rows[0]?.push_token) {
+      await enviarPushNotificacao(
+        dono.rows[0].push_token,
+        '⚠️ Prestador precisa de mais tempo!',
+        `Motivo: ${motivo}. Abra o app para responder.`,
+        { tipo: 'pedido_tempo', reparo_id: req.params.id }
+      )
+    }
+
+    res.json({ mensagem: 'Solicitação enviada ao dono.' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao solicitar mais tempo' })
+  }
+})
+
+// Dono pergunta quanto tempo o prestador precisa — notifica prestador
+router.post('/reparos/:id/perguntar-tempo', autenticar, async (req, res) => {
+  try {
+    const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    const r = reparo.rows[0]
+
+    if (r.criado_por !== req.usuario.id) {
+      return res.status(403).json({ erro: 'Apenas o dono pode responder o pedido' })
+    }
+
+    await pool.query(
+      `UPDATE reparos SET pedido_tempo_status = 'aguardando_minutos' WHERE id = $1`,
+      [req.params.id]
+    )
+
+    // Notifica o prestador
+    const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
+    if (prestador.rows[0]?.push_token) {
+      await enviarPushNotificacao(
+        prestador.rows[0].push_token,
+        '⏱ Quanto tempo você precisa?',
+        'O solicitante quer saber quantos minutos a mais você precisa para chegar.',
+        { tipo: 'perguntar_tempo', reparo_id: req.params.id }
+      )
+    }
+
+    res.json({ mensagem: 'Prestador notificado para informar o tempo.' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao perguntar tempo' })
+  }
+})
+
+// Prestador informa quantos minutos precisa — notifica dono para aceitar/recusar
+router.post('/reparos/:id/informar-tempo', autenticar, async (req, res) => {
+  try {
+    const { minutos } = req.body
+    if (!minutos || minutos <= 0) return res.status(400).json({ erro: 'Informe um tempo válido em minutos' })
+
+    const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    const r = reparo.rows[0]
+
+    if (r.match_usuario_id !== req.usuario.id) {
+      return res.status(403).json({ erro: 'Apenas o prestador do match pode informar o tempo' })
+    }
+
+    await pool.query(
+      `UPDATE reparos SET pedido_tempo_status = 'aguardando_aprovacao', pedido_tempo_minutos = $1 WHERE id = $2`,
+      [minutos, req.params.id]
+    )
+
+    // Notifica o dono
+    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.criado_por])
+    if (dono.rows[0]?.push_token) {
+      await enviarPushNotificacao(
+        dono.rows[0].push_token,
+        '⏳ Prestador precisa de mais tempo',
+        `Ele precisa de ${minutos} minuto(s) a mais. Aceitar ou recusar?`,
+        { tipo: 'aprovar_tempo', reparo_id: req.params.id }
+      )
+    }
+
+    res.json({ mensagem: 'Dono notificado para aprovar o tempo.' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao informar tempo' })
+  }
+})
+
+// Dono aceita ou recusa o tempo extra
+router.post('/reparos/:id/responder-tempo', autenticar, async (req, res) => {
+  try {
+    const { aceito } = req.body
+    const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    const r = reparo.rows[0]
+
+    if (r.criado_por !== req.usuario.id) {
+      return res.status(403).json({ erro: 'Apenas o dono pode responder' })
+    }
+
+    if (aceito) {
+      // Estende o cronômetro somando os minutos ao match_feito_em
+      const novoMatchFeitoEm = new Date(new Date(r.match_feito_em).getTime() + r.pedido_tempo_minutos * 60 * 1000)
+      await pool.query(
+        `UPDATE reparos SET match_feito_em = $1, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL WHERE id = $2`,
+        [novoMatchFeitoEm.toISOString(), req.params.id]
+      )
+
+      // Notifica prestador
+      const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
+      if (prestador.rows[0]?.push_token) {
+        await enviarPushNotificacao(
+          prestador.rows[0].push_token,
+          '✅ Tempo extra aceito!',
+          `O solicitante aceitou. Você tem mais ${r.pedido_tempo_minutos} minuto(s). Corra!`,
+          { tipo: 'tempo_aceito', reparo_id: req.params.id }
+        )
+      }
+
+      res.json({ mensagem: 'Tempo extra concedido!', novo_match_feito_em: novoMatchFeitoEm })
+    } else {
+      // Recusou — bloqueia prestador e volta reparo para disponível
+      await pool.query(
+        `UPDATE reparos SET
+          match_feito_em = NULL,
+          match_usuario_id = NULL,
+          pedido_tempo_status = NULL,
+          pedido_tempo_motivo = NULL,
+          pedido_tempo_minutos = NULL,
+          prestadores_bloqueados = array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid)
+         WHERE id = $1`,
+        [req.params.id, r.match_usuario_id]
+      )
+
+      // Notifica prestador
+      const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
+      if (prestador.rows[0]?.push_token) {
+        await enviarPushNotificacao(
+          prestador.rows[0].push_token,
+          '❌ Tempo extra recusado',
+          'O solicitante não aceitou. O reparo voltou para disponível.',
+          { tipo: 'tempo_recusado', reparo_id: req.params.id }
+        )
+      }
+
+      res.json({ mensagem: 'Tempo recusado. Reparo disponível novamente.' })
+    }
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao responder pedido de tempo' })
+  }
+})
+
 // CORRIGIDO: aceita dono do reparo E prestador (não só prestador)
 router.get('/reparos/:id', autenticar, async (req, res) => {
   try {
