@@ -12,7 +12,7 @@ const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo } = require('../services/uploadService')
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
 
-// Cache de assinatura para prestadores (reutiliza o mesmo padrão do auth)
+// Cache de assinatura para prestadores
 const cachePrestadores = new Map()
 const CACHE_TTL = 5 * 60 * 1000 // 5 minutos
 
@@ -24,7 +24,7 @@ const exigirPrestador = async (req, res, next) => {
     if (req.usuario.role === 'admin') return next()
 
     const cached = cachePrestadores.get(req.usuario.id)
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    if (cached !== null && cached !== undefined && Date.now() - cached.timestamp < CACHE_TTL) {
       if (!cached.ativa) return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os reparos.' })
       return next()
     }
@@ -87,7 +87,6 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     if (usuario.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
     if (usuario.rows[0].role === 'admin') return res.status(400).json({ erro: 'Não é possível excluir um administrador' })
 
-    // Transação garante que todos os deletes acontecem juntos ou nenhum acontece
     await client.query('BEGIN')
     await client.query('DELETE FROM assinaturas WHERE usuario_id = $1', [id])
     await client.query('DELETE FROM candidaturas WHERE usuario_id = $1', [id])
@@ -193,7 +192,6 @@ router.get('/obras', autenticar, exigirAssinaturaAtiva, async (req, res) => {
     const page  = parseInt(req.query.page)  || 1
     const limit = parseInt(req.query.limit) || 20
     const offset = (page - 1) * limit
-    // Delega para o controller mas injeta paginação via query
     req.query.page  = page
     req.query.limit = limit
     req.query.offset = offset
@@ -413,7 +411,6 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
   }
 })
 
-// Correção: apenas dono do reparo ou prestador do match pode expirar o match
 router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
@@ -432,15 +429,67 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
   }
 })
 
-router.get('/reparos/:id', autenticar, exigirPrestador, async (req, res) => {
+// CORRIGIDO: aceita dono do reparo E prestador (não só prestador)
+router.get('/reparos/:id', autenticar, async (req, res) => {
   try {
-    await pool.query(`UPDATE reparos SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
-    const result = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
+    const result = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
-    const midias   = await pool.query(`SELECT * FROM midias_reparos WHERE reparo_id = $1 ORDER BY ordem`, [req.params.id])
-    const interesse = await pool.query(`SELECT id, status FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
-    res.json({ reparo: result.rows[0], midias: midias.rows, meu_interesse: interesse.rows[0] || null })
+
+    const reparo = result.rows[0]
+    const ehDono           = reparo.criado_por === req.usuario.id
+    const ehPrestadorDoMatch = reparo.match_usuario_id === req.usuario.id
+
+    // Dono sempre pode ver seu próprio reparo
+    // Prestador do match sempre pode ver
+    // Admin sempre pode ver
+    // Prestador comum precisa de assinatura ativa
+    if (!ehDono && !ehPrestadorDoMatch && req.usuario.role !== 'admin') {
+      if (req.usuario.role !== 'prestador') {
+        return res.status(403).json({ erro: 'Sem permissão para ver este reparo' })
+      }
+      const assinatura = await pool.query(
+        `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
+        [req.usuario.id]
+      )
+      if (assinatura.rows.length === 0) {
+        return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os reparos.' })
+      }
+    }
+
+    // Só conta visita se for prestador (não dono consultando o próprio reparo)
+    if (!ehDono) {
+      await pool.query(`UPDATE reparos SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
+    }
+
+    const midias    = await pool.query(`SELECT * FROM midias_reparos WHERE reparo_id = $1 ORDER BY ordem`, [req.params.id])
+    const interesse = await pool.query(
+      `SELECT id, status FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`,
+      [req.params.id, req.usuario.id]
+    )
+
+    // Se for dono ou admin, busca lista de interessados
+    let interessados = []
+    if (ehDono || req.usuario.role === 'admin') {
+      const result2 = await pool.query(
+        `SELECT ir.id, ir.status, ir.mensagem, ir.criado_em,
+                u.nome, u.telefone, u.cidade
+         FROM interesse_reparos ir
+         JOIN usuarios u ON ir.usuario_id = u.id
+         WHERE ir.reparo_id = $1
+         ORDER BY ir.criado_em ASC`,
+        [req.params.id]
+      )
+      interessados = result2.rows
+    }
+
+    res.json({
+      reparo: result.rows[0],
+      midias: midias.rows,
+      meu_interesse: interesse.rows[0] || null,
+      interessados,
+    })
   } catch (err) {
+    console.error('Erro ao buscar reparo:', err)
     res.status(500).json({ erro: 'Erro ao buscar reparo' })
   }
 })
@@ -506,9 +555,9 @@ router.post('/candidaturas', autenticar, exigirAssinaturaAtiva, async (req, res)
 
 router.get('/candidaturas/minhas',        autenticar, candidaturasCtrl.minhas)
 router.get('/candidaturas/pendentes',     autenticar, exigirAdmin, candidaturasCtrl.pendentes)
-router.get('/candidaturas/obra/:obra_id', autenticar, exigirAdmin, candidaturasCtrl.porObra)
-router.post('/candidaturas/:id/aprovar',  autenticar, exigirAdmin, candidaturasCtrl.aprovar)
-router.post('/candidaturas/:id/recusar',  autenticar, exigirAdmin, candidaturasCtrl.recusar)
+router.get('/candidaturas/obra/:obra_id', autenticar, candidaturasCtrl.porObra)
+router.post('/candidaturas/:id/aprovar',  autenticar, candidaturasCtrl.aprovar)
+router.post('/candidaturas/:id/recusar',  autenticar, candidaturasCtrl.recusar)
 
 router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
   try {
