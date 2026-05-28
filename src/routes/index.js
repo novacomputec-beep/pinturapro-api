@@ -11,6 +11,7 @@ const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo } = require('../services/uploadService')
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
+const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()
@@ -380,6 +381,8 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) 
       )
     }
     res.json({ mensagem: 'Match confirmado! Contagem regressiva iniciada.', match_feito_em: new Date() })
+    // Envia contrato por e-mail para dono e prestador
+    enviarContratoReparo(req.params.id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao confirmar match' })
   }

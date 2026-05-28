@@ -1,5 +1,5 @@
 const { pool } = require('../utils/supabase')
-const { gerarEEnviarContrato } = require('../services/contratoService')
+const { enviarContratoObra } = require('./contratosController')
 
 const candidatar = async (req, res) => {
   try {
@@ -78,14 +78,13 @@ const porObra = async (req, res) => {
     const limit  = parseInt(req.query.limit) || 20
     const offset = (page - 1) * limit
 
-    // Verifica se a obra existe
     const obraExiste = await pool.query(`SELECT id FROM obras WHERE id = $1`, [req.params.obra_id])
     if (obraExiste.rows.length === 0) {
       return res.status(404).json({ erro: 'Obra não encontrada' })
     }
 
     const result = await pool.query(
-      `SELECT c.id, c.status, c.referencias, c.criado_em,
+      `SELECT c.id, c.status, c.referencias, c.valor_oferta, c.mensagem_oferta, c.criado_em,
               u.id as usuario_id, u.nome, u.email, u.telefone, u.cidade,
               u.anos_experiencia, u.tamanho_equipe, u.especialidades
        FROM candidaturas c
@@ -131,7 +130,6 @@ const aprovar = async (req, res) => {
   try {
     const { id } = req.params
 
-    // Verifica se a candidatura existe e está pendente
     const existe = await pool.query(`SELECT id, status FROM candidaturas WHERE id = $1`, [id])
     if (existe.rows.length === 0) {
       return res.status(404).json({ erro: 'Candidatura não encontrada' })
@@ -146,12 +144,12 @@ const aprovar = async (req, res) => {
       [req.usuario.id, id]
     )
 
-    // Gera e envia contrato por e-mail de forma assíncrona
-    gerarEEnviarContrato(id).catch(err =>
-      console.error('Erro ao gerar contrato:', err)
-    )
-
     res.json(result.rows[0])
+
+    // Envia contrato por e-mail de forma assíncrona sem bloquear a resposta
+    enviarContratoObra(id).catch(err =>
+      console.error('Erro ao enviar contrato de obra:', err)
+    )
 
   } catch (err) {
     console.error('Erro ao aprovar candidatura:', err)
@@ -163,7 +161,6 @@ const recusar = async (req, res) => {
   try {
     const { id } = req.params
 
-    // Verifica se a candidatura existe e está pendente
     const existe = await pool.query(`SELECT id, status FROM candidaturas WHERE id = $1`, [id])
     if (existe.rows.length === 0) {
       return res.status(404).json({ erro: 'Candidatura não encontrada' })
