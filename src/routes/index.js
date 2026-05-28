@@ -689,6 +689,31 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
 })
 
 // ============================================================
+// LOCALIZAÇÃO DE PRESTADORES
+// ============================================================
+
+// Prestador envia sua localização atual
+router.post('/prestadores/localizacao', autenticar, async (req, res) => {
+  try {
+    if (req.usuario.role !== 'prestador') {
+      return res.status(403).json({ erro: 'Apenas prestadores enviam localização' })
+    }
+    const { latitude, longitude } = req.body
+    if (!latitude || !longitude) return res.status(400).json({ erro: 'Latitude e longitude são obrigatórios' })
+
+    await pool.query(
+      `INSERT INTO localizacoes_prestadores (usuario_id, latitude, longitude, atualizado_em)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (usuario_id) DO UPDATE SET latitude = $2, longitude = $3, atualizado_em = NOW()`,
+      [req.usuario.id, latitude, longitude]
+    )
+    res.json({ mensagem: 'Localização atualizada' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao salvar localização' })
+  }
+})
+
+// ============================================================
 // UPLOAD
 // ============================================================
 router.post('/upload',      autenticar, exigirAdmin, upload.single('arquivo'), uploadMidia)
