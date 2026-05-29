@@ -24,9 +24,9 @@ const cadastrar = async (req, res) => {
   try {
     const { nome, email, telefone, senha, cidade,
             especialidades, anos_experiencia, tamanho_equipe,
-            cpf_cnpj, tipo_conta } = req.body
+            cpf_cnpj, tipo_conta, pix_reembolso, referencias,
+            verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url } = req.body
 
-    // Validações básicas
     if (!nome || !email || !senha) {
       return res.status(400).json({ erro: 'Nome, e-mail e senha são obrigatórios' })
     }
@@ -37,7 +37,6 @@ const cadastrar = async (req, res) => {
       return res.status(400).json({ erro: 'E-mail inválido' })
     }
 
-    // Sanitiza email para evitar variações do mesmo endereço
     const emailNormalizado = email.toLowerCase().trim()
 
     const existente = await pool.query('SELECT id FROM usuarios WHERE email = $1', [emailNormalizado])
@@ -51,14 +50,27 @@ const cadastrar = async (req, res) => {
     if (tipo_conta === 'dono_obra') role = 'dono_obra'
     else if (tipo_conta === 'prestador') role = 'prestador'
 
+    // Define tipo_dono para distinguir donos de pintura vs reparo
+    let tipo_dono = null
+    if (tipo_conta === 'dono_obra') tipo_dono = 'pintura'
+    else if (tipo_conta === 'dono_reparo') { role = 'dono_obra'; tipo_dono = 'reparo' }
+
     const result = await pool.query(
       `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade,
-        especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true)
+        especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo,
+        tipo_dono, pix_reembolso, referencias,
+        verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true,$11,$12,$13,$14,$15,$16)
        RETURNING id, nome, email, role`,
-      [nome, emailNormalizado, telefone, senha_hash, cidade,
+      [nome.trim(), emailNormalizado, telefone, senha_hash, cidade,
        especialidades || [], anos_experiencia || 0,
-       tamanho_equipe || 1, cpf_cnpj, role]
+       tamanho_equipe || 1, cpf_cnpj, role,
+       tipo_dono,
+       pix_reembolso || null,
+       JSON.stringify(referencias || []),
+       verificacao_doc_frente_url || null,
+       verificacao_doc_verso_url || null,
+       verificacao_selfie_url || null]
     )
 
     const usuario = result.rows[0]
@@ -86,7 +98,6 @@ const cadastrar = async (req, res) => {
     const token = gerarToken(usuario)
     res.status(201).json({ usuario, token })
 
-    // Envia boas-vindas de forma assíncrona sem bloquear a resposta
     setImmediate(async () => {
       try {
         const { enviarBoasVindas } = require('../services/alertaService')
@@ -117,7 +128,6 @@ const login = async (req, res) => {
       [emailNormalizado]
     )
 
-    // Mensagem genérica para não revelar se o e-mail existe ou não
     if (result.rows.length === 0) {
       return res.status(401).json({ erro: 'E-mail ou senha incorretos' })
     }
@@ -162,7 +172,7 @@ const login = async (req, res) => {
 const perfil = async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url FROM usuarios WHERE id = $1',
+      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono FROM usuarios WHERE id = $1',
       [req.usuario.id]
     )
     const assinaturaResult = await pool.query(
@@ -226,7 +236,6 @@ const esqueciSenha = async (req, res) => {
 
     const emailNormalizado = email.toLowerCase().trim()
 
-    // Responde antes de processar — não revela se o e-mail existe
     res.json({ mensagem: 'Se este e-mail estiver cadastrado, você receberá as instruções em breve.' })
 
     const result = await pool.query('SELECT id, nome, email FROM usuarios WHERE email = $1', [emailNormalizado])
@@ -235,7 +244,7 @@ const esqueciSenha = async (req, res) => {
     const usuario = result.rows[0]
     const tokenCompleto = crypto.randomBytes(32).toString('hex')
     const codigoExibido = tokenCompleto.substring(0, 6).toUpperCase()
-    const expira = new Date(Date.now() + 3600000) // 1 hora
+    const expira = new Date(Date.now() + 3600000)
 
     await pool.query(
       `UPDATE usuarios SET reset_token = $1, reset_token_expira = $2 WHERE id = $3`,
@@ -257,7 +266,7 @@ const esqueciSenha = async (req, res) => {
             <div style="background: #0a0a0a; color: #E8833A; font-size: 32px; font-weight: bold; text-align: center; padding: 20px; border-radius: 8px; letter-spacing: 8px; margin: 20px 0;">
               ${codigoExibido}
             </div>
-            <p style="color: #666; font-size: 13px;">Este código expira em 1 hora. Se você não solicitou a redefinição, ignore este e-mail.</p>
+            <p style="color: #666; font-size: 13px;">Este código expira em 1 hora.</p>
             <p><strong>Equipe PinturaPro</strong></p>
           </div>
         </div>
