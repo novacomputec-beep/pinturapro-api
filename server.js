@@ -170,7 +170,49 @@ const iniciarAgendador = () => {
     verificarPrestadoresProximos()
   }, INTERVALO_PROXIMIDADE)
 
-  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min')
+  // Job de aprovação automática por timeout — roda a cada 10 minutos
+  // Se modo automático estiver ativo OU prestador esperou mais de 1 hora → aprova
+  setInterval(async () => {
+    try {
+      const config = await pool.query(
+        `SELECT valor FROM configuracoes WHERE chave = 'aprovacao_automatica'`
+      )
+      const modoAutomatico = config.rows[0]?.valor === 'true'
+
+      // Busca prestadores pendentes há mais de 1 hora
+      const pendentes = await pool.query(`
+        SELECT u.id, u.nome, u.email, u.push_token
+        FROM usuarios u
+        JOIN assinaturas a ON a.usuario_id = u.id
+        WHERE u.verificacao_status = 'pendente'
+          AND a.status = 'pendente_verificacao'
+          AND a.atualizado_em < NOW() - INTERVAL '1 hour'
+      `)
+
+      if (pendentes.rows.length === 0) return
+
+      for (const p of pendentes.rows) {
+        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [p.id])
+        await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [p.id])
+
+        if (p.push_token) {
+          const { enviarPushNotificacao } = require('./src/services/alertaService')
+          await enviarPushNotificacao(
+            p.push_token,
+            '✅ Cadastro aprovado!',
+            'Bem-vindo ao PinturaPro! Seu acesso está liberado.',
+            { tipo: 'verificacao_aprovada' }
+          ).catch(() => {})
+        }
+      }
+
+      console.log(`[Timeout] ${pendentes.rows.length} prestadores aprovados automaticamente por timeout de 1h`)
+    } catch (err) {
+      console.error('[Timeout verificação] Erro:', err.message)
+    }
+  }, 10 * 60 * 1000) // a cada 10 minutos
+
+  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min')
 }
 
 app.listen(PORT, () => {

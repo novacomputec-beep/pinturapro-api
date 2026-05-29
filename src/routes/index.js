@@ -692,6 +692,224 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
 })
 
 // ============================================================
+// VERIFICAÇÃO DE PRESTADORES
+// ============================================================
+
+// Upload de documentos de verificação
+router.post('/auth/upload-verificacao', autenticar, upload.single('arquivo'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
+    const { tipo } = req.body
+    const resultado = await uploadArquivo(req.file)
+
+    // Salva URL no campo correto
+    const campo = tipo === 'doc_frente' ? 'verificacao_doc_frente_url'
+      : tipo === 'doc_verso' ? 'verificacao_doc_verso_url'
+      : 'verificacao_selfie_url'
+
+    await pool.query(`UPDATE usuarios SET ${campo} = $1 WHERE id = $2`, [resultado.secure_url, req.usuario.id])
+    res.json({ url: resultado.secure_url })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao enviar documento' })
+  }
+})
+
+// Lista prestadores pendentes de verificação (admin)
+router.get('/verificacao/pendentes', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.cpf_cnpj,
+             u.verificacao_status, u.verificacao_doc_frente_url,
+             u.verificacao_doc_verso_url, u.verificacao_selfie_url,
+             u.referencias, u.pix_reembolso, u.criado_em,
+             a.plano, a.status as assinatura_status
+      FROM usuarios u
+      LEFT JOIN assinaturas a ON a.usuario_id = u.id
+      WHERE u.verificacao_status = 'pendente'
+        AND u.role IN ('prestador', 'pintor', 'assinante')
+      ORDER BY u.criado_em ASC
+    `)
+    res.json({ prestadores: result.rows })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar pendentes' })
+  }
+})
+
+// Aprovar prestador
+router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const usuario = await pool.query(
+      `SELECT nome, email FROM usuarios WHERE id = $1`, [id]
+    )
+    if (usuario.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
+
+    // Aprova verificação e ativa assinatura
+    await pool.query(
+      `UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [id]
+    )
+    await pool.query(
+      `UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [id]
+    )
+
+    // Notifica prestador por e-mail
+    const { nome, email } = usuario.rows[0]
+    const nodemailer = require('nodemailer')
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST, port: 587, secure: false,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    })
+    transporter.sendMail({
+      from: `PinturaPro <${process.env.SMTP_USER}>`,
+      to: email,
+      subject: '✅ PinturaPro — Cadastro aprovado! Bem-vindo!',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <div style="background: #4caf50; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
+            <h1 style="color: #fff; margin: 0;">✅ Cadastro Aprovado!</h1>
+          </div>
+          <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
+            <h2>Parabéns, ${nome}!</h2>
+            <p>Sua identidade foi verificada e seu acesso ao PinturaPro está liberado.</p>
+            <p>Abra o aplicativo e comece a encontrar serviços na sua região agora mesmo!</p>
+            <p><strong>Equipe PinturaPro</strong></p>
+          </div>
+        </div>
+      `
+    }).catch(err => console.error('Erro e-mail aprovação:', err))
+
+    // Notificação push
+    const pushToken = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [id])
+    if (pushToken.rows[0]?.push_token) {
+      await enviarPushNotificacao(
+        pushToken.rows[0].push_token,
+        '✅ Cadastro aprovado!',
+        'Sua identidade foi verificada. Bem-vindo ao PinturaPro!',
+        { tipo: 'verificacao_aprovada' }
+      )
+    }
+
+    res.json({ mensagem: 'Prestador aprovado com sucesso' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao aprovar prestador' })
+  }
+})
+
+// Reprovar prestador e fazer reembolso via PIX
+router.post('/verificacao/:id/reprovar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { motivo } = req.body
+
+    const usuario = await pool.query(
+      `SELECT nome, email, pix_reembolso FROM usuarios WHERE id = $1`, [id]
+    )
+    if (usuario.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
+
+    const { nome, email, pix_reembolso } = usuario.rows[0]
+
+    // Reprova e cancela assinatura
+    await pool.query(
+      `UPDATE usuarios SET verificacao_status = 'reprovado' WHERE id = $1`, [id]
+    )
+    await pool.query(
+      `UPDATE assinaturas SET status = 'cancelada', atualizado_em = NOW() WHERE usuario_id = $1`, [id]
+    )
+
+    // Notifica prestador por e-mail com instrução de reembolso
+    const nodemailer = require('nodemailer')
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST, port: 587, secure: false,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    })
+    transporter.sendMail({
+      from: `PinturaPro <${process.env.SMTP_USER}>`,
+      to: email,
+      subject: 'PinturaPro — Informação sobre seu cadastro',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
+            <h1 style="color: #0a0a0a; margin: 0;">PinturaPro</h1>
+          </div>
+          <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
+            <h2>Olá, ${nome}</h2>
+            <p>Após análise, não foi possível aprovar seu cadastro no momento.</p>
+            ${motivo ? `<p><strong>Motivo:</strong> ${motivo}</p>` : ''}
+            <p style="background: #fff3cd; padding: 16px; border-radius: 8px; border-left: 4px solid #E8833A;">
+              <strong>Reembolso:</strong> O valor pago será devolvido para sua chave PIX 
+              <strong>${pix_reembolso || 'informada no cadastro'}</strong> em até 5 dias úteis.
+            </p>
+            <p>Se tiver dúvidas, entre em contato conosco respondendo este e-mail.</p>
+            <p><strong>Equipe PinturaPro</strong></p>
+          </div>
+        </div>
+      `
+    }).catch(err => console.error('Erro e-mail reprovação:', err))
+
+    // Notificação push
+    const pushToken = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [id])
+    if (pushToken.rows[0]?.push_token) {
+      await enviarPushNotificacao(
+        pushToken.rows[0].push_token,
+        '📋 Informação sobre seu cadastro',
+        'Acesse seu e-mail para mais detalhes sobre seu cadastro.',
+        { tipo: 'verificacao_reprovada' }
+      )
+    }
+
+    res.json({
+      mensagem: 'Prestador reprovado',
+      pix_reembolso,
+      aviso: `Efetue o reembolso manualmente via PIX para a chave: ${pix_reembolso}`
+    })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao reprovar prestador' })
+  }
+})
+
+// Modo automático — liga/desliga aprovação automática
+router.get('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT valor FROM configuracoes WHERE chave = 'aprovacao_automatica'`
+    )
+    res.json({ ativo: result.rows[0]?.valor === 'true' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar configuração' })
+  }
+})
+
+router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { ativo } = req.body
+    await pool.query(
+      `UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'aprovacao_automatica'`,
+      [ativo ? 'true' : 'false']
+    )
+
+    // Se ligar modo automático, aprova todos os pendentes agora
+    if (ativo) {
+      const pendentes = await pool.query(
+        `SELECT u.id FROM usuarios u
+         JOIN assinaturas a ON a.usuario_id = u.id
+         WHERE u.verificacao_status = 'pendente'
+           AND a.status = 'pendente_verificacao'`
+      )
+      for (const p of pendentes.rows) {
+        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [p.id])
+        await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [p.id])
+      }
+      console.log(`[Modo automático] ${pendentes.rows.length} prestadores aprovados automaticamente`)
+    }
+
+    res.json({ mensagem: ativo ? 'Modo automático ativado' : 'Modo automático desativado', ativo })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao atualizar configuração' })
+  }
+})
+
+// ============================================================
 // LOCALIZAÇÃO DE PRESTADORES
 // ============================================================
 

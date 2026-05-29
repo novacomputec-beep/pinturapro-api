@@ -1,19 +1,25 @@
 const { pool } = require('../utils/supabase')
+const nodemailer = require('nodemailer')
 
 const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN
 const PAGBANK_URL = 'https://api.pagseguro.com'
 const APP_URL = 'https://pinturapro-api-production.up.railway.app/api'
+
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: 587,
+  secure: false,
+  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+})
 
 const limparCpfCnpj = (str) => {
   if (!str) return null
   return str.replace(/\D/g, '')
 }
 
-// Utilitário para ativar assinatura com segurança (evita duplicação de código)
 const ativarAssinatura = async (usuarioId, plano) => {
   const assinaturaExiste = await pool.query(
-    `SELECT id FROM assinaturas WHERE usuario_id = $1`,
-    [usuarioId]
+    `SELECT id FROM assinaturas WHERE usuario_id = $1`, [usuarioId]
   )
   if (assinaturaExiste.rows.length > 0) {
     await pool.query(
@@ -26,6 +32,80 @@ const ativarAssinatura = async (usuarioId, plano) => {
       [usuarioId, plano || 'mensal']
     )
   }
+}
+
+// Coloca prestador como pendente de verificação após pagamento
+const colocarPendentVerificacao = async (usuarioId, plano) => {
+  // Registra assinatura como paga mas acesso ainda pendente verificação
+  const assinaturaExiste = await pool.query(
+    `SELECT id FROM assinaturas WHERE usuario_id = $1`, [usuarioId]
+  )
+  if (assinaturaExiste.rows.length > 0) {
+    await pool.query(
+      `UPDATE assinaturas SET status = 'pendente_verificacao', plano = $1, atualizado_em = NOW() WHERE usuario_id = $2`,
+      [plano || 'mensal', usuarioId]
+    )
+  } else {
+    await pool.query(
+      `INSERT INTO assinaturas (usuario_id, plano, status, atualizado_em) VALUES ($1, $2, 'pendente_verificacao', NOW())`,
+      [usuarioId, plano || 'mensal']
+    )
+  }
+
+  // Atualiza status de verificação do usuário
+  await pool.query(
+    `UPDATE usuarios SET verificacao_status = 'pendente' WHERE id = $1 AND verificacao_status = 'nao_solicitada'`,
+    [usuarioId]
+  )
+
+  // Busca dados do prestador para notificar
+  const usuario = await pool.query(
+    `SELECT nome, email FROM usuarios WHERE id = $1`, [usuarioId]
+  )
+  if (usuario.rows.length === 0) return
+
+  const { nome, email } = usuario.rows[0]
+
+  // Envia e-mail para o prestador
+  transporter.sendMail({
+    from: `PinturaPro <${process.env.SMTP_USER}>`,
+    to: email,
+    subject: 'PinturaPro — Pagamento recebido! Verificação em andamento',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
+          <h1 style="color: #0a0a0a; margin: 0;">PinturaPro</h1>
+        </div>
+        <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
+          <h2>Olá, ${nome}! 🎉</h2>
+          <p>Seu pagamento foi recebido com sucesso!</p>
+          <p style="background: #fff3cd; padding: 16px; border-radius: 8px; border-left: 4px solid #E8833A;">
+            <strong>Seus dados estão sendo verificados.</strong><br>
+            Em até <strong>1 hora</strong> você receberá a confirmação por e-mail e terá acesso completo ao PinturaPro.
+          </p>
+          <p>Este processo é necessário para garantir a segurança de todos os usuários da plataforma.</p>
+          <p><strong>Equipe PinturaPro</strong></p>
+        </div>
+      </div>
+    `
+  }).catch(err => console.error('Erro ao enviar e-mail verificação:', err))
+
+  // Notifica admin por e-mail
+  transporter.sendMail({
+    from: `PinturaPro <${process.env.SMTP_USER}>`,
+    to: process.env.SMTP_USER,
+    subject: `⚠️ Novo prestador aguardando verificação: ${nome}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 30px;">
+        <h2>Novo prestador para verificar</h2>
+        <p><strong>Nome:</strong> ${nome}</p>
+        <p><strong>E-mail:</strong> ${email}</p>
+        <p><strong>ID:</strong> ${usuarioId}</p>
+        <p>Acesse o painel para aprovar ou reprovar em até 1 hora.</p>
+        <a href="https://pinturapro-painel-production.up.railway.app" style="background: #E8833A; color: #000; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold;">Abrir Painel</a>
+      </div>
+    `
+  }).catch(err => console.error('Erro ao notificar admin:', err))
 }
 
 const criarAssinatura = async (req, res) => {
@@ -44,18 +124,18 @@ const criarAssinatura = async (req, res) => {
       return res.status(400).json({ erro: 'CPF ou CNPJ inválido. Atualize seu perfil com um documento válido.' })
     }
 
-    const telLimpo = (dadosUsuario?.telefone || '').replace(/\D/g, '')
+    const telLimpo  = (dadosUsuario?.telefone || '').replace(/\D/g, '')
     const telArea   = telLimpo.substring(0, 2) || '34'
     const telNumero = telLimpo.substring(2)    || '999999999'
 
-    let valor    = 9990
+    let valor     = 9990
     let descricao = 'PinturaPro — Plano Mensal'
 
     if (usuario.role === 'prestador') {
-      valor    = plano === 'anual' ? 49900 : 4990
+      valor     = plano === 'anual' ? 49900 : 4990
       descricao = `PinturaPro Serviços — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`
     } else {
-      valor    = plano === 'anual' ? 99900 : 9990
+      valor     = plano === 'anual' ? 99900 : 9990
       descricao = `PinturaPro — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`
     }
 
@@ -105,13 +185,7 @@ const criarAssinatura = async (req, res) => {
 
 const sucesso = async (req, res) => {
   try {
-    const { reference_id, status } = req.query
-
-    // Correção: redirect de sucesso não deve ativar assinatura
-    // A ativação deve vir exclusivamente pelo webhook (mais confiável)
-    // Aqui apenas redireciona o usuário
-    console.log(`Redirecionamento de sucesso — reference_id: ${reference_id}, status: ${status}`)
-
+    console.log(`Redirecionamento de sucesso — ${JSON.stringify(req.query)}`)
     res.redirect('https://pinturapro-painel-production.up.railway.app')
   } catch (err) {
     res.redirect('https://pinturapro-painel-production.up.railway.app')
@@ -120,33 +194,34 @@ const sucesso = async (req, res) => {
 
 const webhookPagbank = async (req, res) => {
   try {
-    // Responde 200 imediatamente para o PagBank não reenviar
     res.sendStatus(200)
 
     const { reference_id, charges } = req.body
-
     if (!reference_id || !charges?.length) return
 
     const charge = charges[0]
     if (charge.status !== 'PAID') return
 
     const partes = reference_id.split('|')
-    if (partes.length !== 2) {
-      console.error('Webhook PagBank: reference_id inválido:', reference_id)
-      return
-    }
+    if (partes.length !== 2) return
 
     const [usuarioId, plano] = partes
 
-    // Verifica se o usuário existe antes de ativar
-    const usuarioExiste = await pool.query(`SELECT id FROM usuarios WHERE id = $1`, [usuarioId])
-    if (usuarioExiste.rows.length === 0) {
-      console.error('Webhook PagBank: usuário não encontrado:', usuarioId)
-      return
-    }
+    const usuarioResult = await pool.query(
+      `SELECT id, role FROM usuarios WHERE id = $1`, [usuarioId]
+    )
+    if (usuarioResult.rows.length === 0) return
 
-    await ativarAssinatura(usuarioId, plano)
-    console.log(`Assinatura ativada via PagBank — usuário: ${usuarioId}, plano: ${plano}`)
+    const usuario = usuarioResult.rows[0]
+
+    // Prestadores ficam pendentes de verificação — donos de obra ativam direto
+    if (usuario.role === 'prestador' || usuario.role === 'pintor' || usuario.role === 'assinante') {
+      await colocarPendentVerificacao(usuarioId, plano)
+      console.log(`Prestador ${usuarioId} aguardando verificação após pagamento`)
+    } else {
+      await ativarAssinatura(usuarioId, plano)
+      console.log(`Assinatura ativada via PagBank — usuário: ${usuarioId}, plano: ${plano}`)
+    }
 
   } catch (err) {
     console.error('Erro no webhook PagBank:', err.message)
@@ -155,17 +230,13 @@ const webhookPagbank = async (req, res) => {
 
 const webhook = async (req, res) => {
   try {
-    // Responde 200 imediatamente para o MercadoPago não reenviar
     res.sendStatus(200)
 
     const { type, data } = req.body
     if (type !== 'payment' || !data?.id) return
 
     const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN
-    if (!MP_ACCESS_TOKEN) {
-      console.error('Webhook MP: MP_ACCESS_TOKEN não configurado')
-      return
-    }
+    if (!MP_ACCESS_TOKEN) return
 
     const response = await fetch(`https://api.mercadopago.com/v1/payments/${data.id}`, {
       headers: { 'Authorization': `Bearer ${MP_ACCESS_TOKEN}` }
@@ -175,21 +246,20 @@ const webhook = async (req, res) => {
     if (pagamento.status !== 'approved' || !pagamento.external_reference) return
 
     const partes = pagamento.external_reference.split('|')
-    if (partes.length !== 2) {
-      console.error('Webhook MP: external_reference inválido:', pagamento.external_reference)
-      return
-    }
+    if (partes.length !== 2) return
 
     const [usuarioId, plano] = partes
 
-    const usuarioExiste = await pool.query(`SELECT id FROM usuarios WHERE id = $1`, [usuarioId])
-    if (usuarioExiste.rows.length === 0) {
-      console.error('Webhook MP: usuário não encontrado:', usuarioId)
-      return
-    }
+    const usuarioResult = await pool.query(`SELECT id, role FROM usuarios WHERE id = $1`, [usuarioId])
+    if (usuarioResult.rows.length === 0) return
 
-    await ativarAssinatura(usuarioId, plano)
-    console.log(`Assinatura ativada via MercadoPago — usuário: ${usuarioId}, plano: ${plano}`)
+    const usuario = usuarioResult.rows[0]
+
+    if (usuario.role === 'prestador' || usuario.role === 'pintor' || usuario.role === 'assinante') {
+      await colocarPendentVerificacao(usuarioId, plano)
+    } else {
+      await ativarAssinatura(usuarioId, plano)
+    }
 
   } catch (err) {
     console.error('Erro no webhook MercadoPago:', err.message)
@@ -199,13 +269,10 @@ const webhook = async (req, res) => {
 const darAcessoGratuito = async (req, res) => {
   try {
     const { usuario_id } = req.body
-
     if (!usuario_id) return res.status(400).json({ erro: 'usuario_id é obrigatório' })
 
     const usuarioExiste = await pool.query(`SELECT id FROM usuarios WHERE id = $1`, [usuario_id])
-    if (usuarioExiste.rows.length === 0) {
-      return res.status(404).json({ erro: 'Usuário não encontrado' })
-    }
+    if (usuarioExiste.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
 
     const assinaturaExiste = await pool.query(`SELECT id FROM assinaturas WHERE usuario_id = $1`, [usuario_id])
     if (assinaturaExiste.rows.length > 0) {
@@ -219,6 +286,11 @@ const darAcessoGratuito = async (req, res) => {
         [usuario_id]
       )
     }
+
+    await pool.query(
+      `UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [usuario_id]
+    )
+
     res.json({ mensagem: 'Acesso gratuito concedido com sucesso' })
   } catch (err) {
     console.error('Erro ao conceder acesso gratuito:', err.message)
@@ -234,10 +306,11 @@ const listarAssinantes = async (req, res) => {
 
     const result = await pool.query(`
       SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.role,
+             u.verificacao_status,
              a.status, a.plano, a.tipo, a.criado_em
       FROM usuarios u
       LEFT JOIN assinaturas a ON a.usuario_id = u.id
-      WHERE u.role IN ('assinante', 'prestador', 'dono_obra')
+      WHERE u.role IN ('assinante', 'prestador', 'dono_obra', 'pintor')
       ORDER BY u.role ASC, u.nome ASC
       LIMIT $1 OFFSET $2
     `, [limit, offset])
