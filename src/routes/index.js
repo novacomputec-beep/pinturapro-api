@@ -691,6 +691,33 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
   }
 })
 
+// Limpar dados de teste (admin) — apaga tudo exceto admins
+router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(`DELETE FROM interesse_reparos`)
+    await client.query(`DELETE FROM midias_reparos`)
+    await client.query(`DELETE FROM reparos`)
+    await client.query(`DELETE FROM negociacoes`)
+    await client.query(`DELETE FROM candidaturas`)
+    await client.query(`DELETE FROM midias`)
+    await client.query(`DELETE FROM obras`)
+    await client.query(`DELETE FROM mensagens`)
+    await client.query(`DELETE FROM assinaturas WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
+    await client.query(`DELETE FROM localizacoes_prestadores WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
+    await client.query(`DELETE FROM usuarios WHERE role != 'admin'`)
+    await client.query('COMMIT')
+    res.json({ mensagem: 'Dados de teste removidos com sucesso!' })
+  } catch (err) {
+    await client.query('ROLLBACK')
+    console.error('Erro ao limpar testes:', err)
+    res.status(500).json({ erro: 'Erro ao limpar dados de teste' })
+  } finally {
+    client.release()
+  }
+})
+
 // ============================================================
 // VERIFICAÇÃO DE PRESTADORES
 // ============================================================
