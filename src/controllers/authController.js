@@ -108,8 +108,8 @@ const cadastrar = async (req, res) => {
     })
 
   } catch (err) {
-    console.error('Erro no cadastro:', err)
-    res.status(500).json({ erro: 'Erro ao criar conta' })
+    console.error('Erro no cadastro DETALHADO:', err.message, err.stack)
+    res.status(500).json({ erro: err.message || 'Erro ao criar conta' })
   }
 }
 
