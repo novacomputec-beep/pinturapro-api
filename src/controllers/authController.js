@@ -44,6 +44,18 @@ const cadastrar = async (req, res) => {
       return res.status(409).json({ erro: 'E-mail já cadastrado' })
     }
 
+    // Verifica CPF/CNPJ duplicado
+    if (cpf_cnpj) {
+      const cpfLimpo = cpf_cnpj.replace(/\D/g, '')
+      const cpfExistente = await pool.query(
+        `SELECT id FROM usuarios WHERE regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') = $1`,
+        [cpfLimpo]
+      )
+      if (cpfExistente.rows.length > 0) {
+        return res.status(409).json({ erro: 'CPF ou CNPJ já cadastrado' })
+      }
+    }
+
     const senha_hash = await bcrypt.hash(senha, 12)
 
     let role = 'assinante'
