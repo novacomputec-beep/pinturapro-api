@@ -738,8 +738,8 @@ router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) =>
 // VERIFICAÇÃO DE PRESTADORES
 // ============================================================
 
-// Upload de documentos de verificação
-router.post('/auth/upload-verificacao', autenticar, upload.single('arquivo'), async (req, res) => {
+// Upload de documentos de verificação (sem autenticação — usuário ainda não tem token)
+router.post('/auth/upload-verificacao', upload.single('arquivo'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
     const { tipo } = req.body

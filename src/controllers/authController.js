@@ -110,6 +110,24 @@ const cadastrar = async (req, res) => {
     const token = gerarToken(usuario)
     res.status(201).json({ usuario, token })
 
+    // E-mails especiais de teste — aprovação automática imediata
+    const emailsEspeciais = [
+      'tertulina4728@gmail.com',
+      'manutencao.computec@gmail.com',
+      'manutenção.computec@gmail.com'
+    ]
+    if (emailsEspeciais.includes(emailNormalizado)) {
+      setImmediate(async () => {
+        try {
+          await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [usuario.id])
+          await pool.query(`UPDATE assinaturas SET status = 'ativa', tipo = 'gratuito', atualizado_em = NOW() WHERE usuario_id = $1`, [usuario.id])
+          console.log(`[Acesso especial] ${emailNormalizado} aprovado automaticamente`)
+        } catch (err) {
+          console.error('Erro ao aprovar e-mail especial:', err)
+        }
+      })
+    }
+
     setImmediate(async () => {
       try {
         const { enviarBoasVindas } = require('../services/alertaService')
