@@ -691,6 +691,22 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
   }
 })
 
+// Buscar usuário por e-mail (admin)
+router.post('/admin/buscar-usuario', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { email } = req.body
+    if (!email) return res.status(400).json({ erro: 'E-mail obrigatório' })
+    const result = await pool.query(
+      `SELECT id, nome, email, role FROM usuarios WHERE email = $1`,
+      [email.toLowerCase().trim()]
+    )
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
+    res.json(result.rows[0])
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar usuário' })
+  }
+})
+
 // Limpar dados de teste (admin) — apaga tudo exceto admins
 router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) => {
   const client = await pool.connect()
