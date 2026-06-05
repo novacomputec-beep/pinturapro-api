@@ -36,8 +36,8 @@ app.use(rateLimit({
 app.use('/api/auth/login',    rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }))
 app.use('/api/auth/cadastro', rateLimit({ windowMs: 60 * 60 * 1000, max: 5 }))
 
-app.use(express.json({ limit: '10mb' }))
-app.use(express.urlencoded({ extended: true }))
+app.use(express.json({ limit: '100mb' }))
+app.use(express.urlencoded({ extended: true, limit: '100mb' }))
 app.use('/api', routes)
 
 // Health check
@@ -67,20 +67,17 @@ app.use((req, res) => {
 
 app.use((err, req, res, next) => {
   console.error('Erro não tratado:', err.message)
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ erro: 'Arquivo muito grande. Máximo permitido: 50MB.' })
+  }
   res.status(500).json({ erro: 'Erro interno do servidor. Tente novamente.' })
 })
 
-// ============================================================
-// JOB: NOTIFICAR PRESTADORES PRÓXIMOS DE REPAROS DISPONÍVEIS
-// Roda a cada 15 minutos
-// Raio: 5km (~0.045 graus de latitude/longitude)
-// ============================================================
 const RAIO_KM = 5
-const RAIO_GRAUS = RAIO_KM / 111 // 1 grau ≈ 111km
+const RAIO_GRAUS = RAIO_KM / 111
 
 const verificarPrestadoresProximos = async () => {
   try {
-    // Busca reparos disponíveis com localização cadastrada
     const reparos = await pool.query(`
       SELECT id, titulo, latitude, longitude, prestadores_bloqueados
       FROM reparos
@@ -91,10 +88,8 @@ const verificarPrestadoresProximos = async () => {
         AND latitude IS NOT NULL
         AND longitude IS NOT NULL
     `)
-
     if (reparos.rows.length === 0) return
 
-    // Busca prestadores com localização atualizada nos últimos 30 minutos
     const prestadores = await pool.query(`
       SELECT lp.usuario_id, lp.latitude, lp.longitude, u.push_token, u.nome
       FROM localizacoes_prestadores lp
@@ -103,32 +98,22 @@ const verificarPrestadoresProximos = async () => {
       WHERE lp.atualizado_em > NOW() - INTERVAL '30 minutes'
         AND u.push_token IS NOT NULL
     `)
-
     if (prestadores.rows.length === 0) return
 
-    // Para cada reparo, verifica quais prestadores estão no raio
     for (const reparo of reparos.rows) {
       const bloqueados = reparo.prestadores_bloqueados || []
-
       for (const prestador of prestadores.rows) {
-        // Pula prestadores bloqueados neste reparo
         if (bloqueados.includes(prestador.usuario_id)) continue
-
         const distLat = Math.abs(prestador.latitude - reparo.latitude)
         const distLon = Math.abs(prestador.longitude - reparo.longitude)
-
-        // Verifica se está dentro do raio (aproximação por graus)
         if (distLat <= RAIO_GRAUS && distLon <= RAIO_GRAUS) {
-          // Calcula distância em km (fórmula de Haversine simplificada)
           const dLat = distLat * 111
           const dLon = distLon * 111 * Math.cos(prestador.latitude * Math.PI / 180)
           const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
-
           if (distanciaKm <= RAIO_KM) {
             const distFormatada = distanciaKm < 1
               ? `${Math.round(distanciaKm * 1000)}m`
               : `${distanciaKm.toFixed(1)}km`
-
             await enviarPushNotificacao(
               prestador.push_token,
               '📍 Serviço próximo a você!',
@@ -139,7 +124,6 @@ const verificarPrestadoresProximos = async () => {
         }
       }
     }
-
     console.log(`[Proximidade] Verificação concluída — ${reparos.rows.length} reparos, ${prestadores.rows.length} prestadores ativos`)
   } catch (err) {
     console.error('[Proximidade] Erro na verificação:', err.message)
@@ -147,39 +131,22 @@ const verificarPrestadoresProximos = async () => {
 }
 
 const iniciarAgendador = () => {
-  const INTERVALO_ENGAJAMENTO  = 8 * 60 * 60 * 1000  // 8 horas
-  const INTERVALO_EXPIRACAO    = 60 * 60 * 1000       // 1 hora
-  const INTERVALO_PROXIMIDADE  = 15 * 60 * 1000       // 15 minutos
+  const INTERVALO_ENGAJAMENTO  = 8 * 60 * 60 * 1000
+  const INTERVALO_EXPIRACAO    = 60 * 60 * 1000
+  const INTERVALO_PROXIMIDADE  = 15 * 60 * 1000
 
-  // Aguarda 1 minuto antes de iniciar os jobs (servidor precisa estar pronto)
   setTimeout(() => {
     verificarObrasComBaixoEngajamento()
     verificarObrasExpirando()
     verificarPrestadoresProximos()
   }, 60 * 1000)
 
-  setInterval(() => {
-    verificarObrasComBaixoEngajamento()
-  }, INTERVALO_ENGAJAMENTO)
+  setInterval(() => { verificarObrasComBaixoEngajamento() }, INTERVALO_ENGAJAMENTO)
+  setInterval(() => { verificarObrasExpirando() }, INTERVALO_EXPIRACAO)
+  setInterval(() => { verificarPrestadoresProximos() }, INTERVALO_PROXIMIDADE)
 
-  setInterval(() => {
-    verificarObrasExpirando()
-  }, INTERVALO_EXPIRACAO)
-
-  setInterval(() => {
-    verificarPrestadoresProximos()
-  }, INTERVALO_PROXIMIDADE)
-
-  // Job de aprovação automática por timeout — roda a cada 10 minutos
-  // Se modo automático estiver ativo OU prestador esperou mais de 1 hora → aprova
   setInterval(async () => {
     try {
-      const config = await pool.query(
-        `SELECT valor FROM configuracoes WHERE chave = 'aprovacao_automatica'`
-      )
-      const modoAutomatico = config.rows[0]?.valor === 'true'
-
-      // Busca prestadores pendentes há mais de 1 hora
       const pendentes = await pool.query(`
         SELECT u.id, u.nome, u.email, u.push_token
         FROM usuarios u
@@ -188,29 +155,19 @@ const iniciarAgendador = () => {
           AND a.status = 'pendente_verificacao'
           AND a.atualizado_em < NOW() - INTERVAL '1 hour'
       `)
-
       if (pendentes.rows.length === 0) return
-
       for (const p of pendentes.rows) {
         await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [p.id])
         await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [p.id])
-
         if (p.push_token) {
-          const { enviarPushNotificacao } = require('./src/services/alertaService')
-          await enviarPushNotificacao(
-            p.push_token,
-            '✅ Cadastro aprovado!',
-            'Bem-vindo ao PinturaPro! Seu acesso está liberado.',
-            { tipo: 'verificacao_aprovada' }
-          ).catch(() => {})
+          await enviarPushNotificacao(p.push_token, '✅ Cadastro aprovado!', 'Bem-vindo ao PinturaPro! Seu acesso está liberado.', { tipo: 'verificacao_aprovada' }).catch(() => {})
         }
       }
-
       console.log(`[Timeout] ${pendentes.rows.length} prestadores aprovados automaticamente por timeout de 1h`)
     } catch (err) {
       console.error('[Timeout verificação] Erro:', err.message)
     }
-  }, 10 * 60 * 1000) // a cada 10 minutos
+  }, 10 * 60 * 1000)
 
   console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min')
 }
