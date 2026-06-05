@@ -1146,5 +1146,47 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
 // Health check
 router.get('/health', (req, res) => res.json({ status: 'ok', versao: '1.0.0' }))
 
+// TEMP — testa envio Brevo sincrono com contrato PDF real
+router.post('/debug/testar-contrato-email', autenticar, async (req, res) => {
+  const { reparo_id } = req.body
+  if (!reparo_id) return res.status(400).json({ erro: 'reparo_id obrigatório' })
+  try {
+    const { enviarEmailComAnexo } = require('../services/brevoService')
+    const { gerarContratoPDF }    = require('../services/contratoService')
+    const result = await pool.query(
+      `SELECT r.*,
+              u_dono.nome  as dono_nome,  u_dono.email  as dono_email,
+              u_dono.telefone  as dono_telefone,  u_dono.cpf_cnpj  as dono_cpf,
+              u_prest.nome as prest_nome, u_prest.email as prest_email,
+              u_prest.telefone as prest_telefone, u_prest.cpf_cnpj as prest_cpf
+       FROM reparos r
+       JOIN usuarios u_dono  ON r.criado_por       = u_dono.id
+       JOIN usuarios u_prest ON r.match_usuario_id = u_prest.id
+       WHERE r.id = $1`,
+      [reparo_id]
+    )
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Reparo ou match não encontrado' })
+    const r = result.rows[0]
+    const dadosPDF = {
+      contratante: { nome: r.dono_nome,  email: r.dono_email,  telefone: r.dono_telefone,  cpf_cnpj: r.dono_cpf,  cidade: r.cidade },
+      contratado:  { nome: r.prest_nome, email: r.prest_email, telefone: r.prest_telefone, cpf_cnpj: r.prest_cpf, cidade: r.cidade },
+      servico: {
+        tipo: r.categoria || 'reparo', descricao: r.titulo, endereco: r.cidade,
+        valor: r.valor_estimado, prazo_dias: Math.max(1, Math.ceil((r.prazo_atendimento_horas || 8) / 24)), metragem: null
+      },
+      cidade: r.cidade || 'Uberlandia',
+      data: new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })
+    }
+    const pdfBuffer = await gerarContratoPDF(dadosPDF)
+    const assunto = `[TESTE] Contrato Brevo PDF — ${r.titulo}`
+    const html = '<p>Teste de envio Brevo com PDF em anexo. Verifique se o PDF está correto.</p>'
+    await enviarEmailComAnexo({ para: r.dono_email,  assunto, html, pdfBuffer, nomeArquivo: 'contrato_teste.pdf' })
+    await enviarEmailComAnexo({ para: r.prest_email, assunto, html, pdfBuffer, nomeArquivo: 'contrato_teste.pdf' })
+    res.json({ ok: true, enviado_para: [r.dono_email, r.prest_email], pdf_bytes: pdfBuffer.length })
+  } catch (err) {
+    res.status(500).json({ ok: false, erro: err.message, stack: err.stack?.split('\n').slice(0, 6) })
+  }
+})
+
 
 module.exports = router
