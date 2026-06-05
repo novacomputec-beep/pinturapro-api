@@ -1,15 +1,6 @@
-const nodemailer = require('nodemailer')
 const { pool } = require('../utils/supabase')
-
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
-  }
-})
+const { gerarContratoPDF } = require('../services/contratoService')
+const { enviarEmailComAnexo } = require('../services/brevoService')
 
 const formatarData = (data) =>
   new Date(data).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
@@ -247,14 +238,28 @@ const enviarContratoReparo = async (reparoId) => {
     const prestador = { nome: r.prest_nome, email: r.prest_email, telefone: r.prest_telefone, cpf_cnpj: r.prest_cpf }
 
     const html = gerarContratoReparo({ dono, prestador, reparo: r })
-    const mailOptions = {
-      from: `PinturaPro <${process.env.SMTP_USER}>`,
-      subject: `📋 Contrato de Serviço — ${r.titulo}`,
-      html,
+
+    const dadosPDF = {
+      contratante: { ...dono, cidade: r.cidade },
+      contratado:  { ...prestador, cidade: r.cidade },
+      servico: {
+        tipo:       r.categoria || 'reparo',
+        descricao:  r.titulo + (r.descricao ? ` — ${r.descricao}` : ''),
+        endereco:   r.endereco_obra || `${r.cidade}${r.bairro ? ', ' + r.bairro : ''}`,
+        valor:      r.valor_estimado,
+        prazo_dias: r.prazo_atendimento_horas ? Math.max(1, Math.ceil(r.prazo_atendimento_horas / 24)) : 1,
+        metragem:   null
+      },
+      cidade: r.cidade || 'Patos de Minas',
+      data:   new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })
     }
 
-    await transporter.sendMail({ ...mailOptions, to: dono.email })
-    await transporter.sendMail({ ...mailOptions, to: prestador.email })
+    const pdfBuffer    = await gerarContratoPDF(dadosPDF)
+    const assunto      = `📋 Contrato de Serviço — ${r.titulo}`
+    const nomeArquivo  = `contrato_reparo_${String(reparoId).substring(0, 8)}.pdf`
+
+    await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo })
+    await enviarEmailComAnexo({ para: prestador.email, assunto, html, pdfBuffer, nomeArquivo })
     console.log(`[Contrato] Reparo ${reparoId} — enviado para ${dono.email} e ${prestador.email}`)
   } catch (err) {
     console.error('[Contrato] Erro ao enviar contrato de reparo:', err.message)
@@ -284,15 +289,35 @@ const enviarContratoObra = async (candidaturaId) => {
     const candidatura = { valor_oferta: r.valor_oferta }
 
     const html = gerarContratoObra({ dono, prestador, obra: r, candidatura })
-    const mailOptions = {
-      from: `PinturaPro <${process.env.SMTP_USER}>`,
-      subject: `📋 Contrato de Prestação de Serviços — ${r.titulo}`,
-      html,
+
+    const dadosPDF = {
+      contratante: { ...dono, cidade: r.cidade },
+      contratado:  { ...prestador, cidade: r.cidade },
+      servico: {
+        tipo:       r.categoria || 'pintura',
+        descricao:  r.titulo,
+        endereco:   r.endereco_obra || `${r.cidade}${r.bairro ? ', ' + r.bairro : ''}`,
+        valor:      r.valor_oferta || r.valor,
+        prazo_dias: r.prazo_execucao_dias || 7,
+        metragem:   r.metragem
+      },
+      cidade: r.cidade || 'Patos de Minas',
+      data:   new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })
     }
 
-    await transporter.sendMail({ ...mailOptions, to: dono.email })
-    await transporter.sendMail({ ...mailOptions, to: prestador.email })
+    const pdfBuffer   = await gerarContratoPDF(dadosPDF)
+    const assunto     = `📋 Contrato de Prestação de Serviços — ${r.titulo}`
+    const nomeArquivo = `contrato_obra_${String(r.id).substring(0, 8)}.pdf`
+
+    await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo })
+    await enviarEmailComAnexo({ para: prestador.email, assunto, html, pdfBuffer, nomeArquivo })
     console.log(`[Contrato] Obra ${r.id} — enviado para ${dono.email} e ${prestador.email}`)
+
+    await pool.query(
+      `INSERT INTO contratos (candidatura_id, status) VALUES ($1, 'enviado')
+       ON CONFLICT (candidatura_id) DO UPDATE SET status = 'enviado', atualizado_em = NOW()`,
+      [candidaturaId]
+    )
   } catch (err) {
     console.error('[Contrato] Erro ao enviar contrato de obra:', err.message)
   }
