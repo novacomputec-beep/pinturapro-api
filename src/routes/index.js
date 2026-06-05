@@ -206,6 +206,18 @@ router.post('/obras',       autenticar, exigirAdmin, obrasCtrl.criar)
 router.put('/obras/:id',    autenticar, exigirAdmin, obrasCtrl.editar)
 router.delete('/obras/:id', autenticar, exigirAdmin, obrasCtrl.encerrar)
 
+// Dono pode excluir sua própria obra
+router.delete('/obras/dono/:id', autenticar, async (req, res) => {
+  try {
+    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    await pool.query(`UPDATE obras SET status = 'cancelada', status_aprovacao = 'cancelada' WHERE id = $1`, [req.params.id])
+    res.json({ mensagem: 'Obra removida com sucesso' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao remover obra' })
+  }
+})
+
 router.get('/obras/:id', autenticar, exigirAssinaturaAtiva, async (req, res) => {
   try {
     await pool.query(`UPDATE obras SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
@@ -742,17 +754,11 @@ router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) =>
 router.post('/auth/upload-verificacao', upload.single('arquivo'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
-    const { tipo } = req.body
     const resultado = await uploadArquivo(req.file)
-
-    // Salva URL no campo correto
-    const campo = tipo === 'doc_frente' ? 'verificacao_doc_frente_url'
-      : tipo === 'doc_verso' ? 'verificacao_doc_verso_url'
-      : 'verificacao_selfie_url'
-
-    await pool.query(`UPDATE usuarios SET ${campo} = $1 WHERE id = $2`, [resultado.secure_url, req.usuario.id])
+    // Retorna apenas a URL — o cadastro vai salvar junto com os dados do usuário
     res.json({ url: resultado.secure_url })
   } catch (err) {
+    console.error('Erro upload verificacao:', err)
     res.status(500).json({ erro: 'Erro ao enviar documento' })
   }
 })
