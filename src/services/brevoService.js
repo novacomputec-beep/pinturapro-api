@@ -9,9 +9,17 @@ const getApiInstance = () => {
   return new SibApiV3Sdk.TransactionalEmailsApi()
 }
 
+// Aceita "Nome <email@dominio.com>" ou apenas "email@dominio.com"
+const parseSender = () => {
+  const raw = process.env.EMAIL_REMETENTE || ''
+  const match = raw.match(/^(.+?)\s*<(.+?)>$/)
+  if (match) return { name: match[1].trim(), email: match[2].trim() }
+  return { name: 'PinturaPro', email: raw || 'novacomputec@gmail.com' }
+}
+
 const enviarEmail = async ({ para, assunto, html }) => {
   const email = new SibApiV3Sdk.SendSmtpEmail()
-  email.sender = { name: 'PinturaPro', email: process.env.EMAIL_REMETENTE }
+  email.sender = parseSender()
   email.to = toRecipients(para)
   email.subject = assunto
   email.htmlContent = html
@@ -20,7 +28,7 @@ const enviarEmail = async ({ para, assunto, html }) => {
 
 const enviarEmailComAnexo = async ({ para, assunto, html, pdfBuffer, nomeArquivo }) => {
   const email = new SibApiV3Sdk.SendSmtpEmail()
-  email.sender = { name: 'PinturaPro', email: process.env.EMAIL_REMETENTE }
+  email.sender = parseSender()
   email.to = toRecipients(para)
   email.subject = assunto
   email.htmlContent = html
