@@ -1,12 +1,13 @@
 const SibApiV3Sdk = require('sib-api-v3-sdk')
 
-const defaultClient = SibApiV3Sdk.ApiClient.instance
-defaultClient.authentications['api-key'].apiKey = process.env.BREVO_API_KEY
-
-const apiInstance = new SibApiV3Sdk.TransactionalEmailsApi()
-
 const toRecipients = (para) =>
   Array.isArray(para) ? para.map(e => ({ email: e })) : [{ email: para }]
+
+const getApiInstance = () => {
+  const defaultClient = SibApiV3Sdk.ApiClient.instance
+  defaultClient.authentications['api-key'].apiKey = process.env.BREVO_API_KEY
+  return new SibApiV3Sdk.TransactionalEmailsApi()
+}
 
 const enviarEmail = async ({ para, assunto, html }) => {
   const email = new SibApiV3Sdk.SendSmtpEmail()
@@ -14,7 +15,7 @@ const enviarEmail = async ({ para, assunto, html }) => {
   email.to = toRecipients(para)
   email.subject = assunto
   email.htmlContent = html
-  await apiInstance.sendTransacEmail(email)
+  await getApiInstance().sendTransacEmail(email)
 }
 
 const enviarEmailComAnexo = async ({ para, assunto, html, pdfBuffer, nomeArquivo }) => {
@@ -26,7 +27,7 @@ const enviarEmailComAnexo = async ({ para, assunto, html, pdfBuffer, nomeArquivo
   if (pdfBuffer) {
     email.attachment = [{ name: nomeArquivo || 'contrato.pdf', content: pdfBuffer.toString('base64') }]
   }
-  await apiInstance.sendTransacEmail(email)
+  await getApiInstance().sendTransacEmail(email)
 }
 
 module.exports = { enviarEmail, enviarEmailComAnexo }

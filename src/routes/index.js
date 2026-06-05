@@ -1150,6 +1150,13 @@ router.get('/health', (req, res) => res.json({ status: 'ok', versao: '1.0.0' }))
 router.post('/debug/testar-contrato-email', autenticar, async (req, res) => {
   const { reparo_id } = req.body
   if (!reparo_id) return res.status(400).json({ erro: 'reparo_id obrigatório' })
+
+  const apiKey = process.env.BREVO_API_KEY
+  const remetente = process.env.EMAIL_REMETENTE
+  const keyDiag = apiKey
+    ? `set (${apiKey.length} chars, prefix: ${apiKey.substring(0, 10)}...)`
+    : 'NAO DEFINIDA'
+
   try {
     const { enviarEmailComAnexo } = require('../services/brevoService')
     const { gerarContratoPDF }    = require('../services/contratoService')
@@ -1182,9 +1189,9 @@ router.post('/debug/testar-contrato-email', autenticar, async (req, res) => {
     const html = '<p>Teste de envio Brevo com PDF em anexo. Verifique se o PDF está correto.</p>'
     await enviarEmailComAnexo({ para: r.dono_email,  assunto, html, pdfBuffer, nomeArquivo: 'contrato_teste.pdf' })
     await enviarEmailComAnexo({ para: r.prest_email, assunto, html, pdfBuffer, nomeArquivo: 'contrato_teste.pdf' })
-    res.json({ ok: true, enviado_para: [r.dono_email, r.prest_email], pdf_bytes: pdfBuffer.length })
+    res.json({ ok: true, enviado_para: [r.dono_email, r.prest_email], pdf_bytes: pdfBuffer.length, brevo_key: keyDiag, remetente })
   } catch (err) {
-    res.status(500).json({ ok: false, erro: err.message, stack: err.stack?.split('\n').slice(0, 6) })
+    res.status(500).json({ ok: false, erro: err.message, brevo_key: keyDiag, remetente, stack: err.stack?.split('\n').slice(0, 6) })
   }
 })
 
