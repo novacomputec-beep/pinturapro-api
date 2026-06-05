@@ -28,8 +28,8 @@ const formatarCpf = (cpf) => {
 // CONTRATO DE REPARO (baseado no modelo "Marido de Aluguel")
 // ============================================================
 const gerarContratoReparo = ({ dono, prestador, reparo }) => {
-  const prazoHoras = reparo.prazo_estimado_horas
-    ? Math.ceil(reparo.prazo_estimado_horas * 1.2)
+  const prazoHoras = reparo.prazo_atendimento_horas
+    ? Math.ceil(reparo.prazo_atendimento_horas * 1.2)
     : null
   const valor = reparo.valor_estimado
 
