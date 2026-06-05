@@ -53,4 +53,9 @@ const uploadParaCloudinary = async (buffer, tipo, pasta = 'pinturapro') => {
   })
 }
 
-module.exports = { upload, uploadParaCloudinary }
+const uploadArquivo = async (file) => {
+  const tipo = file.mimetype.startsWith('video/') ? 'video' : 'imagem'
+  return uploadParaCloudinary(file.buffer, tipo)
+}
+
+module.exports = { upload, uploadParaCloudinary, uploadArquivo }
