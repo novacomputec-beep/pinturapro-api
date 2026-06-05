@@ -60,7 +60,7 @@ const cadastrar = async (req, res) => {
 
     let role = 'assinante'
     if (tipo_conta === 'dono_obra') role = 'dono_obra'
-    else if (tipo_conta === 'prestador') role = 'prestador'
+    else if (tipo_conta === 'prestador' || tipo_conta === 'pintor') role = 'prestador'
 
     // Define tipo_dono para distinguir donos de pintura vs reparo
     let tipo_dono = null
@@ -94,10 +94,11 @@ const cadastrar = async (req, res) => {
         [usuario.id]
       )
     } else if (role === 'prestador') {
+      const valorMensal = tipo_conta === 'pintor' ? 99.90 : 49.90
       await pool.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
-         VALUES ($1, 'mensal', 49.90, 'pendente')`,
-        [usuario.id]
+         VALUES ($1, 'mensal', $2, 'pendente')`,
+        [usuario.id, valorMensal]
       )
     } else {
       await pool.query(
@@ -174,8 +175,10 @@ const login = async (req, res) => {
     }
 
     const assinaturaResult = await pool.query(
-      `SELECT status, plano, proximo_vencimento FROM assinaturas
-       WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
+      `SELECT status, plano, proximo_vencimento, valor_mensal FROM assinaturas
+       WHERE usuario_id = $1
+       ORDER BY CASE status WHEN 'ativa' THEN 1 WHEN 'pendente' THEN 2 ELSE 3 END, criado_em DESC
+       LIMIT 1`,
       [usuario.id]
     )
 

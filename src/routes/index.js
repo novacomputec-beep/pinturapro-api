@@ -19,7 +19,7 @@ const CACHE_TTL = 5 * 60 * 1000 // 5 minutos
 
 const exigirPrestador = async (req, res, next) => {
   try {
-    if (req.usuario.role !== 'prestador' && req.usuario.role !== 'admin') {
+    if (req.usuario.role !== 'prestador' && req.usuario.role !== 'assinante' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Acesso restrito a prestadores de serviços' })
     }
     if (req.usuario.role === 'admin') return next()

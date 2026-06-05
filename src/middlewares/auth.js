@@ -45,7 +45,6 @@ const autenticar = async (req, res, next) => {
 
     // Tenta cache primeiro
     let usuario = getCacheUsuario(decoded.id)
-
     if (!usuario) {
       const result = await pool.query(
         'SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1',
@@ -75,10 +74,10 @@ const exigirAssinaturaAtiva = async (req, res, next) => {
     return next()
   }
   try {
-    // Tenta cache primeiro
+    // Correção: usar null como sentinela de "não está no cache"
+    // false significa "está no cache e assinatura é inativa" — não deve ir ao banco
     let assinaturaAtiva = getCacheAssinatura(req.usuario.id)
-
-    if (assinaturaAtiva === null) {
+    if (assinaturaAtiva === null || assinaturaAtiva === undefined) {
       const result = await pool.query(
         `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
         [req.usuario.id]
