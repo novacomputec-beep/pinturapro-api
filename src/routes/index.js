@@ -10,6 +10,7 @@ const candidaturasCtrl = require('../controllers/candidaturasController')
 const mensagensCtrl    = require('../controllers/mensagensController')
 const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
+const { uploadParaCloudinary, gerarAssinaturaCloudinary } = require('../services/uploadService')
 
 // Middleware para verificar se é prestador de serviços
 const exigirPrestador = async (req, res, next) => {
@@ -37,6 +38,18 @@ router.post('/auth/cadastro',       authCtrl.cadastrar)
 router.post('/auth/login',          authCtrl.login)
 router.get('/auth/perfil',          autenticar, authCtrl.perfil)
 router.put('/auth/perfil',          autenticar, authCtrl.atualizarPerfil)
+
+// Upload de documentos de verificação — público (usuário ainda não tem token)
+router.post('/auth/upload-verificacao', upload.single('arquivo'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
+    const resultado = await uploadParaCloudinary(req.file.buffer, 'imagem', 'pinturapro/verificacao')
+    res.json({ url: resultado.url })
+  } catch (err) {
+    console.error('Erro upload verificacao:', err)
+    res.status(500).json({ erro: 'Erro ao enviar documento' })
+  }
+})
 
 router.post('/auth/push-token', autenticar, async (req, res) => {
   try {
@@ -163,7 +176,23 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
 router.get('/reparos/aprovacao', autenticar, exigirAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT r.*, u.nome as dono_nome, u.email as dono_email, u.telefone as dono_telefone
+      `SELECT r.*, u.nome as dono_nome, u.email as dono_email, u.telefone as dono_telefone,
+        (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa
+       FROM reparos r JOIN usuarios u ON r.criado_por = u.id
+       WHERE r.status_aprovacao = 'pendente' ORDER BY r.criado_em DESC`
+    )
+    res.json({ reparos: result.rows })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar reparos' })
+  }
+})
+
+// Alias para compatibilidade com o painel admin
+router.get('/reparos-aprovacao', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT r.*, u.nome as dono_nome, u.email as dono_email, u.telefone as dono_telefone,
+        (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa
        FROM reparos r JOIN usuarios u ON r.criado_por = u.id
        WHERE r.status_aprovacao = 'pendente' ORDER BY r.criado_em DESC`
     )
@@ -188,6 +217,70 @@ router.post('/reparos/aprovacao/:id/recusar', autenticar, exigirAdmin, async (re
     res.json({ mensagem: 'Reparo recusado' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao recusar reparo' })
+  }
+})
+
+router.post('/reparos-aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    await pool.query(`UPDATE reparos SET status_aprovacao = 'aprovada', status = 'aberta' WHERE id = $1`, [req.params.id])
+    res.json({ mensagem: 'Reparo aprovado e publicado!' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao aprovar reparo' })
+  }
+})
+
+router.post('/reparos-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    await pool.query(`UPDATE reparos SET status_aprovacao = 'recusada', status = 'cancelada' WHERE id = $1`, [req.params.id])
+    res.json({ mensagem: 'Reparo recusado' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao recusar reparo' })
+  }
+})
+
+// ============================================================
+// PRESTADORES — aprovação de cadastro
+// ============================================================
+router.get('/prestadores/aprovacao', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.uf, u.role,
+             u.verificacao_status, u.verificacao_doc_frente_url, u.verificacao_doc_verso_url,
+             u.verificacao_selfie_url, u.pix_reembolso, u.referencias, u.criado_em,
+             a.plano, a.valor_mensal, a.status as assinatura_status
+      FROM usuarios u
+      LEFT JOIN assinaturas a ON a.usuario_id = u.id
+      WHERE u.role IN ('prestador', 'assinante') AND u.verificacao_status = 'pendente'
+      ORDER BY u.criado_em DESC
+    `)
+    res.json({ prestadores: result.rows })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar prestadores' })
+  }
+})
+
+router.post('/prestadores/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    await pool.query(
+      `UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`,
+      [req.params.id]
+    )
+    res.json({ mensagem: 'Prestador aprovado com sucesso!' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao aprovar prestador' })
+  }
+})
+
+router.post('/prestadores/aprovacao/:id/recusar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { motivo } = req.body
+    await pool.query(
+      `UPDATE usuarios SET verificacao_status = 'recusado', ativo = false WHERE id = $1`,
+      [req.params.id]
+    )
+    res.json({ mensagem: 'Prestador recusado' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao recusar prestador' })
   }
 })
 
@@ -244,17 +337,44 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
   try {
     const { reparo_id, ordem } = req.body
     if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
-    const { uploadArquivo } = require('../services/uploadService')
-    const resultado = await uploadArquivo(req.file)
-    const tipo = req.file.mimetype.startsWith('video/') ? 'video' : 'foto'
+    const isVideo = req.file.mimetype.startsWith('video/')
+    const tipo = isVideo ? 'video' : 'imagem'
+    const resultado = await uploadParaCloudinary(req.file.buffer, tipo, 'pinturapro/reparos')
     const result = await pool.query(
       `INSERT INTO midias_reparos (reparo_id, tipo, url, ordem) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [reparo_id, tipo, resultado.secure_url, ordem || 1]
+      [reparo_id, isVideo ? 'video' : 'foto', resultado.url, ordem || 1]
     )
     res.json(result.rows[0])
   } catch (err) {
     console.error('Erro upload reparo:', err)
     res.status(500).json({ erro: 'Erro ao fazer upload' })
+  }
+})
+
+// Assinatura para upload direto ao Cloudinary (para vídeos grandes)
+router.get('/upload/assinatura-cloudinary', autenticar, (req, res) => {
+  try {
+    const params = gerarAssinaturaCloudinary('pinturapro/videos')
+    res.json(params)
+  } catch (err) {
+    console.error('Erro ao gerar assinatura Cloudinary:', err)
+    res.status(500).json({ erro: 'Erro ao gerar assinatura de upload' })
+  }
+})
+
+// Salva URL de mídia após upload direto ao Cloudinary
+router.post('/upload/reparo-url', autenticar, async (req, res) => {
+  try {
+    const { reparo_id, url, tipo = 'video', ordem = 1 } = req.body
+    if (!reparo_id || !url) return res.status(400).json({ erro: 'reparo_id e url são obrigatórios' })
+    const result = await pool.query(
+      `INSERT INTO midias_reparos (reparo_id, tipo, url, ordem) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [reparo_id, tipo, url, ordem]
+    )
+    res.json(result.rows[0])
+  } catch (err) {
+    console.error('Erro ao salvar URL reparo:', err)
+    res.status(500).json({ erro: 'Erro ao salvar mídia' })
   }
 })
 

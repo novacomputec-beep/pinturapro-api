@@ -10,7 +10,7 @@ cloudinary.config({
 const storage = multer.memoryStorage()
 const upload = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits: { fileSize: 150 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const tipos = ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/quicktime']
     if (tipos.includes(file.mimetype)) cb(null, true)
@@ -38,4 +38,17 @@ const uploadParaCloudinary = async (buffer, tipo, pasta = 'pinturapro') => {
   })
 }
 
-module.exports = { upload, uploadParaCloudinary }
+const gerarAssinaturaCloudinary = (folder = 'pinturapro/videos') => {
+  const timestamp = Math.round(Date.now() / 1000)
+  const params = { timestamp, folder }
+  const signature = cloudinary.utils.api_sign_request(params, process.env.CLOUDINARY_API_SECRET)
+  return {
+    signature,
+    timestamp,
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    folder
+  }
+}
+
+module.exports = { upload, uploadParaCloudinary, gerarAssinaturaCloudinary }
