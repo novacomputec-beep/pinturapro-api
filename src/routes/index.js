@@ -284,6 +284,65 @@ router.post('/prestadores/aprovacao/:id/recusar', autenticar, exigirAdmin, async
   }
 })
 
+// ============================================================
+// VERIFICAÇÃO — aliases para o painel admin
+// ============================================================
+router.get('/verificacao/pendentes', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.uf, u.role,
+             u.verificacao_status, u.verificacao_doc_frente_url, u.verificacao_doc_verso_url,
+             u.verificacao_selfie_url, u.pix_reembolso, u.referencias, u.criado_em,
+             a.plano, a.valor_mensal, a.status as assinatura_status
+      FROM usuarios u
+      LEFT JOIN assinaturas a ON a.usuario_id = u.id
+      WHERE u.role IN ('prestador', 'assinante') AND u.verificacao_status = 'pendente'
+      ORDER BY u.criado_em DESC
+    `)
+    res.json({ prestadores: result.rows })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar prestadores' })
+  }
+})
+
+router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [req.params.id])
+    await pool.query(`UPDATE assinaturas SET status = 'ativa' WHERE usuario_id = $1`, [req.params.id])
+    res.json({ mensagem: 'Prestador aprovado com sucesso!' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao aprovar prestador' })
+  }
+})
+
+router.post('/verificacao/:id/reprovar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { motivo } = req.body
+    const usuario = await pool.query(`SELECT pix_reembolso FROM usuarios WHERE id = $1`, [req.params.id])
+    await pool.query(`UPDATE usuarios SET verificacao_status = 'recusado', ativo = false WHERE id = $1`, [req.params.id])
+    const pix = usuario.rows[0]?.pix_reembolso
+    const aviso = pix ? '' : '⚠️ Nenhuma chave PIX informada. Realize o reembolso manualmente.'
+    res.json({ mensagem: 'Prestador reprovado', aviso })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao reprovar prestador' })
+  }
+})
+
+router.get('/verificacao/modo-automatico', autenticar, exigirAdmin, (req, res) => {
+  res.json({ ativo: false })
+})
+
+router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
+  const { ativo } = req.body
+  if (ativo) {
+    await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado' WHERE verificacao_status = 'pendente'`)
+    await pool.query(`UPDATE assinaturas SET status = 'ativa' WHERE status = 'pendente'`)
+    res.json({ ativo: true, mensagem: 'Modo automático ativado. Todos os prestadores pendentes foram aprovados.' })
+  } else {
+    res.json({ ativo: false, mensagem: 'Modo automático desativado.' })
+  }
+})
+
 router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
   try {
     const { categoria } = req.query
@@ -306,13 +365,40 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
   }
 })
 
-router.get('/reparos/:id', autenticar, exigirPrestador, async (req, res) => {
+router.get('/reparos/:id', autenticar, async (req, res) => {
   try {
-    const result = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
+    const { role, id: userId } = req.usuario
+    const isDono = role === 'dono_obra'
+    const isAdmin = role === 'admin'
+
+    let result
+    if (isDono) {
+      result = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND criado_por = $2`, [req.params.id, userId])
+    } else if (isAdmin) {
+      result = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
+    } else {
+      const assinatura = await pool.query(`SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`, [userId])
+      if (assinatura.rows.length === 0) return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os reparos.' })
+      result = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
+    }
+
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
     const midias = await pool.query(`SELECT * FROM midias_reparos WHERE reparo_id = $1 ORDER BY ordem`, [req.params.id])
-    const interesse = await pool.query(`SELECT id, status FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
-    res.json({ reparo: result.rows[0], midias: midias.rows, meu_interesse: interesse.rows[0] || null })
+
+    if (isDono || isAdmin) {
+      const interessados = await pool.query(`
+        SELECT ir.id, ir.usuario_id, ir.mensagem, ir.status, ir.criado_em,
+               u.nome, u.telefone, u.cidade, u.anos_experiencia, u.especialidades
+        FROM interesse_reparos ir
+        JOIN usuarios u ON ir.usuario_id = u.id
+        WHERE ir.reparo_id = $1
+        ORDER BY ir.criado_em DESC
+      `, [req.params.id])
+      res.json({ reparo: result.rows[0], midias: midias.rows, interessados: interessados.rows })
+    } else {
+      const interesse = await pool.query(`SELECT id, status FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, userId])
+      res.json({ reparo: result.rows[0], midias: midias.rows, meu_interesse: interesse.rows[0] || null })
+    }
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar reparo' })
   }
@@ -436,6 +522,18 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
     })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar métricas' })
+  }
+})
+
+// ============================================================
+// ADMINISTRAÇÃO
+// ============================================================
+router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM usuarios WHERE id = $1`, [req.params.id])
+    res.json({ mensagem: 'Usuário excluído' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao excluir usuário' })
   }
 })
 
