@@ -1,0 +1,276 @@
+const { pool } = require('../utils/supabase')
+const { Expo } = require('expo-server-sdk')
+
+const expo = new Expo()
+
+const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}) => {
+  if (!Expo.isExpoPushToken(pushToken)) return
+  try {
+    await expo.sendPushNotificationsAsync([{
+      to: pushToken,
+      sound: 'default',
+      title: titulo,
+      body: corpo,
+      data,
+    }])
+  } catch (err) {
+    console.error('Erro ao enviar push:', err)
+  }
+}
+
+// Envia notificações em lote para múltiplos tokens de uma vez
+// Muito mais eficiente que um loop sequencial com await
+const enviarPushEmLote = async (destinatarios, titulo, corpo, data = {}) => {
+  const mensagens = destinatarios
+    .filter(d => Expo.isExpoPushToken(d.push_token))
+    .map(d => ({
+      to: d.push_token,
+      sound: 'default',
+      title: titulo,
+      body: corpo,
+      data,
+    }))
+
+  if (mensagens.length === 0) return 0
+
+  // Expo recomenda chunks de até 100 mensagens por chamada
+  const chunks = expo.chunkPushNotifications(mensagens)
+  for (const chunk of chunks) {
+    try {
+      await expo.sendPushNotificationsAsync(chunk)
+    } catch (err) {
+      console.error('Erro ao enviar chunk de notificações:', err)
+    }
+  }
+  return mensagens.length
+}
+
+const enviarBoasVindas = async (usuarioId) => {
+  try {
+    const result = await pool.query(
+      `SELECT push_token, nome, role FROM usuarios WHERE id = $1`,
+      [usuarioId]
+    )
+    if (!result.rows[0]?.push_token) return
+
+    const { push_token, nome, role } = result.rows[0]
+    const primeiroNome = nome?.split(' ')[0] || 'bem-vindo'
+
+    let mensagem = ''
+    if (role === 'assinante') {
+      mensagem = 'Explore obras de pintura disponíveis na sua região agora mesmo!'
+    } else if (role === 'prestador') {
+      mensagem = 'Explore reparos e serviços disponíveis na sua região agora mesmo!'
+    } else if (role === 'dono_obra') {
+      mensagem = 'Cadastre sua primeira obra ou reparo e encontre profissionais qualificados!'
+    }
+
+    await enviarPushNotificacao(
+      push_token,
+      `🎉 Bem-vindo ao PinturaPro, ${primeiroNome}!`,
+      mensagem,
+      { tipo: 'boas_vindas' }
+    )
+  } catch (err) {
+    console.error('Erro ao enviar boas vindas:', err)
+  }
+}
+
+const notificarPintoresSobreNovaObra = async (obraId) => {
+  try {
+    const obraResult = await pool.query(
+      `SELECT titulo, cidade FROM obras WHERE id = $1`,
+      [obraId]
+    )
+    if (obraResult.rows.length === 0) return
+    const obra = obraResult.rows[0]
+
+    const pintores = await pool.query(
+      `SELECT u.push_token
+       FROM usuarios u
+       JOIN assinaturas a ON a.usuario_id = u.id
+       WHERE u.role = 'assinante'
+         AND a.status = 'ativa'
+         AND u.push_token IS NOT NULL
+       LIMIT 500`
+    )
+
+    const total = await enviarPushEmLote(
+      pintores.rows,
+      '🎨 Nova obra disponível!',
+      `"${obra.titulo}" em ${obra.cidade} acabou de ser publicada!`,
+      { tipo: 'nova_obra', obra_id: obraId }
+    )
+    console.log(`Notificados ${total} pintores sobre nova obra`)
+  } catch (err) {
+    console.error('Erro ao notificar pintores:', err)
+  }
+}
+
+const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
+  try {
+    const reparoResult = await pool.query(
+      `SELECT titulo, cidade, categoria FROM reparos WHERE id = $1`,
+      [reparoId]
+    )
+    if (reparoResult.rows.length === 0) return
+    const reparo = reparoResult.rows[0]
+
+    const prestadores = await pool.query(
+      `SELECT u.push_token
+       FROM usuarios u
+       JOIN assinaturas a ON a.usuario_id = u.id
+       WHERE u.role = 'prestador'
+         AND a.status = 'ativa'
+         AND u.push_token IS NOT NULL
+       LIMIT 500`
+    )
+
+    const total = await enviarPushEmLote(
+      prestadores.rows,
+      '🔧 Novo reparo disponível!',
+      `"${reparo.titulo}" em ${reparo.cidade} — categoria: ${reparo.categoria}`,
+      { tipo: 'novo_reparo', reparo_id: reparoId }
+    )
+    console.log(`Notificados ${total} prestadores sobre novo reparo`)
+  } catch (err) {
+    console.error('Erro ao notificar prestadores:', err)
+  }
+}
+
+const verificarObrasExpirando = async () => {
+  try {
+    const obras = await pool.query(`
+      SELECT o.id, o.titulo, u.push_token
+      FROM obras o
+      JOIN usuarios u ON o.criado_por = u.id
+      WHERE o.status = 'aberta'
+        AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+        AND o.alerta_enviado_em IS NULL
+        AND u.push_token IS NOT NULL
+    `)
+
+    // Atualiza alerta_enviado_em em lote antes de notificar
+    if (obras.rows.length > 0) {
+      const ids = obras.rows.map(o => o.id)
+      await pool.query(
+        `UPDATE obras SET alerta_enviado_em = NOW() WHERE id = ANY($1)`,
+        [ids]
+      )
+      await enviarPushEmLote(
+        obras.rows,
+        '⏰ Sua obra expira em 24 horas!',
+        'Sua obra será encerrada em breve. Renove para continuar recebendo candidatos.',
+        { tipo: 'obra_expirando' }
+      )
+    }
+
+    const reparos = await pool.query(`
+      SELECT r.id, r.titulo, u.push_token
+      FROM reparos r
+      JOIN usuarios u ON r.criado_por = u.id
+      WHERE r.status = 'aberta'
+        AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+        AND r.alerta_enviado_em IS NULL
+        AND u.push_token IS NOT NULL
+    `)
+
+    if (reparos.rows.length > 0) {
+      const ids = reparos.rows.map(r => r.id)
+      await pool.query(
+        `UPDATE reparos SET alerta_enviado_em = NOW() WHERE id = ANY($1)`,
+        [ids]
+      )
+      await enviarPushEmLote(
+        reparos.rows,
+        '⏰ Seu reparo expira em 24 horas!',
+        'Seu reparo será encerrado em breve.',
+        { tipo: 'reparo_expirando' }
+      )
+    }
+
+    console.log(`Expiração: ${obras.rows.length} obras e ${reparos.rows.length} reparos notificados`)
+  } catch (err) {
+    console.error('Erro ao verificar obras expirando:', err)
+  }
+}
+
+const verificarObrasComBaixoEngajamento = async () => {
+  try {
+    console.log('Verificando obras com baixo engajamento...')
+
+    const obras = await pool.query(`
+      SELECT o.id, o.titulo, o.total_visitas, u.push_token
+      FROM obras o
+      JOIN usuarios u ON o.criado_por = u.id
+      WHERE o.status = 'aberta'
+        AND o.status_aprovacao = 'aprovada'
+        AND o.total_visitas >= 10
+        AND o.criado_em < NOW() - INTERVAL '1 day'
+        AND (o.alerta_enviado_em IS NULL OR o.alerta_enviado_em < NOW() - INTERVAL '24 hours')
+        AND NOT EXISTS (
+          SELECT 1 FROM candidaturas c
+          WHERE c.obra_id = o.id AND c.status = 'pendente'
+        )
+        AND u.push_token IS NOT NULL
+    `)
+
+    if (obras.rows.length > 0) {
+      const ids = obras.rows.map(o => o.id)
+      await pool.query(`UPDATE obras SET alerta_enviado_em = NOW() WHERE id = ANY($1)`, [ids])
+
+      // Envio individual aqui pois a mensagem inclui total_visitas específico de cada obra
+      for (const obra of obras.rows) {
+        await enviarPushNotificacao(
+          obra.push_token,
+          '💡 Considere aumentar sua oferta',
+          `Sua obra "${obra.titulo}" teve ${obra.total_visitas} visitas e nenhum interessado ainda.`,
+          { tipo: 'baixo_engajamento', obra_id: obra.id }
+        )
+      }
+    }
+
+    const reparos = await pool.query(`
+      SELECT r.id, r.titulo, r.total_visitas, u.push_token
+      FROM reparos r
+      JOIN usuarios u ON r.criado_por = u.id
+      WHERE r.status = 'aberta'
+        AND r.status_aprovacao = 'aprovada'
+        AND r.total_visitas >= 10
+        AND r.criado_em < NOW() - INTERVAL '1 day'
+        AND (r.alerta_enviado_em IS NULL OR r.alerta_enviado_em < NOW() - INTERVAL '8 hours')
+        AND NOT EXISTS (
+          SELECT 1 FROM interesse_reparos ir
+          WHERE ir.reparo_id = r.id AND ir.status = 'pendente'
+        )
+        AND u.push_token IS NOT NULL
+    `)
+
+    if (reparos.rows.length > 0) {
+      const ids = reparos.rows.map(r => r.id)
+      await pool.query(`UPDATE reparos SET alerta_enviado_em = NOW() WHERE id = ANY($1)`, [ids])
+
+      for (const reparo of reparos.rows) {
+        await enviarPushNotificacao(
+          reparo.push_token,
+          '💡 Considere aumentar sua oferta',
+          `Seu reparo "${reparo.titulo}" teve ${reparo.total_visitas} visitas e nenhum interessado ainda.`,
+          { tipo: 'baixo_engajamento_reparo', reparo_id: reparo.id }
+        )
+      }
+    }
+
+    console.log(`Engajamento: ${obras.rows.length} obras e ${reparos.rows.length} reparos notificados`)
+  } catch (err) {
+    console.error('Erro ao verificar engajamento:', err)
+  }
+}
+
+module.exports = {
+  enviarPushNotificacao,
+  enviarBoasVindas,
+  notificarPintoresSobreNovaObra,
+  notificarPrestadoresSobreNovoReparo,
+  verificarObrasExpirando,
+  verificarObrasComBaixoEngajamento
+}

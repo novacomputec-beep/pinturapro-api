@@ -1,16 +1,6 @@
 const PDFDocument = require('pdfkit')
-const nodemailer = require('nodemailer')
 const { pool } = require('../utils/supabase')
-
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
-  }
-})
+const { enviarEmailComAnexo } = require('./brevoService')
 
 const gerarContratoPDF = (dados) => {
   return new Promise((resolve, reject) => {
@@ -177,7 +167,7 @@ const gerarContratoPDF = (dados) => {
 
 const enviarContratoPorEmail = async (emailContratante, emailContratado, pdfBuffer, dados) => {
   const assunto = `PinturaPro — Contrato de Serviço: ${dados.servico.descricao}`
-  const corpo = `
+  const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
       <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
         <h1 style="color: #0a0a0a; margin: 0;">PinturaPro</h1>
@@ -214,21 +204,8 @@ const enviarContratoPorEmail = async (emailContratante, emailContratado, pdfBuff
     </div>
   `
 
-  const mailOptions = {
-    from: `PinturaPro <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
-    to: [emailContratante, emailContratado].join(', '),
-    subject: assunto,
-    html: corpo,
-    attachments: [
-      {
-        filename: `contrato_pinturapro_${Date.now()}.pdf`,
-        content: pdfBuffer,
-        contentType: 'application/pdf'
-      }
-    ]
-  }
-
-  await transporter.sendMail(mailOptions)
+  await enviarEmailComAnexo({ para: emailContratante, assunto, html, pdfBuffer, nomeArquivo: 'contrato_pinturapro.pdf' })
+  await enviarEmailComAnexo({ para: emailContratado,  assunto, html, pdfBuffer, nomeArquivo: 'contrato_pinturapro.pdf' })
   console.log(`Contrato enviado para ${emailContratante} e ${emailContratado}`)
 }
 

@@ -1,9 +1,13 @@
 const { pool } = require('../utils/supabase')
-const { gerarEEnviarContrato } = require('../services/contratoService')
+const { enviarContratoObra } = require('./contratosController')
 
 const candidatar = async (req, res) => {
   try {
     const { obra_id, referencias } = req.body
+
+    if (!obra_id) {
+      return res.status(400).json({ erro: 'obra_id é obrigatório' })
+    }
 
     const obraResult = await pool.query(
       `SELECT id, titulo, status, expira_em FROM obras WHERE id = $1 AND status = 'aberta'`,
@@ -48,16 +52,21 @@ const candidatar = async (req, res) => {
 
 const minhas = async (req, res) => {
   try {
+    const page   = parseInt(req.query.page)  || 1
+    const limit  = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+
     const result = await pool.query(
       `SELECT c.id, c.status, c.criado_em,
               o.id as obra_id, o.titulo, o.categoria, o.valor, o.cidade, o.status as obra_status
        FROM candidaturas c
        JOIN obras o ON c.obra_id = o.id
        WHERE c.usuario_id = $1
-       ORDER BY c.criado_em DESC`,
-      [req.usuario.id]
+       ORDER BY c.criado_em DESC
+       LIMIT $2 OFFSET $3`,
+      [req.usuario.id, limit, offset]
     )
-    res.json(result.rows)
+    res.json({ candidaturas: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar candidaturas' })
   }
@@ -65,17 +74,27 @@ const minhas = async (req, res) => {
 
 const porObra = async (req, res) => {
   try {
+    const page   = parseInt(req.query.page)  || 1
+    const limit  = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+
+    const obraExiste = await pool.query(`SELECT id FROM obras WHERE id = $1`, [req.params.obra_id])
+    if (obraExiste.rows.length === 0) {
+      return res.status(404).json({ erro: 'Obra não encontrada' })
+    }
+
     const result = await pool.query(
-      `SELECT c.id, c.status, c.referencias, c.criado_em,
+      `SELECT c.id, c.status, c.referencias, c.valor_oferta, c.mensagem_oferta, c.criado_em,
               u.id as usuario_id, u.nome, u.email, u.telefone, u.cidade,
               u.anos_experiencia, u.tamanho_equipe, u.especialidades
        FROM candidaturas c
        JOIN usuarios u ON c.usuario_id = u.id
        WHERE c.obra_id = $1
-       ORDER BY c.criado_em ASC`,
-      [req.params.obra_id]
+       ORDER BY c.criado_em ASC
+       LIMIT $2 OFFSET $3`,
+      [req.params.obra_id, limit, offset]
     )
-    res.json(result.rows)
+    res.json({ candidaturas: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar candidaturas' })
   }
@@ -83,6 +102,10 @@ const porObra = async (req, res) => {
 
 const pendentes = async (req, res) => {
   try {
+    const page   = parseInt(req.query.page)  || 1
+    const limit  = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+
     const result = await pool.query(
       `SELECT c.id, c.status, c.referencias, c.criado_em,
               o.id as obra_id, o.titulo, o.categoria, o.valor, o.cidade,
@@ -92,9 +115,11 @@ const pendentes = async (req, res) => {
        JOIN obras o ON c.obra_id = o.id
        JOIN usuarios u ON c.usuario_id = u.id
        WHERE c.status = 'pendente'
-       ORDER BY c.criado_em ASC`
+       ORDER BY c.criado_em ASC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
     )
-    res.json({ candidaturas: result.rows })
+    res.json({ candidaturas: result.rows, page, limit })
   } catch (err) {
     console.error('Erro ao buscar candidaturas pendentes:', err)
     res.status(500).json({ erro: 'Erro ao buscar candidaturas pendentes' })
@@ -105,22 +130,26 @@ const aprovar = async (req, res) => {
   try {
     const { id } = req.params
 
+    const existe = await pool.query(`SELECT id, status FROM candidaturas WHERE id = $1`, [id])
+    if (existe.rows.length === 0) {
+      return res.status(404).json({ erro: 'Candidatura não encontrada' })
+    }
+    if (existe.rows[0].status !== 'pendente') {
+      return res.status(400).json({ erro: 'Candidatura já foi processada' })
+    }
+
     const result = await pool.query(
       `UPDATE candidaturas SET status = 'aprovada', aprovado_por = $1
        WHERE id = $2 RETURNING *`,
       [req.usuario.id, id]
     )
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ erro: 'Candidatura não encontrada' })
-    }
-
-    // Gera e envia contrato por e-mail
-    gerarEEnviarContrato(id).catch(err =>
-      console.error('Erro ao gerar contrato:', err)
-    )
-
     res.json(result.rows[0])
+
+    // Envia contrato por e-mail de forma assíncrona sem bloquear a resposta
+    enviarContratoObra(id).catch(err =>
+      console.error('Erro ao enviar contrato de obra:', err)
+    )
 
   } catch (err) {
     console.error('Erro ao aprovar candidatura:', err)
@@ -132,6 +161,14 @@ const recusar = async (req, res) => {
   try {
     const { id } = req.params
 
+    const existe = await pool.query(`SELECT id, status FROM candidaturas WHERE id = $1`, [id])
+    if (existe.rows.length === 0) {
+      return res.status(404).json({ erro: 'Candidatura não encontrada' })
+    }
+    if (existe.rows[0].status !== 'pendente') {
+      return res.status(400).json({ erro: 'Candidatura já foi processada' })
+    }
+
     const result = await pool.query(
       `UPDATE candidaturas SET status = 'recusada', aprovado_por = $1
        WHERE id = $2 RETURNING *`,
@@ -141,6 +178,7 @@ const recusar = async (req, res) => {
     res.json(result.rows[0])
 
   } catch (err) {
+    console.error('Erro ao recusar candidatura:', err)
     res.status(500).json({ erro: 'Erro ao recusar candidatura' })
   }
 }

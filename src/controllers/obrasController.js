@@ -87,6 +87,14 @@ const criar = async (req, res) => {
       descricao, tags
     } = req.body
 
+    // Validações básicas
+    if (!titulo || !categoria || !valor || !cidade) {
+      return res.status(400).json({ erro: 'Título, categoria, valor e cidade são obrigatórios' })
+    }
+    if (isNaN(parseFloat(valor)) || parseFloat(valor) <= 0) {
+      return res.status(400).json({ erro: 'Valor inválido' })
+    }
+
     const expira_em = new Date(Date.now() + (horas_para_expirar || 48) * 3600 * 1000)
 
     const result = await pool.query(
@@ -95,13 +103,13 @@ const criar = async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'aberta')
        RETURNING *`,
       [req.usuario.id, titulo, categoria, valor, cidade, bairro,
-       latitude, longitude, metragem, prazo_execucao_dias,
+       latitude || null, longitude || null, metragem, prazo_execucao_dias,
        expira_em.toISOString(), descricao, tags || []]
     )
 
     const obra = result.rows[0]
 
-    // Notifica todos os pintores sobre a nova obra
+    // Notifica todos os pintores sobre a nova obra de forma assíncrona
     notificarNovaObra(pool, obra).catch(err =>
       console.error('Erro ao enviar notificações:', err)
     )
@@ -118,6 +126,18 @@ const editar = async (req, res) => {
   try {
     const { titulo, categoria, valor, cidade, bairro, metragem, prazo_execucao_dias, descricao, tags, status } = req.body
 
+    // Verifica se a obra existe antes de editar
+    const existe = await pool.query(`SELECT id FROM obras WHERE id = $1`, [req.params.id])
+    if (existe.rows.length === 0) {
+      return res.status(404).json({ erro: 'Obra não encontrada' })
+    }
+
+    // Impede status inválidos
+    const statusPermitidos = ['aberta', 'encerrada', 'cancelada', 'rascunho']
+    if (status && !statusPermitidos.includes(status)) {
+      return res.status(400).json({ erro: 'Status inválido' })
+    }
+
     const result = await pool.query(
       `UPDATE obras SET titulo=$1, categoria=$2, valor=$3, cidade=$4, bairro=$5,
        metragem=$6, prazo_execucao_dias=$7, descricao=$8, tags=$9, status=$10
@@ -127,18 +147,26 @@ const editar = async (req, res) => {
 
     res.json(result.rows[0])
   } catch (err) {
+    console.error('Erro ao editar obra:', err)
     res.status(500).json({ erro: 'Erro ao editar obra' })
   }
 }
 
 const encerrar = async (req, res) => {
   try {
+    // Verifica se a obra existe antes de encerrar
+    const existe = await pool.query(`SELECT id FROM obras WHERE id = $1`, [req.params.id])
+    if (existe.rows.length === 0) {
+      return res.status(404).json({ erro: 'Obra não encontrada' })
+    }
+
     const result = await pool.query(
       `UPDATE obras SET status='encerrada' WHERE id=$1 RETURNING id, titulo, status`,
       [req.params.id]
     )
     res.json(result.rows[0])
   } catch (err) {
+    console.error('Erro ao encerrar obra:', err)
     res.status(500).json({ erro: 'Erro ao encerrar obra' })
   }
 }

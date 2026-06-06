@@ -1,26 +1,61 @@
 const jwt = require('jsonwebtoken')
 const { pool } = require('../utils/supabase')
 
+// Cache simples em memória
+const cacheUsuarios = new Map()
+const cacheAssinaturas = new Map()
+const CACHE_TTL = 5 * 60 * 1000 // 5 minutos
+
+const getCacheUsuario = (id) => {
+  const entry = cacheUsuarios.get(id)
+  if (!entry) return null
+  if (Date.now() - entry.timestamp > CACHE_TTL) {
+    cacheUsuarios.delete(id)
+    return null
+  }
+  return entry.data
+}
+
+const setCacheUsuario = (id, data) => {
+  cacheUsuarios.set(id, { data, timestamp: Date.now() })
+}
+
+const getCacheAssinatura = (id) => {
+  const entry = cacheAssinaturas.get(id)
+  if (!entry) return null
+  if (Date.now() - entry.timestamp > CACHE_TTL) {
+    cacheAssinaturas.delete(id)
+    return null
+  }
+  return entry.data
+}
+
+const setCacheAssinatura = (id, data) => {
+  cacheAssinaturas.set(id, { data, timestamp: Date.now() })
+}
+
 const autenticar = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ erro: 'Token não fornecido' })
     }
-
     const token = authHeader.split(' ')[1]
     const decoded = jwt.verify(token, process.env.JWT_SECRET)
 
-    const result = await pool.query(
-      'SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1',
-      [decoded.id]
-    )
-
-    if (result.rows.length === 0) {
-      return res.status(401).json({ erro: 'Usuário não encontrado' })
+    // Tenta cache primeiro
+    let usuario = getCacheUsuario(decoded.id)
+    if (!usuario) {
+      const result = await pool.query(
+        'SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1',
+        [decoded.id]
+      )
+      if (result.rows.length === 0) {
+        return res.status(401).json({ erro: 'Usuário não encontrado' })
+      }
+      usuario = result.rows[0]
+      setCacheUsuario(decoded.id, usuario)
     }
-
-    const usuario = result.rows[0]
 
     if (!usuario.ativo) {
       return res.status(403).json({ erro: 'Conta desativada' })
@@ -35,23 +70,28 @@ const autenticar = async (req, res, next) => {
 }
 
 const exigirAssinaturaAtiva = async (req, res, next) => {
-  if (req.usuario.role === 'admin' || req.usuario.role === 'aprovador') {
+  if (req.usuario.role === 'admin' || req.usuario.role === 'aprovador' || req.usuario.role === 'dono_obra') {
     return next()
   }
-
   try {
-    const result = await pool.query(
-      `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
-      [req.usuario.id]
-    )
+    // Correção: usar null como sentinela de "não está no cache"
+    // false significa "está no cache e assinatura é inativa" — não deve ir ao banco
+    let assinaturaAtiva = getCacheAssinatura(req.usuario.id)
+    if (assinaturaAtiva === null || assinaturaAtiva === undefined) {
+      const result = await pool.query(
+        `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
+        [req.usuario.id]
+      )
+      assinaturaAtiva = result.rows.length > 0
+      setCacheAssinatura(req.usuario.id, assinaturaAtiva)
+    }
 
-    if (result.rows.length === 0) {
+    if (!assinaturaAtiva) {
       return res.status(403).json({
         erro: 'Assinatura inativa. Renove seu plano para acessar as obras.',
         codigo: 'ASSINATURA_INATIVA'
       })
     }
-
     next()
   } catch (err) {
     return res.status(500).json({ erro: 'Erro ao verificar assinatura' })
