@@ -13,6 +13,9 @@ const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = requi
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 
+// One-time column migration for valor_proposto
+pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`).catch(err => console.error('[migration] valor_proposto:', err.message))
+
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()
 const CACHE_TTL = 5 * 60 * 1000 // 5 minutos
@@ -273,7 +276,7 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     const expira_em = new Date(Date.now() + 720 * 3600 * 1000)
     const result = await pool.query(
       `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'aberta','aprovada',$9,$10) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'aberta','pendente',$9,$10) RETURNING *`,
       [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null]
     )
     res.status(201).json(result.rows[0])
@@ -375,12 +378,12 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
 
 router.post('/reparos/:id/interesse', autenticar, exigirPrestador, async (req, res) => {
   try {
-    const { mensagem } = req.body
+    const { mensagem, valor_proposto } = req.body
     const existente = await pool.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
     if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse neste reparo' })
     const result = await pool.query(
-      `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem) VALUES ($1, $2, $3) RETURNING *`,
-      [req.params.id, req.usuario.id, mensagem]
+      `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem, valor_proposto) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [req.params.id, req.usuario.id, mensagem, valor_proposto || null]
     )
     res.status(201).json(result.rows[0])
   } catch (err) {
