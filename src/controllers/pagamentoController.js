@@ -1,18 +1,9 @@
 const { pool } = require('../utils/supabase')
-const nodemailer = require('nodemailer')
+const { enviarEmail } = require('../services/brevoService')
 
 const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN
 const PAGBANK_URL = 'https://api.pagseguro.com'
 const APP_URL = 'https://pinturapro-api-production.up.railway.app/api'
-
-console.log('[PagBank] TOKEN length:', PAGBANK_TOKEN?.length, '| first 8 chars:', PAGBANK_TOKEN?.substring(0, 8))
-
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: 587,
-  secure: false,
-  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-})
 
 const limparCpfCnpj = (str) => {
   if (!str) return null
@@ -68,11 +59,9 @@ const colocarPendentVerificacao = async (usuarioId, plano) => {
 
   const { nome, email } = usuario.rows[0]
 
-  // Envia e-mail para o prestador
-  transporter.sendMail({
-    from: `PinturaPro <${process.env.SMTP_USER}>`,
-    to: email,
-    subject: 'PinturaPro — Pagamento recebido! Verificação em andamento',
+  enviarEmail({
+    para: email,
+    assunto: 'PinturaPro — Pagamento recebido! Verificação em andamento',
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
@@ -92,11 +81,13 @@ const colocarPendentVerificacao = async (usuarioId, plano) => {
     `
   }).catch(err => console.error('Erro ao enviar e-mail verificação:', err))
 
-  // Notifica admin por e-mail
-  transporter.sendMail({
-    from: `PinturaPro <${process.env.SMTP_USER}>`,
-    to: process.env.SMTP_USER,
-    subject: `⚠️ Novo prestador aguardando verificação: ${nome}`,
+  const adminEmail = process.env.EMAIL_REMETENTE?.match(/^(.+?)\s*<(.+?)>$/)?.[2]
+    || process.env.EMAIL_REMETENTE
+    || 'novacomputec@gmail.com'
+
+  enviarEmail({
+    para: adminEmail,
+    assunto: `⚠️ Novo prestador aguardando verificação: ${nome}`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 30px;">
         <h2>Novo prestador para verificar</h2>
@@ -226,44 +217,6 @@ const webhookPagbank = async (req, res) => {
 
   } catch (err) {
     console.error('Erro no webhook PagBank:', err.message)
-  }
-}
-
-const webhook = async (req, res) => {
-  try {
-    res.sendStatus(200)
-
-    const { type, data } = req.body
-    if (type !== 'payment' || !data?.id) return
-
-    const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN
-    if (!MP_ACCESS_TOKEN) return
-
-    const response = await fetch(`https://api.mercadopago.com/v1/payments/${data.id}`, {
-      headers: { 'Authorization': `Bearer ${MP_ACCESS_TOKEN}` }
-    })
-    const pagamento = await response.json()
-
-    if (pagamento.status !== 'approved' || !pagamento.external_reference) return
-
-    const partes = pagamento.external_reference.split('|')
-    if (partes.length !== 2) return
-
-    const [usuarioId, plano] = partes
-
-    const usuarioResult = await pool.query(`SELECT id, role FROM usuarios WHERE id = $1`, [usuarioId])
-    if (usuarioResult.rows.length === 0) return
-
-    const usuario = usuarioResult.rows[0]
-
-    if (usuario.role === 'prestador' || usuario.role === 'pintor' || usuario.role === 'assinante') {
-      await colocarPendentVerificacao(usuarioId, plano)
-    } else {
-      await ativarAssinatura(usuarioId, plano)
-    }
-
-  } catch (err) {
-    console.error('Erro no webhook MercadoPago:', err.message)
   }
 }
 
