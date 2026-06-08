@@ -13,8 +13,10 @@ const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = requi
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 
-// One-time column migration for valor_proposto
+// One-time column migrations
 pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`).catch(err => console.error('[migration] valor_proposto:', err.message))
+pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`).catch(err => console.error('[migration] valor_contraproposta:', err.message))
+pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS rodada INTEGER DEFAULT 1`).catch(err => console.error('[migration] rodada:', err.message))
 
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()
@@ -382,9 +384,19 @@ router.post('/reparos/:id/interesse', autenticar, exigirPrestador, async (req, r
     const existente = await pool.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
     if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse neste reparo' })
     const result = await pool.query(
-      `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem, valor_proposto) VALUES ($1, $2, $3, $4) RETURNING *`,
+      `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem, valor_proposto, rodada) VALUES ($1, $2, $3, $4, 1) RETURNING *`,
       [req.params.id, req.usuario.id, mensagem, valor_proposto || null]
     )
+    // Notify dono
+    const donoInfo = await pool.query(
+      `SELECT u.push_token, r.titulo FROM reparos r JOIN usuarios u ON r.criado_por = u.id WHERE r.id = $1`,
+      [req.params.id]
+    )
+    if (donoInfo.rows[0]?.push_token) {
+      enviarPushNotificacao(donoInfo.rows[0].push_token, '🔧 Novo interesse!',
+        `Um prestador demonstrou interesse no reparo "${donoInfo.rows[0].titulo}"`,
+        { tipo: 'novo_interesse', reparo_id: req.params.id }).catch(() => {})
+    }
     res.status(201).json(result.rows[0])
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao registrar interesse' })
@@ -396,6 +408,11 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) 
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
     if (reparo.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Este reparo já tem um prestador a caminho' })
+    const interesseAceito = await pool.query(
+      `SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2 AND status = 'aceito'`,
+      [req.params.id, req.usuario.id]
+    )
+    if (interesseAceito.rows.length === 0) return res.status(403).json({ erro: 'Sua proposta ainda não foi aceita para este reparo.' })
     await pool.query(
       `UPDATE reparos SET match_feito_em = NOW(), match_usuario_id = $1 WHERE id = $2`,
       [req.usuario.id, req.params.id]
@@ -417,6 +434,109 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) 
     enviarContratoReparo(req.params.id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao confirmar match' })
+  }
+})
+
+// Dono responde a uma proposta (aceitar / recusar / contraproposta)
+router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async (req, res) => {
+  try {
+    const { action, valor } = req.body
+    const { id: reparo_id, interesse_id } = req.params
+
+    const reparo = await pool.query(`SELECT criado_por, titulo FROM reparos WHERE id = $1`, [reparo_id])
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows[0].criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
+
+    const interesse = await pool.query(
+      `SELECT ir.*, u.push_token FROM interesse_reparos ir JOIN usuarios u ON ir.usuario_id = u.id WHERE ir.id = $1 AND ir.reparo_id = $2`,
+      [interesse_id, reparo_id]
+    )
+    if (interesse.rows.length === 0) return res.status(404).json({ erro: 'Interesse não encontrado' })
+    const int = interesse.rows[0]
+
+    if (action === 'aceitar') {
+      await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
+      if (int.push_token) {
+        enviarPushNotificacao(int.push_token, '✅ Proposta aceita!',
+          `O solicitante aceitou sua proposta para "${reparo.rows[0].titulo}". Confirme sua ida!`,
+          { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
+      }
+      enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato:', err))
+      return res.json({ mensagem: 'Proposta aceita! Contrato enviado por e-mail.' })
+    }
+
+    if (action === 'recusar') {
+      await pool.query(`UPDATE interesse_reparos SET status = 'recusado' WHERE id = $1`, [interesse_id])
+      if (int.push_token) {
+        enviarPushNotificacao(int.push_token, '❌ Proposta não aceita',
+          `Sua proposta para "${reparo.rows[0].titulo}" não foi selecionada desta vez.`,
+          { tipo: 'interesse_recusado', reparo_id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Proposta recusada.' })
+    }
+
+    if (action === 'contraproposta') {
+      if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
+      await pool.query(
+        `UPDATE interesse_reparos SET status = 'contraproposta_dono', valor_contraproposta = $2, rodada = 2 WHERE id = $1`,
+        [interesse_id, valor]
+      )
+      if (int.push_token) {
+        enviarPushNotificacao(int.push_token, '💬 Contraproposta recebida!',
+          `O solicitante fez uma contraproposta para "${reparo.rows[0].titulo}". Veja no app!`,
+          { tipo: 'contraproposta_dono', reparo_id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Contraproposta enviada!' })
+    }
+
+    res.status(400).json({ erro: 'Ação inválida' })
+  } catch (err) {
+    console.error('Erro ao responder interesse:', err)
+    res.status(500).json({ erro: 'Erro ao responder' })
+  }
+})
+
+// Prestador responde a uma contraproposta do dono
+router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autenticar, exigirPrestador, async (req, res) => {
+  try {
+    const { action } = req.body
+    const { id: reparo_id, interesse_id } = req.params
+
+    const interesse = await pool.query(
+      `SELECT * FROM interesse_reparos WHERE id = $1 AND reparo_id = $2 AND usuario_id = $3`,
+      [interesse_id, reparo_id, req.usuario.id]
+    )
+    if (interesse.rows.length === 0) return res.status(404).json({ erro: 'Interesse não encontrado' })
+    if (interesse.rows[0].status !== 'contraproposta_dono') return res.status(400).json({ erro: 'Não há contraproposta pendente' })
+
+    const reparo = await pool.query(`SELECT titulo, criado_por FROM reparos WHERE id = $1`, [reparo_id])
+    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [reparo.rows[0].criado_por])
+
+    if (action === 'aceitar') {
+      await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
+      if (dono.rows[0]?.push_token) {
+        enviarPushNotificacao(dono.rows[0].push_token, '✅ Contraproposta aceita!',
+          `O prestador aceitou sua contraproposta para "${reparo.rows[0].titulo}"!`,
+          { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
+      }
+      enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato:', err))
+      return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
+    }
+
+    if (action === 'recusar') {
+      await pool.query(`UPDATE interesse_reparos SET status = 'recusado' WHERE id = $1`, [interesse_id])
+      if (dono.rows[0]?.push_token) {
+        enviarPushNotificacao(dono.rows[0].push_token, '❌ Proposta recusada',
+          `O prestador recusou sua contraproposta para "${reparo.rows[0].titulo}".`,
+          { tipo: 'interesse_recusado', reparo_id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Proposta recusada.' })
+    }
+
+    res.status(400).json({ erro: 'Ação inválida' })
+  } catch (err) {
+    console.error('Erro ao responder contraproposta:', err)
+    res.status(500).json({ erro: 'Erro ao responder' })
   }
 })
 
@@ -676,7 +796,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
 
     const midias    = await pool.query(`SELECT * FROM midias_reparos WHERE reparo_id = $1 ORDER BY ordem`, [req.params.id])
     const interesse = await pool.query(
-      `SELECT id, status FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`,
+      `SELECT id, status, valor_proposto, valor_contraproposta, rodada FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`,
       [req.params.id, req.usuario.id]
     )
 
@@ -685,7 +805,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     if (ehDono || req.usuario.role === 'admin') {
       const result2 = await pool.query(
         `SELECT ir.id, ir.usuario_id, ir.status, ir.mensagem, ir.criado_em,
-                u.nome, u.telefone, u.cidade
+                ir.valor_proposto, ir.valor_contraproposta, ir.rodada,
+                u.nome, u.cidade,
+                CASE WHEN ir.status = 'aceito' THEN u.telefone ELSE NULL END as telefone
          FROM interesse_reparos ir
          JOIN usuarios u ON ir.usuario_id = u.id
          WHERE ir.reparo_id = $1
