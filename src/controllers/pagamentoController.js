@@ -2,12 +2,10 @@ const { pool } = require('../utils/supabase')
 const nodemailer = require('nodemailer')
 
 const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN
-const PAGBANK_URL = process.env.PAGBANK_ENV === 'sandbox'
-  ? 'https://sandbox.api.pagseguro.com'
-  : 'https://api.pagseguro.com'
+const PAGBANK_URL = 'https://api.pagseguro.com'
 const APP_URL = 'https://pinturapro-api-production.up.railway.app/api'
 
-console.log('[PagBank] TOKEN length:', PAGBANK_TOKEN?.length, '| first 8 chars:', PAGBANK_TOKEN?.substring(0, 8), '| env:', process.env.PAGBANK_ENV || 'production')
+console.log('[PagBank] TOKEN length:', PAGBANK_TOKEN?.length, '| first 8 chars:', PAGBANK_TOKEN?.substring(0, 8))
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -160,7 +158,7 @@ const criarAssinatura = async (req, res) => {
     const response = await fetch(`${PAGBANK_URL}/checkouts`, {
       method: 'POST',
       headers: {
-        'Authorization': `Token ${PAGBANK_TOKEN}`,
+        'Authorization': `Bearer ${PAGBANK_TOKEN}`,
         'Content-Type': 'application/json',
         'x-api-version': '4.0'
       },
