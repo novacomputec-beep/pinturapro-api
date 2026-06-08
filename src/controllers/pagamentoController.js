@@ -160,7 +160,7 @@ const criarAssinatura = async (req, res) => {
     const response = await fetch(`${PAGBANK_URL}/checkouts`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${PAGBANK_TOKEN}`,
+        'Authorization': `Token ${PAGBANK_TOKEN}`,
         'Content-Type': 'application/json',
         'x-api-version': '4.0'
       },
