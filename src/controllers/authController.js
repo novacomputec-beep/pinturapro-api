@@ -145,6 +145,11 @@ const cadastrar = async (req, res) => {
     })
 
   } catch (err) {
+    if (err.code === '23505') {
+      if (err.constraint?.includes('cpf')) return res.status(409).json({ erro: 'CPF ou CNPJ já cadastrado' })
+      if (err.constraint?.includes('email')) return res.status(409).json({ erro: 'E-mail já cadastrado' })
+      return res.status(409).json({ erro: 'Dados já cadastrados' })
+    }
     console.error('Erro no cadastro DETALHADO:', err.message, err.stack)
     res.status(500).json({ erro: err.message || 'Erro ao criar conta' })
   }
