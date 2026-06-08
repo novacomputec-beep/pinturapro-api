@@ -179,5 +179,7 @@ app.listen(PORT, () => {
 ║   Rodando em http://localhost:${PORT}   ║
 ╚══════════════════════════════════════╝
   `)
+  const tok = process.env.PAGBANK_TOKEN
+  console.log('[PagBank] TOKEN length:', tok?.length, '| first 8 chars:', tok?.substring(0, 8), '| env:', process.env.PAGBANK_ENV || 'production')
   iniciarAgendador()
 })
