@@ -1,11 +1,11 @@
 const { pool } = require('../utils/supabase')
 const nodemailer = require('nodemailer')
 
-const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN
-const PAGBANK_URL = 'https://api.pagseguro.com'
+const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN_SANDBOX
+const PAGBANK_URL = 'https://sandbox.api.pagseguro.com'
 const APP_URL = 'https://pinturapro-api-production.up.railway.app/api'
 
-console.log('[PagBank] TOKEN length:', PAGBANK_TOKEN?.length, '| first 8 chars:', PAGBANK_TOKEN?.substring(0, 8))
+console.log('[PagBank SANDBOX] TOKEN length:', PAGBANK_TOKEN?.length, '| first 8 chars:', PAGBANK_TOKEN?.substring(0, 8))
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -155,6 +155,8 @@ const criarAssinatura = async (req, res) => {
       notification_urls: [`${APP_URL}/pagamentos/webhook-pagbank`]
     }
 
+    console.log('[PagBank SANDBOX] Request body:', JSON.stringify(body, null, 2))
+
     const response = await fetch(`${PAGBANK_URL}/checkouts`, {
       method: 'POST',
       headers: {
@@ -167,8 +169,11 @@ const criarAssinatura = async (req, res) => {
 
     const data = await response.json()
 
+    console.log('[PagBank SANDBOX] Response status:', response.status)
+    console.log('[PagBank SANDBOX] Response body:', JSON.stringify(data, null, 2))
+
     if (!response.ok) {
-      console.error('Erro PagBank:', JSON.stringify(data))
+      console.error('[PagBank SANDBOX] Erro na resposta:', JSON.stringify(data))
       return res.status(500).json({ erro: 'Erro ao criar pagamento', detalhe: data })
     }
 
