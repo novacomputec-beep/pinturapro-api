@@ -276,7 +276,7 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     const expira_em = new Date(Date.now() + 720 * 3600 * 1000)
     const result = await pool.query(
       `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'aberta','pendente',$9,$10) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'aberta','aprovada',$9,$10) RETURNING *`,
       [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null]
     )
     res.status(201).json(result.rows[0])
