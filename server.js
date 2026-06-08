@@ -73,11 +73,15 @@ app.use((err, req, res, next) => {
   res.status(500).json({ erro: 'Erro interno do servidor. Tente novamente.' })
 })
 
-const RAIO_KM = 5
-const RAIO_GRAUS = RAIO_KM / 111
+const RAIO_KM              = 5
+const RAIO_GRAUS           = RAIO_KM / 111
+const COOLDOWN_PROXIMIDADE = 4 * 60 * 60 * 1000   // 4 hours per prestador+job pair
+const notificacoesEnviadas = new Map()
 
 const verificarPrestadoresProximos = async () => {
+  const agora = Date.now()
   try {
+    // ── REPAROS → prestadores ───────────────────────────────────────────────
     const reparos = await pool.query(`
       SELECT id, titulo, latitude, longitude, prestadores_bloqueados
       FROM reparos
@@ -88,43 +92,99 @@ const verificarPrestadoresProximos = async () => {
         AND latitude IS NOT NULL
         AND longitude IS NOT NULL
     `)
-    if (reparos.rows.length === 0) return
 
-    const prestadores = await pool.query(`
-      SELECT lp.usuario_id, lp.latitude, lp.longitude, u.push_token, u.nome
-      FROM localizacoes_prestadores lp
-      JOIN usuarios u ON lp.usuario_id = u.id
-      JOIN assinaturas a ON a.usuario_id = u.id AND a.status = 'ativa'
-      WHERE lp.atualizado_em > NOW() - INTERVAL '30 minutes'
-        AND u.push_token IS NOT NULL
-    `)
-    if (prestadores.rows.length === 0) return
+    const prestadores = reparos.rows.length > 0
+      ? await pool.query(`
+          SELECT lp.usuario_id, lp.latitude, lp.longitude, u.push_token, u.nome
+          FROM localizacoes_prestadores lp
+          JOIN usuarios u ON lp.usuario_id = u.id
+          JOIN assinaturas a ON a.usuario_id = u.id AND a.status = 'ativa'
+          WHERE lp.atualizado_em > NOW() - INTERVAL '30 minutes'
+            AND u.push_token IS NOT NULL
+            AND u.role = 'prestador'
+        `)
+      : { rows: [] }
 
+    let notifReparos = 0
     for (const reparo of reparos.rows) {
       const bloqueados = reparo.prestadores_bloqueados || []
       for (const prestador of prestadores.rows) {
         if (bloqueados.includes(prestador.usuario_id)) continue
         const distLat = Math.abs(prestador.latitude - reparo.latitude)
         const distLon = Math.abs(prestador.longitude - reparo.longitude)
-        if (distLat <= RAIO_GRAUS && distLon <= RAIO_GRAUS) {
-          const dLat = distLat * 111
-          const dLon = distLon * 111 * Math.cos(prestador.latitude * Math.PI / 180)
-          const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
-          if (distanciaKm <= RAIO_KM) {
-            const distFormatada = distanciaKm < 1
-              ? `${Math.round(distanciaKm * 1000)}m`
-              : `${distanciaKm.toFixed(1)}km`
-            await enviarPushNotificacao(
-              prestador.push_token,
-              '📍 Serviço próximo a você!',
-              `Há um reparo "${reparo.titulo}" a apenas ${distFormatada} de você!`,
-              { tipo: 'reparo_proximo', reparo_id: reparo.id }
-            ).catch(err => console.error('Erro push proximidade:', err))
-          }
-        }
+        if (distLat > RAIO_GRAUS || distLon > RAIO_GRAUS) continue
+        const dLat = distLat * 111
+        const dLon = distLon * 111 * Math.cos(prestador.latitude * Math.PI / 180)
+        const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
+        if (distanciaKm > RAIO_KM) continue
+        const chave = `${prestador.usuario_id}_reparo_${reparo.id}`
+        const ultimaEnviada = notificacoesEnviadas.get(chave)
+        if (ultimaEnviada && agora - ultimaEnviada < COOLDOWN_PROXIMIDADE) continue
+        notificacoesEnviadas.set(chave, agora)
+        const dist = distanciaKm < 1
+          ? `${Math.round(distanciaKm * 1000)}m`
+          : `${distanciaKm.toFixed(1)}km`
+        await enviarPushNotificacao(
+          prestador.push_token,
+          '📍 Serviço próximo a você!',
+          `Há um reparo "${reparo.titulo}" a apenas ${dist} de você!`,
+          { tipo: 'reparo_proximo', reparo_id: reparo.id }
+        ).catch(err => console.error('Erro push proximidade reparo:', err))
+        notifReparos++
       }
     }
-    console.log(`[Proximidade] Verificação concluída — ${reparos.rows.length} reparos, ${prestadores.rows.length} prestadores ativos`)
+
+    // ── OBRAS → assinantes (pintores) ───────────────────────────────────────
+    const obras = await pool.query(`
+      SELECT id, titulo, latitude, longitude
+      FROM obras
+      WHERE status = 'aberta'
+        AND status_aprovacao = 'aprovada'
+        AND expira_em > NOW()
+        AND latitude IS NOT NULL
+        AND longitude IS NOT NULL
+    `)
+
+    const pintores = obras.rows.length > 0
+      ? await pool.query(`
+          SELECT lp.usuario_id, lp.latitude, lp.longitude, u.push_token, u.nome
+          FROM localizacoes_prestadores lp
+          JOIN usuarios u ON lp.usuario_id = u.id
+          JOIN assinaturas a ON a.usuario_id = u.id AND a.status = 'ativa'
+          WHERE lp.atualizado_em > NOW() - INTERVAL '30 minutes'
+            AND u.push_token IS NOT NULL
+            AND u.role = 'assinante'
+        `)
+      : { rows: [] }
+
+    let notifObras = 0
+    for (const obra of obras.rows) {
+      for (const pintor of pintores.rows) {
+        const distLat = Math.abs(pintor.latitude - obra.latitude)
+        const distLon = Math.abs(pintor.longitude - obra.longitude)
+        if (distLat > RAIO_GRAUS || distLon > RAIO_GRAUS) continue
+        const dLat = distLat * 111
+        const dLon = distLon * 111 * Math.cos(pintor.latitude * Math.PI / 180)
+        const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
+        if (distanciaKm > RAIO_KM) continue
+        const chave = `${pintor.usuario_id}_obra_${obra.id}`
+        const ultimaEnviada = notificacoesEnviadas.get(chave)
+        if (ultimaEnviada && agora - ultimaEnviada < COOLDOWN_PROXIMIDADE) continue
+        notificacoesEnviadas.set(chave, agora)
+        const dist = distanciaKm < 1
+          ? `${Math.round(distanciaKm * 1000)}m`
+          : `${distanciaKm.toFixed(1)}km`
+        await enviarPushNotificacao(
+          pintor.push_token,
+          '🎨 Obra próxima a você!',
+          `Há uma obra "${obra.titulo}" a apenas ${dist} de você!`,
+          { tipo: 'obra_proxima', obra_id: obra.id }
+        ).catch(err => console.error('Erro push proximidade obra:', err))
+        notifObras++
+      }
+    }
+
+    console.log(`[Proximidade] reparos: ${reparos.rows.length} | prestadores ativos: ${prestadores.rows.length} | notif enviadas: ${notifReparos} | obras: ${obras.rows.length} | pintores ativos: ${pintores.rows.length} | notif enviadas: ${notifObras}`)
   } catch (err) {
     console.error('[Proximidade] Erro na verificação:', err.message)
   }
