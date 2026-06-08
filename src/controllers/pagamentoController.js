@@ -150,14 +150,13 @@ const criarAssinatura = async (req, res) => {
       items: [{ reference_id: `plano_${plano}`, name: descricao, quantity: 1, unit_amount: valor }],
       payment_methods: [{ type: 'CREDIT_CARD' }, { type: 'PIX' }],
       redirect_url: `${APP_URL}/pagamentos/sucesso`,
-      notification_urls: [`${APP_URL}/pagamentos/webhook-pagbank`],
-      soft_descriptor: 'PinturaPro'
+      notification_urls: [`${APP_URL}/pagamentos/webhook-pagbank`]
     }
 
-    const response = await fetch(`${PAGBANK_URL}/orders`, {
+    const response = await fetch(`${PAGBANK_URL}/checkouts`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${PAGBANK_TOKEN}`,
+        'Authorization': PAGBANK_TOKEN,
         'Content-Type': 'application/json',
         'x-api-version': '4.0'
       },
