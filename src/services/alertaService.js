@@ -266,11 +266,54 @@ const verificarObrasComBaixoEngajamento = async () => {
   }
 }
 
+const verificarReparosExpirandoSemInteressados = async () => {
+  try {
+    const reparos = await pool.query(`
+      SELECT r.id, r.titulo, r.prazo_atendimento_horas, u.push_token
+      FROM reparos r
+      JOIN usuarios u ON r.criado_por = u.id
+      WHERE r.status = 'aberta'
+        AND r.match_usuario_id IS NULL
+        AND r.alerta_sem_interessados_em IS NULL
+        AND u.push_token IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = r.id
+        )
+        AND (
+          (r.prazo_atendimento_horas <= 1  AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '15 minutes')
+          OR (r.prazo_atendimento_horas > 1 AND r.prazo_atendimento_horas <= 4  AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '30 minutes')
+          OR (r.prazo_atendimento_horas > 4 AND r.prazo_atendimento_horas <= 8  AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '1 hour')
+          OR (r.prazo_atendimento_horas > 8 AND r.prazo_atendimento_horas <= 24 AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '2 hours')
+          OR (r.prazo_atendimento_horas > 24 AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '6 hours')
+        )
+    `)
+
+    if (reparos.rows.length > 0) {
+      const ids = reparos.rows.map(r => r.id)
+      await pool.query(`UPDATE reparos SET alerta_sem_interessados_em = NOW() WHERE id = ANY($1)`, [ids])
+
+      for (const reparo of reparos.rows) {
+        await enviarPushNotificacao(
+          reparo.push_token,
+          '⏰ Reparo expirando em breve!',
+          `Seu reparo '${reparo.titulo}' está expirando em breve e ainda não tem interessados! Considere aumentar o prazo.`,
+          { tipo: 'reparo_expirando_sem_interessados', reparo_id: reparo.id }
+        )
+      }
+    }
+
+    console.log(`[ExpirandoSemInteressados] ${reparos.rows.length} donos notificados`)
+  } catch (err) {
+    console.error('Erro ao verificar reparos expirando sem interessados:', err)
+  }
+}
+
 module.exports = {
   enviarPushNotificacao,
   enviarBoasVindas,
   notificarPintoresSobreNovaObra,
   notificarPrestadoresSobreNovoReparo,
   verificarObrasExpirando,
-  verificarObrasComBaixoEngajamento
+  verificarObrasComBaixoEngajamento,
+  verificarReparosExpirandoSemInteressados
 }

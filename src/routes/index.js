@@ -17,6 +17,7 @@ const { enviarContratoReparo, enviarContratoObra } = require('../controllers/con
 pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`).catch(err => console.error('[migration] valor_proposto:', err.message))
 pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`).catch(err => console.error('[migration] valor_contraproposta:', err.message))
 pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS rodada INTEGER DEFAULT 1`).catch(err => console.error('[migration] rodada:', err.message))
+pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS alerta_sem_interessados_em TIMESTAMP WITH TIME ZONE`).catch(err => console.error('[migration] alerta_sem_interessados_em:', err.message))
 
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()
@@ -275,7 +276,8 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar reparos' })
     }
     const { titulo, categoria, descricao, valor_estimado, cidade, bairro, tags, prazo_atendimento_horas } = req.body
-    const expira_em = new Date(Date.now() + 720 * 3600 * 1000)
+    const horasExpiracao = prazo_atendimento_horas || 720
+    const expira_em = new Date(Date.now() + horasExpiracao * 3600 * 1000)
     const result = await pool.query(
       `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'aberta','aprovada',$9,$10) RETURNING *`,
