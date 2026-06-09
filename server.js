@@ -5,7 +5,7 @@ const helmet = require('helmet')
 const rateLimit = require('express-rate-limit')
 const routes = require('./src/routes')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarReparosExpirandoSemInteressados } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarReparosExpirandoSemInteressados, verificarObrasExpirandoSemInteressados } = require('./src/services/alertaService')
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -200,12 +200,14 @@ const iniciarAgendador = () => {
     verificarObrasExpirando()
     verificarPrestadoresProximos()
     verificarReparosExpirandoSemInteressados()
+    verificarObrasExpirandoSemInteressados()
   }, 60 * 1000)
 
   setInterval(() => { verificarObrasComBaixoEngajamento() }, INTERVALO_ENGAJAMENTO)
   setInterval(() => { verificarObrasExpirando() }, INTERVALO_EXPIRACAO)
   setInterval(() => { verificarPrestadoresProximos() }, INTERVALO_PROXIMIDADE)
   setInterval(() => { verificarReparosExpirandoSemInteressados() }, INTERVALO_EXPIRACAO)
+  setInterval(() => { verificarObrasExpirandoSemInteressados() }, INTERVALO_EXPIRACAO)
 
   setInterval(async () => {
     try {
@@ -231,7 +233,7 @@ const iniciarAgendador = () => {
     }
   }, 10 * 60 * 1000)
 
-  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min | expirando sem interessados: 1h')
+  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min | expirando sem interessados (reparos+obras): 1h')
 }
 
 app.listen(PORT, () => {

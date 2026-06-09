@@ -19,6 +19,7 @@ pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_contrap
 pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS rodada INTEGER DEFAULT 1`).catch(err => console.error('[migration] rodada:', err.message))
 pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS alerta_sem_interessados_em TIMESTAMP WITH TIME ZONE`).catch(err => console.error('[migration] alerta_sem_interessados_em:', err.message))
 pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`).catch(err => console.error('[migration] candidaturas.valor_contraproposta:', err.message))
+pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS alerta_sem_interessados_em TIMESTAMP WITH TIME ZONE`).catch(err => console.error('[migration] obras.alerta_sem_interessados_em:', err.message))
 
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()

@@ -85,8 +85,9 @@ const porObra = async (req, res) => {
 
     const result = await pool.query(
       `SELECT c.id, c.status, c.referencias, c.valor_oferta, c.mensagem_oferta, c.criado_em,
-              u.id as usuario_id, u.nome, u.email, u.telefone, u.cidade,
-              u.anos_experiencia, u.tamanho_equipe, u.especialidades
+              u.id as usuario_id, u.nome, u.email,
+              CASE WHEN c.status = 'aprovada' THEN u.telefone ELSE NULL END as telefone,
+              u.cidade, u.anos_experiencia, u.tamanho_equipe, u.especialidades
        FROM candidaturas c
        JOIN usuarios u ON c.usuario_id = u.id
        WHERE c.obra_id = $1

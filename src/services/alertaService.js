@@ -308,6 +308,47 @@ const verificarReparosExpirandoSemInteressados = async () => {
   }
 }
 
+const verificarObrasExpirandoSemInteressados = async () => {
+  try {
+    const obras = await pool.query(`
+      SELECT o.id, o.titulo,
+             EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 as horas_para_expirar,
+             u.push_token
+      FROM obras o
+      JOIN usuarios u ON o.criado_por = u.id
+      WHERE o.status = 'aberta'
+        AND o.alerta_sem_interessados_em IS NULL
+        AND u.push_token IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM candidaturas c WHERE c.obra_id = o.id)
+        AND (
+          (EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 <= 1  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '15 minutes')
+          OR (EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 > 1 AND EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 <= 4  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '30 minutes')
+          OR (EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 > 4 AND EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 <= 8  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '1 hour')
+          OR (EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 > 8 AND EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 <= 24 AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '2 hours')
+          OR (EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 > 24 AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '6 hours')
+        )
+    `)
+
+    if (obras.rows.length > 0) {
+      const ids = obras.rows.map(o => o.id)
+      await pool.query(`UPDATE obras SET alerta_sem_interessados_em = NOW() WHERE id = ANY($1)`, [ids])
+
+      for (const obra of obras.rows) {
+        await enviarPushNotificacao(
+          obra.push_token,
+          '⏰ Obra expirando em breve!',
+          `Sua obra '${obra.titulo}' está expirando em breve e ainda não tem interessados! Considere atualizar o prazo.`,
+          { tipo: 'obra_expirando_sem_interessados', obra_id: obra.id }
+        )
+      }
+    }
+
+    console.log(`[ExpirandoSemInteressados] ${obras.rows.length} donos de obra notificados`)
+  } catch (err) {
+    console.error('Erro ao verificar obras expirando sem interessados:', err)
+  }
+}
+
 module.exports = {
   enviarPushNotificacao,
   enviarBoasVindas,
@@ -315,5 +356,6 @@ module.exports = {
   notificarPrestadoresSobreNovoReparo,
   verificarObrasExpirando,
   verificarObrasComBaixoEngajamento,
-  verificarReparosExpirandoSemInteressados
+  verificarReparosExpirandoSemInteressados,
+  verificarObrasExpirandoSemInteressados
 }
