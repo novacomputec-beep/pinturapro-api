@@ -27,8 +27,8 @@ const CACHE_TTL = 5 * 60 * 1000 // 5 minutos
 
 const exigirPrestador = async (req, res, next) => {
   try {
-    if (req.usuario.role !== 'prestador' && req.usuario.role !== 'assinante' && req.usuario.role !== 'admin') {
-      return res.status(403).json({ erro: 'Acesso restrito a prestadores de serviços' })
+    if (req.usuario.role !== 'prestador' && req.usuario.role !== 'admin') {
+      return res.status(403).json({ erro: 'Acesso restrito a prestadores de serviços domésticos' })
     }
     if (req.usuario.role === 'admin') return next()
 
@@ -51,6 +51,29 @@ const exigirPrestador = async (req, res, next) => {
     res.status(500).json({ erro: 'Erro de autenticação' })
   }
 }
+
+// ============================================================
+// STATS PÚBLICOS (sem auth)
+// ============================================================
+router.get('/stats/publico', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        COALESCE((SELECT SUM(valor_estimado) FROM reparos WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()), 0)
+        + COALESCE((SELECT SUM(valor) FROM obras WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()), 0) AS total_valor,
+        (SELECT COUNT(*) FROM reparos WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW())
+        + (SELECT COUNT(*) FROM obras WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()) AS total_ativas
+    `)
+    const row = result.rows[0]
+    res.json({
+      total_valor_obras: parseFloat(row.total_valor) || 0,
+      total_obras_ativas: parseInt(row.total_ativas) || 0
+    })
+  } catch (err) {
+    console.error('[stats/publico]', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar estatísticas' })
+  }
+})
 
 // ============================================================
 // AUTH
@@ -363,6 +386,7 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa
       FROM reparos r
       WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()
+        AND r.match_usuario_id IS NULL
         AND NOT ($1::uuid = ANY(COALESCE(r.prestadores_bloqueados, '{}')))`
 
     if (categoria && categoria !== 'todas') {

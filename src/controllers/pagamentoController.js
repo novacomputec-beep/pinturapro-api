@@ -302,12 +302,12 @@ const darAcessoGratuito = async (req, res) => {
 const listarAssinantes = async (req, res) => {
   try {
     const page   = parseInt(req.query.page)  || 1
-    const limit  = parseInt(req.query.limit) || 50
+    const limit  = parseInt(req.query.limit) || 200
     const offset = (page - 1) * limit
 
     const result = await pool.query(`
       SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.role,
-             u.verificacao_status,
+             u.tipo_dono, u.verificacao_status,
              a.status, a.plano, a.tipo, a.criado_em
       FROM usuarios u
       LEFT JOIN assinaturas a ON a.usuario_id = u.id
