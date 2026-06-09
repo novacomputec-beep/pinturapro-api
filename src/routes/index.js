@@ -18,6 +18,7 @@ pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_propost
 pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`).catch(err => console.error('[migration] valor_contraproposta:', err.message))
 pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS rodada INTEGER DEFAULT 1`).catch(err => console.error('[migration] rodada:', err.message))
 pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS alerta_sem_interessados_em TIMESTAMP WITH TIME ZONE`).catch(err => console.error('[migration] alerta_sem_interessados_em:', err.message))
+pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`).catch(err => console.error('[migration] candidaturas.valor_contraproposta:', err.message))
 
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()
@@ -237,7 +238,7 @@ router.get('/obras/:id', autenticar, exigirAssinaturaAtiva, async (req, res) => 
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
     const midias = await pool.query(`SELECT * FROM midias WHERE obra_id = $1 ORDER BY ordem`, [req.params.id])
     const minhaCandidatura = await pool.query(
-      `SELECT id, status, valor_oferta, mensagem_oferta FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
+      `SELECT id, status, valor_oferta, mensagem_oferta, valor_contraproposta FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
       [req.params.id, req.usuario.id]
     )
     res.json({ obra: result.rows[0], midias: midias.rows, minha_candidatura: minhaCandidatura.rows[0] || null })
@@ -1233,6 +1234,97 @@ router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
     res.status(201).json(negociacao.rows[0])
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao registrar negociação' })
+  }
+})
+
+// Dono responds to a candidatura: aceitar | recusar | contraproposta
+router.post('/candidaturas/:id/dono-responder', autenticar, async (req, res) => {
+  try {
+    const { action, valor, mensagem } = req.body
+    const { id } = req.params
+    const candidatura = await pool.query(
+      `SELECT c.*, o.criado_por as dono_id, o.titulo, u.push_token as pintor_token
+       FROM candidaturas c JOIN obras o ON c.obra_id = o.id JOIN usuarios u ON c.usuario_id = u.id
+       WHERE c.id = $1`, [id]
+    )
+    if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
+    const cand = candidatura.rows[0]
+    if (req.usuario.id !== cand.dono_id) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
+
+    if (action === 'aceitar') {
+      await pool.query(`UPDATE candidaturas SET status = 'aprovada' WHERE id = $1`, [id])
+      if (cand.pintor_token) {
+        enviarPushNotificacao(cand.pintor_token, '✅ Candidatura aprovada!',
+          `O dono aprovou sua candidatura para "${cand.titulo}". Entre em contato!`,
+          { tipo: 'candidatura_aprovada', candidatura_id: id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Candidatura aprovada!' })
+    }
+    if (action === 'recusar') {
+      await pool.query(`UPDATE candidaturas SET status = 'recusada' WHERE id = $1`, [id])
+      if (cand.pintor_token) {
+        enviarPushNotificacao(cand.pintor_token, '❌ Candidatura não selecionada',
+          `Sua candidatura para "${cand.titulo}" não foi selecionada desta vez.`,
+          { tipo: 'candidatura_recusada', candidatura_id: id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Candidatura recusada.' })
+    }
+    if (action === 'contraproposta') {
+      if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
+      await pool.query(
+        `INSERT INTO negociacoes (candidatura_id, autor_id, tipo, valor, mensagem) VALUES ($1, $2, 'contra_oferta', $3, $4)`,
+        [id, req.usuario.id, valor, mensagem || null]
+      )
+      if (cand.pintor_token) {
+        enviarPushNotificacao(cand.pintor_token, '💬 O dono fez uma proposta!',
+          `Nova proposta de R$ ${Number(valor).toLocaleString('pt-BR')} para "${cand.titulo}". Veja no app!`,
+          { tipo: 'contra_oferta', candidatura_id: id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Contraproposta enviada!' })
+    }
+    res.status(400).json({ erro: 'Ação inválida' })
+  } catch (err) {
+    console.error('Erro ao responder candidatura (dono):', err)
+    res.status(500).json({ erro: 'Erro ao responder' })
+  }
+})
+
+// Pintor responds to dono's counter-offer: aceitar | recusar
+router.post('/candidaturas/:id/pintor-responder', autenticar, async (req, res) => {
+  try {
+    const { action } = req.body
+    const { id } = req.params
+    const candidatura = await pool.query(
+      `SELECT c.*, o.criado_por as dono_id, o.titulo
+       FROM candidaturas c JOIN obras o ON c.obra_id = o.id
+       WHERE c.id = $1 AND c.usuario_id = $2`, [id, req.usuario.id]
+    )
+    if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
+    const cand = candidatura.rows[0]
+    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [cand.dono_id])
+
+    if (action === 'aceitar') {
+      await pool.query(`UPDATE candidaturas SET status = 'aprovada' WHERE id = $1`, [id])
+      if (dono.rows[0]?.push_token) {
+        enviarPushNotificacao(dono.rows[0].push_token, '✅ Proposta aceita!',
+          `O pintor aceitou sua proposta para "${cand.titulo}"!`,
+          { tipo: 'candidatura_aprovada', candidatura_id: id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Proposta aceita!' })
+    }
+    if (action === 'recusar') {
+      await pool.query(`UPDATE candidaturas SET status = 'recusada' WHERE id = $1`, [id])
+      if (dono.rows[0]?.push_token) {
+        enviarPushNotificacao(dono.rows[0].push_token, '❌ Proposta recusada',
+          `O pintor recusou sua proposta para "${cand.titulo}".`,
+          { tipo: 'candidatura_recusada', candidatura_id: id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Proposta recusada.' })
+    }
+    res.status(400).json({ erro: 'Ação inválida' })
+  } catch (err) {
+    console.error('Erro ao responder candidatura (pintor):', err)
+    res.status(500).json({ erro: 'Erro ao responder' })
   }
 })
 
