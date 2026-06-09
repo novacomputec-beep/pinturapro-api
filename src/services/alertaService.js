@@ -123,9 +123,7 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     const prestadores = await pool.query(
       `SELECT u.push_token
        FROM usuarios u
-       JOIN assinaturas a ON a.usuario_id = u.id
        WHERE u.role = 'prestador'
-         AND a.status = 'ativa'
          AND u.push_token IS NOT NULL
        LIMIT 500`
     )
