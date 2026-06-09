@@ -874,6 +874,21 @@ router.post('/upload/reparo-url', autenticar, async (req, res) => {
   }
 })
 
+// Salva URL de mídia de obra após upload direto ao Cloudinary
+router.post('/upload/obra-url', autenticar, async (req, res) => {
+  try {
+    const { obra_id, url, tipo = 'video', ordem = 1 } = req.body
+    if (!obra_id || !url) return res.status(400).json({ erro: 'obra_id e url são obrigatórios' })
+    const result = await pool.query(
+      `INSERT INTO midias (obra_id, tipo, url, ordem) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [obra_id, tipo, url, ordem]
+    )
+    res.json(result.rows[0])
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao salvar mídia' })
+  }
+})
+
 // Buscar usuário por e-mail (admin)
 router.post('/admin/buscar-usuario', autenticar, exigirAdmin, async (req, res) => {
   try {

@@ -15,6 +15,7 @@ const listar = async (req, res) => {
              (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
       FROM obras o
       WHERE o.status = 'aberta'
+      AND o.status_aprovacao = 'aprovada'
       AND o.expira_em > NOW()
     `
     const params = []
