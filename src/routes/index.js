@@ -370,6 +370,25 @@ router.post('/reparos/aprovacao/:id/recusar', autenticar, exigirAdmin, async (re
   }
 })
 
+router.get('/reparos/meus-interesses', autenticar, exigirPrestador, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT ir.id, ir.status, ir.valor_proposto, ir.valor_contraproposta, ir.rodada, ir.criado_em,
+             r.id as reparo_id, r.titulo, r.categoria, r.descricao, r.valor_estimado,
+             r.cidade, r.bairro, r.expira_em, r.status as reparo_status, r.prazo_atendimento_horas,
+             (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa
+      FROM interesse_reparos ir
+      JOIN reparos r ON ir.reparo_id = r.id
+      WHERE ir.usuario_id = $1
+      ORDER BY ir.criado_em DESC
+    `, [req.usuario.id])
+    res.json({ interesses: result.rows })
+  } catch (err) {
+    console.error('[meus-interesses]', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar seus interesses' })
+  }
+})
+
 router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
   try {
     const page  = parseInt(req.query.page)  || 1

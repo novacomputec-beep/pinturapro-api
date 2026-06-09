@@ -4,7 +4,10 @@ const { Expo } = require('expo-server-sdk')
 const expo = new Expo()
 
 const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}) => {
-  if (!Expo.isExpoPushToken(pushToken)) return
+  if (!Expo.isExpoPushToken(pushToken)) {
+    console.warn('[Push] Token inválido ou ausente:', pushToken ? pushToken.substring(0, 30) : 'null')
+    return
+  }
   try {
     await expo.sendPushNotificationsAsync([{
       to: pushToken,
@@ -13,8 +16,9 @@ const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}) => {
       body: corpo,
       data,
     }])
+    console.log('[Push] Enviado:', titulo, '→', pushToken.substring(0, 30))
   } catch (err) {
-    console.error('Erro ao enviar push:', err)
+    console.error('[Push] Erro ao enviar:', err.message)
   }
 }
 
