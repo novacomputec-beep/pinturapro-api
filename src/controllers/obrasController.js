@@ -24,7 +24,7 @@ const listar = async (req, res) => {
       query += ` AND o.categoria = $${params.length}`
     }
 
-    query += ` ORDER BY o.criado_em DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`
+    query += ` ORDER BY o.expira_em ASC, o.valor DESC NULLS LAST LIMIT $${params.length + 1} OFFSET $${params.length + 2}`
     params.push(parseInt(limit), offset)
 
     const result = await pool.query(query, params)

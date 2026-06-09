@@ -369,7 +369,7 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
     }
 
     params.push(limit)
-    query += ` ORDER BY r.criado_em DESC LIMIT $${params.length}`
+    query += ` ORDER BY r.expira_em ASC, r.valor_estimado DESC NULLS LAST LIMIT $${params.length}`
     params.push(offset)
     query += ` OFFSET $${params.length}`
 
