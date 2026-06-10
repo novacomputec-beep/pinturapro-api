@@ -1413,7 +1413,6 @@ router.post('/mensagens/:id/responder',   autenticar, exigirAdmin, mensagensCtrl
 // PAGAMENTOS
 // ============================================================
 router.post('/pagamentos/criar-assinatura',   autenticar, pagamentoCtrl.criarAssinatura)
-router.post('/pagamentos/webhook',            pagamentoCtrl.webhook)
 router.post('/pagamentos/webhook-pagbank',    pagamentoCtrl.webhookPagbank)
 router.get('/pagamentos/sucesso',             pagamentoCtrl.sucesso)
 router.get('/pagamentos/falha',               (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))

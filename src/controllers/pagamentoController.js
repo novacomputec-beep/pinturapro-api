@@ -276,4 +276,4 @@ const listarAssinantes = async (req, res) => {
   }
 }
 
-module.exports = { criarAssinatura, sucesso, webhook, webhookPagbank, darAcessoGratuito, listarAssinantes }
+module.exports = { criarAssinatura, sucesso, webhookPagbank, darAcessoGratuito, listarAssinantes }
