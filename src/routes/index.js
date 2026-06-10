@@ -256,7 +256,7 @@ router.get('/obras/:id', autenticar, exigirAssinaturaAtiva, async (req, res) => 
       `SELECT o.*,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
-       FROM obras o WHERE o.id = $1 AND o.status = 'aberta'`,
+       FROM obras o WHERE o.id = $1`,
       [req.params.id]
     )
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
