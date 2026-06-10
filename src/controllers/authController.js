@@ -60,7 +60,7 @@ const cadastrar = async (req, res) => {
 
     let role = 'assinante'
     if (tipo_conta === 'dono_obra') role = 'dono_obra'
-    else if (tipo_conta === 'prestador' || tipo_conta === 'pintor') role = 'prestador'
+    else if (tipo_conta === 'prestador' || tipo_conta === 'pintor' || tipo_conta === 'construtor') role = 'prestador'
 
     // Define tipo_dono para distinguir donos de pintura vs reparo
     let tipo_dono = null
@@ -100,7 +100,7 @@ const cadastrar = async (req, res) => {
         [usuario.id]
       )
     } else if (role === 'prestador') {
-      const valorMensal = planoEscolhido === 'anual' ? 499.00 : (tipo_conta === 'pintor' ? 99.90 : 49.90)
+      const valorMensal = planoEscolhido === 'anual' ? 499.00 : (tipo_conta === 'pintor' || tipo_conta === 'construtor' ? 99.90 : 49.90)
       await pool.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
          VALUES ($1, $2, $3, 'pendente')`,
