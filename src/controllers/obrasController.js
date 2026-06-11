@@ -3,11 +3,11 @@ const { notificarNovaObra } = require('../services/notificacaoService')
 
 const listar = async (req, res) => {
   try {
-    const { categoria, page = 1, limit = 20 } = req.query
+    const { categoria, raio_km, lat, lng, page = 1, limit = 20 } = req.query
     const offset = (parseInt(page) - 1) * parseInt(limit)
 
     let query = `
-      SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.estado, o.bairro,
+      SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.estado, o.bairro, o.uf,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status,
              0 as distancia_metros,
              (SELECT COUNT(*) FROM midias WHERE obra_id = o.id) as total_midias,
@@ -23,6 +23,27 @@ const listar = async (req, res) => {
     if (categoria && categoria !== 'todas') {
       params.push(categoria)
       query += ` AND o.categoria = $${params.length}`
+    }
+
+    if (raio_km === 'estado' && req.usuario?.id) {
+      const ufResult = await pool.query(`SELECT uf FROM usuarios WHERE id = $1`, [req.usuario.id])
+      const uf = ufResult.rows[0]?.uf
+      if (uf) {
+        params.push(uf)
+        query += ` AND o.uf = $${params.length}`
+      }
+    } else if (raio_km && raio_km !== 'pais' && lat && lng) {
+      const raio = parseFloat(raio_km)
+      const latNum = parseFloat(lat)
+      const lngNum = parseFloat(lng)
+      if (!isNaN(raio) && !isNaN(latNum) && !isNaN(lngNum)) {
+        const latIdx = params.length + 1
+        const lngIdx = params.length + 2
+        const raioIdx = params.length + 3
+        params.push(latNum, lngNum, raio)
+        query += ` AND o.latitude IS NOT NULL AND o.longitude IS NOT NULL
+          AND (6371 * acos(LEAST(1.0, cos(radians($${latIdx})) * cos(radians(o.latitude::float)) * cos(radians(o.longitude::float) - radians($${lngIdx})) + sin(radians($${latIdx})) * sin(radians(o.latitude::float))))) <= $${raioIdx}`
+      }
     }
 
     query += ` ORDER BY o.expira_em ASC, o.valor DESC NULLS LAST LIMIT $${params.length + 1} OFFSET $${params.length + 2}`

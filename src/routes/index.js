@@ -759,7 +759,7 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
     const page  = parseInt(req.query.page)  || 1
     const limit = parseInt(req.query.limit) || 20
     const offset = (page - 1) * limit
-    const { categoria } = req.query
+    const { categoria, raio_km, lat, lng } = req.query
 
     // $1 reservado para o usuario_id (filtro de bloqueados)
     const params = [req.usuario.id]
@@ -778,6 +778,27 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
       query += ` AND r.categoria = $${params.length}`
     }
 
+    if (raio_km === 'estado') {
+      const ufResult = await pool.query(`SELECT uf FROM usuarios WHERE id = $1`, [req.usuario.id])
+      const uf = ufResult.rows[0]?.uf
+      if (uf) {
+        params.push(uf)
+        query += ` AND r.uf = $${params.length}`
+      }
+    } else if (raio_km && raio_km !== 'pais' && lat && lng) {
+      const raio = parseFloat(raio_km)
+      const latNum = parseFloat(lat)
+      const lngNum = parseFloat(lng)
+      if (!isNaN(raio) && !isNaN(latNum) && !isNaN(lngNum)) {
+        const latIdx = params.length + 1
+        const lngIdx = params.length + 2
+        const raioIdx = params.length + 3
+        params.push(latNum, lngNum, raio)
+        query += ` AND r.latitude IS NOT NULL AND r.longitude IS NOT NULL
+          AND (6371 * acos(LEAST(1.0, cos(radians($${latIdx})) * cos(radians(r.latitude::float)) * cos(radians(r.longitude::float) - radians($${lngIdx})) + sin(radians($${latIdx})) * sin(radians(r.latitude::float))))) <= $${raioIdx}`
+      }
+    }
+
     params.push(limit)
     query += ` ORDER BY r.expira_em ASC, r.valor_estimado DESC NULLS LAST LIMIT $${params.length}`
     params.push(offset)
@@ -786,6 +807,7 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
     const result = await pool.query(query, params)
     res.json({ reparos: result.rows, page, limit })
   } catch (err) {
+    console.error('Erro ao buscar reparos:', err)
     res.status(500).json({ erro: 'Erro ao buscar reparos' })
   }
 })

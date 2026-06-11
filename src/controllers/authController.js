@@ -67,8 +67,7 @@ const cadastrar = async (req, res) => {
     if (tipo_conta === 'dono_obra') tipo_dono = 'pintura'
     else if (tipo_conta === 'dono_reparo') { role = 'dono_obra'; tipo_dono = 'reparo' }
 
-    const temDocs = !!(verificacao_doc_frente_url && verificacao_doc_verso_url && verificacao_selfie_url)
-    const verificacaoStatus = (role === 'prestador' && temDocs) ? 'pendente' : 'nao_solicitada'
+    const verificacaoStatus = role === 'prestador' ? 'pendente' : 'nao_solicitada'
 
     const result = await pool.query(
       `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade, uf,
