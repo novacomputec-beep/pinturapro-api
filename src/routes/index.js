@@ -27,6 +27,10 @@ pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_motivo TEXT`
 pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_minutos INTEGER`).catch(err => console.error('[migration] obras.pedido_tempo_minutos:', err.message))
 pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`).catch(err => console.error('[migration] candidaturas.valor_proposto:', err.message))
 pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS mensagem TEXT`).catch(err => console.error('[migration] candidaturas.mensagem:', err.message))
+pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`).catch(err => console.error('[migration] reparos.uf:', err.message))
+pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS endereco_reparo TEXT`).catch(err => console.error('[migration] reparos.endereco_reparo:', err.message))
+pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS latitude NUMERIC`).catch(err => console.error('[migration] reparos.latitude:', err.message))
+pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS longitude NUMERIC`).catch(err => console.error('[migration] reparos.longitude:', err.message))
 pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`).catch(err => console.error('[migration] obras.uf:', err.message))
 pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS endereco_obra TEXT`).catch(err => console.error('[migration] obras.endereco_obra:', err.message))
 pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS latitude NUMERIC`).catch(err => console.error('[migration] obras.latitude:', err.message))
@@ -660,13 +664,13 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar reparos' })
     }
-    const { titulo, categoria, descricao, valor_estimado, cidade, bairro, tags, prazo_atendimento_horas } = req.body
+    const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, latitude, longitude } = req.body
     const horasExpiracao = prazo_atendimento_horas || 720
     const expira_em = new Date(Date.now() + horasExpiracao * 3600 * 1000)
     const result = await pool.query(
-      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'aberta','aprovada',$9,$10) RETURNING *`,
-      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null]
+      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, latitude, longitude)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',$10,$11,$12,$13,$14) RETURNING *`,
+      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null, endereco_obra, latitude, longitude]
     )
     res.status(201).json(result.rows[0])
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
