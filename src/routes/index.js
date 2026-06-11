@@ -20,6 +20,13 @@ pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS rodada INTEGE
 pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS alerta_sem_interessados_em TIMESTAMP WITH TIME ZONE`).catch(err => console.error('[migration] alerta_sem_interessados_em:', err.message))
 pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`).catch(err => console.error('[migration] candidaturas.valor_contraproposta:', err.message))
 pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS alerta_sem_interessados_em TIMESTAMP WITH TIME ZONE`).catch(err => console.error('[migration] obras.alerta_sem_interessados_em:', err.message))
+pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS match_feito_em TIMESTAMP WITH TIME ZONE`).catch(err => console.error('[migration] obras.match_feito_em:', err.message))
+pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS match_usuario_id UUID REFERENCES usuarios(id)`).catch(err => console.error('[migration] obras.match_usuario_id:', err.message))
+pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_status VARCHAR(50)`).catch(err => console.error('[migration] obras.pedido_tempo_status:', err.message))
+pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_motivo TEXT`).catch(err => console.error('[migration] obras.pedido_tempo_motivo:', err.message))
+pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_minutos INTEGER`).catch(err => console.error('[migration] obras.pedido_tempo_minutos:', err.message))
+pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`).catch(err => console.error('[migration] candidaturas.valor_proposto:', err.message))
+pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS mensagem TEXT`).catch(err => console.error('[migration] candidaturas.mensagem:', err.message))
 
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()
@@ -249,9 +256,8 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
   }
 })
 
-router.get('/obras/:id', autenticar, exigirAssinaturaAtiva, async (req, res) => {
+router.get('/obras/:id', autenticar, async (req, res) => {
   try {
-    await pool.query(`UPDATE obras SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
     const result = await pool.query(
       `SELECT o.*,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
@@ -260,15 +266,365 @@ router.get('/obras/:id', autenticar, exigirAssinaturaAtiva, async (req, res) => 
       [req.params.id]
     )
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    const obra = result.rows[0]
+    const ehDono = obra.criado_por === req.usuario.id
+    const ehPintorDoMatch = obra.match_usuario_id === req.usuario.id
+
+    if (!ehDono && !ehPintorDoMatch && req.usuario.role !== 'admin') {
+      const assinatura = await pool.query(
+        `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
+        [req.usuario.id]
+      )
+      if (assinatura.rows.length === 0) {
+        return res.status(403).json({ erro: 'Assinatura necessária para ver esta obra' })
+      }
+    }
+
+    if (!ehDono) {
+      await pool.query(`UPDATE obras SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
+    }
+
     const midias = await pool.query(`SELECT * FROM midias WHERE obra_id = $1 ORDER BY ordem`, [req.params.id])
-    const minhaCandidatura = await pool.query(
-      `SELECT id, status, valor_oferta, mensagem_oferta, valor_contraproposta FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
+    const minhaCandidaturaResult = await pool.query(
+      `SELECT id, status, valor_oferta, mensagem_oferta, valor_proposto, mensagem, valor_contraproposta FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
       [req.params.id, req.usuario.id]
     )
-    res.json({ obra: result.rows[0], midias: midias.rows, minha_candidatura: minhaCandidatura.rows[0] || null })
+
+    let candidatos = []
+    if (ehDono || req.usuario.role === 'admin') {
+      const candidatosResult = await pool.query(
+        `SELECT c.id, c.status, c.valor_proposto, c.valor_contraproposta, c.mensagem,
+                u.nome, u.cidade, u.foto_url, c.usuario_id,
+                CASE WHEN c.status = 'aceito' THEN u.telefone ELSE NULL END as telefone
+         FROM candidaturas c JOIN usuarios u ON u.id = c.usuario_id
+         WHERE c.obra_id = $1 ORDER BY c.criado_em DESC`,
+        [req.params.id]
+      )
+      candidatos = candidatosResult.rows
+    }
+
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos })
   } catch (err) {
     console.error('Erro ao buscar obra:', err)
     res.status(500).json({ erro: 'Erro ao buscar obra' })
+  }
+})
+
+// POST /obras/:id/candidatura — pintor se candidata a uma obra
+router.post('/obras/:id/candidatura', autenticar, async (req, res) => {
+  try {
+    const { mensagem, valor_proposto } = req.body
+    const existente = await pool.query(
+      `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
+      [req.params.id, req.usuario.id]
+    )
+    if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já se candidatou nesta obra' })
+    const result = await pool.query(
+      `INSERT INTO candidaturas (obra_id, usuario_id, mensagem, valor_proposto, status) VALUES ($1, $2, $3, $4, 'pendente') RETURNING *`,
+      [req.params.id, req.usuario.id, mensagem, valor_proposto || null]
+    )
+    const donoInfo = await pool.query(
+      `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
+      [req.params.id]
+    )
+    if (donoInfo.rows[0]?.push_token) {
+      enviarPushNotificacao(donoInfo.rows[0].push_token, '🎨 Novo candidato!',
+        `Um pintor se candidatou na obra "${donoInfo.rows[0].titulo}"`,
+        { tipo: 'nova_candidatura', obra_id: req.params.id }).catch(() => {})
+    }
+    res.status(201).json(result.rows[0])
+  } catch (err) {
+    console.error('Erro ao candidatar:', err)
+    res.status(500).json({ erro: 'Erro ao registrar candidatura' })
+  }
+})
+
+// POST /obras/:id/candidatura/:candidaturaId/responder — dono responde a uma candidatura
+router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async (req, res) => {
+  try {
+    const { action, valor } = req.body
+    const { id: obra_id, candidaturaId } = req.params
+    const obra = await pool.query(`SELECT criado_por, titulo FROM obras WHERE id = $1`, [obra_id])
+    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    if (obra.rows[0].criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
+    const candidatura = await pool.query(
+      `SELECT c.*, u.push_token FROM candidaturas c JOIN usuarios u ON c.usuario_id = u.id WHERE c.id = $1 AND c.obra_id = $2`,
+      [candidaturaId, obra_id]
+    )
+    if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
+    const cand = candidatura.rows[0]
+    if (action === 'aceitar') {
+      await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
+      if (cand.push_token) {
+        enviarPushNotificacao(cand.push_token, '✅ Candidatura aceita!',
+          `O solicitante aceitou sua candidatura para "${obra.rows[0].titulo}". Confirme sua ida!`,
+          { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
+      }
+      enviarContratoObra(obra_id).catch(err => console.error('Erro ao enviar contrato obra:', err))
+      return res.json({ mensagem: 'Candidatura aceita! Contrato enviado por e-mail.' })
+    }
+    if (action === 'recusar') {
+      await pool.query(`UPDATE candidaturas SET status = 'recusado' WHERE id = $1`, [candidaturaId])
+      if (cand.push_token) {
+        enviarPushNotificacao(cand.push_token, '❌ Candidatura não aceita',
+          `Sua candidatura para "${obra.rows[0].titulo}" não foi selecionada desta vez.`,
+          { tipo: 'candidatura_recusada', obra_id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Candidatura recusada.' })
+    }
+    if (action === 'contraproposta') {
+      if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
+      await pool.query(
+        `UPDATE candidaturas SET status = 'contraproposta_dono', valor_contraproposta = $2 WHERE id = $1`,
+        [candidaturaId, valor]
+      )
+      if (cand.push_token) {
+        enviarPushNotificacao(cand.push_token, '💬 Contraproposta recebida!',
+          `O solicitante fez uma contraproposta para "${obra.rows[0].titulo}". Veja no app!`,
+          { tipo: 'contraproposta_dono', obra_id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Contraproposta enviada!' })
+    }
+    res.status(400).json({ erro: 'Ação inválida' })
+  } catch (err) {
+    console.error('Erro ao responder candidatura:', err)
+    res.status(500).json({ erro: 'Erro ao responder' })
+  }
+})
+
+// POST /obras/:id/candidatura/:candidaturaId/pintor-responder — pintor responde a contraproposta
+router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar, async (req, res) => {
+  try {
+    const { action } = req.body
+    const { id: obra_id, candidaturaId } = req.params
+    const candidatura = await pool.query(
+      `SELECT * FROM candidaturas WHERE id = $1 AND obra_id = $2 AND usuario_id = $3`,
+      [candidaturaId, obra_id, req.usuario.id]
+    )
+    if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
+    if (candidatura.rows[0].status !== 'contraproposta_dono') return res.status(400).json({ erro: 'Não há contraproposta pendente' })
+    const obra = await pool.query(`SELECT titulo, criado_por FROM obras WHERE id = $1`, [obra_id])
+    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [obra.rows[0].criado_por])
+    if (action === 'aceitar') {
+      await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
+      if (dono.rows[0]?.push_token) {
+        enviarPushNotificacao(dono.rows[0].push_token, '✅ Contraproposta aceita!',
+          `O pintor aceitou sua contraproposta para "${obra.rows[0].titulo}"!`,
+          { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
+      }
+      enviarContratoObra(obra_id).catch(err => console.error('Erro ao enviar contrato obra:', err))
+      return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
+    }
+    if (action === 'recusar') {
+      await pool.query(`UPDATE candidaturas SET status = 'recusado' WHERE id = $1`, [candidaturaId])
+      if (dono.rows[0]?.push_token) {
+        enviarPushNotificacao(dono.rows[0].push_token, '❌ Proposta recusada',
+          `O pintor recusou sua contraproposta para "${obra.rows[0].titulo}".`,
+          { tipo: 'candidatura_recusada', obra_id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Proposta recusada.' })
+    }
+    res.status(400).json({ erro: 'Ação inválida' })
+  } catch (err) {
+    console.error('Erro ao responder contraproposta:', err)
+    res.status(500).json({ erro: 'Erro ao responder' })
+  }
+})
+
+// POST /obras/:id/match — pintor confirma ida ao local
+router.post('/obras/:id/match', autenticar, async (req, res) => {
+  try {
+    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1 AND status = 'aberta'`, [req.params.id])
+    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    if (obra.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Esta obra já tem um pintor a caminho' })
+    const candidaturaAceita = await pool.query(
+      `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2 AND status = 'aceito'`,
+      [req.params.id, req.usuario.id]
+    )
+    if (candidaturaAceita.rows.length === 0) return res.status(403).json({ erro: 'Sua candidatura ainda não foi aceita para esta obra.' })
+    await pool.query(
+      `UPDATE obras SET match_feito_em = NOW(), match_usuario_id = $1 WHERE id = $2`,
+      [req.usuario.id, req.params.id]
+    )
+    const dono = await pool.query(
+      `SELECT u.push_token FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
+      [req.params.id]
+    )
+    if (dono.rows[0]?.push_token) {
+      await enviarPushNotificacao(dono.rows[0].push_token, '🚀 Pintor a caminho!',
+        `Um pintor confirmou que está indo até você para "${obra.rows[0].titulo}"`,
+        { tipo: 'match_obra', obra_id: req.params.id })
+    }
+    res.json({ mensagem: 'Match confirmado! Contagem regressiva iniciada.', match_feito_em: new Date() })
+    enviarContratoObra(req.params.id).catch(err => console.error('Erro ao enviar contrato obra:', err))
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao confirmar match' })
+  }
+})
+
+// POST /obras/:id/encerrar — dono ou pintor encerra a obra
+router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
+  try {
+    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
+    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    const o = obra.rows[0]
+    const ehDono = o.criado_por === req.usuario.id
+    const ehPintor = o.match_usuario_id === req.usuario.id
+    const ehAdmin = req.usuario.role === 'admin'
+    if (!ehDono && !ehPintor && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar esta obra' })
+    await pool.query(`UPDATE obras SET status = 'encerrada', status_aprovacao = 'encerrada' WHERE id = $1`, [req.params.id])
+    if (ehDono && o.match_usuario_id) {
+      const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.match_usuario_id])
+      if (pintor.rows[0]?.push_token) {
+        await enviarPushNotificacao(pintor.rows[0].push_token, '✅ Obra encerrada!',
+          `O solicitante encerrou a obra "${o.titulo}".`, { tipo: 'obra_encerrada', obra_id: req.params.id })
+      }
+    } else if (ehPintor) {
+      const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
+      if (dono.rows[0]?.push_token) {
+        await enviarPushNotificacao(dono.rows[0].push_token, '✅ Serviço concluído!',
+          `O pintor concluiu a obra "${o.titulo}".`, { tipo: 'obra_encerrada', obra_id: req.params.id })
+      }
+    }
+    res.json({ mensagem: 'Obra encerrada com sucesso!' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao encerrar obra' })
+  }
+})
+
+// POST /obras/:id/expirar-match — chamado quando o cronômetro expira
+router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
+  try {
+    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
+    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    const o = obra.rows[0]
+    const ehDono = o.criado_por === req.usuario.id
+    const ehPintor = o.match_usuario_id === req.usuario.id
+    const ehAdmin = req.usuario.role === 'admin'
+    if (!ehDono && !ehPintor && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão' })
+    const pintorId = o.match_usuario_id
+    await pool.query(
+      `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL WHERE id = $1`,
+      [req.params.id]
+    )
+    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
+    if (dono.rows[0]?.push_token) {
+      enviarPushNotificacao(dono.rows[0].push_token, '⏰ Prazo expirado!',
+        `O pintor não chegou a tempo para "${o.titulo}". A obra está disponível novamente.`,
+        { tipo: 'match_expirado', obra_id: req.params.id }).catch(() => {})
+    }
+    res.json({ mensagem: 'Match expirado, obra disponível novamente' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao expirar match' })
+  }
+})
+
+// POST /obras/:id/pedir-tempo — pintor solicita mais tempo
+router.post('/obras/:id/pedir-tempo', autenticar, async (req, res) => {
+  try {
+    const { motivo } = req.body
+    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
+    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    const o = obra.rows[0]
+    if (o.match_usuario_id !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o pintor do match pode solicitar mais tempo' })
+    await pool.query(
+      `UPDATE obras SET pedido_tempo_status = 'aguardando_tempo', pedido_tempo_motivo = $1, pedido_tempo_minutos = NULL WHERE id = $2`,
+      [motivo, req.params.id]
+    )
+    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
+    if (dono.rows[0]?.push_token) {
+      await enviarPushNotificacao(dono.rows[0].push_token, '⚠️ Pintor precisa de mais tempo!',
+        `Motivo: ${motivo}. Abra o app para responder.`,
+        { tipo: 'pedido_tempo', obra_id: req.params.id })
+    }
+    res.json({ mensagem: 'Solicitação enviada ao dono.' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao solicitar mais tempo' })
+  }
+})
+
+// POST /obras/:id/perguntar-tempo — dono pergunta quantos minutos o pintor precisa
+router.post('/obras/:id/perguntar-tempo', autenticar, async (req, res) => {
+  try {
+    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
+    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    const o = obra.rows[0]
+    if (o.criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder o pedido' })
+    await pool.query(`UPDATE obras SET pedido_tempo_status = 'aguardando_minutos' WHERE id = $1`, [req.params.id])
+    const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.match_usuario_id])
+    if (pintor.rows[0]?.push_token) {
+      await enviarPushNotificacao(pintor.rows[0].push_token, '⏱ Quanto tempo você precisa?',
+        'O solicitante quer saber quantos minutos a mais você precisa para chegar.',
+        { tipo: 'perguntar_tempo', obra_id: req.params.id })
+    }
+    res.json({ mensagem: 'Pintor notificado para informar o tempo.' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao perguntar tempo' })
+  }
+})
+
+// POST /obras/:id/informar-tempo — pintor informa quantos minutos precisa
+router.post('/obras/:id/informar-tempo', autenticar, async (req, res) => {
+  try {
+    const { minutos } = req.body
+    if (!minutos || minutos <= 0) return res.status(400).json({ erro: 'Informe um tempo válido em minutos' })
+    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
+    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    const o = obra.rows[0]
+    if (o.match_usuario_id !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o pintor do match pode informar o tempo' })
+    await pool.query(
+      `UPDATE obras SET pedido_tempo_status = 'aguardando_aprovacao', pedido_tempo_minutos = $1 WHERE id = $2`,
+      [minutos, req.params.id]
+    )
+    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
+    if (dono.rows[0]?.push_token) {
+      await enviarPushNotificacao(dono.rows[0].push_token, '⏳ Pintor precisa de mais tempo',
+        `Ele precisa de ${minutos} minuto(s) a mais. Aceitar ou recusar?`,
+        { tipo: 'aprovar_tempo', obra_id: req.params.id })
+    }
+    res.json({ mensagem: 'Dono notificado para aprovar o tempo.' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao informar tempo' })
+  }
+})
+
+// POST /obras/:id/responder-tempo — dono aceita ou recusa tempo extra
+router.post('/obras/:id/responder-tempo', autenticar, async (req, res) => {
+  try {
+    const { aceito } = req.body
+    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
+    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    const o = obra.rows[0]
+    if (o.criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
+    if (aceito) {
+      const novoMatchFeitoEm = new Date(new Date(o.match_feito_em).getTime() + o.pedido_tempo_minutos * 60 * 1000)
+      await pool.query(
+        `UPDATE obras SET match_feito_em = $1, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL WHERE id = $2`,
+        [novoMatchFeitoEm.toISOString(), req.params.id]
+      )
+      const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.match_usuario_id])
+      if (pintor.rows[0]?.push_token) {
+        await enviarPushNotificacao(pintor.rows[0].push_token, '✅ Tempo extra aceito!',
+          `O solicitante aceitou. Você tem mais ${o.pedido_tempo_minutos} minuto(s). Corra!`,
+          { tipo: 'tempo_aceito', obra_id: req.params.id })
+      }
+      res.json({ mensagem: 'Tempo extra concedido!', novo_match_feito_em: novoMatchFeitoEm })
+    } else {
+      const pintorId = o.match_usuario_id
+      await pool.query(
+        `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL WHERE id = $1`,
+        [req.params.id]
+      )
+      const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [pintorId])
+      if (pintor.rows[0]?.push_token) {
+        await enviarPushNotificacao(pintor.rows[0].push_token, '❌ Tempo extra recusado',
+          'O solicitante não aceitou. A obra voltou para disponível.',
+          { tipo: 'tempo_recusado', obra_id: req.params.id })
+      }
+      res.json({ mensagem: 'Tempo recusado. Obra disponível novamente.' })
+    }
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao responder pedido de tempo' })
   }
 })
 
