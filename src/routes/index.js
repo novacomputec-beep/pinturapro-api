@@ -27,6 +27,10 @@ pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_motivo TEXT`
 pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_minutos INTEGER`).catch(err => console.error('[migration] obras.pedido_tempo_minutos:', err.message))
 pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`).catch(err => console.error('[migration] candidaturas.valor_proposto:', err.message))
 pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS mensagem TEXT`).catch(err => console.error('[migration] candidaturas.mensagem:', err.message))
+pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`).catch(err => console.error('[migration] obras.uf:', err.message))
+pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS endereco_obra TEXT`).catch(err => console.error('[migration] obras.endereco_obra:', err.message))
+pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS latitude NUMERIC`).catch(err => console.error('[migration] obras.latitude:', err.message))
+pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS longitude NUMERIC`).catch(err => console.error('[migration] obras.longitude:', err.message))
 
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()
@@ -173,12 +177,12 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos de obra podem cadastrar obras' })
     }
-    const { titulo, categoria, valor, cidade, bairro, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags } = req.body
+    const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags, endereco_obra, latitude, longitude } = req.body
     const expira_em = new Date(Date.now() + (horas_para_expirar || 720) * 3600 * 1000)
     const result = await pool.query(
-      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, metragem, prazo_execucao_dias, expira_em, descricao, tags, status, enviada_por_dono, status_aprovacao)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'rascunho',true,'pendente') RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || []]
+      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, latitude, longitude, status, enviada_por_dono, status_aprovacao)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'rascunho',true,'pendente') RETURNING *`,
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, latitude, longitude]
     )
     res.status(201).json(result.rows[0])
   } catch (err) {
