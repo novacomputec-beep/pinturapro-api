@@ -649,7 +649,7 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
       `SELECT r.*,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa
-       FROM reparos r WHERE r.criado_por = $1 AND r.status != 'encerrada' ORDER BY r.criado_em DESC
+       FROM reparos r WHERE r.criado_por = $1 AND r.status != 'cancelada' ORDER BY r.criado_em DESC
        LIMIT $2 OFFSET $3`,
       [req.usuario.id, limit, offset]
     )
@@ -682,10 +682,11 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
 router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(
-      `SELECT id FROM reparos WHERE id = $1 AND criado_por = $2`,
+      `SELECT id, match_usuario_id FROM reparos WHERE id = $1 AND criado_por = $2`,
       [req.params.id, req.usuario.id]
     )
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Não é possível excluir um reparo com prestador a caminho' })
     await pool.query(`DELETE FROM midias_reparos WHERE reparo_id = $1`, [req.params.id])
     await pool.query(`DELETE FROM interesse_reparos WHERE reparo_id = $1`, [req.params.id])
     await pool.query(`DELETE FROM reparos WHERE id = $1`, [req.params.id])
