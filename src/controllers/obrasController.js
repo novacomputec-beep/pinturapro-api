@@ -25,7 +25,14 @@ const listar = async (req, res) => {
       query += ` AND o.categoria = $${params.length}`
     }
 
-    if (raio_km === 'estado' && req.usuario?.id) {
+    if (raio_km === 'cidade' && req.usuario?.id) {
+      const cidadeResult = await pool.query(`SELECT cidade FROM usuarios WHERE id = $1`, [req.usuario.id])
+      const cidade = cidadeResult.rows[0]?.cidade
+      if (cidade) {
+        params.push(cidade)
+        query += ` AND o.cidade = $${params.length}`
+      }
+    } else if (raio_km === 'estado' && req.usuario?.id) {
       const ufResult = await pool.query(`SELECT uf FROM usuarios WHERE id = $1`, [req.usuario.id])
       const uf = ufResult.rows[0]?.uf
       if (uf) {

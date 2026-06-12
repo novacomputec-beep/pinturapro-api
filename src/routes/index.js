@@ -35,6 +35,13 @@ pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`).catch(err
 pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS endereco_obra TEXT`).catch(err => console.error('[migration] obras.endereco_obra:', err.message))
 pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS latitude NUMERIC`).catch(err => console.error('[migration] obras.latitude:', err.message))
 pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS longitude NUMERIC`).catch(err => console.error('[migration] obras.longitude:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_status VARCHAR(50) DEFAULT 'nao_solicitada'`).catch(err => console.error('[migration] usuarios.verificacao_status:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_doc_frente_url TEXT`).catch(err => console.error('[migration] usuarios.verificacao_doc_frente_url:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_doc_verso_url TEXT`).catch(err => console.error('[migration] usuarios.verificacao_doc_verso_url:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_selfie_url TEXT`).catch(err => console.error('[migration] usuarios.verificacao_selfie_url:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_dono VARCHAR(50)`).catch(err => console.error('[migration] usuarios.tipo_dono:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS pix_reembolso VARCHAR(200)`).catch(err => console.error('[migration] usuarios.pix_reembolso:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS referencias TEXT`).catch(err => console.error('[migration] usuarios.referencias:', err.message))
 
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()
