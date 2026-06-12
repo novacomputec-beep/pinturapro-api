@@ -7,7 +7,7 @@ const crypto = require('crypto')
 const gerarToken = (usuario) => jwt.sign(
   { id: usuario.id, role: usuario.role },
   process.env.JWT_SECRET,
-  { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+  { expiresIn: usuario.role === 'admin' ? '30d' : (process.env.JWT_EXPIRES_IN || '7d') }
 )
 
 const transporter = nodemailer.createTransport({
@@ -41,7 +41,7 @@ const cadastrar = async (req, res) => {
 
     const existente = await pool.query('SELECT id FROM usuarios WHERE email = $1', [emailNormalizado])
     if (existente.rows.length > 0) {
-      return res.status(409).json({ erro: 'E-mail já cadastrado' })
+      return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
     }
 
     // Verifica CPF/CNPJ duplicado
@@ -52,7 +52,7 @@ const cadastrar = async (req, res) => {
         [cpfLimpo]
       )
       if (cpfExistente.rows.length > 0) {
-        return res.status(409).json({ erro: 'CPF ou CNPJ já cadastrado' })
+        return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
       }
     }
 
@@ -146,9 +146,9 @@ const cadastrar = async (req, res) => {
 
   } catch (err) {
     if (err.code === '23505') {
-      if (err.constraint?.includes('cpf')) return res.status(409).json({ erro: 'CPF ou CNPJ já cadastrado' })
-      if (err.constraint?.includes('email')) return res.status(409).json({ erro: 'E-mail já cadastrado' })
-      return res.status(409).json({ erro: 'Dados já cadastrados' })
+      if (err.constraint?.includes('cpf')) return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
+      if (err.constraint?.includes('email')) return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
+      return res.status(409).json({ erro: 'Dados já cadastrados. Verifique seu e-mail e CPF/CNPJ.' })
     }
     console.error('Erro no cadastro DETALHADO:', err.message, err.stack)
     res.status(500).json({ erro: err.message || 'Erro ao criar conta' })
