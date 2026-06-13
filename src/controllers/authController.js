@@ -25,7 +25,8 @@ const cadastrar = async (req, res) => {
     const { nome, email, telefone, senha, cidade, uf,
             especialidades, anos_experiencia, tamanho_equipe,
             cpf_cnpj, tipo_conta, plano, pix_reembolso, referencias,
-            verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url } = req.body
+            verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
+            rg, rg_orgao, rg_estado } = req.body
 
     if (!nome || !email || !senha) {
       return res.status(400).json({ erro: 'Nome, e-mail e senha são obrigatórios' })
@@ -74,9 +75,9 @@ const cadastrar = async (req, res) => {
         especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo,
         tipo_dono, pix_reembolso, referencias,
         verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
-        verificacao_status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18)
-       RETURNING id, nome, email, role`,
+        verificacao_status, rg, rg_orgao, rg_estado)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+       RETURNING id, nome, email, role, tipo_dono, foto_url`,
       [nome.trim(), emailNormalizado, telefone, senha_hash, cidade, uf || null,
        especialidades || [], anos_experiencia || 0,
        tamanho_equipe || 1, cpf_cnpj, role,
@@ -86,7 +87,8 @@ const cadastrar = async (req, res) => {
        verificacao_doc_frente_url || null,
        verificacao_doc_verso_url || null,
        verificacao_selfie_url || null,
-       verificacaoStatus]
+       verificacaoStatus,
+       rg || null, rg_orgao || null, rg_estado || null]
     )
 
     const usuario = result.rows[0]
