@@ -12,6 +12,8 @@ const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = require('../services/uploadService')
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
+const bcrypt = require('bcryptjs')
+const speakeasy = require('speakeasy')
 
 // One-time column migrations
 pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`).catch(err => console.error('[migration] valor_proposto:', err.message))
@@ -42,6 +44,11 @@ pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_selfie_url
 pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_dono VARCHAR(50)`).catch(err => console.error('[migration] usuarios.tipo_dono:', err.message))
 pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS pix_reembolso VARCHAR(200)`).catch(err => console.error('[migration] usuarios.pix_reembolso:', err.message))
 pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS referencias TEXT`).catch(err => console.error('[migration] usuarios.referencias:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg VARCHAR(20)`).catch(err => console.error('[migration] rg:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_orgao VARCHAR(20)`).catch(err => console.error('[migration] rg_orgao:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_estado VARCHAR(2)`).catch(err => console.error('[migration] rg_estado:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_secret VARCHAR(100)`).catch(err => console.error('[migration] dois_fa_secret:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_ativo BOOLEAN DEFAULT false`).catch(err => console.error('[migration] dois_fa_ativo:', err.message))
 
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()
@@ -1402,6 +1409,8 @@ router.get('/verificacao/pendentes', autenticar, exigirAdmin, async (req, res) =
              u.verificacao_status, u.verificacao_doc_frente_url,
              u.verificacao_doc_verso_url, u.verificacao_selfie_url,
              u.referencias, u.pix_reembolso, u.criado_em,
+             u.anos_experiencia, u.tamanho_equipe,
+             u.rg, u.rg_orgao, u.rg_estado,
              a.plano, a.status as assinatura_status
       FROM usuarios u
       LEFT JOIN assinaturas a ON a.usuario_id = u.id
@@ -1850,5 +1859,112 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
 // Health check
 router.get('/health', (req, res) => res.json({ status: 'ok', versao: '1.0.0' }))
 
+// ============================================================
+// ADMIN — LIMPEZA SELETIVA
+// ============================================================
+router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(`DELETE FROM assinaturas WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
+    await client.query(`DELETE FROM localizacoes_prestadores WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
+    await client.query(`DELETE FROM usuarios WHERE role != 'admin'`)
+    await client.query('COMMIT')
+    res.json({ mensagem: 'Usuários removidos com sucesso' })
+  } catch (err) {
+    await client.query('ROLLBACK')
+    console.error('Erro ao limpar usuários:', err)
+    res.status(500).json({ erro: 'Erro ao limpar usuários' })
+  } finally { client.release() }
+})
+
+router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(`DELETE FROM candidaturas`)
+    await client.query(`DELETE FROM midias`)
+    await client.query(`DELETE FROM obras`)
+    await client.query('COMMIT')
+    res.json({ mensagem: 'Obras removidas com sucesso' })
+  } catch (err) {
+    await client.query('ROLLBACK')
+    console.error('Erro ao limpar obras:', err)
+    res.status(500).json({ erro: 'Erro ao limpar obras' })
+  } finally { client.release() }
+})
+
+router.post('/admin/limpar-reparos', autenticar, exigirAdmin, async (req, res) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(`DELETE FROM interesse_reparos`)
+    await client.query(`DELETE FROM midias_reparos`)
+    await client.query(`DELETE FROM negociacoes`)
+    await client.query(`DELETE FROM reparos`)
+    await client.query('COMMIT')
+    res.json({ mensagem: 'Reparos removidos com sucesso' })
+  } catch (err) {
+    await client.query('ROLLBACK')
+    console.error('Erro ao limpar reparos:', err)
+    res.status(500).json({ erro: 'Erro ao limpar reparos' })
+  } finally { client.release() }
+})
+
+router.post('/admin/limpar-mensagens', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM mensagens`)
+    res.json({ mensagem: 'Mensagens removidas com sucesso' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao limpar mensagens' })
+  }
+})
+
+// ============================================================
+// ADMIN — SEGURANÇA (SENHA + 2FA)
+// ============================================================
+router.post('/admin/trocar-senha', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { senha_atual, nova_senha } = req.body
+    if (!nova_senha || nova_senha.length < 8) return res.status(400).json({ erro: 'Nova senha deve ter ao menos 8 caracteres' })
+    const result = await pool.query(`SELECT senha_hash FROM usuarios WHERE id = $1`, [req.usuario.id])
+    const ok = await bcrypt.compare(senha_atual, result.rows[0].senha_hash)
+    if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' })
+    const hash = await bcrypt.hash(nova_senha, 12)
+    await pool.query(`UPDATE usuarios SET senha_hash = $1 WHERE id = $2`, [hash, req.usuario.id])
+    res.json({ mensagem: 'Senha alterada com sucesso' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao trocar senha' })
+  }
+})
+
+router.post('/admin/2fa/setup', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const adminResult = await pool.query(`SELECT email FROM usuarios WHERE id = $1`, [req.usuario.id])
+    const email = adminResult.rows[0]?.email || 'admin'
+    const secret = speakeasy.generateSecret({ name: `PinturaPro Admin (${email})`, length: 20 })
+    await pool.query(`UPDATE usuarios SET dois_fa_secret = $1, dois_fa_ativo = false WHERE id = $2`, [secret.base32, req.usuario.id])
+    res.json({ secret: secret.base32, otpauth_url: secret.otpauth_url })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao configurar 2FA' })
+  }
+})
+
+router.post('/admin/2fa/verificar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { token, ativar } = req.body
+    const result = await pool.query(`SELECT dois_fa_secret FROM usuarios WHERE id = $1`, [req.usuario.id])
+    const secret = result.rows[0]?.dois_fa_secret
+    if (!secret) return res.status(400).json({ erro: 'Configure o 2FA primeiro clicando em "Gerar QR Code"' })
+    const valido = speakeasy.totp.verify({ secret, encoding: 'base32', token: String(token), window: 1 })
+    if (!valido) return res.status(401).json({ erro: 'Código inválido. Verifique o app autenticador.' })
+    if (ativar !== undefined) {
+      await pool.query(`UPDATE usuarios SET dois_fa_ativo = $1 WHERE id = $2`, [!!ativar, req.usuario.id])
+    }
+    res.json({ valido: true, mensagem: ativar ? '✅ 2FA ativado com sucesso!' : '2FA desativado' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao verificar 2FA' })
+  }
+})
 
 module.exports = router
