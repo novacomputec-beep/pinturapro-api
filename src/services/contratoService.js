@@ -16,7 +16,7 @@ const gerarContratoPDF = (dados) => {
     // Cabeçalho
     doc.fontSize(16).font('Helvetica-Bold').text('CONTRATO DE PRESTAÇÃO DE SERVIÇOS', { align: 'center' })
     doc.moveDown(0.5)
-    doc.fontSize(10).font('Helvetica').text(`Gerado pela plataforma PinturaPro em ${data}`, { align: 'center' })
+    doc.fontSize(10).font('Helvetica').text(`Gerado pela plataforma ArrumaPro em ${data}`, { align: 'center' })
     doc.moveDown(1.5)
 
     // Linha separadora
@@ -44,7 +44,7 @@ const gerarContratoPDF = (dados) => {
     doc.moveDown(0.5)
 
     doc.font('Helvetica-Bold').text('INTERMEDIADOR:')
-    doc.font('Helvetica').text('PinturaPro Serviços Digitais — plataforma digital de intermediação')
+    doc.font('Helvetica').text('ArrumaPro Serviços Digitais — plataforma digital de intermediação')
     doc.moveDown(1)
 
     doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke()
@@ -110,7 +110,7 @@ const gerarContratoPDF = (dados) => {
     )
 
     clausula('8', 'DA RESPONSABILIDADE DA PLATAFORMA',
-      `8.1 A PinturaPro atua exclusivamente como intermediadora, não sendo responsável pela execução dos serviços ou inadimplência das partes.\n\n` +
+      `8.1 A ArrumaPro atua exclusivamente como intermediadora, não sendo responsável pela execução dos serviços ou inadimplência das partes.\n\n` +
       `8.2 A plataforma não gera vínculo trabalhista, previdenciário ou fiscal entre as partes.`
     )
 
@@ -159,22 +159,22 @@ const gerarContratoPDF = (dados) => {
 
     // Rodapé
     doc.moveDown(2)
-    doc.fontSize(8).fillColor('#888888').text('Documento gerado automaticamente pela plataforma PinturaPro | www.pinturapro.com.br', { align: 'center' })
+    doc.fontSize(8).fillColor('#888888').text('Documento gerado automaticamente pela plataforma ArrumaPro | www.pinturapro.com.br', { align: 'center' })
 
     doc.end()
   })
 }
 
 const enviarContratoPorEmail = async (emailContratante, emailContratado, pdfBuffer, dados) => {
-  const assunto = `PinturaPro — Contrato de Serviço: ${dados.servico.descricao}`
+  const assunto = `ArrumaPro — Contrato de Serviço: ${dados.servico.descricao}`
   const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
       <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-        <h1 style="color: #0a0a0a; margin: 0;">PinturaPro</h1>
+        <h1 style="color: #0a0a0a; margin: 0;">ArrumaPro</h1>
       </div>
       <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
         <h2 style="color: #333;">Contrato de Prestação de Serviços</h2>
-        <p>Olá! Segue em anexo o contrato referente ao serviço contratado pela plataforma PinturaPro.</p>
+        <p>Olá! Segue em anexo o contrato referente ao serviço contratado pela plataforma ArrumaPro.</p>
         <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
           <tr style="background: #eee;">
             <td style="padding: 10px; font-weight: bold;">Serviço</td>
@@ -199,7 +199,7 @@ const enviarContratoPorEmail = async (emailContratante, emailContratado, pdfBuff
         </table>
         <p style="color: #666; font-size: 13px;">O contrato está disponível em anexo neste e-mail. Recomendamos que ambas as partes o assinem e guardem uma cópia.</p>
         <p style="color: #666; font-size: 13px;">Em caso de dúvidas, entre em contato conosco.</p>
-        <p style="margin-top: 30px; color: #333;"><strong>Equipe PinturaPro</strong></p>
+        <p style="margin-top: 30px; color: #333;"><strong>Equipe ArrumaPro</strong></p>
       </div>
     </div>
   `

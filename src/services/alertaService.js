@@ -71,7 +71,7 @@ const enviarBoasVindas = async (usuarioId) => {
 
     await enviarPushNotificacao(
       push_token,
-      `🎉 Bem-vindo ao PinturaPro, ${primeiroNome}!`,
+      `🎉 Bem-vindo ao ArrumaPro, ${primeiroNome}!`,
       mensagem,
       { tipo: 'boas_vindas' }
     )

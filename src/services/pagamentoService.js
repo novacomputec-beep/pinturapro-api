@@ -14,7 +14,7 @@ const criarAssinatura = async (usuario, plano) => {
     preapproval_plan_id: null,
     payer_email: usuario.email,
     card_token_id: null,
-    reason: `PinturaPro — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`,
+    reason: `ArrumaPro — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`,
     external_reference: usuario.id,
     auto_recurring: {
       frequency: 1,

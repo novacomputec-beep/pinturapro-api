@@ -1441,9 +1441,9 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
     })
     transporter.sendMail({
-      from: `PinturaPro <${process.env.SMTP_USER}>`,
+      from: `ArrumaPro <${process.env.SMTP_USER}>`,
       to: email,
-      subject: '✅ PinturaPro — Cadastro aprovado! Bem-vindo!',
+      subject: '✅ ArrumaPro — Cadastro aprovado! Bem-vindo!',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #4caf50; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
@@ -1451,9 +1451,9 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
           </div>
           <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
             <h2>Parabéns, ${nome}!</h2>
-            <p>Sua identidade foi verificada e seu acesso ao PinturaPro está liberado.</p>
+            <p>Sua identidade foi verificada e seu acesso ao ArrumaPro está liberado.</p>
             <p>Abra o aplicativo e comece a encontrar serviços na sua região agora mesmo!</p>
-            <p><strong>Equipe PinturaPro</strong></p>
+            <p><strong>Equipe ArrumaPro</strong></p>
           </div>
         </div>
       `
@@ -1465,7 +1465,7 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
       await enviarPushNotificacao(
         pushToken.rows[0].push_token,
         '✅ Cadastro aprovado!',
-        'Sua identidade foi verificada. Bem-vindo ao PinturaPro!',
+        'Sua identidade foi verificada. Bem-vindo ao ArrumaPro!',
         { tipo: 'verificacao_aprovada' }
       )
     }
@@ -1504,13 +1504,13 @@ router.post('/verificacao/:id/reprovar', autenticar, exigirAdmin, async (req, re
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
     })
     transporter.sendMail({
-      from: `PinturaPro <${process.env.SMTP_USER}>`,
+      from: `ArrumaPro <${process.env.SMTP_USER}>`,
       to: email,
-      subject: 'PinturaPro — Informação sobre seu cadastro',
+      subject: 'ArrumaPro — Informação sobre seu cadastro',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-            <h1 style="color: #0a0a0a; margin: 0;">PinturaPro</h1>
+            <h1 style="color: #0a0a0a; margin: 0;">ArrumaPro</h1>
           </div>
           <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
             <h2>Olá, ${nome}</h2>
@@ -1521,7 +1521,7 @@ router.post('/verificacao/:id/reprovar', autenticar, exigirAdmin, async (req, re
               <strong>${pix_reembolso || 'informada no cadastro'}</strong> em até 5 dias úteis.
             </p>
             <p>Se tiver dúvidas, entre em contato conosco respondendo este e-mail.</p>
-            <p><strong>Equipe PinturaPro</strong></p>
+            <p><strong>Equipe ArrumaPro</strong></p>
           </div>
         </div>
       `

@@ -50,7 +50,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
 <body>
 
   <h1>Contrato Simples de Prestação de Serviços</h1>
-  <p class="subtitulo">Gerado automaticamente pelo aplicativo PinturaPro em ${formatarData(new Date())}</p>
+  <p class="subtitulo">Gerado automaticamente pelo aplicativo ArrumaPro em ${formatarData(new Date())}</p>
 
   <p>Pelo presente instrumento particular, de um lado:</p>
 
@@ -78,7 +78,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
   <p>Categoria: <strong>${reparo.categoria || 'Reparo geral'}</strong>.</p>
 
   <h2>Cláusula 2 — Da Execução dos Serviços</h2>
-  <p>Os serviços serão executados no endereço indicado pela Contratante, conforme agendamento realizado através do aplicativo PinturaPro.</p>
+  <p>Os serviços serão executados no endereço indicado pela Contratante, conforme agendamento realizado através do aplicativo ArrumaPro.</p>
   <p>O Contratado compromete-se a realizar os serviços com zelo, responsabilidade e dentro das condições técnicas adequadas.</p>
 
   <h2>Cláusula 3 — Dos Materiais</h2>
@@ -122,7 +122,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
   </div>
 
   <div class="rodape">
-    Documento gerado pelo aplicativo PinturaPro — Pode ser assinado manualmente ou por qualquer plataforma de assinatura digital.
+    Documento gerado pelo aplicativo ArrumaPro — Pode ser assinado manualmente ou por qualquer plataforma de assinatura digital.
   </div>
 
 </body>
@@ -160,7 +160,7 @@ const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
 <body>
 
   <h1>Contrato de Prestação de Serviços</h1>
-  <p class="subtitulo">Serviço de Pintura / Reforma Residencial<br>Gerado automaticamente pelo aplicativo PinturaPro em ${formatarData(new Date())}</p>
+  <p class="subtitulo">Serviço de Pintura / Reforma Residencial<br>Gerado automaticamente pelo aplicativo ArrumaPro em ${formatarData(new Date())}</p>
 
   <h2>Cláusula 1 — Das Partes</h2>
   <div class="parte-bloco">
@@ -172,7 +172,7 @@ const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
   <p>Prestação de serviços de <strong>${obra.categoria || 'pintura e reforma'}</strong> referente à obra <strong>"${obra.titulo}"</strong>, localizada em ${obra.endereco_obra || `${obra.cidade}${obra.bairro ? ', ' + obra.bairro : ''}`}.${obra.descricao ? ` Descrição: ${obra.descricao}` : ''}</p>
 
   <h2>Cláusula 3 — Do Valor e Pagamento</h2>
-  <p>Valor total acordado: <strong>${formatarValor(valor)}</strong>, conforme proposta aceita por ambas as partes através do aplicativo PinturaPro. Condições de pagamento a serem definidas diretamente entre as partes.</p>
+  <p>Valor total acordado: <strong>${formatarValor(valor)}</strong>, conforme proposta aceita por ambas as partes através do aplicativo ArrumaPro. Condições de pagamento a serem definidas diretamente entre as partes.</p>
 
   <h2>Cláusula 4 — Do Prazo</h2>
   <p>Prazo estimado para conclusão: <strong>${prazoContrato} dias corridos</strong> a partir do início efetivo dos trabalhos, podendo ser prorrogado mediante acordo.</p>
@@ -206,7 +206,7 @@ const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
   </div>
 
   <div class="rodape">
-    Documento gerado pelo aplicativo PinturaPro — Pode ser assinado manualmente ou por qualquer plataforma de assinatura digital.
+    Documento gerado pelo aplicativo ArrumaPro — Pode ser assinado manualmente ou por qualquer plataforma de assinatura digital.
   </div>
 
 </body>

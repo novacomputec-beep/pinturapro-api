@@ -61,21 +61,21 @@ const colocarPendentVerificacao = async (usuarioId, plano) => {
 
   enviarEmail({
     para: email,
-    assunto: 'PinturaPro — Pagamento recebido! Verificação em andamento',
+    assunto: 'ArrumaPro — Pagamento recebido! Verificação em andamento',
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-          <h1 style="color: #0a0a0a; margin: 0;">PinturaPro</h1>
+          <h1 style="color: #0a0a0a; margin: 0;">ArrumaPro</h1>
         </div>
         <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
           <h2>Olá, ${nome}! 🎉</h2>
           <p>Seu pagamento foi recebido com sucesso!</p>
           <p style="background: #fff3cd; padding: 16px; border-radius: 8px; border-left: 4px solid #E8833A;">
             <strong>Seus dados estão sendo verificados.</strong><br>
-            Em até <strong>1 hora</strong> você receberá a confirmação por e-mail e terá acesso completo ao PinturaPro.
+            Em até <strong>1 hora</strong> você receberá a confirmação por e-mail e terá acesso completo ao ArrumaPro.
           </p>
           <p>Este processo é necessário para garantir a segurança de todos os usuários da plataforma.</p>
-          <p><strong>Equipe PinturaPro</strong></p>
+          <p><strong>Equipe ArrumaPro</strong></p>
         </div>
       </div>
     `
@@ -122,20 +122,20 @@ const criarAssinatura = async (req, res) => {
     const telNumero = telLimpo.substring(2)    || '999999999'
 
     let valor     = 9990
-    let descricao = 'PinturaPro — Plano Mensal'
+    let descricao = 'ArrumaPro — Plano Mensal'
 
     if (usuario.role === 'prestador') {
       valor     = plano === 'anual' ? 49900 : 4990
-      descricao = `PinturaPro Serviços — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`
+      descricao = `ArrumaPro Serviços — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`
     } else {
       valor     = plano === 'anual' ? 99900 : 9990
-      descricao = `PinturaPro — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`
+      descricao = `ArrumaPro — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`
     }
 
     const body = {
       reference_id: `${usuario.id}|${plano}`,
       customer: {
-        name: dadosUsuario?.nome || 'Cliente PinturaPro',
+        name: dadosUsuario?.nome || 'Cliente ArrumaPro',
         email: dadosUsuario?.email || usuario.email,
         tax_id: taxId,
         phones: [{ country: '55', area: telArea, number: telNumero, type: 'MOBILE' }]

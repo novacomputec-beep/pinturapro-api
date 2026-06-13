@@ -14,7 +14,7 @@ const parseSender = () => {
   const raw = process.env.EMAIL_REMETENTE || ''
   const match = raw.match(/^(.+?)\s*<(.+?)>$/)
   if (match) return { name: match[1].trim(), email: match[2].trim() }
-  return { name: 'PinturaPro', email: raw || 'novacomputec@gmail.com' }
+  return { name: 'ArrumaPro', email: raw || 'novacomputec@gmail.com' }
 }
 
 const enviarEmail = async ({ para, assunto, html }) => {
