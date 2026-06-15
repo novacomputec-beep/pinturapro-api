@@ -49,6 +49,7 @@ pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_orgao VARCHAR(20)`)
 pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_estado VARCHAR(2)`).catch(err => console.error('[migration] rg_estado:', err.message))
 pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_secret VARCHAR(100)`).catch(err => console.error('[migration] dois_fa_secret:', err.message))
 pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_ativo BOOLEAN DEFAULT false`).catch(err => console.error('[migration] dois_fa_ativo:', err.message))
+pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_prestador VARCHAR(20)`).catch(err => console.error('[migration] usuarios.tipo_prestador:', err.message))
 
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()

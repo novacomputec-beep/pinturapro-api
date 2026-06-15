@@ -68,6 +68,11 @@ const cadastrar = async (req, res) => {
     if (tipo_conta === 'dono_obra') tipo_dono = 'pintura'
     else if (tipo_conta === 'dono_reparo') { role = 'dono_obra'; tipo_dono = 'reparo' }
 
+    // Define tipo_prestador para distinguir pintores/construtores de reparadores
+    let tipo_prestador = null
+    if (tipo_conta === 'pintor' || tipo_conta === 'construtor') tipo_prestador = 'pintor'
+    else if (tipo_conta === 'prestador') tipo_prestador = 'reparador'
+
     const verificacaoStatus = role === 'prestador' ? 'pendente' : 'nao_solicitada'
 
     const result = await pool.query(
@@ -75,9 +80,9 @@ const cadastrar = async (req, res) => {
         especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo,
         tipo_dono, pix_reembolso, referencias,
         verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
-        verificacao_status, rg, rg_orgao, rg_estado)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-       RETURNING id, nome, email, role, tipo_dono, foto_url`,
+        verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+       RETURNING id, nome, email, role, tipo_dono, tipo_prestador, foto_url`,
       [nome.trim(), emailNormalizado, telefone, senha_hash, cidade, uf || null,
        especialidades || [], anos_experiencia || 0,
        tamanho_equipe || 1, cpf_cnpj, role,
@@ -88,7 +93,8 @@ const cadastrar = async (req, res) => {
        verificacao_doc_verso_url || null,
        verificacao_selfie_url || null,
        verificacaoStatus,
-       rg || null, rg_orgao || null, rg_estado || null]
+       rg || null, rg_orgao || null, rg_estado || null,
+       tipo_prestador]
     )
 
     const usuario = result.rows[0]
@@ -168,7 +174,7 @@ const login = async (req, res) => {
     const emailNormalizado = email.toLowerCase().trim()
 
     const result = await pool.query(
-      'SELECT id, nome, email, role, senha_hash, ativo, foto_url, tipo_dono FROM usuarios WHERE email = $1',
+      'SELECT id, nome, email, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador FROM usuarios WHERE email = $1',
       [emailNormalizado]
     )
 
@@ -204,7 +210,8 @@ const login = async (req, res) => {
         email: usuario.email,
         role: usuario.role,
         foto_url: usuario.foto_url || null,
-        tipo_dono: usuario.tipo_dono || null
+        tipo_dono: usuario.tipo_dono || null,
+        tipo_prestador: usuario.tipo_prestador || null
       },
       assinatura: assinaturaResult.rows[0] || null,
       token
@@ -219,7 +226,7 @@ const login = async (req, res) => {
 const perfil = async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono FROM usuarios WHERE id = $1',
+      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador FROM usuarios WHERE id = $1',
       [req.usuario.id]
     )
     const assinaturaResult = await pool.query(
