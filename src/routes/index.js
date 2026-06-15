@@ -1313,6 +1313,28 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
 })
 
 // Assinatura para upload direto ao Cloudinary (para vídeos grandes)
+router.post('/auth/verificar-disponibilidade', async (req, res) => {
+  try {
+    const { email, cpf_cnpj } = req.body
+    if (email) {
+      const emailNormalizado = email.toLowerCase().trim()
+      const existe = await pool.query('SELECT id FROM usuarios WHERE email = $1', [emailNormalizado])
+      if (existe.rows.length > 0) return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
+    }
+    if (cpf_cnpj) {
+      const cpfLimpo = cpf_cnpj.replace(/\D/g, '')
+      const existe = await pool.query(
+        `SELECT id FROM usuarios WHERE regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') = $1`,
+        [cpfLimpo]
+      )
+      if (existe.rows.length > 0) return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
+    }
+    res.json({ disponivel: true })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao verificar disponibilidade' })
+  }
+})
+
 router.get('/upload/assinatura-publica', (req, res) => {
   try {
     const params = gerarAssinaturaCloudinary('pinturapro/verificacao')
