@@ -126,6 +126,17 @@ router.post('/auth/foto-perfil', autenticar, upload.single('arquivo'), async (re
   }
 })
 
+router.patch('/auth/foto-perfil', autenticar, async (req, res) => {
+  try {
+    const { foto_url } = req.body
+    if (!foto_url) return res.status(400).json({ erro: 'URL da foto é obrigatória' })
+    await pool.query('UPDATE usuarios SET foto_url = $1 WHERE id = $2', [foto_url, req.usuario.id])
+    res.json({ foto_url })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao atualizar foto de perfil' })
+  }
+})
+
 router.post('/auth/push-token', autenticar, async (req, res) => {
   try {
     const { token } = req.body
