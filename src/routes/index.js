@@ -1313,6 +1313,15 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
 })
 
 // Assinatura para upload direto ao Cloudinary (para vídeos grandes)
+router.get('/upload/assinatura-publica', (req, res) => {
+  try {
+    const params = gerarAssinaturaCloudinary('pinturapro/verificacao')
+    res.json(params)
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao gerar assinatura de upload' })
+  }
+})
+
 router.get('/upload/assinatura-cloudinary', autenticar, (req, res) => {
   try {
     const folder = req.query.folder || 'pinturapro/videos'
