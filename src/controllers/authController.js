@@ -149,13 +149,10 @@ const cadastrar = async (req, res) => {
     console.log(`[CADASTRO][${ts}] ✓ token gerado | usuario_id=${usuario.id} — respondendo 201`)
     res.status(201).json({ usuario, token })
 
-    // E-mails especiais de teste — aprovação automática imediata
-    const emailsEspeciais = [
-      'tertulina4728@gmail.com',
-      'manutencao.computec@gmail.com',
-      'manutenção.computec@gmail.com'
-    ]
-    if (emailsEspeciais.includes(emailNormalizado)) {
+    // E-mails especiais de teste — aprovação automática imediata (configurar via EMAILS_ESPECIAIS no Railway)
+    const emailsEspeciais = (process.env.EMAILS_ESPECIAIS || '')
+      .split(',').map(e => e.trim().toLowerCase()).filter(Boolean)
+    if (emailsEspeciais.length > 0 && emailsEspeciais.includes(emailNormalizado)) {
       setImmediate(async () => {
         try {
           await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [usuario.id])

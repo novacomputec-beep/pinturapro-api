@@ -16,44 +16,63 @@ const bcrypt = require('bcryptjs')
 const speakeasy = require('speakeasy')
 
 // One-time column migrations
-pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`).catch(err => console.error('[migration] valor_proposto:', err.message))
-pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`).catch(err => console.error('[migration] valor_contraproposta:', err.message))
-pool.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS rodada INTEGER DEFAULT 1`).catch(err => console.error('[migration] rodada:', err.message))
-pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS alerta_sem_interessados_em TIMESTAMP WITH TIME ZONE`).catch(err => console.error('[migration] alerta_sem_interessados_em:', err.message))
-pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`).catch(err => console.error('[migration] candidaturas.valor_contraproposta:', err.message))
-pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS alerta_sem_interessados_em TIMESTAMP WITH TIME ZONE`).catch(err => console.error('[migration] obras.alerta_sem_interessados_em:', err.message))
-pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS match_feito_em TIMESTAMP WITH TIME ZONE`).catch(err => console.error('[migration] obras.match_feito_em:', err.message))
-pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS match_usuario_id UUID REFERENCES usuarios(id)`).catch(err => console.error('[migration] obras.match_usuario_id:', err.message))
-pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_status VARCHAR(50)`).catch(err => console.error('[migration] obras.pedido_tempo_status:', err.message))
-pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_motivo TEXT`).catch(err => console.error('[migration] obras.pedido_tempo_motivo:', err.message))
-pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_minutos INTEGER`).catch(err => console.error('[migration] obras.pedido_tempo_minutos:', err.message))
-pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`).catch(err => console.error('[migration] candidaturas.valor_proposto:', err.message))
-pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS mensagem TEXT`).catch(err => console.error('[migration] candidaturas.mensagem:', err.message))
-pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`).catch(err => console.error('[migration] reparos.uf:', err.message))
-pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS endereco_reparo TEXT`).catch(err => console.error('[migration] reparos.endereco_reparo:', err.message))
-pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS latitude NUMERIC`).catch(err => console.error('[migration] reparos.latitude:', err.message))
-pool.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS longitude NUMERIC`).catch(err => console.error('[migration] reparos.longitude:', err.message))
-pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`).catch(err => console.error('[migration] obras.uf:', err.message))
-pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS endereco_obra TEXT`).catch(err => console.error('[migration] obras.endereco_obra:', err.message))
-pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS latitude NUMERIC`).catch(err => console.error('[migration] obras.latitude:', err.message))
-pool.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS longitude NUMERIC`).catch(err => console.error('[migration] obras.longitude:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_status VARCHAR(50) DEFAULT 'nao_solicitada'`).catch(err => console.error('[migration] usuarios.verificacao_status:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_doc_frente_url TEXT`).catch(err => console.error('[migration] usuarios.verificacao_doc_frente_url:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_doc_verso_url TEXT`).catch(err => console.error('[migration] usuarios.verificacao_doc_verso_url:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_selfie_url TEXT`).catch(err => console.error('[migration] usuarios.verificacao_selfie_url:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_dono VARCHAR(50)`).catch(err => console.error('[migration] usuarios.tipo_dono:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS pix_reembolso VARCHAR(200)`).catch(err => console.error('[migration] usuarios.pix_reembolso:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS referencias TEXT`).catch(err => console.error('[migration] usuarios.referencias:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg VARCHAR(20)`).catch(err => console.error('[migration] rg:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_orgao VARCHAR(20)`).catch(err => console.error('[migration] rg_orgao:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_estado VARCHAR(2)`).catch(err => console.error('[migration] rg_estado:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_secret VARCHAR(100)`).catch(err => console.error('[migration] dois_fa_secret:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_ativo BOOLEAN DEFAULT false`).catch(err => console.error('[migration] dois_fa_ativo:', err.message))
-pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_prestador VARCHAR(20)`).catch(err => console.error('[migration] usuarios.tipo_prestador:', err.message))
+// One-time column migrations — single transaction so all columns land atomically or none do
+;(async () => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`)
+    await client.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`)
+    await client.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS rodada INTEGER DEFAULT 1`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS alerta_sem_interessados_em TIMESTAMP WITH TIME ZONE`)
+    await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS alerta_sem_interessados_em TIMESTAMP WITH TIME ZONE`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS match_feito_em TIMESTAMP WITH TIME ZONE`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS match_usuario_id UUID REFERENCES usuarios(id)`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_status VARCHAR(50)`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_motivo TEXT`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_minutos INTEGER`)
+    await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`)
+    await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS mensagem TEXT`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS endereco_reparo TEXT`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS latitude NUMERIC`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS longitude NUMERIC`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS endereco_obra TEXT`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS latitude NUMERIC`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS longitude NUMERIC`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_status VARCHAR(50) DEFAULT 'nao_solicitada'`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_doc_frente_url TEXT`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_doc_verso_url TEXT`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_selfie_url TEXT`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_dono VARCHAR(50)`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS pix_reembolso VARCHAR(200)`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS referencias TEXT`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg VARCHAR(20)`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_orgao VARCHAR(20)`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_estado VARCHAR(2)`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_secret VARCHAR(100)`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_ativo BOOLEAN DEFAULT false`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_prestador VARCHAR(20)`)
+    await client.query('COMMIT')
+    console.log('[migration] colunas verificadas com sucesso')
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    console.error('[migration] FALHOU — rollback executado:', err.message)
+  } finally {
+    client.release()
+  }
+})()
 
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()
 const CACHE_TTL = 5 * 60 * 1000 // 5 minutos
+
+// Rate limit para /auth/verificar-disponibilidade (10 req / 60s por IP)
+const cacheVerifRate = new Map()
+const VERIF_LIMIT = 10
+const VERIF_WINDOW = 60 * 1000
 
 const exigirPrestador = async (req, res, next) => {
   try {
@@ -1328,6 +1347,16 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
 
 // Assinatura para upload direto ao Cloudinary (para vídeos grandes)
 router.post('/auth/verificar-disponibilidade', async (req, res) => {
+  const ip = req.ip || req.connection?.remoteAddress || 'unknown'
+  const now = Date.now()
+  const entry = cacheVerifRate.get(ip) || { count: 0, windowStart: now }
+  if (now - entry.windowStart > VERIF_WINDOW) { entry.count = 0; entry.windowStart = now }
+  entry.count++
+  cacheVerifRate.set(ip, entry)
+  if (entry.count > VERIF_LIMIT) {
+    return res.status(429).json({ erro: 'Muitas tentativas. Aguarde um momento e tente novamente.' })
+  }
+
   const ts = new Date().toISOString()
   const { email, cpf_cnpj } = req.body
   console.log(`[VERIF][${ts}] ▶ inicio | email=${email} cpf_cnpj=${cpf_cnpj}`)
@@ -1376,9 +1405,19 @@ router.get('/upload/assinatura-publica', (req, res) => {
   }
 })
 
+const CLOUDINARY_FOLDERS_PERMITIDAS = new Set([
+  'pinturapro/videos',
+  'pinturapro/fotos',
+  'pinturapro/perfil',
+  'pinturapro/verificacao',
+])
+
 router.get('/upload/assinatura-cloudinary', autenticar, (req, res) => {
   try {
     const folder = req.query.folder || 'pinturapro/videos'
+    if (!CLOUDINARY_FOLDERS_PERMITIDAS.has(folder)) {
+      return res.status(400).json({ erro: 'Pasta de upload não permitida' })
+    }
     const params = gerarAssinaturaCloudinary(folder)
     res.json(params)
   } catch (err) {
@@ -1875,6 +1914,16 @@ router.post('/candidaturas/:id/pintor-responder', autenticar, async (req, res) =
 
 router.get('/candidaturas/:id/negociacoes', autenticar, async (req, res) => {
   try {
+    const ownership = await pool.query(
+      `SELECT c.usuario_id, o.criado_por as dono_id FROM candidaturas c
+       JOIN obras o ON c.obra_id = o.id WHERE c.id = $1`,
+      [req.params.id]
+    )
+    if (ownership.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
+    const { usuario_id, dono_id } = ownership.rows[0]
+    if (req.usuario.id !== usuario_id && req.usuario.id !== dono_id) {
+      return res.status(403).json({ erro: 'Sem permissão para ver estas negociações' })
+    }
     const result = await pool.query(
       `SELECT n.*, u.nome as autor_nome, u.role as autor_role FROM negociacoes n
        JOIN usuarios u ON n.autor_id = u.id WHERE n.candidatura_id = $1 ORDER BY n.criado_em ASC`,
