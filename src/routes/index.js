@@ -180,12 +180,44 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     if (usuario.rows[0].role === 'admin') return res.status(400).json({ erro: 'Não é possível excluir um administrador' })
 
     await client.query('BEGIN')
+
+    // Cascade obras criadas por este usuário (dono_obra)
+    const obrasRes = await client.query('SELECT id FROM obras WHERE criado_por = $1', [id])
+    if (obrasRes.rows.length > 0) {
+      const obraIds = obrasRes.rows.map(r => r.id)
+      await client.query('DELETE FROM mensagens WHERE obra_id = ANY($1::uuid[])', [obraIds])
+      await client.query(
+        'DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE obra_id = ANY($1::uuid[]))',
+        [obraIds]
+      )
+      await client.query('DELETE FROM candidaturas WHERE obra_id = ANY($1::uuid[])', [obraIds])
+      await client.query('DELETE FROM obras WHERE criado_por = $1', [id])
+    }
+
+    // Cascade reparos criados por este usuário (dono_obra)
+    const reparosRes = await client.query('SELECT id FROM reparos WHERE criado_por = $1', [id])
+    if (reparosRes.rows.length > 0) {
+      const reparoIds = reparosRes.rows.map(r => r.id)
+      await client.query('DELETE FROM interesse_reparos WHERE reparo_id = ANY($1::uuid[])', [reparoIds])
+      await client.query('DELETE FROM reparos WHERE criado_por = $1', [id])
+    }
+
+    // NULL out match_usuario_id caso o prestador estivesse em atendimento
+    await client.query('UPDATE obras SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1', [id])
+    await client.query('UPDATE reparos SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1', [id])
+
+    // Cascade registros do próprio usuário como candidato/interessado
+    await client.query(
+      'DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE usuario_id = $1)',
+      [id]
+    )
     await client.query('DELETE FROM assinaturas WHERE usuario_id = $1', [id])
     await client.query('DELETE FROM candidaturas WHERE usuario_id = $1', [id])
     await client.query('DELETE FROM mensagens WHERE autor_id = $1', [id])
     await client.query('DELETE FROM interesse_reparos WHERE usuario_id = $1', [id])
     await client.query('DELETE FROM negociacoes WHERE autor_id = $1', [id])
     await client.query('DELETE FROM usuarios WHERE id = $1', [id])
+
     await client.query('COMMIT')
 
     res.json({ mensagem: 'Usuário excluído com sucesso' })
