@@ -192,11 +192,15 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
       `SELECT o.*,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
-       FROM obras o WHERE o.criado_por = $1 ORDER BY o.criado_em DESC
+       FROM obras o WHERE o.criado_por = $1 AND o.status != 'cancelada' ORDER BY o.criado_em DESC
        LIMIT $2 OFFSET $3`,
       [req.usuario.id, limit, offset]
     )
-    res.json({ obras: result.rows, page, limit })
+    const agora = new Date()
+    const eArquivada = o => o.status === 'encerrada' || (o.status === 'aberta' && o.expira_em && new Date(o.expira_em) < agora)
+    const obras     = result.rows.filter(o => !eArquivada(o))
+    const historico = result.rows.filter(o =>  eArquivada(o))
+    res.json({ obras, historico, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar obras' })
   }
@@ -679,7 +683,11 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
        LIMIT $2 OFFSET $3`,
       [req.usuario.id, limit, offset]
     )
-    res.json({ reparos: result.rows, page, limit })
+    const agora = new Date()
+    const eArquivado = r => r.status === 'encerrada' || (r.status === 'aberta' && r.expira_em && new Date(r.expira_em) < agora)
+    const reparos   = result.rows.filter(r => !eArquivado(r))
+    const historico = result.rows.filter(r =>  eArquivado(r))
+    res.json({ reparos, historico, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar reparos' })
   }
@@ -773,7 +781,13 @@ router.get('/reparos/meus-interesses', autenticar, exigirPrestador, async (req, 
       WHERE ir.usuario_id = $1
       ORDER BY ir.criado_em DESC
     `, [req.usuario.id])
-    res.json({ interesses: result.rows })
+    const agora = new Date()
+    const eArquivado = item =>
+      item.reparo_status === 'encerrada' ||
+      (item.reparo_status === 'aberta' && item.expira_em && new Date(item.expira_em) < agora)
+    const ativos    = result.rows.filter(item => !eArquivado(item))
+    const historico = result.rows.filter(item =>  eArquivado(item))
+    res.json({ ativos, historico })
   } catch (err) {
     console.error('[meus-interesses]', err.message)
     res.status(500).json({ erro: 'Erro ao buscar seus interesses' })
