@@ -200,7 +200,7 @@ const webhookPagbank = async (req, res) => {
     const [usuarioId, plano] = partes
 
     const usuarioResult = await pool.query(
-      `SELECT id, role FROM usuarios WHERE id = $1`, [usuarioId]
+      `SELECT id, role, nome FROM usuarios WHERE id = $1`, [usuarioId]
     )
     if (usuarioResult.rows.length === 0) return
 
@@ -210,6 +210,22 @@ const webhookPagbank = async (req, res) => {
     if (usuario.role === 'prestador' || usuario.role === 'pintor' || usuario.role === 'assinante') {
       await colocarPendentVerificacao(usuarioId, plano)
       console.log(`Prestador ${usuarioId} aguardando verificação após pagamento`)
+
+      const telegramToken  = process.env.TELEGRAM_BOT_TOKEN
+      const telegramChatId = process.env.TELEGRAM_CHAT_ID
+      if (telegramToken && telegramChatId) {
+        try {
+          const valorCentavos = charge.amount?.value
+          const valorFmt = valorCentavos
+            ? `R$ ${(valorCentavos / 100).toFixed(2).replace('.', ',')}`
+            : plano
+          const texto = `💰 Novo pagamento PinturaPro!\nUsuario: ${usuario.nome}\nPlano: ${plano}\nValor: ${valorFmt}\nAguardando aprovacao no painel`
+          fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage?chat_id=${telegramChatId}&text=${encodeURIComponent(texto)}`)
+            .catch(e => console.error('Telegram notify error:', e.message))
+        } catch (e) {
+          console.error('Telegram notify error:', e.message)
+        }
+      }
     } else {
       await ativarAssinatura(usuarioId, plano)
       console.log(`Assinatura ativada via PagBank — usuário: ${usuarioId}, plano: ${plano}`)
