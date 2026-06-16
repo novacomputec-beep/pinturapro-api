@@ -1491,7 +1491,7 @@ router.get('/verificacao/pendentes', autenticar, exigirAdmin, async (req, res) =
       LEFT JOIN assinaturas a ON a.usuario_id = u.id
       WHERE u.verificacao_status = 'pendente'
         AND u.role IN ('prestador', 'pintor', 'assinante')
-      ORDER BY u.criado_em ASC
+      ORDER BY u.criado_em DESC
     `)
     res.json({ prestadores: result.rows })
   } catch (err) {
