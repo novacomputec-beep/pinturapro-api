@@ -21,6 +21,7 @@ const transporter = nodemailer.createTransport({
 })
 
 const cadastrar = async (req, res) => {
+  const ts = new Date().toISOString()
   try {
     const { nome, email, telefone, senha, cidade, uf,
             especialidades, anos_experiencia, tamanho_equipe,
@@ -28,36 +29,49 @@ const cadastrar = async (req, res) => {
             verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
             rg, rg_orgao, rg_estado } = req.body
 
+    console.log(`[CADASTRO][${ts}] ▶ inicio | tipo_conta=${tipo_conta} email=${email} cpf_cnpj=${cpf_cnpj} plano=${plano} tem_doc_frente=${!!verificacao_doc_frente_url} tem_doc_verso=${!!verificacao_doc_verso_url} tem_selfie=${!!verificacao_selfie_url}`)
+
     if (!nome || !email || !senha) {
+      console.log(`[CADASTRO][${ts}] ✗ 400 campos obrigatorios ausentes | nome=${!!nome} email=${!!email} senha=${!!senha}`)
       return res.status(400).json({ erro: 'Nome, e-mail e senha são obrigatórios' })
     }
     if (senha.length < 8) {
+      console.log(`[CADASTRO][${ts}] ✗ 400 senha curta | len=${senha.length}`)
       return res.status(400).json({ erro: 'A senha deve ter pelo menos 8 caracteres' })
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      console.log(`[CADASTRO][${ts}] ✗ 400 email invalido | email=${email}`)
       return res.status(400).json({ erro: 'E-mail inválido' })
     }
 
     const emailNormalizado = email.toLowerCase().trim()
 
+    console.log(`[CADASTRO][${ts}] ▶ verificando email no banco | email=${emailNormalizado}`)
     const existente = await pool.query('SELECT id FROM usuarios WHERE email = $1', [emailNormalizado])
     if (existente.rows.length > 0) {
+      console.log(`[CADASTRO][${ts}] ✗ 409 email duplicado | email=${emailNormalizado}`)
       return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
     }
+    console.log(`[CADASTRO][${ts}] ✓ email disponivel`)
 
     // Verifica CPF/CNPJ duplicado
     if (cpf_cnpj) {
       const cpfLimpo = cpf_cnpj.replace(/\D/g, '')
+      console.log(`[CADASTRO][${ts}] ▶ verificando cpf_cnpj no banco | cpfLimpo=${cpfLimpo}`)
       const cpfExistente = await pool.query(
         `SELECT id FROM usuarios WHERE regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') = $1`,
         [cpfLimpo]
       )
       if (cpfExistente.rows.length > 0) {
+        console.log(`[CADASTRO][${ts}] ✗ 409 cpf_cnpj duplicado | cpfLimpo=${cpfLimpo}`)
         return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
       }
+      console.log(`[CADASTRO][${ts}] ✓ cpf_cnpj disponivel`)
     }
 
+    console.log(`[CADASTRO][${ts}] ▶ gerando hash de senha`)
     const senha_hash = await bcrypt.hash(senha, 12)
+    console.log(`[CADASTRO][${ts}] ✓ senha hash gerada`)
 
     let role = 'assinante'
     if (tipo_conta === 'dono_obra') role = 'dono_obra'
@@ -75,6 +89,7 @@ const cadastrar = async (req, res) => {
 
     const verificacaoStatus = role === 'prestador' ? 'pendente' : 'nao_solicitada'
 
+    console.log(`[CADASTRO][${ts}] ▶ INSERT usuarios | role=${role} tipo_dono=${tipo_dono} tipo_prestador=${tipo_prestador} verificacao_status=${verificacaoStatus}`)
     const result = await pool.query(
       `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade, uf,
         especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo,
@@ -98,31 +113,40 @@ const cadastrar = async (req, res) => {
     )
 
     const usuario = result.rows[0]
+    console.log(`[CADASTRO][${ts}] ✓ usuario criado | id=${usuario.id} role=${usuario.role} tipo_prestador=${usuario.tipo_prestador}`)
+
     const planoEscolhido = plano || 'mensal'
 
     if (role === 'dono_obra') {
+      console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura gratuita | usuario_id=${usuario.id}`)
       await pool.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
          VALUES ($1, 'mensal', 0, 'ativa', 'gratuito')`,
         [usuario.id]
       )
+      console.log(`[CADASTRO][${ts}] ✓ assinatura gratuita criada`)
     } else if (role === 'prestador') {
       const valorMensal = planoEscolhido === 'anual' ? 499.00 : (tipo_conta === 'pintor' || tipo_conta === 'construtor' ? 99.90 : 49.90)
+      console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura prestador | usuario_id=${usuario.id} plano=${planoEscolhido} valor=${valorMensal}`)
       await pool.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
          VALUES ($1, $2, $3, 'pendente')`,
         [usuario.id, planoEscolhido, valorMensal]
       )
+      console.log(`[CADASTRO][${ts}] ✓ assinatura pendente criada | valor=${valorMensal}`)
     } else {
       const valorMensal = planoEscolhido === 'anual' ? 999.00 : 99.90
+      console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura assinante | usuario_id=${usuario.id} plano=${planoEscolhido} valor=${valorMensal}`)
       await pool.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
          VALUES ($1, $2, $3, 'pendente')`,
         [usuario.id, planoEscolhido, valorMensal]
       )
+      console.log(`[CADASTRO][${ts}] ✓ assinatura pendente criada | valor=${valorMensal}`)
     }
 
     const token = gerarToken(usuario)
+    console.log(`[CADASTRO][${ts}] ✓ token gerado | usuario_id=${usuario.id} — respondendo 201`)
     res.status(201).json({ usuario, token })
 
     // E-mails especiais de teste — aprovação automática imediata
@@ -153,12 +177,14 @@ const cadastrar = async (req, res) => {
     })
 
   } catch (err) {
+    const ts2 = new Date().toISOString()
     if (err.code === '23505') {
+      console.error(`[CADASTRO][${ts2}] ✗ 409 unicidade BD | constraint=${err.constraint} | msg=${err.message}`)
       if (err.constraint?.includes('cpf')) return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
       if (err.constraint?.includes('email')) return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
       return res.status(409).json({ erro: 'Dados já cadastrados. Verifique seu e-mail e CPF/CNPJ.' })
     }
-    console.error('Erro no cadastro DETALHADO:', err.message, err.stack)
+    console.error(`[CADASTRO][${ts2}] ✗ ERRO INTERNO | msg="${err.message}" | code=${err.code}\n${err.stack}`)
     res.status(500).json({ erro: err.message || 'Erro ao criar conta' })
   }
 }

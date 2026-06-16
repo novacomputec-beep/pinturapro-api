@@ -1328,32 +1328,50 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
 
 // Assinatura para upload direto ao Cloudinary (para vídeos grandes)
 router.post('/auth/verificar-disponibilidade', async (req, res) => {
+  const ts = new Date().toISOString()
+  const { email, cpf_cnpj } = req.body
+  console.log(`[VERIF][${ts}] ▶ inicio | email=${email} cpf_cnpj=${cpf_cnpj}`)
   try {
-    const { email, cpf_cnpj } = req.body
     if (email) {
       const emailNormalizado = email.toLowerCase().trim()
+      console.log(`[VERIF][${ts}] ▶ checando email no banco | email=${emailNormalizado}`)
       const existe = await pool.query('SELECT id FROM usuarios WHERE email = $1', [emailNormalizado])
-      if (existe.rows.length > 0) return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
+      if (existe.rows.length > 0) {
+        console.log(`[VERIF][${ts}] ✗ 409 email duplicado | email=${emailNormalizado}`)
+        return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
+      }
+      console.log(`[VERIF][${ts}] ✓ email disponivel`)
     }
     if (cpf_cnpj) {
       const cpfLimpo = cpf_cnpj.replace(/\D/g, '')
+      console.log(`[VERIF][${ts}] ▶ checando cpf_cnpj no banco | cpfLimpo=${cpfLimpo}`)
       const existe = await pool.query(
         `SELECT id FROM usuarios WHERE regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') = $1`,
         [cpfLimpo]
       )
-      if (existe.rows.length > 0) return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
+      if (existe.rows.length > 0) {
+        console.log(`[VERIF][${ts}] ✗ 409 cpf_cnpj duplicado | cpfLimpo=${cpfLimpo}`)
+        return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
+      }
+      console.log(`[VERIF][${ts}] ✓ cpf_cnpj disponivel`)
     }
+    console.log(`[VERIF][${ts}] ✓ disponivel: true — respondendo 200`)
     res.json({ disponivel: true })
   } catch (err) {
+    console.error(`[VERIF][${ts}] ✗ ERRO INTERNO | msg="${err.message}" | code=${err.code}\n${err.stack}`)
     res.status(500).json({ erro: 'Erro ao verificar disponibilidade' })
   }
 })
 
 router.get('/upload/assinatura-publica', (req, res) => {
+  const ts = new Date().toISOString()
+  console.log(`[ASSINATURA][${ts}] ▶ GET /upload/assinatura-publica`)
   try {
     const params = gerarAssinaturaCloudinary('pinturapro/verificacao')
+    console.log(`[ASSINATURA][${ts}] ✓ assinatura gerada | folder=${params.folder} timestamp=${params.timestamp}`)
     res.json(params)
   } catch (err) {
+    console.error(`[ASSINATURA][${ts}] ✗ ERRO | msg="${err.message}" | code=${err.code}\n${err.stack}`)
     res.status(500).json({ erro: 'Erro ao gerar assinatura de upload' })
   }
 })
