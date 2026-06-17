@@ -17,6 +17,7 @@ const listar = async (req, res) => {
       WHERE o.status = 'aberta'
       AND o.status_aprovacao = 'aprovada'
       AND o.expira_em > NOW()
+      AND o.match_usuario_id IS NULL
     `
     const params = []
 

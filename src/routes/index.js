@@ -551,7 +551,7 @@ router.post('/obras/:id/match', autenticar, async (req, res) => {
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
     if (obra.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Esta obra já tem um pintor a caminho' })
     const candidaturaAceita = await pool.query(
-      `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2 AND status = 'aceito'`,
+      `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2 AND status IN ('aceito','aprovada')`,
       [req.params.id, req.usuario.id]
     )
     if (candidaturaAceita.rows.length === 0) return res.status(403).json({ erro: 'Sua candidatura ainda não foi aceita para esta obra.' })
@@ -563,14 +563,16 @@ router.post('/obras/:id/match', autenticar, async (req, res) => {
       `SELECT u.push_token FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
       [req.params.id]
     )
-    if (dono.rows[0]?.push_token) {
-      await enviarPushNotificacao(dono.rows[0].push_token, '🚀 Pintor a caminho!',
-        `Um pintor confirmou que está indo até você para "${obra.rows[0].titulo}"`,
-        { tipo: 'match_obra', obra_id: req.params.id })
-    }
+    // Responde imediatamente; push e contrato rodam em segundo plano (não bloquear o cliente)
     res.json({ mensagem: 'Match confirmado! Contagem regressiva iniciada.', match_feito_em: new Date() })
+    if (dono.rows[0]?.push_token) {
+      enviarPushNotificacao(dono.rows[0].push_token, '🚀 Pintor a caminho!',
+        `Um pintor confirmou que está indo até você para "${obra.rows[0].titulo}"`,
+        { tipo: 'match_obra', obra_id: req.params.id }).catch(err => console.error('[obras/match] push falhou:', err.message))
+    }
     enviarContratoObra(req.params.id).catch(err => console.error('Erro ao enviar contrato obra:', err))
   } catch (err) {
+    console.error('[obras/match]', err.message)
     res.status(500).json({ erro: 'Erro ao confirmar match' })
   }
 })
@@ -988,7 +990,7 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) 
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
     if (reparo.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Este reparo já tem um prestador a caminho' })
     const interesseAceito = await pool.query(
-      `SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2 AND status = 'aceito'`,
+      `SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2 AND status IN ('aceito','aprovada')`,
       [req.params.id, req.usuario.id]
     )
     if (interesseAceito.rows.length === 0) return res.status(403).json({ erro: 'Sua proposta ainda não foi aceita para este reparo.' })
@@ -1000,18 +1002,20 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) 
       `SELECT u.push_token FROM reparos r JOIN usuarios u ON r.criado_por = u.id WHERE r.id = $1`,
       [req.params.id]
     )
+    // Responde imediatamente; push e contrato rodam em segundo plano (não bloquear o cliente)
+    res.json({ mensagem: 'Match confirmado! Contagem regressiva iniciada.', match_feito_em: new Date() })
     if (dono.rows[0]?.push_token) {
-      await enviarPushNotificacao(
+      enviarPushNotificacao(
         dono.rows[0].push_token,
         '🚀 Profissional a caminho!',
         `Um prestador confirmou que está indo até você para "${reparo.rows[0].titulo}"`,
         { tipo: 'match_reparo', reparo_id: req.params.id }
-      )
+      ).catch(err => console.error('[reparos/match] push falhou:', err.message))
     }
-    res.json({ mensagem: 'Match confirmado! Contagem regressiva iniciada.', match_feito_em: new Date() })
     // Envia contrato por e-mail para dono e prestador
     enviarContratoReparo(req.params.id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
   } catch (err) {
+    console.error('[reparos/match]', err.message)
     res.status(500).json({ erro: 'Erro ao confirmar match' })
   }
 })
