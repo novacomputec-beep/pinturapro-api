@@ -257,6 +257,30 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
   }
 })
 
+// GET /obras/meus-contratos — obras finalizadas (encerradas) em que o usuário foi o pintor do match
+// IMPORTANTE: registrar antes de GET /obras/:id para não ser sombreado por :id='meus-contratos'
+router.get('/obras/meus-contratos', autenticar, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.bairro, o.uf,
+              o.match_feito_em, o.status,
+              u.nome AS dono_nome, u.telefone AS dono_telefone,
+              (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) AS foto_capa,
+              COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado
+       FROM obras o
+       JOIN usuarios u ON o.criado_por = u.id
+       LEFT JOIN candidaturas c ON c.obra_id = o.id AND c.usuario_id = $1
+       WHERE o.match_usuario_id = $1 AND o.status = 'encerrada'
+       ORDER BY o.match_feito_em DESC NULLS LAST`,
+      [req.usuario.id]
+    )
+    res.json({ contratos: result.rows })
+  } catch (err) {
+    console.error('[obras/meus-contratos]', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar contratos finalizados' })
+  }
+})
+
 router.post('/obras/dono', autenticar, async (req, res) => {
   try {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
@@ -842,6 +866,29 @@ router.get('/reparos/meus-interesses', autenticar, exigirPrestador, async (req, 
   } catch (err) {
     console.error('[meus-interesses]', err.message)
     res.status(500).json({ erro: 'Erro ao buscar seus interesses' })
+  }
+})
+
+// GET /reparos/meus-contratos — reparos finalizados (encerrados) em que o usuário foi o prestador do match
+router.get('/reparos/meus-contratos', autenticar, exigirPrestador, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
+              r.match_feito_em, r.status,
+              u.nome AS dono_nome, u.telefone AS dono_telefone,
+              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) AS foto_capa,
+              COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado
+       FROM reparos r
+       JOIN usuarios u ON r.criado_por = u.id
+       LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.usuario_id = $1
+       WHERE r.match_usuario_id = $1 AND r.status = 'encerrada'
+       ORDER BY r.match_feito_em DESC NULLS LAST`,
+      [req.usuario.id]
+    )
+    res.json({ contratos: result.rows })
+  } catch (err) {
+    console.error('[reparos/meus-contratos]', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar contratos finalizados' })
   }
 })
 
