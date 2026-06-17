@@ -309,6 +309,7 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     )
     res.status(201).json(result.rows[0])
   } catch (err) {
+    console.error('[obras/dono]', err.message)
     res.status(500).json({ erro: 'Erro ao cadastrar obra' })
   }
 })
@@ -820,6 +821,7 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     res.status(201).json(result.rows[0])
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
   } catch (err) {
+    console.error('[reparos/dono]', err.message)
     res.status(500).json({ erro: 'Erro ao cadastrar reparo' })
   }
 })
