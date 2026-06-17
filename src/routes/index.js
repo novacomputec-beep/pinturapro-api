@@ -242,7 +242,11 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
     const result = await pool.query(
       `SELECT o.*,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
-        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
+        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa,
+        (SELECT COALESCE(c.valor_contraproposta, c.valor_proposto)
+           FROM candidaturas c
+          WHERE c.obra_id = o.id AND c.usuario_id = o.match_usuario_id
+          LIMIT 1) as valor_acordado
        FROM obras o WHERE o.criado_por = $1 AND o.status != 'cancelada' ORDER BY o.criado_em DESC
        LIMIT $2 OFFSET $3`,
       [req.usuario.id, limit, offset]
@@ -508,7 +512,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
 // POST /obras/:id/candidatura/:candidaturaId/pintor-responder — pintor responde a contraproposta
 router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar, async (req, res) => {
   try {
-    const { action } = req.body
+    const { action, valor } = req.body
     const { id: obra_id, candidaturaId } = req.params
     const candidatura = await pool.query(
       `SELECT * FROM candidaturas WHERE id = $1 AND obra_id = $2 AND usuario_id = $3`,
@@ -518,6 +522,17 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
     if (candidatura.rows[0].status !== 'contraproposta_dono') return res.status(400).json({ erro: 'Não há contraproposta pendente' })
     const obra = await pool.query(`SELECT titulo, criado_por FROM obras WHERE id = $1`, [obra_id])
     const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [obra.rows[0].criado_por])
+    if (action === 'contraproposta') {
+      if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
+      // Volta para 'pendente' com o novo valor para reentrar no fluxo de resposta do dono
+      await pool.query(`UPDATE candidaturas SET status = 'pendente', valor_proposto = $2, valor_contraproposta = NULL WHERE id = $1`, [candidaturaId, valor])
+      if (dono.rows[0]?.push_token) {
+        enviarPushNotificacao(dono.rows[0].push_token, '💬 Nova contraproposta do profissional!',
+          `O pintor propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${obra.rows[0].titulo}". Veja no app!`,
+          { tipo: 'contra_oferta', obra_id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Contraproposta enviada!' })
+    }
     if (action === 'aceitar') {
       await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
       if (dono.rows[0]?.push_token) {
@@ -755,7 +770,11 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
     const result = await pool.query(
       `SELECT r.*,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
-        (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa
+        (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa,
+        (SELECT COALESCE(ir.valor_contraproposta, ir.valor_proposto)
+           FROM interesse_reparos ir
+          WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
+          LIMIT 1) as valor_acordado
        FROM reparos r WHERE r.criado_por = $1 AND r.status != 'cancelada' ORDER BY r.criado_em DESC
        LIMIT $2 OFFSET $3`,
       [req.usuario.id, limit, offset]
@@ -1082,7 +1101,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
 // Prestador responde a uma contraproposta do dono
 router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autenticar, exigirPrestador, async (req, res) => {
   try {
-    const { action } = req.body
+    const { action, valor } = req.body
     const { id: reparo_id, interesse_id } = req.params
 
     const interesse = await pool.query(
@@ -1094,6 +1113,18 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
 
     const reparo = await pool.query(`SELECT titulo, criado_por FROM reparos WHERE id = $1`, [reparo_id])
     const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [reparo.rows[0].criado_por])
+
+    if (action === 'contraproposta') {
+      if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
+      // Volta para 'pendente' com o novo valor para reentrar no fluxo de resposta do dono
+      await pool.query(`UPDATE interesse_reparos SET status = 'pendente', valor_proposto = $2, valor_contraproposta = NULL WHERE id = $1`, [interesse_id, valor])
+      if (dono.rows[0]?.push_token) {
+        enviarPushNotificacao(dono.rows[0].push_token, '💬 Nova contraproposta do profissional!',
+          `O prestador propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${reparo.rows[0].titulo}". Veja no app!`,
+          { tipo: 'contra_oferta', reparo_id }).catch(() => {})
+      }
+      return res.json({ mensagem: 'Contraproposta enviada!' })
+    }
 
     if (action === 'aceitar') {
       await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
