@@ -55,6 +55,11 @@ const speakeasy = require('speakeasy')
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_secret VARCHAR(100)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_ativo BOOLEAN DEFAULT false`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_prestador VARCHAR(20)`)
+    // Idempotência de criação de obra/reparo — evita duplicatas em retries após timeout/ERR_NETWORK
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS obras_criado_por_client_request_id_uniq ON obras (criado_por, client_request_id) WHERE client_request_id IS NOT NULL`)
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS reparos_criado_por_client_request_id_uniq ON reparos (criado_por, client_request_id) WHERE client_request_id IS NOT NULL`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -290,12 +295,17 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos de obra podem cadastrar obras' })
     }
-    const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags, endereco_obra, latitude, longitude } = req.body
+    const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags, endereco_obra, latitude, longitude, client_request_id } = req.body
     const expira_em = new Date(Date.now() + (horas_para_expirar || 720) * 3600 * 1000)
+    // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
+    // retornam a obra já criada em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, latitude, longitude, status, enviada_por_dono, status_aprovacao)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'rascunho',true,'pendente') RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, latitude, longitude]
+      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, latitude, longitude, status, enviada_por_dono, status_aprovacao, client_request_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'rascunho',true,'pendente',$16)
+       ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
+       DO UPDATE SET client_request_id = EXCLUDED.client_request_id
+       RETURNING *`,
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, latitude, longitude, client_request_id || null]
     )
     res.status(201).json(result.rows[0])
   } catch (err) {
@@ -794,13 +804,18 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar reparos' })
     }
-    const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, latitude, longitude } = req.body
+    const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, latitude, longitude, client_request_id } = req.body
     const horasExpiracao = prazo_atendimento_horas || 720
     const expira_em = new Date(Date.now() + horasExpiracao * 3600 * 1000)
+    // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
+    // retornam o reparo já criado em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, latitude, longitude)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',$10,$11,$12,$13,$14) RETURNING *`,
-      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null, endereco_obra, latitude, longitude]
+      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, latitude, longitude, client_request_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',$10,$11,$12,$13,$14,$15)
+       ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
+       DO UPDATE SET client_request_id = EXCLUDED.client_request_id
+       RETURNING *`,
+      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null, endereco_obra, latitude, longitude, client_request_id || null]
     )
     res.status(201).json(result.rows[0])
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
