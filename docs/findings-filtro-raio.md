@@ -74,3 +74,15 @@ e confirmar que a distância atualiza a partir do GPS.
 
 Observação: na base de produção atual, a maioria dos itens não tem coordenadas, então
 exibirão o card **sem** distância — comportamento correto, não um bug.
+
+### Extensão: distância nas telas de detalhe
+
+A mesma distância foi adicionada às telas de detalhe (`DetalheObraScreen.js` e
+`DetalheReparoScreen.js`), na linha de local, com os mesmos helpers
+(`distanciaKm`/`formatarDistancia`) e o mesmo carregamento de localização sem nova
+permissão. As coordenadas sobrevivem ao `buscar()` da tela porque os endpoints de detalhe
+retornam lat/lng: `GET /obras/:id` (`SELECT o.*`) e `GET /reparos/:id` (`SELECT *`).
+
+Mesmo status de verificação dos cards: dados + fórmula confirmados; pixels renderizados
+**não** verificados (sem device/emulador neste host). Para fechar, abrir o detalhe de uma
+obra/reparo geocodificado com localização concedida e confirmar a distância na linha de local.
