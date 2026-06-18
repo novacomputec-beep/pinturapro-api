@@ -60,6 +60,11 @@ const speakeasy = require('speakeasy')
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS obras_criado_por_client_request_id_uniq ON obras (criado_por, client_request_id) WHERE client_request_id IS NOT NULL`)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS reparos_criado_por_client_request_id_uniq ON reparos (criado_por, client_request_id) WHERE client_request_id IS NOT NULL`)
+    // Índices para o filtro por raio (feed). PostGIS/GiST não é assumido como disponível,
+    // então usamos btree em (latitude, longitude) — sempre disponível no Postgres padrão.
+    // Acelera a pré-seleção de linhas com coordenadas; o haversine continua sendo calculado por linha.
+    await client.query(`CREATE INDEX IF NOT EXISTS obras_lat_lng_idx ON obras (latitude, longitude)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS reparos_lat_lng_idx ON reparos (latitude, longitude)`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -973,12 +978,21 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
       const latNum = parseFloat(lat)
       const lngNum = parseFloat(lng)
       if (!isNaN(raio) && !isNaN(latNum) && !isNaN(lngNum)) {
+        // Raio cumulativo: inclui reparos dentro de X km (com coordenadas) OU da cidade do
+        // usuário (mesmo sem coordenadas geocodificadas — "sem lat/lng" não pode significar "invisível")
+        const cidadeResult = await pool.query(`SELECT cidade FROM usuarios WHERE id = $1`, [req.usuario.id])
+        const cidade = cidadeResult.rows[0]?.cidade
         const latIdx = params.length + 1
         const lngIdx = params.length + 2
         const raioIdx = params.length + 3
         params.push(latNum, lngNum, raio)
-        query += ` AND r.latitude IS NOT NULL AND r.longitude IS NOT NULL
-          AND (6371 * acos(LEAST(1.0, cos(radians($${latIdx})) * cos(radians(r.latitude::float)) * cos(radians(r.longitude::float) - radians($${lngIdx})) + sin(radians($${latIdx})) * sin(radians(r.latitude::float))))) <= $${raioIdx}`
+        let condicao = `(r.latitude IS NOT NULL AND r.longitude IS NOT NULL
+          AND (6371 * acos(LEAST(1.0, cos(radians($${latIdx})) * cos(radians(r.latitude::float)) * cos(radians(r.longitude::float) - radians($${lngIdx})) + sin(radians($${latIdx})) * sin(radians(r.latitude::float))))) <= $${raioIdx})`
+        if (cidade) {
+          params.push(cidade)
+          condicao = `(${condicao} OR r.cidade = $${params.length})`
+        }
+        query += ` AND ${condicao}`
       }
     }
 

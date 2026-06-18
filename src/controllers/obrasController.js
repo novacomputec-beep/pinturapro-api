@@ -45,12 +45,23 @@ const listar = async (req, res) => {
       const latNum = parseFloat(lat)
       const lngNum = parseFloat(lng)
       if (!isNaN(raio) && !isNaN(latNum) && !isNaN(lngNum)) {
+        // Raio cumulativo: inclui obras dentro de X km (com coordenadas) OU da cidade do
+        // usuário (mesmo sem coordenadas geocodificadas — "sem lat/lng" não pode significar "invisível")
+        const cidadeResult = req.usuario?.id
+          ? await pool.query(`SELECT cidade FROM usuarios WHERE id = $1`, [req.usuario.id])
+          : { rows: [] }
+        const cidade = cidadeResult.rows[0]?.cidade
         const latIdx = params.length + 1
         const lngIdx = params.length + 2
         const raioIdx = params.length + 3
         params.push(latNum, lngNum, raio)
-        query += ` AND o.latitude IS NOT NULL AND o.longitude IS NOT NULL
-          AND (6371 * acos(LEAST(1.0, cos(radians($${latIdx})) * cos(radians(o.latitude::float)) * cos(radians(o.longitude::float) - radians($${lngIdx})) + sin(radians($${latIdx})) * sin(radians(o.latitude::float))))) <= $${raioIdx}`
+        let condicao = `(o.latitude IS NOT NULL AND o.longitude IS NOT NULL
+          AND (6371 * acos(LEAST(1.0, cos(radians($${latIdx})) * cos(radians(o.latitude::float)) * cos(radians(o.longitude::float) - radians($${lngIdx})) + sin(radians($${latIdx})) * sin(radians(o.latitude::float))))) <= $${raioIdx})`
+        if (cidade) {
+          params.push(cidade)
+          condicao = `(${condicao} OR o.cidade = $${params.length})`
+        }
+        query += ` AND ${condicao}`
       }
     }
 
