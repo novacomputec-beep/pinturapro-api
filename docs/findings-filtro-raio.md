@@ -4,9 +4,12 @@ Contexto: verificação do filtro de raio cumulativo (`(haversine <= raio) OR o.
 e do pré-filtro por bounding box, executada contra a API de produção em 2026-06-18.
 Resultado geral: **PASS** (obras e reparos, conferência cruzada contra haversine independente).
 
-## Achado: `obras.listar` não retorna `latitude`/`longitude` no SELECT
+## Achado: `obras.listar` não retorna `latitude`/`longitude` no SELECT — RESOLVIDO
 
-`src/controllers/obrasController.js` (`listar`) seleciona colunas explícitas e **omite
+> **Status: resolvido.** `o.latitude, o.longitude` foram adicionados ao SELECT de
+> `listar`, alinhando com `/reparos`. O texto abaixo descreve o estado anterior.
+
+`src/controllers/obrasController.js` (`listar`) selecionava colunas explícitas e **omitia
 `latitude` e `longitude`**:
 
 ```sql
@@ -31,10 +34,9 @@ Isto **não** é causado pela correção do filtro de raio nem afeta a corretude
 o cálculo do haversine acontece no banco, sobre as colunas reais. É uma inconsistência
 pré-existente entre os endpoints de obras e reparos.
 
-### Recomendação
-Se a UI precisar mostrar distância (ou para padronizar com `/reparos`), incluir
-`o.latitude, o.longitude` na lista de colunas do SELECT de `listar`. Caso contrário,
-documentar que a omissão é intencional (payload mais enxuto).
+### Resolução
+`o.latitude, o.longitude` foram incluídos na lista de colunas do SELECT de `listar`,
+padronizando com `/reparos` e permitindo que a UI exiba distância quando necessário.
 
 ## Limitação da verificação (registro)
 Os dados de produção de obras eram homogêneos (todas em uma cidade, apenas 3 com
