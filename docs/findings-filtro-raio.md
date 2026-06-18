@@ -45,3 +45,32 @@ obras. Isso foi coberto por:
 - o limite de fronteira em `/reparos` (reparo de Ituiutaba a 316 km entra em +500 km e
   não em +300 km), e
 - o teste numérico offline do bounding box (9.000 pontos de fronteira, 0 falsos negativos).
+
+## Verificação da distância nos cards do feed (2026-06-18)
+
+Recurso: exibir "X km de você" nos cards de obras e reparos, calculado no cliente
+(`distanciaKm`/`formatarDistancia` em `FeedObrasScreen.js` e `FeedReparosScreen.js`)
+a partir das coordenadas retornadas pela API.
+
+**Veredito: BLOCKED** para o pixel renderizado — não há device/emulador/Expo neste host
+para dirigir a tela. O que *alimenta* a exibição foi confirmado contra a API de produção:
+
+- ✅ **Dados presentes ao vivo.** `GET /obras` e `GET /reparos` retornam `latitude`/`longitude`
+  (obras agora expõem após a correção do SELECT; reparos já expunham via `r.*`).
+- ✅ **Fórmula/gating corretos.** Rodando a fórmula exata dos cards sobre linhas reais a
+  partir de Patos de Minas:
+  - obras geocodificadas em Patos → "menos de 1 km" / "1 km de você";
+  - reparo de Ituiutaba (coords reais) → "316 km de você" (bate com os 316 km medidos na
+    verificação do filtro de raio);
+  - itens sem coordenadas → **sem** segmento de distância (gating `latitude != null`).
+- ✅ **Limites da formatação.** Mesmo ponto e < 1 km → "menos de 1 km"; demais →
+  arredondado "N km de você".
+
+**Não verificado (pendente de device):** os pixels em si — layout do `Text` inline colorido
+(`cardDistancia`), quebra/overflow, aparição real na tela e o comportamento com permissão de
+localização negada. Para fechar: abrir o feed em/perto de Patos de Minas com localização
+concedida e confirmar a distância nas obras/reparos geocodificados; alternar o filtro +500 km
+e confirmar que a distância atualiza a partir do GPS.
+
+Observação: na base de produção atual, a maioria dos itens não tem coordenadas, então
+exibirão o card **sem** distância — comportamento correto, não um bug.
