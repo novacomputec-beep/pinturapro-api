@@ -982,11 +982,29 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
         // usuário (mesmo sem coordenadas geocodificadas — "sem lat/lng" não pode significar "invisível")
         const cidadeResult = await pool.query(`SELECT cidade FROM usuarios WHERE id = $1`, [req.usuario.id])
         const cidade = cidadeResult.rows[0]?.cidade
+        // Pré-filtro por bounding box (sargável → usa o índice btree (latitude, longitude))
+        // antes do haversine exato por linha. A caixa é um superconjunto do círculo de raio
+        // R (usa cos na latitude da borda mais próxima do polo), então não há falsos negativos:
+        // o haversine continua sendo o filtro exato.
+        const KM_POR_GRAU = 111.045
+        const latDelta = raio / KM_POR_GRAU
+        const cosBorda = Math.cos(Math.min(89.9, Math.abs(latNum) + latDelta) * Math.PI / 180)
+        const lngDelta = cosBorda > 0.0001 ? raio / (KM_POR_GRAU * cosBorda) : 180
+        const latMin = latNum - latDelta
+        const latMax = latNum + latDelta
+        const lngMin = Math.max(-180, lngNum - lngDelta)
+        const lngMax = Math.min(180, lngNum + lngDelta)
         const latIdx = params.length + 1
         const lngIdx = params.length + 2
         const raioIdx = params.length + 3
-        params.push(latNum, lngNum, raio)
+        const latMinIdx = params.length + 4
+        const latMaxIdx = params.length + 5
+        const lngMinIdx = params.length + 6
+        const lngMaxIdx = params.length + 7
+        params.push(latNum, lngNum, raio, latMin, latMax, lngMin, lngMax)
         let condicao = `(r.latitude IS NOT NULL AND r.longitude IS NOT NULL
+          AND r.latitude BETWEEN $${latMinIdx} AND $${latMaxIdx}
+          AND r.longitude BETWEEN $${lngMinIdx} AND $${lngMaxIdx}
           AND (6371 * acos(LEAST(1.0, cos(radians($${latIdx})) * cos(radians(r.latitude::float)) * cos(radians(r.longitude::float) - radians($${lngIdx})) + sin(radians($${latIdx})) * sin(radians(r.latitude::float))))) <= $${raioIdx})`
         if (cidade) {
           params.push(cidade)
