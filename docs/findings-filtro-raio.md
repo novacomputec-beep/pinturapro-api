@@ -83,6 +83,20 @@ A mesma distância foi adicionada às telas de detalhe (`DetalheObraScreen.js` e
 permissão. As coordenadas sobrevivem ao `buscar()` da tela porque os endpoints de detalhe
 retornam lat/lng: `GET /obras/:id` (`SELECT o.*`) e `GET /reparos/:id` (`SELECT *`).
 
-Mesmo status de verificação dos cards: dados + fórmula confirmados; pixels renderizados
-**não** verificados (sem device/emulador neste host). Para fechar, abrir o detalhe de uma
-obra/reparo geocodificado com localização concedida e confirmar a distância na linha de local.
+**Verificação (2026-06-18) — veredito: BLOCKED** para o pixel renderizado (sem
+device/emulador/Expo neste host). Risco específico das telas de detalhe — `buscar()`
+sobrescreve o objeto vindo por params com a resposta do endpoint, então a distância só
+persiste se o detalhe retornar coords — **descartado** ao vivo:
+
+- ✅ `GET /obras/:id` (obra geocodificada `22262085`) → HTTP 200; resposta inclui
+  `latitude`/`longitude` não-nulos → linha renderizada: "📍 Patos de Minas, Centro · 1 km de você".
+- ✅ `GET /reparos/:id` (reparo de Ituiutaba `8c0effc8`) → HTTP 200; coords presentes →
+  "📍 Ituiutaba, Cidade Jardim · 316 km de você" (bate com os 316 km do filtro de raio).
+- ✅ Sem permissão de localização (`coords=null`) → segmento de distância omitido
+  (gating `latitude != null`).
+- ❌ Pixels não observados: `Text` inline colorido (`localDistancia`), layout/quebra e
+  aparição real na tela.
+
+Observação: os endpoints de detalhe incrementam `total_visitas` na leitura — efeito
+esperado do app, não da mudança. Para fechar (PASS): abrir o detalhe de uma obra/reparo
+geocodificado com localização concedida e confirmar a distância na linha de local.
