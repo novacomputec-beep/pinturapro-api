@@ -11,6 +11,7 @@ const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = require('../services/uploadService')
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
+const { ufDeCidade } = require('../utils/localidade')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const bcrypt = require('bcryptjs')
 const speakeasy = require('speakeasy')
@@ -65,6 +66,11 @@ const speakeasy = require('speakeasy')
     // Acelera a pré-seleção de linhas com coordenadas; o haversine continua sendo calculado por linha.
     await client.query(`CREATE INDEX IF NOT EXISTS obras_lat_lng_idx ON obras (latitude, longitude)`)
     await client.query(`CREATE INDEX IF NOT EXISTS reparos_lat_lng_idx ON reparos (latitude, longitude)`)
+    // Backfill do uf: linhas antigas têm cidade preenchida mas uf NULL, então sumiam do
+    // filtro "Estado" (o.uf/r.uf) mesmo aparecendo em "Cidade". Cidades conhecidas e
+    // inequívocas (todas em MG). Idempotente via WHERE uf IS NULL.
+    await client.query(`UPDATE obras   SET uf = 'MG' WHERE uf IS NULL AND cidade = 'Patos de Minas'`)
+    await client.query(`UPDATE reparos SET uf = 'MG' WHERE uf IS NULL AND cidade IN ('Patos de Minas', 'Formiga')`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -301,6 +307,7 @@ router.post('/obras/dono', autenticar, async (req, res) => {
       return res.status(403).json({ erro: 'Apenas donos de obra podem cadastrar obras' })
     }
     const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags, endereco_obra, latitude, longitude, client_request_id } = req.body
+    const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
     const expira_em = new Date(Date.now() + (horas_para_expirar || 720) * 3600 * 1000)
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam a obra já criada em vez de inserir duplicata. Sem chave (NULL) → insert normal.
@@ -310,7 +317,7 @@ router.post('/obras/dono', autenticar, async (req, res) => {
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, latitude, longitude, client_request_id || null]
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, latitude, longitude, client_request_id || null]
     )
     res.status(201).json(result.rows[0])
   } catch (err) {
@@ -811,6 +818,7 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar reparos' })
     }
     const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, latitude, longitude, client_request_id } = req.body
+    const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
     const horasExpiracao = prazo_atendimento_horas || 720
     const expira_em = new Date(Date.now() + horasExpiracao * 3600 * 1000)
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
@@ -821,7 +829,7 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null, endereco_obra, latitude, longitude, client_request_id || null]
+      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null, endereco_obra, latitude, longitude, client_request_id || null]
     )
     res.status(201).json(result.rows[0])
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))

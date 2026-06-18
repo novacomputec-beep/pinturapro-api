@@ -1,5 +1,6 @@
 const { pool } = require('../utils/supabase')
 const { notificarNovaObra } = require('../services/notificacaoService')
+const { ufDeCidade } = require('../utils/localidade')
 
 const listar = async (req, res) => {
   try {
@@ -141,7 +142,7 @@ const detalhe = async (req, res) => {
 const criar = async (req, res) => {
   try {
     const {
-      titulo, categoria, valor, cidade, bairro,
+      titulo, categoria, valor, cidade, bairro, uf,
       latitude, longitude, metragem,
       prazo_execucao_dias, horas_para_expirar,
       descricao, tags
@@ -155,14 +156,16 @@ const criar = async (req, res) => {
       return res.status(400).json({ erro: 'Valor inválido' })
     }
 
+    // Rede de segurança: deriva o uf da cidade quando o cliente não envia
+    const ufFinal = uf || await ufDeCidade(cidade)
     const expira_em = new Date(Date.now() + (horas_para_expirar || 48) * 3600 * 1000)
 
     const result = await pool.query(
-      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro,
+      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf,
         latitude, longitude, metragem, prazo_execucao_dias, expira_em, descricao, tags, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'aberta')
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'aberta')
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro,
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal,
        latitude || null, longitude || null, metragem, prazo_execucao_dias,
        expira_em.toISOString(), descricao, tags || []]
     )
@@ -184,7 +187,7 @@ const criar = async (req, res) => {
 
 const editar = async (req, res) => {
   try {
-    const { titulo, categoria, valor, cidade, bairro, metragem, prazo_execucao_dias, descricao, tags, status } = req.body
+    const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, descricao, tags, status } = req.body
 
     // Verifica se a obra existe antes de editar
     const existe = await pool.query(`SELECT id FROM obras WHERE id = $1`, [req.params.id])
@@ -198,11 +201,13 @@ const editar = async (req, res) => {
       return res.status(400).json({ erro: 'Status inválido' })
     }
 
+    // Rede de segurança: deriva o uf da cidade quando o cliente não envia
+    const ufFinal = uf || await ufDeCidade(cidade)
     const result = await pool.query(
-      `UPDATE obras SET titulo=$1, categoria=$2, valor=$3, cidade=$4, bairro=$5,
-       metragem=$6, prazo_execucao_dias=$7, descricao=$8, tags=$9, status=$10
-       WHERE id=$11 RETURNING *`,
-      [titulo, categoria, valor, cidade, bairro, metragem, prazo_execucao_dias, descricao, tags, status, req.params.id]
+      `UPDATE obras SET titulo=$1, categoria=$2, valor=$3, cidade=$4, bairro=$5, uf=$6,
+       metragem=$7, prazo_execucao_dias=$8, descricao=$9, tags=$10, status=$11
+       WHERE id=$12 RETURNING *`,
+      [titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, descricao, tags, status, req.params.id]
     )
 
     res.json(result.rows[0])
