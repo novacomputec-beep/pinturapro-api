@@ -258,6 +258,7 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
     const result = await pool.query(
       `SELECT o.*,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
+        (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id AND status = 'pendente') as candidaturas_pendentes,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa,
         (SELECT COALESCE(c.valor_contraproposta, c.valor_proposto)
            FROM candidaturas c
@@ -793,6 +794,7 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
     const result = await pool.query(
       `SELECT r.*,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
+        (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id AND status = 'pendente') as interesses_pendentes,
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa,
         (SELECT COALESCE(ir.valor_contraproposta, ir.valor_proposto)
            FROM interesse_reparos ir
