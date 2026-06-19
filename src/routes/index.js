@@ -2132,12 +2132,16 @@ router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamento
 // ============================================================
 router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const [obras, assinantes, candidaturas, obrasAprovacao, reparosAprovacao] = await Promise.all([
+    const [obras, assinantes, candidaturas, obrasAprovacao, reparosAprovacao, porStatus] = await Promise.all([
       pool.query(`SELECT COUNT(*) FROM obras WHERE status = 'aberta'`),
       pool.query(`SELECT COUNT(*) FROM assinaturas WHERE status = 'ativa'`),
       pool.query(`SELECT COUNT(*) FROM candidaturas WHERE status = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM obras WHERE enviada_por_dono = true AND status_aprovacao = 'pendente'`),
-      pool.query(`SELECT COUNT(*) FROM reparos WHERE status_aprovacao = 'pendente'`)
+      pool.query(`SELECT COUNT(*) FROM reparos WHERE status_aprovacao = 'pendente'`),
+      // TEMP: censo de candidaturas por status × obra encerrada (verificação do fix de filtros). Remover após leitura.
+      pool.query(`SELECT c.status, (o.status = 'encerrada') AS obra_encerrada, COUNT(*)::int AS total
+                  FROM candidaturas c JOIN obras o ON o.id = c.obra_id
+                  GROUP BY c.status, obra_encerrada ORDER BY c.status`)
     ])
     const totalAssinantes = parseInt(assinantes.rows[0].count)
     res.json({
@@ -2146,7 +2150,8 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
       receita_mensal: totalAssinantes * 99.90,
       candidaturas_pendentes: parseInt(candidaturas.rows[0].count),
       obras_para_aprovar: parseInt(obrasAprovacao.rows[0].count),
-      reparos_para_aprovar: parseInt(reparosAprovacao.rows[0].count)
+      reparos_para_aprovar: parseInt(reparosAprovacao.rows[0].count),
+      candidaturas_por_status: porStatus.rows
     })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar métricas' })
