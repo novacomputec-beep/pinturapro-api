@@ -1,8 +1,14 @@
+require('dotenv').config()
 const bcrypt = require('bcryptjs')
 const { Pool } = require('pg')
 
+if (!process.env.DATABASE_URL) {
+  console.error('DATABASE_URL não definida. Configure no .env (local) ou nas variáveis de ambiente (Railway).')
+  process.exit(1)
+}
+
 const pool = new Pool({
-  connectionString: 'postgresql://postgres:bXRBYWrPTEGQqLFMzRJIXTUpzEmzLPaS@shuttle.proxy.rlwy.net:31045/railway',
+  connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 })
 
