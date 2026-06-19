@@ -2132,11 +2132,15 @@ router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamento
 // ============================================================
 router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const [obras, assinantes, candidaturas, interesses, obrasAprovacao, reparosAprovacao] = await Promise.all([
+    const [obras, assinantes, candidaturas, interesses, obrasDonos, reparosDonos, obrasAprovacao, reparosAprovacao] = await Promise.all([
       pool.query(`SELECT COUNT(*) FROM obras WHERE status = 'aberta'`),
       pool.query(`SELECT COUNT(*) FROM assinaturas WHERE status = 'ativa'`),
       pool.query(`SELECT COUNT(*) FROM candidaturas WHERE status = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM interesse_reparos WHERE status = 'pendente'`),
+      // Donos distintos com ao menos uma obra/reparo com pendente — equivale à população
+      // que veria o banner "Parabéns" ao logar.
+      pool.query(`SELECT COUNT(DISTINCT o.criado_por) FROM obras o JOIN candidaturas c ON c.obra_id = o.id WHERE c.status = 'pendente'`),
+      pool.query(`SELECT COUNT(DISTINCT r.criado_por) FROM reparos r JOIN interesse_reparos ir ON ir.reparo_id = r.id WHERE ir.status = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM obras WHERE enviada_por_dono = true AND status_aprovacao = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM reparos WHERE status_aprovacao = 'pendente'`)
     ])
@@ -2147,6 +2151,8 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
       receita_mensal: totalAssinantes * 99.90,
       candidaturas_pendentes: parseInt(candidaturas.rows[0].count),
       interesses_pendentes: parseInt(interesses.rows[0].count),
+      obras_donos_pendentes: parseInt(obrasDonos.rows[0].count),
+      reparos_donos_pendentes: parseInt(reparosDonos.rows[0].count),
       obras_para_aprovar: parseInt(obrasAprovacao.rows[0].count),
       reparos_para_aprovar: parseInt(reparosAprovacao.rows[0].count)
     })
