@@ -155,7 +155,7 @@ const cadastrar = async (req, res) => {
     if (emailsEspeciais.length > 0 && emailsEspeciais.includes(emailNormalizado)) {
       setImmediate(async () => {
         try {
-          await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [usuario.id])
+          await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [usuario.id])
           await pool.query(`UPDATE assinaturas SET status = 'ativa', tipo = 'gratuito', atualizado_em = NOW() WHERE usuario_id = $1`, [usuario.id])
           console.log(`[Acesso especial] ${emailNormalizado} aprovado automaticamente`)
         } catch (err) {

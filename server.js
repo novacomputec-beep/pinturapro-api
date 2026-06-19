@@ -211,6 +211,11 @@ const iniciarAgendador = () => {
 
   setInterval(async () => {
     try {
+      // Toggle "Modo Auto": OFF ('false' ou ausente) → admin presente, exige revisão manual.
+      // Nenhuma aprovação automática acontece enquanto estiver OFF.
+      const cfg = await pool.query(`SELECT valor FROM configuracoes WHERE chave = 'aprovacao_automatica'`)
+      if (cfg.rows[0]?.valor !== 'true') return
+
       const pendentes = await pool.query(`
         SELECT u.id, u.nome, u.email, u.push_token
         FROM usuarios u
@@ -221,13 +226,14 @@ const iniciarAgendador = () => {
       `)
       if (pendentes.rows.length === 0) return
       for (const p of pendentes.rows) {
-        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [p.id])
+        // aprovado_automaticamente = true → idoneidade ainda não revisada (auditável no painel)
+        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
         await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [p.id])
         if (p.push_token) {
           await enviarPushNotificacao(p.push_token, '✅ Cadastro aprovado!', 'Bem-vindo ao PinturaPro! Seu acesso está liberado.', { tipo: 'verificacao_aprovada' }).catch(() => {})
         }
       }
-      console.log(`[Timeout] ${pendentes.rows.length} prestadores aprovados automaticamente por timeout de 1h`)
+      console.log(`[Timeout] ${pendentes.rows.length} prestadores auto-aprovados por timeout de 1h (Modo Auto ON)`)
     } catch (err) {
       console.error('[Timeout verificação] Erro:', err.message)
     }

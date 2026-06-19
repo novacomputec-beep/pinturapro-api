@@ -258,7 +258,7 @@ const darAcessoGratuito = async (req, res) => {
     }
 
     await pool.query(
-      `UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [usuario_id]
+      `UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = false WHERE id = $1`, [usuario_id]
     )
 
     res.json({ mensagem: 'Acesso gratuito concedido com sucesso' })
@@ -276,7 +276,7 @@ const listarAssinantes = async (req, res) => {
 
     const result = await pool.query(`
       SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.role,
-             u.tipo_dono, u.tipo_prestador, u.verificacao_status,
+             u.tipo_dono, u.tipo_prestador, u.verificacao_status, u.aprovado_automaticamente,
              a.status, a.plano, a.tipo, a.valor_mensal, a.criado_em
       FROM usuarios u
       LEFT JOIN assinaturas a ON a.usuario_id = u.id

@@ -56,6 +56,15 @@ const speakeasy = require('speakeasy')
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_secret VARCHAR(100)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_ativo BOOLEAN DEFAULT false`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_prestador VARCHAR(20)`)
+    // Auditoria de aprovação: true = aprovado pelo job automático (Modo Auto ON) sem revisão
+    // de idoneidade; false = aprovado/reprovado manualmente por admin; null = legado/não tocado.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS aprovado_automaticamente BOOLEAN`)
+    // Flag global "Modo Auto" — garante a existência da linha (tabela já existe em prod).
+    // Default 'false' = OFF: novos prestadores aguardam revisão manual do admin.
+    await client.query(`CREATE TABLE IF NOT EXISTS configuracoes (chave TEXT PRIMARY KEY, valor TEXT, atualizado_em TIMESTAMPTZ DEFAULT NOW())`)
+    await client.query(`INSERT INTO configuracoes (chave, valor)
+                        SELECT 'aprovacao_automatica', 'false'
+                        WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'aprovacao_automatica')`)
     // Idempotência de criação de obra/reparo — evita duplicatas em retries após timeout/ERR_NETWORK
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
@@ -1697,7 +1706,7 @@ router.get('/verificacao/pendentes', autenticar, exigirAdmin, async (req, res) =
              u.verificacao_doc_verso_url, u.verificacao_selfie_url,
              u.referencias, u.pix_reembolso, u.criado_em,
              u.anos_experiencia, u.tamanho_equipe,
-             u.rg, u.rg_orgao, u.rg_estado,
+             u.rg, u.rg_orgao, u.rg_estado, u.aprovado_automaticamente,
              a.plano, a.status as assinatura_status
       FROM usuarios u
       LEFT JOIN assinaturas a ON a.usuario_id = u.id
@@ -1721,9 +1730,9 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
     )
     if (usuario.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
 
-    // Aprova verificação e ativa assinatura
+    // Aprova verificação e ativa assinatura (revisão manual → idoneidade confirmada)
     await pool.query(
-      `UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [id]
+      `UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = false WHERE id = $1`, [id]
     )
     await pool.query(
       `UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [id]
@@ -1844,6 +1853,22 @@ router.post('/verificacao/:id/reprovar', autenticar, exigirAdmin, async (req, re
   }
 })
 
+// Confirma idoneidade de um prestador que foi auto-aprovado (limpa o flag de revisão pendente).
+// Não altera verificacao_status — apenas marca que um admin revisou o cadastro.
+router.post('/verificacao/:id/confirmar-idoneidade', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `UPDATE usuarios SET aprovado_automaticamente = false
+       WHERE id = $1 AND verificacao_status = 'aprovado'
+       RETURNING id`, [req.params.id]
+    )
+    if (r.rows.length === 0) return res.status(404).json({ erro: 'Prestador aprovado não encontrado' })
+    res.json({ mensagem: 'Idoneidade confirmada' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao confirmar idoneidade' })
+  }
+})
+
 // Modo automático — liga/desliga aprovação automática
 router.get('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
   try {
@@ -1873,7 +1898,8 @@ router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req,
            AND a.status = 'pendente_verificacao'`
       )
       for (const p of pendentes.rows) {
-        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [p.id])
+        // Aprovação em lote ao ligar o Modo Auto: também é não-revisada → marca automática
+        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
         await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [p.id])
       }
       console.log(`[Modo automático] ${pendentes.rows.length} prestadores aprovados automaticamente`)
