@@ -19,8 +19,11 @@ const speakeasy = require('speakeasy')
 // One-time column migrations
 // One-time column migrations — single transaction so all columns land atomically or none do
 ;(async () => {
-  const client = await pool.connect()
+  // pool.connect() dentro do try: erro de conexão (ex.: DB inacessível) é logado
+  // em vez de virar unhandled rejection que derruba o processo (crash-loop / 502).
+  let client
   try {
+    client = await pool.connect()
     await client.query('BEGIN')
     await client.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`)
     await client.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`)
@@ -83,10 +86,10 @@ const speakeasy = require('speakeasy')
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
+    if (client) await client.query('ROLLBACK').catch(() => {})
     console.error('[migration] FALHOU — rollback executado:', err.message)
   } finally {
-    client.release()
+    if (client) client.release()
   }
 })()
 
