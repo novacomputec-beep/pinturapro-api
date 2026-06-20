@@ -224,7 +224,11 @@ const enviarContratoReparo = async (reparoId) => {
               u_dono.nome as dono_nome, u_dono.email as dono_email,
               u_dono.telefone as dono_telefone, u_dono.cpf_cnpj as dono_cpf,
               u_prest.nome as prest_nome, u_prest.email as prest_email,
-              u_prest.telefone as prest_telefone, u_prest.cpf_cnpj as prest_cpf
+              u_prest.telefone as prest_telefone, u_prest.cpf_cnpj as prest_cpf,
+              (SELECT ir.id FROM interesse_reparos ir
+                WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
+                  AND ir.status IN ('aceito','aprovada')
+                ORDER BY ir.criado_em DESC LIMIT 1) as interesse_id
        FROM reparos r
        JOIN usuarios u_dono  ON r.criado_por       = u_dono.id
        JOIN usuarios u_prest ON r.match_usuario_id = u_prest.id
@@ -264,6 +268,15 @@ const enviarContratoReparo = async (reparoId) => {
     await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo })
     await enviarEmailComAnexo({ para: prestador.email, assunto, html, pdfBuffer, nomeArquivo })
     console.log(`[Contrato] Reparo ${reparoId} — enviado para ${dono.email} e ${prestador.email}`)
+
+    // Registra o contrato enviado (paridade com obra; idempotente por interesse)
+    if (r.interesse_id) {
+      await pool.query(
+        `INSERT INTO contratos (interesse_id, status)
+         SELECT $1, 'enviado' WHERE NOT EXISTS (SELECT 1 FROM contratos WHERE interesse_id = $1)`,
+        [r.interesse_id]
+      )
+    }
   } catch (err) {
     console.error('[Contrato] Erro ao enviar contrato de reparo:', err.message)
   }

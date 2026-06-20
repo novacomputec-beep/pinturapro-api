@@ -68,6 +68,8 @@ const speakeasy = require('speakeasy')
     await client.query(`INSERT INTO configuracoes (chave, valor)
                         SELECT 'aprovacao_automatica', 'false'
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'aprovacao_automatica')`)
+    // Contratos de reparo: referência ao interesse aceito (paridade com candidatura_id de obra)
+    await client.query(`ALTER TABLE contratos ADD COLUMN IF NOT EXISTS interesse_id uuid`)
     // Idempotência de criação de obra/reparo — evita duplicatas em retries após timeout/ERR_NETWORK
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
@@ -1134,8 +1136,9 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
           `O solicitante aceitou sua proposta para "${reparo.rows[0].titulo}". Confirme sua ida!`,
           { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
       }
-      enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato:', err))
-      return res.json({ mensagem: 'Proposta aceita! Contrato enviado por e-mail.' })
+      // O contrato é enviado quando o prestador confirma a ida (/reparos/:id/match),
+      // ponto em que match_usuario_id é definido. Aqui ainda é nulo, então não envia.
+      return res.json({ mensagem: 'Proposta aceita! O prestador foi notificado para confirmar a ida.' })
     }
 
     if (action === 'recusar') {
@@ -1204,8 +1207,8 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
           `O prestador aceitou sua contraproposta para "${reparo.rows[0].titulo}"!`,
           { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
       }
-      enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato:', err))
-      return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
+      // Contrato é enviado quando o prestador confirma a ida (/reparos/:id/match).
+      return res.json({ mensagem: 'Contraproposta aceita! Confirme sua ida para gerar o contrato.' })
     }
 
     if (action === 'recusar') {
