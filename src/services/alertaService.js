@@ -3,20 +3,81 @@ const { Expo } = require('expo-server-sdk')
 
 const expo = new Expo()
 
+// Consulta os recibos de entrega (depois de um intervalo, pois o Expo processa a
+// entrega de forma assíncrona) e remove tokens reportados como DeviceNotRegistered.
+// Recebe pares { ticket, pushToken } de tickets já confirmados como 'ok'.
+// É chamada em fire-and-forget — qualquer erro é apenas logado, nunca propagado.
+const processarRecibos = async (ticketsComToken, delayMs = 15000) => {
+  const receiptIdToToken = {}
+  for (const { ticket, pushToken } of ticketsComToken) {
+    if (ticket && ticket.status === 'ok' && ticket.id) {
+      receiptIdToToken[ticket.id] = pushToken
+    }
+  }
+  const receiptIds = Object.keys(receiptIdToToken)
+  if (receiptIds.length === 0) return
+
+  // Aguarda o Expo concluir a entrega antes de consultar os recibos
+  await new Promise(resolve => setTimeout(resolve, delayMs))
+
+  const tokensInvalidos = new Set()
+  const idChunks = expo.chunkPushNotificationReceiptIds(receiptIds)
+  for (const chunk of idChunks) {
+    try {
+      const receipts = await expo.getPushNotificationReceiptsAsync(chunk)
+      for (const [receiptId, receipt] of Object.entries(receipts)) {
+        if (receipt.status === 'error') {
+          const erro = receipt.details?.error
+          console.error('[Push] Recibo com erro | erro:', erro || 'n/a', '| msg:', receipt.message)
+          if (erro === 'DeviceNotRegistered') {
+            tokensInvalidos.add(receiptIdToToken[receiptId])
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[Push] Erro ao consultar recibos:', err.message)
+    }
+  }
+
+  if (tokensInvalidos.size > 0) {
+    try {
+      await pool.query(
+        `UPDATE usuarios SET push_token = NULL WHERE push_token = ANY($1)`,
+        [[...tokensInvalidos]]
+      )
+      console.log(`[Push] ${tokensInvalidos.size} token(s) inválido(s) removido(s) (DeviceNotRegistered)`)
+    } catch (err) {
+      console.error('[Push] Erro ao remover tokens inválidos:', err.message)
+    }
+  }
+}
+
 const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}) => {
   if (!Expo.isExpoPushToken(pushToken)) {
     console.warn('[Push] Token inválido ou ausente:', pushToken ? pushToken.substring(0, 30) : 'null')
     return
   }
   try {
-    await expo.sendPushNotificationsAsync([{
+    const tickets = await expo.sendPushNotificationsAsync([{
       to: pushToken,
       sound: 'default',
       title: titulo,
       body: corpo,
       data,
     }])
-    console.log('[Push] Enviado:', titulo, '→', pushToken.substring(0, 30))
+    const ticket = tickets[0]
+    if (ticket && ticket.status === 'error') {
+      console.error(
+        '[Push] Falha no envio:', titulo,
+        '| erro:', ticket.message,
+        '| detalhe:', ticket.details?.error || 'n/a',
+        '→', pushToken.substring(0, 30)
+      )
+    } else {
+      console.log('[Push] Enviado:', titulo, '→', pushToken.substring(0, 30))
+      processarRecibos([{ ticket, pushToken }]).catch(err =>
+        console.error('[Push] Erro no processamento de recibos:', err.message))
+    }
   } catch (err) {
     console.error('[Push] Erro ao enviar:', err.message)
   }
@@ -39,13 +100,33 @@ const enviarPushEmLote = async (destinatarios, titulo, corpo, data = {}) => {
 
   // Expo recomenda chunks de até 100 mensagens por chamada
   const chunks = expo.chunkPushNotifications(mensagens)
+  const ticketsComToken = []
   for (const chunk of chunks) {
     try {
-      await expo.sendPushNotificationsAsync(chunk)
+      const tickets = await expo.sendPushNotificationsAsync(chunk)
+      tickets.forEach((ticket, i) => {
+        const pushToken = chunk[i].to
+        if (ticket && ticket.status === 'error') {
+          console.error(
+            '[Push] Falha no envio (lote):', titulo,
+            '| erro:', ticket.message,
+            '| detalhe:', ticket.details?.error || 'n/a',
+            '→', pushToken.substring(0, 30)
+          )
+        } else {
+          ticketsComToken.push({ ticket, pushToken })
+        }
+      })
     } catch (err) {
       console.error('Erro ao enviar chunk de notificações:', err)
     }
   }
+
+  if (ticketsComToken.length > 0) {
+    processarRecibos(ticketsComToken).catch(err =>
+      console.error('[Push] Erro no processamento de recibos:', err.message))
+  }
+
   return mensagens.length
 }
 
