@@ -1618,8 +1618,11 @@ router.post('/upload/reparo-url', autenticar, async (req, res) => {
   try {
     const { reparo_id, url, tipo = 'video', ordem = 1 } = req.body
     if (!reparo_id || !url) return res.status(400).json({ erro: 'reparo_id e url são obrigatórios' })
+    // Idempotente por slot (reparo_id, ordem): um retry após resposta perdida
+    // (ex.: Wi-Fi + dados móveis trocando a rota) substitui a mídia em vez de duplicar.
     const result = await pool.query(
-      `INSERT INTO midias_reparos (reparo_id, tipo, url, ordem) VALUES ($1, $2, $3, $4) RETURNING *`,
+      `WITH del AS (DELETE FROM midias_reparos WHERE reparo_id = $1 AND ordem = $4)
+       INSERT INTO midias_reparos (reparo_id, tipo, url, ordem) VALUES ($1, $2, $3, $4) RETURNING *`,
       [reparo_id, tipo, url, ordem]
     )
     res.json(result.rows[0])
@@ -1633,8 +1636,10 @@ router.post('/upload/obra-url', autenticar, async (req, res) => {
   try {
     const { obra_id, url, tipo = 'video', ordem = 1 } = req.body
     if (!obra_id || !url) return res.status(400).json({ erro: 'obra_id e url são obrigatórios' })
+    // Idempotente por slot (obra_id, ordem): retry após resposta perdida substitui em vez de duplicar.
     const result = await pool.query(
-      `INSERT INTO midias (obra_id, tipo, url, ordem) VALUES ($1, $2, $3, $4) RETURNING *`,
+      `WITH del AS (DELETE FROM midias WHERE obra_id = $1 AND ordem = $4)
+       INSERT INTO midias (obra_id, tipo, url, ordem) VALUES ($1, $2, $3, $4) RETURNING *`,
       [obra_id, tipo, url, ordem]
     )
     res.json(result.rows[0])
