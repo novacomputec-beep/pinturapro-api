@@ -513,7 +513,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
           `O solicitante aceitou sua candidatura para "${obra.rows[0].titulo}". Confirme sua ida!`,
           { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
       }
-      enviarContratoObra(obra_id).catch(err => console.error('Erro ao enviar contrato obra:', err))
+      enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
       return res.json({ mensagem: 'Candidatura aceita! Contrato enviado por e-mail.' })
     }
     if (action === 'recusar') {
@@ -576,7 +576,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
           `O pintor aceitou sua contraproposta para "${obra.rows[0].titulo}"!`,
           { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
       }
-      enviarContratoObra(obra_id).catch(err => console.error('Erro ao enviar contrato obra:', err))
+      enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
       return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
     }
     if (action === 'recusar') {
@@ -621,7 +621,7 @@ router.post('/obras/:id/match', autenticar, async (req, res) => {
         `Um pintor confirmou que está indo até você para "${obra.rows[0].titulo}"`,
         { tipo: 'match_obra', obra_id: req.params.id }).catch(err => console.error('[obras/match] push falhou:', err.message))
     }
-    enviarContratoObra(req.params.id).catch(err => console.error('Erro ao enviar contrato obra:', err))
+    enviarContratoObra(candidaturaAceita.rows[0].id).catch(err => console.error('Erro ao enviar contrato obra:', err))
   } catch (err) {
     console.error('[obras/match]', err.message)
     res.status(500).json({ erro: 'Erro ao confirmar match' })

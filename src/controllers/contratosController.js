@@ -231,7 +231,10 @@ const enviarContratoReparo = async (reparoId) => {
        WHERE r.id = $1`,
       [reparoId]
     )
-    if (result.rows.length === 0) return
+    if (result.rows.length === 0) {
+      console.error(`[Contrato] Reparo ${reparoId} — query retornou 0 linhas (match_usuario_id ausente?) — e-mail NÃO enviado`)
+      return
+    }
 
     const r = result.rows[0]
     const dono      = { nome: r.dono_nome,  email: r.dono_email,  telefone: r.dono_telefone,  cpf_cnpj: r.dono_cpf  }
@@ -281,7 +284,10 @@ const enviarContratoObra = async (candidaturaId) => {
        WHERE c.id = $1`,
       [candidaturaId]
     )
-    if (result.rows.length === 0) return
+    if (result.rows.length === 0) {
+      console.error(`[Contrato] Obra — candidatura ${candidaturaId} não encontrada (query 0 linhas) — e-mail NÃO enviado`)
+      return
+    }
 
     const r = result.rows[0]
     const dono      = { nome: r.dono_nome,  email: r.dono_email,  telefone: r.dono_telefone,  cpf_cnpj: r.dono_cpf  }
