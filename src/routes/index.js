@@ -2035,6 +2035,11 @@ router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
   }
 })
 
+// [DEAD CODE — fluxo legado 'aprovada'] Nenhuma tela do app atual chama este
+// endpoint; o aceite vivo usa /obras/:id/candidatura/:id/responder → status
+// 'aceito'. Emite push 'candidatura_aprovada', que portanto NÃO é disparado pelo
+// app atual (confirmado por busca em todo o app, jun/2026). Mantido só por
+// compatibilidade com builds antigos / possível uso pelo painel admin.
 // Dono responds to a candidatura: aceitar | recusar | contraproposta
 router.post('/candidaturas/:id/dono-responder', autenticar, async (req, res) => {
   try {
@@ -2087,6 +2092,8 @@ router.post('/candidaturas/:id/dono-responder', autenticar, async (req, res) => 
   }
 })
 
+// [DEAD CODE — fluxo legado 'aprovada'] Não é chamado por nenhuma tela do app
+// atual (ver nota em /candidaturas/:id/dono-responder). Emite 'candidatura_aprovada'.
 // Pintor responds to dono's counter-offer: aceitar | recusar
 router.post('/candidaturas/:id/pintor-responder', autenticar, async (req, res) => {
   try {
