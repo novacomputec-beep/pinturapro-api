@@ -36,6 +36,9 @@ app.use(rateLimit({
 app.use('/api/auth/login',    rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }))
 app.use('/api/auth/cadastro', rateLimit({ windowMs: 60 * 60 * 1000, max: 5 }))
 
+// Webhook PagBank precisa do corpo cru (bytes exatos) p/ validar a assinatura
+// SHA-256. Escopado só a esta rota — não retém buffers crus no resto da API.
+app.use('/api/pagamentos/webhook-pagbank', express.raw({ type: '*/*', limit: '1mb' }))
 app.use(express.json({ limit: '100mb' }))
 app.use(express.urlencoded({ extended: true, limit: '100mb' }))
 app.use('/api', routes)
@@ -249,7 +252,6 @@ app.listen(PORT, () => {
 ║   Rodando em http://localhost:${PORT}   ║
 ╚══════════════════════════════════════╝
   `)
-  const tok = process.env.PAGBANK_TOKEN
-  console.log('[PagBank] TOKEN length:', tok?.length, '| first 8 chars:', tok?.substring(0, 8), '| env:', process.env.PAGBANK_ENV || 'production')
+  console.log('[PagBank] token:', process.env.PAGBANK_TOKEN ? 'configurado' : 'AUSENTE', '| env:', process.env.PAGBANK_ENV || 'production')
   iniciarAgendador()
 })

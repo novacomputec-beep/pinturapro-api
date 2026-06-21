@@ -1,3 +1,4 @@
+const crypto = require('crypto')
 const { pool } = require('../utils/supabase')
 const { enviarEmail } = require('../services/brevoService')
 
@@ -186,16 +187,36 @@ const sucesso = async (req, res) => {
 
 const webhookPagbank = async (req, res) => {
   try {
-    // [TEMP diagnóstico] Confirmar qual header de assinatura a PagBank envia em
-    // produção (ex.: x-authenticity-token / x-payload-signature) antes de implementar
-    // a verificação. Loga só os headers — NUNCA o corpo (contém dados pessoais).
-    // REMOVER após capturar um webhook real.
-    console.log('[webhook-pagbank] headers:', JSON.stringify(req.headers))
-    console.log('[webhook-pagbank] x-authenticity-token:', req.headers['x-authenticity-token'] || '(ausente)', '| x-payload-signature:', req.headers['x-payload-signature'] || '(ausente)')
+    // req.body é um Buffer cru (express.raw escopado à rota do webhook em server.js).
+    const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : ''
+
+    // Autenticidade PagBank: SHA-256("{token}-{payload}") comparado em tempo
+    // constante ao header x-authenticity-token.
+    const assinaturaRecebida = (req.headers['x-authenticity-token'] || '').toLowerCase()
+    const assinaturaEsperada = crypto
+      .createHash('sha256')
+      .update(`${process.env.PAGBANK_TOKEN || ''}-${rawBody}`)
+      .digest('hex')
+    const assinaturaValida =
+      assinaturaRecebida.length === assinaturaEsperada.length &&
+      crypto.timingSafeEqual(Buffer.from(assinaturaRecebida), Buffer.from(assinaturaEsperada))
+
+    // Modo MONITOR (padrão): só loga o resultado e processa o evento mesmo assim.
+    // Para REJEITAR eventos sem assinatura válida, defina WEBHOOK_ENFORCE_SIGNATURE=true
+    // no ambiente (sem alteração de código).
+    const enforce = process.env.WEBHOOK_ENFORCE_SIGNATURE === 'true'
+    console.log(`[webhook-pagbank] assinatura match=${assinaturaValida} | modo=${enforce ? 'enforce' : 'monitor'} | content-type=${req.headers['content-type'] || '(none)'}`)
+
+    if (!assinaturaValida && enforce) {
+      console.warn('[webhook-pagbank] assinatura inválida ou ausente — evento ignorado (enforce)')
+      return res.sendStatus(200)
+    }
 
     res.sendStatus(200)
 
-    const { reference_id, charges } = req.body
+    let payload = {}
+    try { payload = JSON.parse(rawBody || '{}') } catch { payload = {} }
+    const { reference_id, charges } = payload
     if (!reference_id || !charges?.length) return
 
     const charge = charges[0]
@@ -240,6 +261,7 @@ const webhookPagbank = async (req, res) => {
 
   } catch (err) {
     console.error('Erro no webhook PagBank:', err.message)
+    if (!res.headersSent) res.sendStatus(200)
   }
 }
 
