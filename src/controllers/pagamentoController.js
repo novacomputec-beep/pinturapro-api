@@ -186,6 +186,13 @@ const sucesso = async (req, res) => {
 
 const webhookPagbank = async (req, res) => {
   try {
+    // [TEMP diagnóstico] Confirmar qual header de assinatura a PagBank envia em
+    // produção (ex.: x-authenticity-token / x-payload-signature) antes de implementar
+    // a verificação. Loga só os headers — NUNCA o corpo (contém dados pessoais).
+    // REMOVER após capturar um webhook real.
+    console.log('[webhook-pagbank] headers:', JSON.stringify(req.headers))
+    console.log('[webhook-pagbank] x-authenticity-token:', req.headers['x-authenticity-token'] || '(ausente)', '| x-payload-signature:', req.headers['x-payload-signature'] || '(ausente)')
+
     res.sendStatus(200)
 
     const { reference_id, charges } = req.body
