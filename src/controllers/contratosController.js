@@ -23,6 +23,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
     ? Math.ceil(reparo.prazo_atendimento_horas * 1.2)
     : null
   const valor = reparo.valor_estimado
+  const marca = 'PinturaPro - ArrumaPro'
 
   return `
 <!DOCTYPE html>
@@ -50,7 +51,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
 <body>
 
   <h1>Contrato Simples de Prestação de Serviços</h1>
-  <p class="subtitulo">Gerado automaticamente pelo aplicativo ArrumaPro em ${formatarData(new Date())}</p>
+  <p class="subtitulo">Gerado automaticamente pelo aplicativo ${marca} em ${formatarData(new Date())}</p>
 
   <p>Pelo presente instrumento particular, de um lado:</p>
 
@@ -78,7 +79,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
   <p>Categoria: <strong>${reparo.categoria || 'Reparo geral'}</strong>.</p>
 
   <h2>Cláusula 2 — Da Execução dos Serviços</h2>
-  <p>Os serviços serão executados no endereço indicado pela Contratante, conforme agendamento realizado através do aplicativo ArrumaPro.</p>
+  <p>Os serviços serão executados no endereço indicado pela Contratante, conforme agendamento realizado através do aplicativo ${marca}.</p>
   <p>O Contratado compromete-se a realizar os serviços com zelo, responsabilidade e dentro das condições técnicas adequadas.</p>
 
   <h2>Cláusula 3 — Dos Materiais</h2>
@@ -122,7 +123,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
   </div>
 
   <div class="rodape">
-    Documento gerado pelo aplicativo ArrumaPro — Pode ser assinado manualmente ou por qualquer plataforma de assinatura digital.
+    Documento gerado pelo aplicativo ${marca} — Pode ser assinado manualmente ou por qualquer plataforma de assinatura digital.
   </div>
 
 </body>
@@ -136,6 +137,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
 const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
   const prazoContrato = Math.ceil((obra.prazo_execucao_dias || 7) * 1.2)
   const valor = candidatura.valor_oferta || obra.valor
+  const marca = 'PinturaPro'
 
   return `
 <!DOCTYPE html>
@@ -160,7 +162,7 @@ const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
 <body>
 
   <h1>Contrato de Prestação de Serviços</h1>
-  <p class="subtitulo">Serviço de Pintura / Reforma Residencial<br>Gerado automaticamente pelo aplicativo ArrumaPro em ${formatarData(new Date())}</p>
+  <p class="subtitulo">Serviço de Pintura / Reforma Residencial<br>Gerado automaticamente pelo aplicativo ${marca} em ${formatarData(new Date())}</p>
 
   <h2>Cláusula 1 — Das Partes</h2>
   <div class="parte-bloco">
@@ -172,7 +174,7 @@ const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
   <p>Prestação de serviços de <strong>${obra.categoria || 'pintura e reforma'}</strong> referente à obra <strong>"${obra.titulo}"</strong>, localizada em ${obra.endereco_obra || `${obra.cidade}${obra.bairro ? ', ' + obra.bairro : ''}`}.${obra.descricao ? ` Descrição: ${obra.descricao}` : ''}</p>
 
   <h2>Cláusula 3 — Do Valor e Pagamento</h2>
-  <p>Valor total acordado: <strong>${formatarValor(valor)}</strong>, conforme proposta aceita por ambas as partes através do aplicativo ArrumaPro. Condições de pagamento a serem definidas diretamente entre as partes.</p>
+  <p>Valor total acordado: <strong>${formatarValor(valor)}</strong>, conforme proposta aceita por ambas as partes através do aplicativo ${marca}. Condições de pagamento a serem definidas diretamente entre as partes.</p>
 
   <h2>Cláusula 4 — Do Prazo</h2>
   <p>Prazo estimado para conclusão: <strong>${prazoContrato} dias corridos</strong> a partir do início efetivo dos trabalhos, podendo ser prorrogado mediante acordo.</p>
@@ -206,7 +208,7 @@ const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
   </div>
 
   <div class="rodape">
-    Documento gerado pelo aplicativo ArrumaPro — Pode ser assinado manualmente ou por qualquer plataforma de assinatura digital.
+    Documento gerado pelo aplicativo ${marca} — Pode ser assinado manualmente ou por qualquer plataforma de assinatura digital.
   </div>
 
 </body>
@@ -257,16 +259,18 @@ const enviarContratoReparo = async (reparoId) => {
         prazo_dias: r.prazo_atendimento_horas ? Math.max(1, Math.ceil(r.prazo_atendimento_horas / 24)) : 1,
         metragem:   null
       },
+      marca: 'PinturaPro - ArrumaPro',
       cidade: r.cidade || 'Patos de Minas',
       data:   new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })
     }
 
     const pdfBuffer    = await gerarContratoPDF(dadosPDF)
-    const assunto      = `📋 Contrato de Serviço — ${r.titulo}`
+    const assunto      = `PinturaPro - ArrumaPro — Contrato de Serviço: ${r.titulo}`
     const nomeArquivo  = `contrato_reparo_${String(reparoId).substring(0, 8)}.pdf`
+    const remetenteNome = 'PinturaPro - ArrumaPro'
 
-    await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo })
-    await enviarEmailComAnexo({ para: prestador.email, assunto, html, pdfBuffer, nomeArquivo })
+    await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
+    await enviarEmailComAnexo({ para: prestador.email, assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
     console.log(`[Contrato] Reparo ${reparoId} — enviado para ${dono.email} e ${prestador.email}`)
 
     // Registra o contrato enviado (paridade com obra; idempotente por interesse)
@@ -320,16 +324,18 @@ const enviarContratoObra = async (candidaturaId) => {
         prazo_dias: r.prazo_execucao_dias || 7,
         metragem:   r.metragem
       },
+      marca: 'PinturaPro',
       cidade: r.cidade || 'Patos de Minas',
       data:   new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })
     }
 
     const pdfBuffer   = await gerarContratoPDF(dadosPDF)
-    const assunto     = `📋 Contrato de Prestação de Serviços — ${r.titulo}`
+    const assunto     = `PinturaPro — Contrato de Prestação de Serviços: ${r.titulo}`
     const nomeArquivo = `contrato_obra_${String(r.id).substring(0, 8)}.pdf`
+    const remetenteNome = 'PinturaPro'
 
-    await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo })
-    await enviarEmailComAnexo({ para: prestador.email, assunto, html, pdfBuffer, nomeArquivo })
+    await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
+    await enviarEmailComAnexo({ para: prestador.email, assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
     console.log(`[Contrato] Obra ${r.id} — enviado para ${dono.email} e ${prestador.email}`)
 
     await pool.query(

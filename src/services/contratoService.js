@@ -12,11 +12,12 @@ const gerarContratoPDF = (dados) => {
     doc.on('error', reject)
 
     const { contratante, contratado, servico, cidade, data } = dados
+    const marca = dados.marca || 'PinturaPro'
 
     // Cabeçalho
     doc.fontSize(16).font('Helvetica-Bold').text('CONTRATO DE PRESTAÇÃO DE SERVIÇOS', { align: 'center' })
     doc.moveDown(0.5)
-    doc.fontSize(10).font('Helvetica').text(`Gerado pela plataforma ArrumaPro em ${data}`, { align: 'center' })
+    doc.fontSize(10).font('Helvetica').text(`Gerado pela plataforma ${marca} em ${data}`, { align: 'center' })
     doc.moveDown(1.5)
 
     // Linha separadora
@@ -44,7 +45,7 @@ const gerarContratoPDF = (dados) => {
     doc.moveDown(0.5)
 
     doc.font('Helvetica-Bold').text('INTERMEDIADOR:')
-    doc.font('Helvetica').text('ArrumaPro Serviços Digitais — plataforma digital de intermediação')
+    doc.font('Helvetica').text(`${marca} Serviços Digitais — plataforma digital de intermediação`)
     doc.moveDown(1)
 
     doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke()
@@ -110,7 +111,7 @@ const gerarContratoPDF = (dados) => {
     )
 
     clausula('8', 'DA RESPONSABILIDADE DA PLATAFORMA',
-      `8.1 A ArrumaPro atua exclusivamente como intermediadora, não sendo responsável pela execução dos serviços ou inadimplência das partes.\n\n` +
+      `8.1 A ${marca} atua exclusivamente como intermediadora, não sendo responsável pela execução dos serviços ou inadimplência das partes.\n\n` +
       `8.2 A plataforma não gera vínculo trabalhista, previdenciário ou fiscal entre as partes.`
     )
 
@@ -159,7 +160,7 @@ const gerarContratoPDF = (dados) => {
 
     // Rodapé
     doc.moveDown(2)
-    doc.fontSize(8).fillColor('#888888').text('Documento gerado automaticamente pela plataforma ArrumaPro | www.pinturapro.com.br', { align: 'center' })
+    doc.fontSize(8).fillColor('#888888').text(`Documento gerado automaticamente pela plataforma ${marca} | www.pinturapro.com.br`, { align: 'center' })
 
     doc.end()
   })

@@ -1,6 +1,7 @@
 const crypto = require('crypto')
 const { pool } = require('../utils/supabase')
 const { enviarEmail } = require('../services/brevoService')
+const { marcaPorTipo } = require('../utils/marca')
 
 const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN
 const PAGBANK_URL = 'https://api.pagseguro.com'
@@ -54,29 +55,31 @@ const colocarPendentVerificacao = async (usuarioId, plano) => {
 
   // Busca dados do prestador para notificar
   const usuario = await pool.query(
-    `SELECT nome, email FROM usuarios WHERE id = $1`, [usuarioId]
+    `SELECT nome, email, tipo_prestador, tipo_dono FROM usuarios WHERE id = $1`, [usuarioId]
   )
   if (usuario.rows.length === 0) return
 
   const { nome, email } = usuario.rows[0]
+  const marca = marcaPorTipo(usuario.rows[0])
 
   enviarEmail({
     para: email,
-    assunto: 'ArrumaPro — Pagamento recebido! Verificação em andamento',
+    remetenteNome: marca,
+    assunto: `${marca} — Pagamento recebido! Verificação em andamento`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-          <h1 style="color: #0a0a0a; margin: 0;">ArrumaPro</h1>
+          <h1 style="color: #0a0a0a; margin: 0;">${marca}</h1>
         </div>
         <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
           <h2>Olá, ${nome}! 🎉</h2>
           <p>Seu pagamento foi recebido com sucesso!</p>
           <p style="background: #fff3cd; padding: 16px; border-radius: 8px; border-left: 4px solid #E8833A;">
             <strong>Seus dados estão sendo verificados.</strong><br>
-            Em até <strong>1 hora</strong> você receberá a confirmação por e-mail e terá acesso completo ao ArrumaPro.
+            Em até <strong>1 hora</strong> você receberá a confirmação por e-mail e terá acesso completo ao ${marca}.
           </p>
           <p>Este processo é necessário para garantir a segurança de todos os usuários da plataforma.</p>
-          <p><strong>Equipe ArrumaPro</strong></p>
+          <p><strong>Equipe ${marca}</strong></p>
         </div>
       </div>
     `
