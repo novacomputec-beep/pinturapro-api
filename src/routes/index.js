@@ -515,8 +515,8 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
     if (action === 'aceitar') {
       await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
       if (cand.push_token) {
-        enviarPushNotificacao(cand.push_token, '✅ Candidatura aceita!',
-          `O solicitante aceitou sua candidatura para "${obra.rows[0].titulo}". Confirme sua ida!`,
+        enviarPushNotificacao(cand.push_token, '🎉 Deu match!',
+          `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
       }
       enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
@@ -578,8 +578,8 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
     if (action === 'aceitar') {
       await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
       if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '✅ Contraproposta aceita!',
-          `O pintor aceitou sua contraproposta para "${obra.rows[0].titulo}"!`,
+        enviarPushNotificacao(dono.rows[0].push_token, '🎉 Deu match!',
+          `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
       }
       enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
@@ -1136,8 +1136,8 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
     if (action === 'aceitar') {
       await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
       if (int.push_token) {
-        enviarPushNotificacao(int.push_token, '✅ Proposta aceita!',
-          `O solicitante aceitou sua proposta para "${reparo.rows[0].titulo}". Confirme sua ida!`,
+        enviarPushNotificacao(int.push_token, '🎉 Deu match!',
+          `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
       }
       // O contrato é enviado quando o prestador confirma a ida (/reparos/:id/match),
@@ -1207,8 +1207,8 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
     if (action === 'aceitar') {
       await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
       if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '✅ Contraproposta aceita!',
-          `O prestador aceitou sua contraproposta para "${reparo.rows[0].titulo}"!`,
+        enviarPushNotificacao(dono.rows[0].push_token, '🎉 Deu match!',
+          `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
       }
       // Contrato é enviado quando o prestador confirma a ida (/reparos/:id/match).
