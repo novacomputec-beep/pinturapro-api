@@ -62,6 +62,10 @@ const speakeasy = require('speakeasy')
     // Auditoria de aprovação: true = aprovado pelo job automático (Modo Auto ON) sem revisão
     // de idoneidade; false = aprovado/reprovado manualmente por admin; null = legado/não tocado.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS aprovado_automaticamente BOOLEAN`)
+    // Localização do prestador no cadastro (CEP → ViaCEP/Nominatim). Base p/ distância futura.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS cep VARCHAR(8)`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS latitude NUMERIC`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS longitude NUMERIC`)
     // Flag global "Modo Auto" — garante a existência da linha (tabela já existe em prod).
     // Default 'false' = OFF: novos prestadores aguardam revisão manual do admin.
     await client.query(`CREATE TABLE IF NOT EXISTS configuracoes (chave TEXT PRIMARY KEY, valor TEXT, atualizado_em TIMESTAMPTZ DEFAULT NOW())`)

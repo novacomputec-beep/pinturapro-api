@@ -27,7 +27,7 @@ const cadastrar = async (req, res) => {
             especialidades, anos_experiencia, tamanho_equipe,
             cpf_cnpj, tipo_conta, plano, pix_reembolso, referencias,
             verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
-            rg, rg_orgao, rg_estado } = req.body
+            rg, rg_orgao, rg_estado, cep, latitude, longitude } = req.body
 
     console.log(`[CADASTRO][${ts}] ▶ inicio | tipo_conta=${tipo_conta} email=${email} cpf_cnpj=${cpf_cnpj} plano=${plano} tem_doc_frente=${!!verificacao_doc_frente_url} tem_doc_verso=${!!verificacao_doc_verso_url} tem_selfie=${!!verificacao_selfie_url}`)
 
@@ -95,8 +95,8 @@ const cadastrar = async (req, res) => {
         especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo,
         tipo_dono, pix_reembolso, referencias,
         verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
-        verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+        verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador, cep, latitude, longitude)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
        RETURNING id, nome, email, role, tipo_dono, tipo_prestador, foto_url`,
       [nome.trim(), emailNormalizado, telefone, senha_hash, cidade, uf || null,
        especialidades || [], anos_experiencia || 0,
@@ -109,7 +109,8 @@ const cadastrar = async (req, res) => {
        verificacao_selfie_url || null,
        verificacaoStatus,
        rg || null, rg_orgao || null, rg_estado || null,
-       tipo_prestador]
+       tipo_prestador,
+       cep || null, latitude ?? null, longitude ?? null]
     )
 
     const usuario = result.rows[0]
