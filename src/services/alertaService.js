@@ -432,6 +432,63 @@ const verificarObrasExpirandoSemInteressados = async () => {
   }
 }
 
+// Cronômetro de matches de reparos.
+// O prazo do cronômetro inicia em match_feito_em e dura prazo_atendimento_horas.
+// (a) A 5 minutos do fim: avisa o dono uma única vez por match.
+// (b) Quando o cronômetro zera: devolve o reparo ao feed e limpa o match.
+const verificarCronometroReparos = async () => {
+  try {
+    // (a) 5 minutos restantes → notifica o dono (uma vez por match)
+    const cincoMin = await pool.query(`
+      SELECT r.id, r.titulo, u.push_token
+      FROM reparos r
+      JOIN usuarios u ON r.criado_por = u.id
+      WHERE r.match_usuario_id IS NOT NULL
+        AND r.prazo_atendimento_horas IS NOT NULL
+        AND r.notif_5min_enviada = false
+        AND u.push_token IS NOT NULL
+        AND (r.match_feito_em + (r.prazo_atendimento_horas * INTERVAL '1 hour'))
+              BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
+    `)
+
+    if (cincoMin.rows.length > 0) {
+      const ids = cincoMin.rows.map(r => r.id)
+      await pool.query(`UPDATE reparos SET notif_5min_enviada = true WHERE id = ANY($1)`, [ids])
+
+      for (const reparo of cincoMin.rows) {
+        await enviarPushNotificacao(
+          reparo.push_token,
+          '⏰ O prestador ainda não chegou?',
+          'Faltam 5 minutos. Se ele ainda não chegou, você pode aumentar o prazo ou aguardar o cronômetro zerar.',
+          { tipo: 'reparo_5min_restantes', reparo_id: reparo.id }
+        )
+      }
+    }
+
+    // (b) Cronômetro zerou → devolve o reparo ao feed e limpa o match,
+    // reiniciando a contagem com o prazo original configurado na criação
+    const expirados = await pool.query(`
+      UPDATE reparos SET
+        status = 'aberta',
+        match_feito_em = NULL,
+        match_usuario_id = NULL,
+        notif_5min_enviada = false,
+        pedido_tempo_status = NULL,
+        pedido_tempo_motivo = NULL,
+        pedido_tempo_minutos = NULL,
+        expira_em = NOW() + (prazo_atendimento_horas * INTERVAL '1 hour')
+      WHERE match_usuario_id IS NOT NULL
+        AND prazo_atendimento_horas IS NOT NULL
+        AND (match_feito_em + (prazo_atendimento_horas * INTERVAL '1 hour')) <= NOW()
+      RETURNING id
+    `)
+
+    console.log(`[CronômetroReparos] 5min notificados: ${cincoMin.rows.length} | matches expirados (devolvidos ao feed): ${expirados.rows.length}`)
+  } catch (err) {
+    console.error('Erro ao verificar cronômetro de reparos:', err.message)
+  }
+}
+
 module.exports = {
   enviarPushNotificacao,
   enviarBoasVindas,
@@ -440,5 +497,6 @@ module.exports = {
   verificarObrasExpirando,
   verificarObrasComBaixoEngajamento,
   verificarReparosExpirandoSemInteressados,
-  verificarObrasExpirandoSemInteressados
+  verificarObrasExpirandoSemInteressados,
+  verificarCronometroReparos
 }

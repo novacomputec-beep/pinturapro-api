@@ -17,7 +17,6 @@ const { enviarContratoReparo, enviarContratoObra } = require('../controllers/con
 const bcrypt = require('bcryptjs')
 const speakeasy = require('speakeasy')
 
-// One-time column migrations
 // One-time column migrations — single transaction so all columns land atomically or none do
 ;(async () => {
   // pool.connect() dentro do try: erro de conexão (ex.: DB inacessível) é logado
@@ -43,6 +42,7 @@ const speakeasy = require('speakeasy')
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS endereco_reparo TEXT`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS latitude NUMERIC`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS longitude NUMERIC`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS notif_5min_enviada BOOLEAN DEFAULT false`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS endereco_obra TEXT`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS latitude NUMERIC`)
