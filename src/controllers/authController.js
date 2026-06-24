@@ -253,7 +253,7 @@ const login = async (req, res) => {
 const perfil = async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador FROM usuarios WHERE id = $1',
+      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida FROM usuarios WHERE id = $1',
       [req.usuario.id]
     )
     const assinaturaResult = await pool.query(
