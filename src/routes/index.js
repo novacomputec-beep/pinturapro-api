@@ -404,6 +404,39 @@ router.get('/obras', autenticar, exigirAssinaturaAtiva, async (req, res) => {
   }
 })
 
+// Painel admin — lista obras por situação (finalizadas / canceladas-expiradas).
+// O GET /obras público só devolve obras abertas/aprovadas/não expiradas, então o
+// painel precisa deste endpoint para enxergar o histórico de obras encerradas e
+// canceladas. "Expirada" não é um status no banco: é uma obra ainda 'aberta' cujo
+// expira_em já passou — por isso o filtro 'canceladas' inclui esse caso.
+router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const filtro = req.query.filtro || 'finalizadas'
+    let where
+    if (filtro === 'finalizadas') {
+      where = `o.status = 'encerrada'`
+    } else if (filtro === 'canceladas') {
+      where = `(o.status IN ('cancelada', 'expirada') OR (o.status = 'aberta' AND o.expira_em <= NOW()))`
+    } else {
+      return res.status(400).json({ erro: 'Filtro inválido' })
+    }
+    const result = await pool.query(`
+      SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.uf, o.bairro,
+             o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status,
+             (o.status = 'aberta' AND o.expira_em <= NOW()) AS expirada,
+             (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) AS total_candidaturas
+      FROM obras o
+      WHERE ${where}
+      ORDER BY o.expira_em DESC NULLS LAST, o.id DESC
+      LIMIT 200
+    `)
+    res.json({ obras: result.rows })
+  } catch (err) {
+    console.error('Erro ao listar obras (admin):', err)
+    res.status(500).json({ erro: 'Erro ao buscar obras' })
+  }
+})
+
 router.post('/obras',       autenticar, exigirAdmin, obrasCtrl.criar)
 router.put('/obras/:id',    autenticar, exigirAdmin, obrasCtrl.editar)
 router.delete('/obras/:id', autenticar, exigirAdmin, obrasCtrl.encerrar)
@@ -2187,18 +2220,31 @@ router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamento
 // ============================================================
 router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const [obras, assinantes, candidaturas, obrasAprovacao, reparosAprovacao] = await Promise.all([
+    const [obras, assinaturas, candidaturas, obrasAprovacao, reparosAprovacao] = await Promise.all([
       pool.query(`SELECT COUNT(*) FROM obras WHERE status = 'aberta'`),
-      pool.query(`SELECT COUNT(*) FROM assinaturas WHERE status = 'ativa'`),
+      // Métricas de assinaturas em uma única passagem:
+      // - ativos: todas as assinaturas ativas
+      // - gratuitos: ativas marcadas como gratuito OU sem valor mensal
+      // - receita: soma do valor_mensal apenas dos pagantes (exclui gratuitos e valor 0)
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'ativa') AS ativos,
+          COUNT(*) FILTER (WHERE status = 'ativa' AND (tipo = 'gratuito' OR valor_mensal = 0)) AS gratuitos,
+          COALESCE(SUM(valor_mensal) FILTER (
+            WHERE status = 'ativa' AND tipo IS DISTINCT FROM 'gratuito' AND valor_mensal > 0
+          ), 0) AS receita
+        FROM assinaturas
+      `),
       pool.query(`SELECT COUNT(*) FROM candidaturas WHERE status = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM obras WHERE enviada_por_dono = true AND status_aprovacao = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM reparos WHERE status_aprovacao = 'pendente'`)
     ])
-    const totalAssinantes = parseInt(assinantes.rows[0].count)
+    const assinRow = assinaturas.rows[0]
     res.json({
       obras_abertas: parseInt(obras.rows[0].count),
-      assinantes_ativos: totalAssinantes,
-      receita_mensal: totalAssinantes * 99.90,
+      assinantes_ativos: parseInt(assinRow.ativos),
+      assinantes_gratuitos: parseInt(assinRow.gratuitos),
+      receita_mensal: parseFloat(assinRow.receita),
       candidaturas_pendentes: parseInt(candidaturas.rows[0].count),
       obras_para_aprovar: parseInt(obrasAprovacao.rows[0].count),
       reparos_para_aprovar: parseInt(reparosAprovacao.rows[0].count)
