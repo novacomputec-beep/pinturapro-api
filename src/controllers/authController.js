@@ -201,7 +201,7 @@ const login = async (req, res) => {
     const emailNormalizado = email.toLowerCase().trim()
 
     const result = await pool.query(
-      'SELECT id, nome, email, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador FROM usuarios WHERE email = $1',
+      'SELECT id, nome, email, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida FROM usuarios WHERE email = $1',
       [emailNormalizado]
     )
 
@@ -238,7 +238,8 @@ const login = async (req, res) => {
         role: usuario.role,
         foto_url: usuario.foto_url || null,
         tipo_dono: usuario.tipo_dono || null,
-        tipo_prestador: usuario.tipo_prestador || null
+        tipo_prestador: usuario.tipo_prestador || null,
+        boas_vindas_exibida: usuario.boas_vindas_exibida ?? false
       },
       assinatura: assinaturaResult.rows[0] || null,
       token
