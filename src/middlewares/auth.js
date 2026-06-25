@@ -34,6 +34,16 @@ const setCacheAssinatura = (id, data) => {
   cacheAssinaturas.set(id, { data, timestamp: Date.now() })
 }
 
+// Invalida os caches em memória de um usuário. Chamado quando a assinatura muda
+// de estado (ex.: aprovação manual / auto-aprovação ativa a assinatura) para que
+// a próxima chamada a rota protegida releia o status real do banco em vez de
+// devolver um `false` cacheado por até 5 min — o que mandava o prestador recém-
+// aprovado para a tela de pagamento mesmo já tendo pago/sido aprovado (B72-07).
+const invalidarCacheAssinatura = (id) => {
+  cacheUsuarios.delete(id)
+  cacheAssinaturas.delete(id)
+}
+
 const autenticar = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization
@@ -112,4 +122,4 @@ const exigirSuperAdmin = (req, res, next) => {
   next()
 }
 
-module.exports = { autenticar, exigirAssinaturaAtiva, exigirAdmin, exigirSuperAdmin }
+module.exports = { autenticar, exigirAssinaturaAtiva, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura }

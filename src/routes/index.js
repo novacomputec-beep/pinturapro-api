@@ -1,7 +1,7 @@
 require('dotenv').config()
 const express = require('express')
 const router = express.Router()
-const { autenticar, exigirAssinaturaAtiva, exigirAdmin } = require('../middlewares/auth')
+const { autenticar, exigirAssinaturaAtiva, exigirAdmin, invalidarCacheAssinatura } = require('../middlewares/auth')
 const { pool } = require('../utils/supabase')
 const { marcaPorTipo } = require('../utils/marca')
 const authCtrl         = require('../controllers/authController')
@@ -96,6 +96,12 @@ const speakeasy = require('speakeasy')
     // inequívocas (todas em MG). Idempotente via WHERE uf IS NULL.
     await client.query(`UPDATE obras   SET uf = 'MG' WHERE uf IS NULL AND cidade = 'Patos de Minas'`)
     await client.query(`UPDATE reparos SET uf = 'MG' WHERE uf IS NULL AND cidade IN ('Patos de Minas', 'Formiga')`)
+    // Limpeza de linhas órfãs deixadas por exclusões antigas que falhavam no meio da
+    // transação (ver B72-01). Uma assinatura órfã (usuario_id de usuário já apagado)
+    // não afeta o novo cadastro do mesmo CPF — ele recebe novo id — mas suja relatórios
+    // e a base. Idempotente: só apaga o que não tem usuário correspondente.
+    await client.query(`DELETE FROM assinaturas a WHERE NOT EXISTS (SELECT 1 FROM usuarios u WHERE u.id = a.usuario_id)`)
+    await client.query(`DELETE FROM localizacoes_prestadores lp WHERE NOT EXISTS (SELECT 1 FROM usuarios u WHERE u.id = lp.usuario_id)`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -109,6 +115,14 @@ const speakeasy = require('speakeasy')
 // Cache de assinatura para prestadores
 const cachePrestadores = new Map()
 const CACHE_TTL = 5 * 60 * 1000 // 5 minutos
+
+// Limpa TODOS os caches em memória de um usuário (deste módulo + middleware de auth).
+// Usar sempre que a assinatura do usuário for ativada, para o app ver o status novo
+// na hora em vez de esperar o TTL de 5 min — evita o redirect indevido para o PagBank.
+const invalidarCachesUsuario = (id) => {
+  cachePrestadores.delete(id)
+  invalidarCacheAssinatura(id)
+}
 
 // Rate limit para /auth/verificar-disponibilidade (10 req / 60s por IP)
 const cacheVerifRate = new Map()
@@ -267,9 +281,16 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     await client.query('DELETE FROM mensagens WHERE autor_id = $1', [id])
     await client.query('DELETE FROM interesse_reparos WHERE usuario_id = $1', [id])
     await client.query('DELETE FROM negociacoes WHERE autor_id = $1', [id])
+    // localizacoes_prestadores tem FK para usuarios (sem CASCADE) — todo prestador que
+    // já compartilhou GPS tem linha aqui. Se não apagar, o DELETE FROM usuarios abaixo
+    // estoura violação de FK e a transação INTEIRA sofre ROLLBACK, desfazendo inclusive
+    // o DELETE da assinatura acima e deixando uma assinatura órfã/desatualizada (B72-01).
+    await client.query('DELETE FROM localizacoes_prestadores WHERE usuario_id = $1', [id])
     await client.query('DELETE FROM usuarios WHERE id = $1', [id])
 
     await client.query('COMMIT')
+
+    invalidarCachesUsuario(id)
 
     res.json({ mensagem: 'Usuário excluído com sucesso' })
   } catch (err) {
@@ -1802,6 +1823,10 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
     await pool.query(
       `UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [id]
     )
+
+    // Assinatura acabou de virar 'ativa' — derruba o cache para o app não cair na
+    // tela de pagamento por causa de um `ativa=false` ainda cacheado (B72-07).
+    invalidarCachesUsuario(id)
 
     // Notifica prestador por e-mail
     const { nome, email } = usuario.rows[0]

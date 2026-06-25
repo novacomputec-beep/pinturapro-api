@@ -6,6 +6,7 @@ const rateLimit = require('express-rate-limit')
 const routes = require('./src/routes')
 const { pool } = require('./src/utils/supabase')
 const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarReparosExpirandoSemInteressados, verificarObrasExpirandoSemInteressados, verificarCronometroReparos } = require('./src/services/alertaService')
+const { invalidarCacheAssinatura } = require('./src/middlewares/auth')
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -235,6 +236,8 @@ const iniciarAgendador = () => {
         // aprovado_automaticamente = true → idoneidade ainda não revisada (auditável no painel)
         await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
         await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [p.id])
+        // Assinatura recém-ativada: limpa o cache p/ o app não cair na tela de pagamento (B72-07)
+        invalidarCacheAssinatura(p.id)
         if (p.push_token) {
           await enviarPushNotificacao(p.push_token, '✅ Cadastro aprovado!', 'Bem-vindo ao PinturaPro! Seu acesso está liberado.', { tipo: 'verificacao_aprovada' }).catch(() => {})
         }
