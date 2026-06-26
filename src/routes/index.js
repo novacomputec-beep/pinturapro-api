@@ -124,9 +124,9 @@ const invalidarCachesUsuario = (id) => {
   invalidarCacheAssinatura(id)
 }
 
-// Rate limit para /auth/verificar-disponibilidade (10 req / 60s por IP)
+// Rate limit para /auth/verificar-disponibilidade (30 req / 60s por IP)
 const cacheVerifRate = new Map()
-const VERIF_LIMIT = 10
+const VERIF_LIMIT = 30
 const VERIF_WINDOW = 60 * 1000
 
 const exigirPrestador = async (req, res, next) => {
