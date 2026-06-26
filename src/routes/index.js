@@ -358,6 +358,30 @@ router.get('/obras/meus-contratos', autenticar, async (req, res) => {
   }
 })
 
+// GET /obras/meus-contratos-dono — obras finalizadas (encerradas) em que o usuário foi o dono (solicitante)
+// IMPORTANTE: registrar antes de GET /obras/:id para não ser sombreado por :id='meus-contratos-dono'
+router.get('/obras/meus-contratos-dono', autenticar, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.bairro, o.uf,
+              o.match_feito_em, o.status,
+              u.nome AS prestador_nome, u.telefone AS prestador_telefone,
+              (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) AS foto_capa,
+              COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado
+       FROM obras o
+       JOIN usuarios u ON o.match_usuario_id = u.id
+       LEFT JOIN candidaturas c ON c.obra_id = o.id AND c.usuario_id = o.match_usuario_id
+       WHERE o.criado_por = $1 AND o.status = 'encerrada'
+       ORDER BY o.match_feito_em DESC NULLS LAST`,
+      [req.usuario.id]
+    )
+    res.json({ contratos: result.rows })
+  } catch (err) {
+    console.error('[obras/meus-contratos-dono]', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar contratos finalizados' })
+  }
+})
+
 router.post('/obras/dono', autenticar, async (req, res) => {
   try {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
@@ -1030,6 +1054,30 @@ router.get('/reparos/meus-contratos', autenticar, exigirPrestador, async (req, r
     res.json({ contratos: result.rows })
   } catch (err) {
     console.error('[reparos/meus-contratos]', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar contratos finalizados' })
+  }
+})
+
+// GET /reparos/meus-contratos-dono — reparos finalizados (encerrados) em que o usuário foi o dono (solicitante)
+// IMPORTANTE: registrar antes de GET /reparos/:id para não ser sombreado por :id='meus-contratos-dono'
+router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
+              r.match_feito_em, r.status,
+              u.nome AS prestador_nome, u.telefone AS prestador_telefone,
+              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) AS foto_capa,
+              COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado
+       FROM reparos r
+       JOIN usuarios u ON r.match_usuario_id = u.id
+       LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
+       WHERE r.criado_por = $1 AND r.status = 'encerrada'
+       ORDER BY r.match_feito_em DESC NULLS LAST`,
+      [req.usuario.id]
+    )
+    res.json({ contratos: result.rows })
+  } catch (err) {
+    console.error('[reparos/meus-contratos-dono]', err.message)
     res.status(500).json({ erro: 'Erro ao buscar contratos finalizados' })
   }
 })
