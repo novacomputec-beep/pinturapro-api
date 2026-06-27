@@ -366,6 +366,7 @@ router.get('/obras/meus-contratos-dono', autenticar, async (req, res) => {
       `SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.bairro, o.uf,
               o.match_feito_em, o.status,
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
+              u.logradouro, u.numero, u.bairro,
               (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) AS foto_capa,
               COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado
        FROM obras o
@@ -549,6 +550,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       const candidatosResult = await pool.query(
         `SELECT c.id, c.status, c.valor_proposto, c.valor_contraproposta, c.mensagem,
                 u.nome, u.cidade, u.foto_url, c.usuario_id,
+                CASE WHEN c.status = 'aceito' THEN u.logradouro ELSE NULL END as logradouro,
+                CASE WHEN c.status = 'aceito' THEN u.numero ELSE NULL END as numero,
+                CASE WHEN c.status = 'aceito' THEN u.bairro ELSE NULL END as bairro,
                 CASE WHEN c.status = 'aceito' THEN u.telefone ELSE NULL END as telefone
          FROM candidaturas c JOIN usuarios u ON u.id = c.usuario_id
          WHERE c.obra_id = $1 ORDER BY c.criado_em DESC`,
@@ -1066,6 +1070,7 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
       `SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
               r.match_feito_em, r.status,
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
+              u.logradouro, u.numero, u.bairro,
               (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) AS foto_capa,
               COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado
        FROM reparos r
@@ -1618,6 +1623,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
         `SELECT ir.id, ir.usuario_id, ir.status, ir.mensagem, ir.criado_em,
                 ir.valor_proposto, ir.valor_contraproposta, ir.rodada,
                 u.nome, u.cidade,
+                CASE WHEN ir.status = 'aceito' THEN u.logradouro ELSE NULL END as logradouro,
+                CASE WHEN ir.status = 'aceito' THEN u.numero ELSE NULL END as numero,
+                CASE WHEN ir.status = 'aceito' THEN u.bairro ELSE NULL END as bairro,
                 CASE WHEN ir.status = 'aceito' THEN u.telefone ELSE NULL END as telefone
          FROM interesse_reparos ir
          JOIN usuarios u ON ir.usuario_id = u.id
