@@ -258,8 +258,9 @@ const perfil = async (req, res) => {
       [req.usuario.id]
     )
     const assinaturaResult = await pool.query(
-      `SELECT plano, status, proximo_vencimento FROM assinaturas
-       WHERE usuario_id = $1 ORDER BY criado_em DESC LIMIT 1`,
+      `SELECT plano, status, proximo_vencimento, valor_mensal FROM assinaturas
+       WHERE usuario_id = $1
+       ORDER BY CASE status WHEN 'ativa' THEN 1 WHEN 'pendente' THEN 2 ELSE 3 END, criado_em DESC LIMIT 1`,
       [req.usuario.id]
     )
     res.json({ usuario: result.rows[0], assinatura: assinaturaResult.rows[0] || null })
