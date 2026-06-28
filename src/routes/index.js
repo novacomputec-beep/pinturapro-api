@@ -1317,7 +1317,13 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
       [interesse_id, reparo_id, req.usuario.id]
     )
     if (interesse.rows.length === 0) return res.status(404).json({ erro: 'Interesse não encontrado' })
-    if (interesse.rows[0].status !== 'contraproposta_dono') return res.status(400).json({ erro: 'Não há contraproposta pendente' })
+    if (interesse.rows[0].status !== 'contraproposta_dono') {
+      // Idempotency for accept retries: if already accepted, return success silently
+      if (action === 'aceitar' && interesse.rows[0].status === 'aceito') {
+        return res.json({ mensagem: 'Contraproposta aceita! Confirme sua ida para gerar o contrato.' })
+      }
+      return res.status(400).json({ erro: 'Não há contraproposta pendente' })
+    }
 
     const reparo = await pool.query(`SELECT titulo, criado_por FROM reparos WHERE id = $1`, [reparo_id])
     const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [reparo.rows[0].criado_por])
