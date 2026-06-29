@@ -1099,8 +1099,9 @@ router.post('/reparos/aprovacao/:id/recusar', autenticar, exigirAdmin, async (re
   }
 })
 
-router.get('/reparos/meus-interesses', autenticar, exigirPrestador, async (req, res) => {
+router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
   try {
+    if (req.usuario.role !== 'prestador') return res.status(403).json({ erro: 'Acesso restrito a prestadores' })
     const result = await pool.query(`
       SELECT ir.id, ir.status, ir.valor_proposto, ir.valor_contraproposta, ir.rodada, ir.criado_em,
              r.id as reparo_id, r.titulo, r.categoria, r.descricao, r.valor_estimado,
@@ -1125,8 +1126,9 @@ router.get('/reparos/meus-interesses', autenticar, exigirPrestador, async (req, 
 })
 
 // GET /reparos/meus-contratos — reparos finalizados (encerrados) em que o usuário foi o prestador do match
-router.get('/reparos/meus-contratos', autenticar, exigirPrestador, async (req, res) => {
+router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
   try {
+    if (req.usuario.role !== 'prestador') return res.status(403).json({ erro: 'Acesso restrito a prestadores' })
     const result = await pool.query(
       `SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
               r.match_feito_em, r.status,
