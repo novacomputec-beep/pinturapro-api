@@ -561,6 +561,12 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       candidatos = candidatosResult.rows
     }
 
+    // Endereço exato só para dono, pintor do match ou admin (Finding 3.1).
+    // Coordenadas permanecem para o cálculo de distância no cliente.
+    if (obra.criado_por !== req.usuario.id && obra.match_usuario_id !== req.usuario.id && req.usuario.role !== 'admin') {
+      delete obra.endereco_obra
+    }
+
     res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos })
   } catch (err) {
     console.error('Erro ao buscar obra:', err)
@@ -1098,7 +1104,11 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
     const params = [req.usuario.id]
 
     let query = `
-      SELECT r.*,
+      SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
+             r.latitude, r.longitude,
+             r.status, r.status_aprovacao, r.expira_em, r.criado_em, r.criado_por,
+             r.match_feito_em, r.match_usuario_id, r.pedido_tempo_status,
+             r.prestadores_bloqueados, r.client_request_id,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa
       FROM reparos r
@@ -1648,8 +1658,14 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       interessados = result2.rows
     }
 
+    // Endereço exato só para dono, prestador do match ou admin (Finding 3.1).
+    // Coordenadas permanecem para o cálculo de distância no cliente.
+    if (reparo.criado_por !== req.usuario.id && reparo.match_usuario_id !== req.usuario.id && req.usuario.role !== 'admin') {
+      delete reparo.endereco_reparo
+    }
+
     res.json({
-      reparo: result.rows[0],
+      reparo,
       midias: midias.rows,
       meu_interesse: interesse.rows[0] || null,
       interessados,
