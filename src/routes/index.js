@@ -2411,8 +2411,29 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    // IDs dos usuários alvo (todos exceto admin) — base do cascade abaixo
+    const alvos = await client.query(`SELECT id FROM usuarios WHERE role != 'admin'`)
+    const ids = alvos.rows.map(r => r.id)
     await client.query(`DELETE FROM assinaturas WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
     await client.query(`DELETE FROM localizacoes_prestadores WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
+    // Cascade das obras criadas pelos usuários alvo (filho antes do pai; mensagens
+    // antes de obras por causa da FK mensagens.obra_id)
+    await client.query(`DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1)))`, [ids])
+    await client.query(`DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
+    await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
+    await client.query(`DELETE FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
+    await client.query(`DELETE FROM obras WHERE criado_por = ANY($1)`, [ids])
+    // Cascade dos reparos criados pelos usuários alvo
+    await client.query(`DELETE FROM midias_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = ANY($1))`, [ids])
+    await client.query(`DELETE FROM interesse_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = ANY($1))`, [ids])
+    await client.query(`DELETE FROM reparos WHERE criado_por = ANY($1)`, [ids])
+    // Registros dos usuários alvo como participantes (candidato/interessado/autor) em
+    // itens de terceiros — necessário antes do DELETE FROM usuarios por causa das FKs
+    await client.query(`DELETE FROM negociacoes WHERE autor_id = ANY($1)`, [ids])
+    await client.query(`DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE usuario_id = ANY($1))`, [ids])
+    await client.query(`DELETE FROM candidaturas WHERE usuario_id = ANY($1)`, [ids])
+    await client.query(`DELETE FROM interesse_reparos WHERE usuario_id = ANY($1)`, [ids])
+    await client.query(`DELETE FROM mensagens WHERE autor_id = ANY($1)`, [ids])
     await client.query(`DELETE FROM usuarios WHERE role != 'admin'`)
     await client.query('COMMIT')
     res.json({ mensagem: 'Usuários removidos com sucesso' })
