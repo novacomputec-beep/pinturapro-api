@@ -747,6 +747,23 @@ router.post('/obras/:id/match', autenticar, async (req, res) => {
         { tipo: 'match_obra', obra_id: req.params.id }).catch(err => console.error('[obras/match] push falhou:', err.message))
     }
     enviarContratoObra(candidaturaAceita.rows[0].id).catch(err => console.error('Erro ao enviar contrato obra:', err))
+    // Recusa os demais candidatos e os notifica — pós-resposta, não bloqueia o cliente (Finding 3.1)
+    const rejeitadosResult = await pool.query(
+      `UPDATE candidaturas SET status = 'recusado' WHERE obra_id = $1 AND usuario_id != $2 AND status NOT IN ('recusado', 'expirado') RETURNING usuario_id`,
+      [req.params.id, req.usuario.id]
+    )
+    const rejeitadosIds = rejeitadosResult.rows.map(r => r.usuario_id)
+    if (rejeitadosIds.length > 0) {
+      const tokens = await pool.query(
+        `SELECT push_token FROM usuarios WHERE id = ANY($1) AND push_token IS NOT NULL`,
+        [rejeitadosIds]
+      )
+      tokens.rows.forEach(r => {
+        enviarPushNotificacao(r.push_token, '❌ Outro profissional foi selecionado',
+          'O solicitante escolheu outro profissional para esta obra.',
+          { tipo: 'candidatura_recusada', obra_id: req.params.id }).catch(() => {})
+      })
+    }
   } catch (err) {
     console.error('[obras/match]', err.message)
     res.status(500).json({ erro: 'Erro ao confirmar match' })
@@ -1264,6 +1281,23 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) 
     }
     // Envia contrato por e-mail para dono e prestador
     enviarContratoReparo(req.params.id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
+    // Recusa os demais interessados e os notifica — pós-resposta, não bloqueia o cliente (Finding 3.1)
+    const rejeitadosResult = await pool.query(
+      `UPDATE interesse_reparos SET status = 'recusado' WHERE reparo_id = $1 AND usuario_id != $2 AND status NOT IN ('recusado', 'expirado') RETURNING usuario_id`,
+      [req.params.id, req.usuario.id]
+    )
+    const rejeitadosIds = rejeitadosResult.rows.map(r => r.usuario_id)
+    if (rejeitadosIds.length > 0) {
+      const tokens = await pool.query(
+        `SELECT push_token FROM usuarios WHERE id = ANY($1) AND push_token IS NOT NULL`,
+        [rejeitadosIds]
+      )
+      tokens.rows.forEach(r => {
+        enviarPushNotificacao(r.push_token, '❌ Outro profissional foi selecionado',
+          'O solicitante escolheu outro prestador para este reparo.',
+          { tipo: 'interesse_recusado', reparo_id: req.params.id }).catch(() => {})
+      })
+    }
   } catch (err) {
     console.error('[reparos/match]', err.message)
     res.status(500).json({ erro: 'Erro ao confirmar match' })
