@@ -106,6 +106,31 @@ const migracaoPronta = (async () => {
     await client.query(`CREATE INDEX IF NOT EXISTS reparos_feed_idx ON reparos (status, status_aprovacao, expira_em)`)
     await client.query(`CREATE INDEX IF NOT EXISTS obras_criado_por_idx ON obras (criado_por)`)
     await client.query(`CREATE INDEX IF NOT EXISTS obras_feed_idx ON obras (status, expira_em)`)
+    // No máximo um aceito por reparo/obra — enforce no nível do banco (Finding 2.1).
+    // Dedup ANTES dos índices únicos: mantém o 'aceito' mais recente por job e rebaixa
+    // os demais para 'recusado', senão o CREATE UNIQUE INDEX falha em dados legados.
+    await client.query(`
+      UPDATE interesse_reparos SET status = 'recusado'
+      WHERE status = 'aceito'
+      AND id NOT IN (
+        SELECT DISTINCT ON (reparo_id) id
+        FROM interesse_reparos
+        WHERE status = 'aceito'
+        ORDER BY reparo_id, criado_em DESC
+      )
+    `)
+    await client.query(`
+      UPDATE candidaturas SET status = 'recusado'
+      WHERE status = 'aceito'
+      AND id NOT IN (
+        SELECT DISTINCT ON (obra_id) id
+        FROM candidaturas
+        WHERE status = 'aceito'
+        ORDER BY obra_id, criado_em DESC
+      )
+    `)
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS interesse_reparos_aceito_unico_idx ON interesse_reparos (reparo_id) WHERE status = 'aceito'`)
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS candidaturas_aceito_unica_idx ON candidaturas (obra_id) WHERE status = 'aceito'`)
     // Backfill do uf: linhas antigas têm cidade preenchida mas uf NULL, então sumiam do
     // filtro "Estado" (o.uf/r.uf) mesmo aparecendo em "Cidade". Cidades conhecidas e
     // inequívocas (todas em MG). Idempotente via WHERE uf IS NULL.
@@ -635,6 +660,13 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
     if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
     const cand = candidatura.rows[0]
     if (action === 'aceitar') {
+      const jaAceito = await pool.query(
+        `SELECT id FROM candidaturas WHERE obra_id = $1 AND status = 'aceito' AND id != $2`,
+        [req.params.id, candidaturaId]
+      )
+      if (jaAceito.rows.length > 0) {
+        return res.status(409).json({ erro: 'Já existe um candidato aceito para esta obra' })
+      }
       await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
       if (cand.push_token) {
         enviarPushNotificacao(cand.push_token, '🎉 Deu match!',
@@ -1325,6 +1357,13 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
     const int = interesse.rows[0]
 
     if (action === 'aceitar') {
+      const jaAceito = await pool.query(
+        `SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND status = 'aceito' AND id != $2`,
+        [req.params.id, interesse_id]
+      )
+      if (jaAceito.rows.length > 0) {
+        return res.status(409).json({ erro: 'Já existe um prestador aceito para este reparo' })
+      }
       await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
       if (int.push_token) {
         enviarPushNotificacao(int.push_token, '🎉 Deu match!',
