@@ -13,39 +13,30 @@ const limparCpfCnpj = (str) => {
 }
 
 const ativarAssinatura = async (usuarioId, plano) => {
-  const assinaturaExiste = await pool.query(
-    `SELECT id FROM assinaturas WHERE usuario_id = $1`, [usuarioId]
+  // Upsert atômico (Finding 4.1): evita check-then-insert race que duplicava assinaturas.
+  await pool.query(
+    `INSERT INTO assinaturas (usuario_id, plano, status, atualizado_em)
+     VALUES ($1, $2, 'ativa', NOW())
+     ON CONFLICT (usuario_id) DO UPDATE SET
+       status = 'ativa',
+       plano = EXCLUDED.plano,
+       atualizado_em = NOW()`,
+    [usuarioId, plano || 'mensal']
   )
-  if (assinaturaExiste.rows.length > 0) {
-    await pool.query(
-      `UPDATE assinaturas SET status = 'ativa', plano = $1, atualizado_em = NOW() WHERE usuario_id = $2`,
-      [plano || 'mensal', usuarioId]
-    )
-  } else {
-    await pool.query(
-      `INSERT INTO assinaturas (usuario_id, plano, status, atualizado_em) VALUES ($1, $2, 'ativa', NOW())`,
-      [usuarioId, plano || 'mensal']
-    )
-  }
 }
 
 // Coloca prestador como pendente de verificação após pagamento
 const colocarPendentVerificacao = async (usuarioId, plano) => {
-  // Registra assinatura como paga mas acesso ainda pendente verificação
-  const assinaturaExiste = await pool.query(
-    `SELECT id FROM assinaturas WHERE usuario_id = $1`, [usuarioId]
+  // Registra assinatura como paga mas acesso ainda pendente verificação (upsert atômico — Finding 4.1)
+  await pool.query(
+    `INSERT INTO assinaturas (usuario_id, plano, status, atualizado_em)
+     VALUES ($1, $2, 'pendente_verificacao', NOW())
+     ON CONFLICT (usuario_id) DO UPDATE SET
+       status = 'pendente_verificacao',
+       plano = EXCLUDED.plano,
+       atualizado_em = NOW()`,
+    [usuarioId, plano || 'mensal']
   )
-  if (assinaturaExiste.rows.length > 0) {
-    await pool.query(
-      `UPDATE assinaturas SET status = 'pendente_verificacao', plano = $1, atualizado_em = NOW() WHERE usuario_id = $2`,
-      [plano || 'mensal', usuarioId]
-    )
-  } else {
-    await pool.query(
-      `INSERT INTO assinaturas (usuario_id, plano, status, atualizado_em) VALUES ($1, $2, 'pendente_verificacao', NOW())`,
-      [usuarioId, plano || 'mensal']
-    )
-  }
 
   // Atualiza status de verificação do usuário
   await pool.query(

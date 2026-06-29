@@ -131,6 +131,19 @@ const migracaoPronta = (async () => {
     `)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS interesse_reparos_aceito_unico_idx ON interesse_reparos (reparo_id) WHERE status = 'aceito'`)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS candidaturas_aceito_unica_idx ON candidaturas (obra_id) WHERE status = 'aceito'`)
+    // Uma única assinatura por usuário (Finding 4.1). Dedup ANTES do índice único:
+    // mantém a linha mais relevante por usuario_id (prefere 'ativa', depois mais recente).
+    await client.query(`
+      DELETE FROM assinaturas
+      WHERE id NOT IN (
+        SELECT DISTINCT ON (usuario_id) id
+        FROM assinaturas
+        ORDER BY usuario_id,
+          CASE status WHEN 'ativa' THEN 1 WHEN 'pendente_verificacao' THEN 2 ELSE 3 END ASC,
+          criado_em DESC
+      )
+    `)
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS assinaturas_usuario_id_unico_idx ON assinaturas (usuario_id)`)
     // Backfill do uf: linhas antigas têm cidade preenchida mas uf NULL, então sumiam do
     // filtro "Estado" (o.uf/r.uf) mesmo aparecendo em "Cidade". Cidades conhecidas e
     // inequívocas (todas em MG). Idempotente via WHERE uf IS NULL.
