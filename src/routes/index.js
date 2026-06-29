@@ -91,6 +91,18 @@ const speakeasy = require('speakeasy')
     // Acelera a pré-seleção de linhas com coordenadas; o haversine continua sendo calculado por linha.
     await client.query(`CREATE INDEX IF NOT EXISTS obras_lat_lng_idx ON obras (latitude, longitude)`)
     await client.query(`CREATE INDEX IF NOT EXISTS reparos_lat_lng_idx ON reparos (latitude, longitude)`)
+    // Índices para FKs e filtros quentes (feed + ownership). Sem eles, as subqueries
+    // correlacionadas do feed e os lookups por usuário/obra/reparo fazem seq scan.
+    await client.query(`CREATE INDEX IF NOT EXISTS interesse_reparos_reparo_id_idx ON interesse_reparos (reparo_id)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS interesse_reparos_usuario_id_idx ON interesse_reparos (usuario_id)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS candidaturas_obra_id_idx ON candidaturas (obra_id)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS candidaturas_usuario_id_idx ON candidaturas (usuario_id)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS midias_obra_id_idx ON midias (obra_id)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS midias_reparos_reparo_id_idx ON midias_reparos (reparo_id)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS reparos_criado_por_idx ON reparos (criado_por)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS reparos_feed_idx ON reparos (status, status_aprovacao, expira_em)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS obras_criado_por_idx ON obras (criado_por)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS obras_feed_idx ON obras (status, expira_em)`)
     // Backfill do uf: linhas antigas têm cidade preenchida mas uf NULL, então sumiam do
     // filtro "Estado" (o.uf/r.uf) mesmo aparecendo em "Cidade". Cidades conhecidas e
     // inequívocas (todas em MG). Idempotente via WHERE uf IS NULL.
