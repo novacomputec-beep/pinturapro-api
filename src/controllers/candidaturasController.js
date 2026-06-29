@@ -131,10 +131,22 @@ const aprovar = async (req, res) => {
   try {
     const { id } = req.params
 
-    const existe = await pool.query(`SELECT id, status FROM candidaturas WHERE id = $1`, [id])
+    const existe = await pool.query(`SELECT id, status, obra_id FROM candidaturas WHERE id = $1`, [id])
     if (existe.rows.length === 0) {
       return res.status(404).json({ erro: 'Candidatura não encontrada' })
     }
+
+    const obraCheck = await pool.query(
+      `SELECT criado_por FROM obras WHERE id = $1`,
+      [existe.rows[0].obra_id]
+    )
+    if (
+      obraCheck.rows.length === 0 ||
+      (obraCheck.rows[0].criado_por !== req.usuario.id && req.usuario.role !== 'admin')
+    ) {
+      return res.status(403).json({ erro: 'Sem permissão para esta ação' })
+    }
+
     if (existe.rows[0].status !== 'pendente') {
       return res.status(400).json({ erro: 'Candidatura já foi processada' })
     }
@@ -162,10 +174,22 @@ const recusar = async (req, res) => {
   try {
     const { id } = req.params
 
-    const existe = await pool.query(`SELECT id, status FROM candidaturas WHERE id = $1`, [id])
+    const existe = await pool.query(`SELECT id, status, obra_id FROM candidaturas WHERE id = $1`, [id])
     if (existe.rows.length === 0) {
       return res.status(404).json({ erro: 'Candidatura não encontrada' })
     }
+
+    const obraCheck = await pool.query(
+      `SELECT criado_por FROM obras WHERE id = $1`,
+      [existe.rows[0].obra_id]
+    )
+    if (
+      obraCheck.rows.length === 0 ||
+      (obraCheck.rows[0].criado_por !== req.usuario.id && req.usuario.role !== 'admin')
+    ) {
+      return res.status(403).json({ erro: 'Sem permissão para esta ação' })
+    }
+
     if (existe.rows[0].status !== 'pendente') {
       return res.status(400).json({ erro: 'Candidatura já foi processada' })
     }
