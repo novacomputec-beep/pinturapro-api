@@ -14,9 +14,12 @@ const uploadMidia = async (req, res) => {
     }
 
     // Verifica se a obra existe antes de vincular a mídia
-    const obraExiste = await pool.query(`SELECT id FROM obras WHERE id = $1`, [obra_id])
+    const obraExiste = await pool.query(`SELECT id, criado_por FROM obras WHERE id = $1`, [obra_id])
     if (obraExiste.rows.length === 0) {
       return res.status(404).json({ erro: 'Obra não encontrada' })
+    }
+    if (obraExiste.rows[0].criado_por !== req.usuario.id && req.usuario.role !== 'admin') {
+      return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
 
     const isVideo = req.file.mimetype.startsWith('video/')

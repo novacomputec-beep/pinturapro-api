@@ -1664,6 +1664,10 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
   try {
     const { reparo_id, ordem } = req.body
     if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
+    const reparoOwner = await pool.query(`SELECT criado_por FROM reparos WHERE id = $1`, [reparo_id])
+    if (reparoOwner.rows.length === 0 || reparoOwner.rows[0].criado_por !== req.usuario.id) {
+      return res.status(403).json({ erro: 'Sem permissão para esta ação' })
+    }
     const resultado = await uploadArquivo(req.file)
     const tipo = req.file.mimetype.startsWith('video/') ? 'video' : 'foto'
     const result = await pool.query(
@@ -1761,6 +1765,10 @@ router.post('/upload/reparo-url', autenticar, async (req, res) => {
   try {
     const { reparo_id, url, tipo = 'video', ordem = 1 } = req.body
     if (!reparo_id || !url) return res.status(400).json({ erro: 'reparo_id e url são obrigatórios' })
+    const reparoOwner = await pool.query(`SELECT criado_por FROM reparos WHERE id = $1`, [reparo_id])
+    if (reparoOwner.rows.length === 0 || reparoOwner.rows[0].criado_por !== req.usuario.id) {
+      return res.status(403).json({ erro: 'Sem permissão para esta ação' })
+    }
     // Idempotente por slot (reparo_id, ordem): um retry após resposta perdida
     // (ex.: Wi-Fi + dados móveis trocando a rota) substitui a mídia em vez de duplicar.
     const result = await pool.query(
@@ -1779,6 +1787,10 @@ router.post('/upload/obra-url', autenticar, async (req, res) => {
   try {
     const { obra_id, url, tipo = 'video', ordem = 1 } = req.body
     if (!obra_id || !url) return res.status(400).json({ erro: 'obra_id e url são obrigatórios' })
+    const obraOwner = await pool.query(`SELECT criado_por FROM obras WHERE id = $1`, [obra_id])
+    if (obraOwner.rows.length === 0 || obraOwner.rows[0].criado_por !== req.usuario.id) {
+      return res.status(403).json({ erro: 'Sem permissão para esta ação' })
+    }
     // Idempotente por slot (obra_id, ordem): retry após resposta perdida substitui em vez de duplicar.
     const result = await pool.query(
       `WITH del AS (DELETE FROM midias WHERE obra_id = $1 AND ordem = $4)
