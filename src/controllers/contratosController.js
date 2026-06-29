@@ -281,6 +281,9 @@ const enviarContratoReparo = async (reparoId) => {
         [r.interesse_id]
       )
     }
+
+    // Marca o reparo como tendo contrato enviado — só após todos os passos acima (Finding 3.2)
+    await pool.query(`UPDATE reparos SET contrato_enviado = true WHERE id = $1`, [reparoId])
   } catch (err) {
     console.error('[Contrato] Erro ao enviar contrato de reparo:', err.message)
   }
@@ -343,6 +346,9 @@ const enviarContratoObra = async (candidaturaId) => {
        ON CONFLICT (candidatura_id) DO UPDATE SET status = 'enviado', atualizado_em = NOW()`,
       [candidaturaId]
     )
+
+    // Marca a obra como tendo contrato enviado — só após todos os passos acima (Finding 3.2)
+    await pool.query(`UPDATE obras SET contrato_enviado = true WHERE id = $1`, [r.id])
   } catch (err) {
     console.error('[Contrato] Erro ao enviar contrato de obra:', err.message)
   }

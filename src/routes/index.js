@@ -91,6 +91,9 @@ const migracaoPronta = (async () => {
     // Acelera a pré-seleção de linhas com coordenadas; o haversine continua sendo calculado por linha.
     await client.query(`CREATE INDEX IF NOT EXISTS obras_lat_lng_idx ON obras (latitude, longitude)`)
     await client.query(`CREATE INDEX IF NOT EXISTS reparos_lat_lng_idx ON reparos (latitude, longitude)`)
+    // Flag de contrato enviado — permite detectar matches cujo e-mail de contrato falhou (Finding 3.2)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS contrato_enviado BOOLEAN DEFAULT false`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS contrato_enviado BOOLEAN DEFAULT false`)
     // Índices para FKs e filtros quentes (feed + ownership). Sem eles, as subqueries
     // correlacionadas do feed e os lookups por usuário/obra/reparo fazem seq scan.
     await client.query(`CREATE INDEX IF NOT EXISTS interesse_reparos_reparo_id_idx ON interesse_reparos (reparo_id)`)
