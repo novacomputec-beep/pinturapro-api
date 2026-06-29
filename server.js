@@ -105,7 +105,7 @@ const verificarPrestadoresProximos = async () => {
           JOIN assinaturas a ON a.usuario_id = u.id AND a.status = 'ativa'
           WHERE lp.atualizado_em > NOW() - INTERVAL '30 minutes'
             AND u.push_token IS NOT NULL
-            AND u.role = 'prestador'
+            AND u.role = 'prestador' AND u.tipo_prestador IS DISTINCT FROM 'pintor'
         `)
       : { rows: [] }
 
@@ -157,7 +157,7 @@ const verificarPrestadoresProximos = async () => {
           JOIN assinaturas a ON a.usuario_id = u.id AND a.status = 'ativa'
           WHERE lp.atualizado_em > NOW() - INTERVAL '30 minutes'
             AND u.push_token IS NOT NULL
-            AND u.role = 'assinante'
+            AND u.role = 'prestador' AND u.tipo_prestador = 'pintor'
         `)
       : { rows: [] }
 

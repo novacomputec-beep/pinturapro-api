@@ -174,7 +174,7 @@ const notificarPintoresSobreNovaObra = async (obraId) => {
       `SELECT u.push_token
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
-       WHERE u.role = 'assinante'
+       WHERE u.role = 'prestador' AND u.tipo_prestador = 'pintor'
          AND a.status = 'ativa'
          AND u.push_token IS NOT NULL
        LIMIT 500`
@@ -204,7 +204,7 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     const prestadores = await pool.query(
       `SELECT u.push_token
        FROM usuarios u
-       WHERE u.role = 'prestador'
+       WHERE u.role = 'prestador' AND u.tipo_prestador IS DISTINCT FROM 'pintor'
          AND u.push_token IS NOT NULL
        LIMIT 500`
     )
