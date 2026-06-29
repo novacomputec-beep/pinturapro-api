@@ -3,7 +3,7 @@ const express = require('express')
 const cors = require('cors')
 const helmet = require('helmet')
 const rateLimit = require('express-rate-limit')
-const routes = require('./src/routes')
+const rotasApp = require('./src/routes')
 const { pool } = require('./src/utils/supabase')
 const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarReparosExpirandoSemInteressados, verificarObrasExpirandoSemInteressados, verificarCronometroReparos } = require('./src/services/alertaService')
 const { invalidarCacheAssinatura } = require('./src/middlewares/auth')
@@ -42,7 +42,7 @@ app.use('/api/auth/cadastro', rateLimit({ windowMs: 60 * 60 * 1000, max: 5 }))
 app.use('/api/pagamentos/webhook-pagbank', express.raw({ type: '*/*', limit: '1mb' }))
 app.use(express.json({ limit: '100mb' }))
 app.use(express.urlencoded({ extended: true, limit: '100mb' }))
-app.use('/api', routes)
+app.use('/api', rotasApp)
 
 // Health check
 app.get('/', async (req, res) => {
@@ -251,13 +251,20 @@ const iniciarAgendador = () => {
   console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min | expirando sem interessados (reparos+obras): 1h | cronômetro reparos: 1min')
 }
 
-app.listen(PORT, () => {
-  console.log(`
+rotasApp.migracaoPronta
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`
 ╔══════════════════════════════════════╗
 ║   PinturaPro API — v1.0.0            ║
 ║   Rodando em http://localhost:${PORT}   ║
 ╚══════════════════════════════════════╝
   `)
-  console.log('[PagBank] token:', process.env.PAGBANK_TOKEN ? 'configurado' : 'AUSENTE', '| env:', process.env.PAGBANK_ENV || 'production')
-  iniciarAgendador()
-})
+      console.log('[PagBank] token:', process.env.PAGBANK_TOKEN ? 'configurado' : 'AUSENTE', '| env:', process.env.PAGBANK_ENV || 'production')
+      iniciarAgendador()
+    })
+  })
+  .catch((err) => {
+    console.error('Falha na migração de boot — servidor não iniciado:', err)
+    process.exit(1)
+  })

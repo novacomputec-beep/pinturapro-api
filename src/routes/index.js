@@ -18,7 +18,7 @@ const bcrypt = require('bcryptjs')
 const speakeasy = require('speakeasy')
 
 // One-time column migrations — single transaction so all columns land atomically or none do
-;(async () => {
+const migracaoPronta = (async () => {
   // pool.connect() dentro do try: erro de conexão (ex.: DB inacessível) é logado
   // em vez de virar unhandled rejection que derruba o processo (crash-loop / 502).
   let client
@@ -2511,3 +2511,4 @@ router.post('/admin/2fa/verificar', autenticar, exigirAdmin, async (req, res) =>
 })
 
 module.exports = router
+module.exports.migracaoPronta = migracaoPronta
