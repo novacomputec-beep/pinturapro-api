@@ -268,6 +268,7 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
         [obraIds]
       )
       await client.query('DELETE FROM candidaturas WHERE obra_id = ANY($1::uuid[])', [obraIds])
+      await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
       await client.query('DELETE FROM obras WHERE criado_por = $1', [id])
     }
 
@@ -276,6 +277,7 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     if (reparosRes.rows.length > 0) {
       const reparoIds = reparosRes.rows.map(r => r.id)
       await client.query('DELETE FROM interesse_reparos WHERE reparo_id = ANY($1::uuid[])', [reparoIds])
+      await client.query(`DELETE FROM midias_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1)`, [id])
       await client.query('DELETE FROM reparos WHERE criado_por = $1', [id])
     }
 
@@ -2425,6 +2427,7 @@ router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => 
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    await client.query(`DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas)`)
     await client.query(`DELETE FROM candidaturas`)
     await client.query(`DELETE FROM midias`)
     await client.query(`DELETE FROM obras`)
