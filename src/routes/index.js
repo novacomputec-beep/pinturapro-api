@@ -94,6 +94,8 @@ const migracaoPronta = (async () => {
     // Flag de contrato enviado — permite detectar matches cujo e-mail de contrato falhou (Finding 3.2)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS contrato_enviado BOOLEAN DEFAULT false`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS contrato_enviado BOOLEAN DEFAULT false`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
     // Índices para FKs e filtros quentes (feed + ownership). Sem eles, as subqueries
     // correlacionadas do feed e os lookups por usuário/obra/reparo fazem seq scan.
     await client.query(`CREATE INDEX IF NOT EXISTS interesse_reparos_reparo_id_idx ON interesse_reparos (reparo_id)`)
@@ -892,7 +894,7 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
     const ehPintor = o.match_usuario_id === req.usuario.id
     const ehAdmin = req.usuario.role === 'admin'
     if (!ehDono && !ehPintor && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar esta obra' })
-    await pool.query(`UPDATE obras SET status = 'encerrada', status_aprovacao = 'encerrada' WHERE id = $1`, [req.params.id])
+    await pool.query(`UPDATE obras SET status = 'encerrada', status_aprovacao = 'encerrada', encerrado_em = NOW() WHERE id = $1`, [req.params.id])
     if (ehDono && o.match_usuario_id) {
       const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.match_usuario_id])
       if (pintor.rows[0]?.push_token) {
@@ -1564,7 +1566,7 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
     const ehPrestador = r.match_usuario_id === req.usuario.id
     const ehAdmin     = req.usuario.role === 'admin'
     if (!ehDono && !ehPrestador && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar este reparo' })
-    await pool.query(`UPDATE reparos SET status = 'encerrada', status_aprovacao = 'encerrada' WHERE id = $1`, [req.params.id])
+    await pool.query(`UPDATE reparos SET status = 'encerrada', status_aprovacao = 'encerrada', encerrado_em = NOW() WHERE id = $1`, [req.params.id])
     if (ehDono && r.match_usuario_id) {
       const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
       if (prestador.rows[0]?.push_token) {
