@@ -1257,7 +1257,11 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
       FROM reparos r
       WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()
         AND r.match_usuario_id IS NULL
-        AND NOT ($1::uuid = ANY(COALESCE(r.prestadores_bloqueados, '{}')))`
+        AND NOT ($1::uuid = ANY(COALESCE(r.prestadores_bloqueados, '{}')))
+        AND NOT EXISTS (
+          SELECT 1 FROM prestadores_bloqueados_dono pb
+          WHERE pb.dono_id = r.criado_por AND pb.prestador_id = $1
+        )`
 
     if (categoria && categoria !== 'todas') {
       params.push(categoria)

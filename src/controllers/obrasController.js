@@ -20,8 +20,13 @@ const listar = async (req, res) => {
       AND o.status_aprovacao = 'aprovada'
       AND o.expira_em > NOW()
       AND o.match_usuario_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM prestadores_bloqueados_dono pb
+        WHERE pb.dono_id = o.criado_por AND pb.prestador_id = $1
+      )
     `
-    const params = []
+    // $1 reservado para o usuario_id (filtro de bloqueio global por dono)
+    const params = [req.usuario.id]
 
     if (categoria && categoria !== 'todas') {
       params.push(categoria)
