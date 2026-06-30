@@ -1229,8 +1229,11 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
       if (!isNaN(raio) && !isNaN(latNum) && !isNaN(lngNum)) {
         // Raio cumulativo: inclui reparos dentro de X km (com coordenadas) OU da cidade do
         // usuário (mesmo sem coordenadas geocodificadas — "sem lat/lng" não pode significar "invisível")
-        const cidadeResult = await pool.query(`SELECT cidade FROM usuarios WHERE id = $1`, [req.usuario.id])
-        const cidade = cidadeResult.rows[0]?.cidade
+        let cidade = (req.query.cidade_busca || '').trim()
+        if (!cidade) {
+          const cidadeResult = await pool.query(`SELECT cidade FROM usuarios WHERE id = $1`, [req.usuario.id])
+          cidade = cidadeResult.rows[0]?.cidade
+        }
         // Pré-filtro por bounding box (sargável → usa o índice btree (latitude, longitude))
         // antes do haversine exato por linha. A caixa é um superconjunto do círculo de raio
         // R (usa cos na latitude da borda mais próxima do polo), então não há falsos negativos:
