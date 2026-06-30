@@ -2574,8 +2574,8 @@ router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamento
 // ============================================================
 router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const [obras, assinaturas, candidaturas, obrasAprovacao, reparosAprovacao] = await Promise.all([
-      pool.query(`SELECT COUNT(*) FROM obras WHERE status = 'aberta'`),
+    const [obras, assinaturas, candidaturas, obrasAprovacao, reparosAprovacao, reparos] = await Promise.all([
+      pool.query(`SELECT COUNT(*) FROM obras WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()`),
       // Métricas de assinaturas em uma única passagem:
       // - ativos: todas as assinaturas ativas
       // - gratuitos: ativas marcadas como gratuito OU sem valor mensal
@@ -2591,11 +2591,13 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
       `),
       pool.query(`SELECT COUNT(*) FROM candidaturas WHERE status = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM obras WHERE enviada_por_dono = true AND status_aprovacao = 'pendente'`),
-      pool.query(`SELECT COUNT(*) FROM reparos WHERE status_aprovacao = 'pendente'`)
+      pool.query(`SELECT COUNT(*) FROM reparos WHERE status_aprovacao = 'pendente'`),
+      pool.query(`SELECT COUNT(*) FROM reparos WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()`)
     ])
     const assinRow = assinaturas.rows[0]
     res.json({
       obras_abertas: parseInt(obras.rows[0].count),
+      reparos_abertos: parseInt(reparos.rows[0].count),
       assinantes_ativos: parseInt(assinRow.ativos),
       assinantes_gratuitos: parseInt(assinRow.gratuitos),
       receita_mensal: parseFloat(assinRow.receita),
