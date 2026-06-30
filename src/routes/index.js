@@ -425,7 +425,7 @@ router.get('/obras/meus-contratos-dono', autenticar, async (req, res) => {
               (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) AS foto_capa,
               COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado
        FROM obras o
-       JOIN usuarios u ON o.match_usuario_id = u.id
+       LEFT JOIN usuarios u ON o.match_usuario_id = u.id
        LEFT JOIN candidaturas c ON c.obra_id = o.id AND c.usuario_id = o.match_usuario_id
        WHERE o.criado_por = $1 AND o.status = 'encerrada'
        ORDER BY o.match_feito_em DESC NULLS LAST`,
@@ -1161,7 +1161,7 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
               (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) AS foto_capa,
               COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado
        FROM reparos r
-       JOIN usuarios u ON r.match_usuario_id = u.id
+       LEFT JOIN usuarios u ON r.match_usuario_id = u.id
        LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
        WHERE r.criado_por = $1 AND r.status = 'encerrada'
        ORDER BY r.match_feito_em DESC NULLS LAST`,
