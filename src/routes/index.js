@@ -482,6 +482,7 @@ router.get('/obras/meus-contratos-dono', autenticar, async (req, res) => {
     const result = await pool.query(
       `SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.bairro, o.uf,
               o.match_feito_em, o.status,
+              u.id AS prestador_id,
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
               u.logradouro, u.numero, u.bairro,
               (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) AS foto_capa,
@@ -1218,6 +1219,7 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
     const result = await pool.query(
       `SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
               r.match_feito_em, r.status,
+              u.id AS prestador_id,
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
               u.logradouro, u.numero, u.bairro,
               (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) AS foto_capa,
