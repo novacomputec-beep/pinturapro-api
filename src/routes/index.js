@@ -155,6 +155,18 @@ const migracaoPronta = (async () => {
     // e a base. Idempotente: só apaga o que não tem usuário correspondente.
     await client.query(`DELETE FROM assinaturas a WHERE NOT EXISTS (SELECT 1 FROM usuarios u WHERE u.id = a.usuario_id)`)
     await client.query(`DELETE FROM localizacoes_prestadores lp WHERE NOT EXISTS (SELECT 1 FROM usuarios u WHERE u.id = lp.usuario_id)`)
+    // Lista de bloqueio global por dono (separada do array per-reparo prestadores_bloqueados).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS prestadores_bloqueados_dono (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        dono_id UUID NOT NULL REFERENCES usuarios(id),
+        prestador_id UUID NOT NULL REFERENCES usuarios(id),
+        criado_em TIMESTAMP DEFAULT NOW(),
+        UNIQUE(dono_id, prestador_id)
+      )
+    `)
+    await client.query(`CREATE INDEX IF NOT EXISTS prestadores_bloqueados_dono_dono_idx ON prestadores_bloqueados_dono (dono_id)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS prestadores_bloqueados_dono_prestador_idx ON prestadores_bloqueados_dono (prestador_id)`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -271,6 +283,56 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
     res.json({ mensagem: 'Token registrado' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao registrar token' })
+  }
+})
+
+// Lista de bloqueio global por dono (prestadores_bloqueados_dono). Separada do array
+// per-reparo prestadores_bloqueados — estes endpoints NÃO afetam o feed ainda.
+router.post('/usuarios/bloquear-prestador', autenticar, async (req, res) => {
+  try {
+    if (req.usuario.role !== 'dono_obra') return res.status(403).json({ erro: 'Apenas donos podem bloquear prestadores' })
+    const { prestador_id } = req.body
+    if (!prestador_id) return res.status(400).json({ erro: 'prestador_id é obrigatório' })
+    await pool.query(
+      `INSERT INTO prestadores_bloqueados_dono (dono_id, prestador_id) VALUES ($1, $2) ON CONFLICT (dono_id, prestador_id) DO NOTHING`,
+      [req.usuario.id, prestador_id]
+    )
+    res.json({ mensagem: 'Prestador bloqueado com sucesso' })
+  } catch (err) {
+    console.error('Erro ao bloquear prestador:', err)
+    res.status(500).json({ erro: 'Erro ao bloquear prestador' })
+  }
+})
+
+router.delete('/usuarios/desbloquear-prestador/:id', autenticar, async (req, res) => {
+  try {
+    if (req.usuario.role !== 'dono_obra') return res.status(403).json({ erro: 'Apenas donos podem desbloquear prestadores' })
+    await pool.query(
+      `DELETE FROM prestadores_bloqueados_dono WHERE dono_id = $1 AND prestador_id = $2`,
+      [req.usuario.id, req.params.id]
+    )
+    res.json({ mensagem: 'Prestador desbloqueado com sucesso' })
+  } catch (err) {
+    console.error('Erro ao desbloquear prestador:', err)
+    res.status(500).json({ erro: 'Erro ao desbloquear prestador' })
+  }
+})
+
+router.get('/usuarios/prestadores-bloqueados', autenticar, async (req, res) => {
+  try {
+    if (req.usuario.role !== 'dono_obra') return res.status(403).json({ erro: 'Apenas donos podem ver esta lista' })
+    const result = await pool.query(
+      `SELECT pb.prestador_id, pb.criado_em, u.nome, u.foto_url
+       FROM prestadores_bloqueados_dono pb
+       JOIN usuarios u ON u.id = pb.prestador_id
+       WHERE pb.dono_id = $1
+       ORDER BY pb.criado_em DESC`,
+      [req.usuario.id]
+    )
+    res.json({ bloqueados: result.rows })
+  } catch (err) {
+    console.error('Erro ao listar prestadores bloqueados:', err)
+    res.status(500).json({ erro: 'Erro ao listar prestadores bloqueados' })
   }
 })
 
