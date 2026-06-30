@@ -1176,6 +1176,36 @@ router.post('/reparos/aprovacao/:id/recusar', autenticar, exigirAdmin, async (re
   }
 })
 
+router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const filtro = req.query.filtro || 'finalizadas'
+    let where
+    if (filtro === 'finalizadas') {
+      where = `r.status = 'encerrada'`
+    } else if (filtro === 'canceladas') {
+      where = `(r.status IN ('cancelada', 'expirada') OR (r.status = 'aberta' AND r.expira_em <= NOW()))`
+    } else if (filtro === 'abertas') {
+      where = `r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()`
+    } else {
+      return res.status(400).json({ erro: 'Filtro inválido' })
+    }
+    const result = await pool.query(`
+      SELECT r.id, r.titulo, r.categoria, r.valor_estimado, r.cidade, r.uf, r.bairro,
+             r.expira_em, r.status,
+             (r.status = 'aberta' AND r.expira_em <= NOW()) AS expirada,
+             (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) AS total_interessados
+      FROM reparos r
+      WHERE ${where}
+      ORDER BY r.expira_em DESC NULLS LAST, r.id DESC
+      LIMIT 200
+    `)
+    res.json({ reparos: result.rows })
+  } catch (err) {
+    console.error('Erro ao listar reparos (admin):', err)
+    res.status(500).json({ erro: 'Erro ao buscar reparos' })
+  }
+})
+
 router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
   try {
     if (req.usuario.role !== 'prestador') return res.status(403).json({ erro: 'Acesso restrito a prestadores' })
