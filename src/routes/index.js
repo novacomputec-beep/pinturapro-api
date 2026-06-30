@@ -403,6 +403,7 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     // estoura violação de FK e a transação INTEIRA sofre ROLLBACK, desfazendo inclusive
     // o DELETE da assinatura acima e deixando uma assinatura órfã/desatualizada (B72-01).
     await client.query('DELETE FROM localizacoes_prestadores WHERE usuario_id = $1', [id])
+    await client.query(`DELETE FROM prestadores_bloqueados_dono WHERE dono_id = $1 OR prestador_id = $1`, [id])
     await client.query('DELETE FROM usuarios WHERE id = $1', [id])
 
     await client.query('COMMIT')
@@ -2026,6 +2027,7 @@ router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) =>
     await client.query(`DELETE FROM mensagens`)
     await client.query(`DELETE FROM assinaturas WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
     await client.query(`DELETE FROM localizacoes_prestadores WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
+    await client.query(`DELETE FROM prestadores_bloqueados_dono WHERE dono_id IN (SELECT id FROM usuarios WHERE role != 'admin') OR prestador_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
     await client.query(`DELETE FROM usuarios WHERE role != 'admin'`)
     await client.query('COMMIT')
     res.json({ mensagem: 'Dados de teste removidos com sucesso!' })
@@ -2596,6 +2598,7 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
     await client.query(`DELETE FROM candidaturas WHERE usuario_id = ANY($1)`, [ids])
     await client.query(`DELETE FROM interesse_reparos WHERE usuario_id = ANY($1)`, [ids])
     await client.query(`DELETE FROM mensagens WHERE autor_id = ANY($1)`, [ids])
+    await client.query(`DELETE FROM prestadores_bloqueados_dono WHERE dono_id IN (SELECT id FROM usuarios WHERE role != 'admin') OR prestador_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
     await client.query(`DELETE FROM usuarios WHERE role != 'admin'`)
     await client.query('COMMIT')
     res.json({ mensagem: 'Usuários removidos com sucesso' })
