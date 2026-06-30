@@ -7,6 +7,7 @@ const rotasApp = require('./src/routes')
 const { pool } = require('./src/utils/supabase')
 const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarReparosExpirandoSemInteressados, verificarObrasExpirandoSemInteressados, verificarCronometroReparos } = require('./src/services/alertaService')
 const { invalidarCacheAssinatura } = require('./src/middlewares/auth')
+const { deletarDoCloudinary } = require('./src/services/uploadService')
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -194,6 +195,50 @@ const verificarPrestadoresProximos = async () => {
   }
 }
 
+const deletarMidiasAntigas = async () => {
+  try {
+    // Reparos encerrados há mais de 7 dias com mídias ainda não removidas
+    const reparosAntigos = await pool.query(`
+      SELECT r.id, mr.id as midia_id, mr.url, mr.tipo
+      FROM reparos r
+      JOIN midias_reparos mr ON mr.reparo_id = r.id
+      WHERE r.status = 'encerrada'
+        AND r.encerrado_em IS NOT NULL
+        AND r.encerrado_em < NOW() - INTERVAL '7 days'
+    `)
+    for (const m of reparosAntigos.rows) {
+      const sucesso = await deletarDoCloudinary(m.url, m.tipo)
+      if (sucesso) {
+        await pool.query(`DELETE FROM midias_reparos WHERE id = $1`, [m.midia_id])
+      }
+    }
+    if (reparosAntigos.rows.length > 0) {
+      console.log(`[MidiasAntigas] ${reparosAntigos.rows.length} mídias de reparos processadas`)
+    }
+
+    // Obras encerradas há mais de 7 dias com mídias ainda não removidas
+    const obrasAntigas = await pool.query(`
+      SELECT o.id, m.id as midia_id, m.url, m.tipo
+      FROM obras o
+      JOIN midias m ON m.obra_id = o.id
+      WHERE o.status = 'encerrada'
+        AND o.encerrado_em IS NOT NULL
+        AND o.encerrado_em < NOW() - INTERVAL '7 days'
+    `)
+    for (const m of obrasAntigas.rows) {
+      const sucesso = await deletarDoCloudinary(m.url, m.tipo)
+      if (sucesso) {
+        await pool.query(`DELETE FROM midias WHERE id = $1`, [m.midia_id])
+      }
+    }
+    if (obrasAntigas.rows.length > 0) {
+      console.log(`[MidiasAntigas] ${obrasAntigas.rows.length} mídias de obras processadas`)
+    }
+  } catch (err) {
+    console.error('[MidiasAntigas] Erro:', err.message)
+  }
+}
+
 const iniciarAgendador = () => {
   const INTERVALO_ENGAJAMENTO  = 8 * 60 * 60 * 1000
   const INTERVALO_EXPIRACAO    = 60 * 60 * 1000
@@ -215,6 +260,7 @@ const iniciarAgendador = () => {
   setInterval(() => { verificarReparosExpirandoSemInteressados() }, INTERVALO_EXPIRACAO)
   setInterval(() => { verificarObrasExpirandoSemInteressados() }, INTERVALO_EXPIRACAO)
   setInterval(() => { verificarCronometroReparos() }, INTERVALO_CRONOMETRO)
+  setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
 
   setInterval(async () => {
     try {
@@ -248,7 +294,7 @@ const iniciarAgendador = () => {
     }
   }, 10 * 60 * 1000)
 
-  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min | expirando sem interessados (reparos+obras): 1h | cronômetro reparos: 1min')
+  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min | expirando sem interessados (reparos+obras): 1h | cronômetro reparos: 1min | mídias antigas: 24h')
 }
 
 rotasApp.migracaoPronta
