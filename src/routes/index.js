@@ -96,6 +96,17 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS contrato_enviado BOOLEAN DEFAULT false`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
+    // Backfill one-time de encerrado_em para linhas já encerradas antes da coluna existir.
+    // Usa match_feito_em como melhor aproximação, caindo para criado_em quando o item foi
+    // encerrado sem nunca ter match. Idempotente via WHERE encerrado_em IS NULL.
+    await client.query(`
+      UPDATE obras SET encerrado_em = COALESCE(match_feito_em, criado_em)
+      WHERE status = 'encerrada' AND encerrado_em IS NULL
+    `)
+    await client.query(`
+      UPDATE reparos SET encerrado_em = COALESCE(match_feito_em, criado_em)
+      WHERE status = 'encerrada' AND encerrado_em IS NULL
+    `)
     // Índices para FKs e filtros quentes (feed + ownership). Sem eles, as subqueries
     // correlacionadas do feed e os lookups por usuário/obra/reparo fazem seq scan.
     await client.query(`CREATE INDEX IF NOT EXISTS interesse_reparos_reparo_id_idx ON interesse_reparos (reparo_id)`)
