@@ -65,4 +65,30 @@ const gerarAssinaturaCloudinary = (folder = 'pinturapro/videos') => {
   return { signature, timestamp, cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, folder, transformation }
 }
 
-module.exports = { upload, uploadParaCloudinary, uploadArquivo, gerarAssinaturaCloudinary }
+const extrairPublicId = (url) => {
+  try {
+    const match = url.match(/\/upload\/(?:v\d+\/)?(.+)\.\w+$/)
+    return match ? match[1] : null
+  } catch (err) {
+    return null
+  }
+}
+
+const deletarDoCloudinary = async (url, tipo = 'foto') => {
+  const publicId = extrairPublicId(url)
+  if (!publicId) {
+    console.log('[Cloudinary] não foi possível extrair public_id de:', url)
+    return false
+  }
+  try {
+    const resourceType = tipo === 'video' ? 'video' : 'image'
+    const resultado = await cloudinary.uploader.destroy(publicId, { resource_type: resourceType })
+    console.log('[Cloudinary] resultado da exclusão:', publicId, '|', resultado.result)
+    return resultado.result === 'ok' || resultado.result === 'not found'
+  } catch (err) {
+    console.log('[Cloudinary] falha ao deletar | publicId:', publicId, '| msg:', err.message)
+    return false
+  }
+}
+
+module.exports = { upload, uploadParaCloudinary, uploadArquivo, gerarAssinaturaCloudinary, extrairPublicId, deletarDoCloudinary }
