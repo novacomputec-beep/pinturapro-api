@@ -221,7 +221,7 @@ const exigirPrestador = async (req, res, next) => {
     }
 
     const assinatura = await pool.query(
-      `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
+      `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' AND (proximo_vencimento IS NULL OR proximo_vencimento > NOW()) LIMIT 1`,
       [req.usuario.id]
     )
     const ativa = assinatura.rows.length > 0
@@ -659,7 +659,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
 
     if (!ehDono && !ehPintorDoMatch && req.usuario.role !== 'admin') {
       const assinatura = await pool.query(
-        `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
+        `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' AND (proximo_vencimento IS NULL OR proximo_vencimento > NOW()) LIMIT 1`,
         [req.usuario.id]
       )
       if (assinatura.rows.length === 0) {
@@ -1839,7 +1839,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
         return res.status(403).json({ erro: 'Sem permissão para ver este reparo' })
       }
       const assinatura = await pool.query(
-        `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
+        `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' AND (proximo_vencimento IS NULL OR proximo_vencimento > NOW()) LIMIT 1`,
         [req.usuario.id]
       )
       if (assinatura.rows.length === 0) {

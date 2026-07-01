@@ -89,7 +89,7 @@ const exigirAssinaturaAtiva = async (req, res, next) => {
     let assinaturaAtiva = getCacheAssinatura(req.usuario.id)
     if (assinaturaAtiva === null || assinaturaAtiva === undefined) {
       const result = await pool.query(
-        `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' LIMIT 1`,
+        `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' AND (proximo_vencimento IS NULL OR proximo_vencimento > NOW()) LIMIT 1`,
         [req.usuario.id]
       )
       assinaturaAtiva = result.rows.length > 0
