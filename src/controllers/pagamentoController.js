@@ -15,12 +15,14 @@ const limparCpfCnpj = (str) => {
 const ativarAssinatura = async (usuarioId, plano) => {
   // Upsert atômico (Finding 4.1): evita check-then-insert race que duplicava assinaturas.
   await pool.query(
-    `INSERT INTO assinaturas (usuario_id, plano, status, atualizado_em)
-     VALUES ($1, $2, 'ativa', NOW())
+    `INSERT INTO assinaturas (usuario_id, plano, status, atualizado_em, proximo_vencimento)
+     VALUES ($1, $2, 'ativa', NOW(),
+       CASE WHEN $2 = 'anual' THEN NOW() + INTERVAL '365 days' ELSE NOW() + INTERVAL '30 days' END)
      ON CONFLICT (usuario_id) DO UPDATE SET
        status = 'ativa',
        plano = EXCLUDED.plano,
-       atualizado_em = NOW()`,
+       atualizado_em = NOW(),
+       proximo_vencimento = EXCLUDED.proximo_vencimento`,
     [usuarioId, plano || 'mensal']
   )
 }
@@ -270,12 +272,14 @@ const darAcessoGratuito = async (req, res) => {
     const assinaturaExiste = await pool.query(`SELECT id FROM assinaturas WHERE usuario_id = $1`, [usuario_id])
     if (assinaturaExiste.rows.length > 0) {
       await pool.query(
-        `UPDATE assinaturas SET status = 'ativa', tipo = 'gratuito', atualizado_em = NOW() WHERE usuario_id = $1`,
+        `UPDATE assinaturas SET status = 'ativa', tipo = 'gratuito', atualizado_em = NOW(),
+          proximo_vencimento = NOW() + INTERVAL '30 days' WHERE usuario_id = $1`,
         [usuario_id]
       )
     } else {
       await pool.query(
-        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo) VALUES ($1, 'mensal', 0, 'ativa', 'gratuito')`,
+        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo, proximo_vencimento)
+         VALUES ($1, 'mensal', 0, 'ativa', 'gratuito', NOW() + INTERVAL '30 days')`,
         [usuario_id]
       )
     }

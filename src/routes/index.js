@@ -2138,7 +2138,9 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
       `UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = false WHERE id = $1`, [id]
     )
     await pool.query(
-      `UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [id]
+      `UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
+        proximo_vencimento = CASE WHEN plano = 'anual' THEN NOW() + INTERVAL '365 days' ELSE NOW() + INTERVAL '30 days' END
+       WHERE usuario_id = $1`, [id]
     )
 
     // Assinatura acabou de virar 'ativa' — derruba o cache para o app não cair na
@@ -2309,7 +2311,9 @@ router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req,
       for (const p of pendentes.rows) {
         // Aprovação em lote ao ligar o Modo Auto: também é não-revisada → marca automática
         await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
-        await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [p.id])
+        await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
+          proximo_vencimento = CASE WHEN plano = 'anual' THEN NOW() + INTERVAL '365 days' ELSE NOW() + INTERVAL '30 days' END
+         WHERE usuario_id = $1`, [p.id])
       }
       console.log(`[Modo automático] ${pendentes.rows.length} prestadores aprovados automaticamente`)
     }

@@ -281,7 +281,9 @@ const iniciarAgendador = () => {
       for (const p of pendentes.rows) {
         // aprovado_automaticamente = true → idoneidade ainda não revisada (auditável no painel)
         await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
-        await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW() WHERE usuario_id = $1`, [p.id])
+        await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
+          proximo_vencimento = CASE WHEN plano = 'anual' THEN NOW() + INTERVAL '365 days' ELSE NOW() + INTERVAL '30 days' END
+         WHERE usuario_id = $1`, [p.id])
         // Assinatura recém-ativada: limpa o cache p/ o app não cair na tela de pagamento (B72-07)
         invalidarCacheAssinatura(p.id)
         if (p.push_token) {
