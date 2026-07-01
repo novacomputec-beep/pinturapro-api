@@ -119,7 +119,12 @@ const migracaoPronta = (async () => {
     await client.query(`CREATE INDEX IF NOT EXISTS reparos_criado_por_idx ON reparos (criado_por)`)
     await client.query(`CREATE INDEX IF NOT EXISTS reparos_feed_idx ON reparos (status, status_aprovacao, expira_em)`)
     await client.query(`CREATE INDEX IF NOT EXISTS obras_criado_por_idx ON obras (criado_por)`)
-    await client.query(`CREATE INDEX IF NOT EXISTS obras_feed_idx ON obras (status, expira_em)`)
+    // obras_feed_idx: inclui status_aprovacao e match_usuario_id p/ paridade com reparos_feed_idx.
+    // Drop do índice antigo (mais estreito) antes de recriar com as colunas corretas.
+    await client.query(`DROP INDEX IF EXISTS obras_feed_idx`)
+    await client.query(`CREATE INDEX IF NOT EXISTS obras_feed_idx ON obras (status, status_aprovacao, expira_em, match_usuario_id)`)
+    // Filtro quente do cron de proximidade (15min): lp.atualizado_em > NOW() - 30min.
+    await client.query(`CREATE INDEX IF NOT EXISTS localizacoes_prestadores_atualizado_em_idx ON localizacoes_prestadores (atualizado_em)`)
     // No máximo um aceito por reparo/obra — enforce no nível do banco (Finding 2.1).
     // Dedup ANTES dos índices únicos: mantém o 'aceito' mais recente por job e rebaixa
     // os demais para 'recusado', senão o CREATE UNIQUE INDEX falha em dados legados.
@@ -158,6 +163,8 @@ const migracaoPronta = (async () => {
       )
     `)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS assinaturas_usuario_id_unico_idx ON assinaturas (usuario_id)`)
+    // Cron de expiração (1h) e aviso de vencimento (24h): WHERE status='ativa' AND proximo_vencimento < NOW().
+    await client.query(`CREATE INDEX IF NOT EXISTS assinaturas_status_vencimento_idx ON assinaturas (status, proximo_vencimento)`)
     // Backfill do uf: linhas antigas têm cidade preenchida mas uf NULL, então sumiam do
     // filtro "Estado" (o.uf/r.uf) mesmo aparecendo em "Cidade". Cidades conhecidas e
     // inequívocas (todas em MG). Idempotente via WHERE uf IS NULL.
