@@ -57,7 +57,7 @@ const minhas = async (req, res) => {
     const offset = (page - 1) * limit
 
     const result = await pool.query(
-      `SELECT c.id, c.status, c.criado_em,
+      `SELECT c.id, c.status, c.criado_em, c.valor_contraproposta, c.valor_proposto,
               o.id as obra_id, o.titulo, o.categoria, o.valor, o.cidade, o.status as obra_status
        FROM candidaturas c
        JOIN obras o ON c.obra_id = o.id
