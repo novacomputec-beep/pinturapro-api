@@ -15,6 +15,7 @@ const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestado
 const { ufDeCidade } = require('../utils/localidade')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const bcrypt = require('bcryptjs')
+const jwt = require('jsonwebtoken')
 const speakeasy = require('speakeasy')
 
 // One-time column migrations — single transaction so all columns land atomically or none do
@@ -2744,6 +2745,64 @@ router.post('/admin/2fa/verificar', autenticar, exigirAdmin, async (req, res) =>
     }
     res.json({ valido: true, mensagem: ativar ? '✅ 2FA ativado com sucesso!' : '2FA desativado' })
   } catch (err) {
+    res.status(500).json({ erro: 'Erro ao verificar 2FA' })
+  }
+})
+
+router.post('/admin/2fa/login-verificar', async (req, res) => {
+  try {
+    const { temp_token, codigo } = req.body
+    if (!temp_token || !codigo) return res.status(400).json({ erro: 'temp_token e codigo são obrigatórios' })
+
+    let payload
+    try {
+      payload = jwt.verify(temp_token, process.env.JWT_SECRET)
+    } catch (e) {
+      return res.status(401).json({ erro: 'Token temporário inválido ou expirado' })
+    }
+
+    if (payload.tipo !== '2fa_pendente' || payload.role !== 'admin') {
+      return res.status(401).json({ erro: 'Token inválido' })
+    }
+
+    const userResult = await pool.query(
+      `SELECT id, nome, email, role, dois_fa_secret, dois_fa_ativo FROM usuarios WHERE id = $1`,
+      [payload.id]
+    )
+    if (userResult.rows.length === 0) return res.status(401).json({ erro: 'Usuário não encontrado' })
+
+    const usuario = userResult.rows[0]
+    if (!usuario.dois_fa_ativo || !usuario.dois_fa_secret) {
+      return res.status(401).json({ erro: '2FA não configurado' })
+    }
+
+    const valido = speakeasy.totp.verify({
+      secret: usuario.dois_fa_secret,
+      encoding: 'base32',
+      token: String(codigo),
+      window: 1
+    })
+
+    if (!valido) return res.status(401).json({ erro: 'Código 2FA inválido' })
+
+    const token = jwt.sign(
+      { id: usuario.id, role: usuario.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    )
+
+    const assinaturaResult = await pool.query(
+      `SELECT status, plano, proximo_vencimento, valor_mensal FROM assinaturas WHERE usuario_id = $1 LIMIT 1`,
+      [usuario.id]
+    )
+
+    res.json({
+      token,
+      usuario: { id: usuario.id, nome: usuario.nome, email: usuario.email, role: usuario.role },
+      assinatura: assinaturaResult.rows[0] || null
+    })
+  } catch (err) {
+    console.error('[2FA login-verificar] Erro:', err.message)
     res.status(500).json({ erro: 'Erro ao verificar 2FA' })
   }
 })

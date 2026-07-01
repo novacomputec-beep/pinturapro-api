@@ -220,6 +220,22 @@ const login = async (req, res) => {
       return res.status(401).json({ erro: 'E-mail ou senha incorretos' })
     }
 
+    if (usuario.role === 'admin') {
+      const tfaResult = await pool.query(
+        `SELECT dois_fa_ativo, dois_fa_secret FROM usuarios WHERE id = $1`,
+        [usuario.id]
+      )
+      const tfa = tfaResult.rows[0]
+      if (tfa?.dois_fa_ativo && tfa?.dois_fa_secret) {
+        const tempToken = jwt.sign(
+          { id: usuario.id, role: usuario.role, tipo: '2fa_pendente' },
+          process.env.JWT_SECRET,
+          { expiresIn: '5m' }
+        )
+        return res.status(200).json({ requer_2fa: true, temp_token: tempToken })
+      }
+    }
+
     const assinaturaResult = await pool.query(
       `SELECT status, plano, proximo_vencimento, valor_mensal FROM assinaturas
        WHERE usuario_id = $1
