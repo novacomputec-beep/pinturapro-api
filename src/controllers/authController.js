@@ -151,7 +151,12 @@ const cadastrar = async (req, res) => {
 
     const token = gerarToken(usuario)
     console.log(`[CADASTRO][${ts}] ✓ token gerado | usuario_id=${usuario.id} — respondendo 201`)
-    res.status(201).json({ usuario, token })
+    const assinaturaResult = await pool.query(
+      `SELECT status, plano, proximo_vencimento, valor_mensal FROM assinaturas WHERE usuario_id = $1 ORDER BY criado_em DESC LIMIT 1`,
+      [usuario.id]
+    )
+    const assinatura = assinaturaResult.rows[0] || null
+    res.status(201).json({ usuario, token, assinatura })
 
     // E-mails especiais de teste — aprovação automática imediata (configurar via EMAILS_ESPECIAIS no Railway)
     const emailsEspeciais = (process.env.EMAILS_ESPECIAIS || '')
