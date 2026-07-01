@@ -239,6 +239,37 @@ const deletarMidiasAntigas = async () => {
   }
 }
 
+const expirarAssinaturasVencidas = async () => {
+  try {
+    const vencidas = await pool.query(`
+      SELECT a.usuario_id, u.push_token, u.nome
+      FROM assinaturas a
+      JOIN usuarios u ON u.id = a.usuario_id
+      WHERE a.status = 'ativa' AND a.proximo_vencimento < NOW()
+    `)
+    if (vencidas.rows.length === 0) return
+
+    for (const sub of vencidas.rows) {
+      await pool.query(
+        `UPDATE assinaturas SET status = 'expirada', atualizado_em = NOW() WHERE usuario_id = $1`,
+        [sub.usuario_id]
+      )
+      invalidarCacheAssinatura(sub.usuario_id)
+      if (sub.push_token) {
+        enviarPushNotificacao(
+          sub.push_token,
+          '⚠️ Seu acesso expirou',
+          'Sua assinatura venceu. Renove agora para continuar acessando os serviços.',
+          { tipo: 'assinatura_expirada' }
+        ).catch(() => {})
+      }
+    }
+    console.log(`[ExpirarAssinaturas] ${vencidas.rows.length} assinatura(s) expirada(s)`)
+  } catch (err) {
+    console.error('[ExpirarAssinaturas] Erro:', err.message)
+  }
+}
+
 const iniciarAgendador = () => {
   const INTERVALO_ENGAJAMENTO  = 8 * 60 * 60 * 1000
   const INTERVALO_EXPIRACAO    = 60 * 60 * 1000
@@ -261,6 +292,7 @@ const iniciarAgendador = () => {
   setInterval(() => { verificarObrasExpirandoSemInteressados() }, INTERVALO_EXPIRACAO)
   setInterval(() => { verificarCronometroReparos() }, INTERVALO_CRONOMETRO)
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
+  setInterval(() => { expirarAssinaturasVencidas() }, 60 * 60 * 1000)
 
   setInterval(async () => {
     try {
@@ -296,7 +328,7 @@ const iniciarAgendador = () => {
     }
   }, 10 * 60 * 1000)
 
-  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min | expirando sem interessados (reparos+obras): 1h | cronômetro reparos: 1min | mídias antigas: 24h')
+  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min | expirando sem interessados (reparos+obras): 1h | cronômetro reparos: 1min | mídias antigas: 24h | expiração assinaturas: 1h')
 }
 
 rotasApp.migracaoPronta
