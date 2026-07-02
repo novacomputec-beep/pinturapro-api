@@ -2566,6 +2566,96 @@ router.post('/feed/visualizacoes', autenticar, async (req, res) => {
   }
 })
 
+// POST /feed/checar-proximidade — chamado na abertura do app com a localização atual.
+// Encontra itens vistos-mas-não-notificados dentro de 5km em que o usuário não engajou,
+// envia UM push (o mais próximo) e marca notificado=true. One-time por item.
+router.post('/feed/checar-proximidade', autenticar, async (req, res) => {
+  try {
+    const { latitude, longitude } = req.body
+    const lat = parseFloat(latitude)
+    const lng = parseFloat(longitude)
+    if (isNaN(lat) || isNaN(lng)) {
+      return res.status(400).json({ erro: 'latitude e longitude são obrigatórios' })
+    }
+
+    const RAIO_KM = 5
+    const RAIO_GRAUS = RAIO_KM / 111
+
+    // Candidate reparos: seen, not notified, still open/available, has coords,
+    // and the user has NOT expressed interest
+    const reparos = await pool.query(
+      `SELECT fv.id AS visualizacao_id, r.id, r.titulo, r.latitude, r.longitude, 'reparo' AS tipo
+       FROM feed_visualizacoes fv
+       JOIN reparos r ON r.id = fv.item_id
+       WHERE fv.usuario_id = $1 AND fv.item_tipo = 'reparo' AND fv.notificado = false
+         AND r.status = 'aberta' AND r.status_aprovacao = 'aprovada'
+         AND r.expira_em > NOW() AND r.match_usuario_id IS NULL
+         AND r.latitude IS NOT NULL AND r.longitude IS NOT NULL
+         AND ABS(r.latitude - $2) < $4 AND ABS(r.longitude - $3) < $4
+         AND NOT EXISTS (
+           SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = r.id AND ir.usuario_id = $1
+         )`,
+      [req.usuario.id, lat, lng, RAIO_GRAUS]
+    )
+
+    const obras = await pool.query(
+      `SELECT fv.id AS visualizacao_id, o.id, o.titulo, o.latitude, o.longitude, 'obra' AS tipo
+       FROM feed_visualizacoes fv
+       JOIN obras o ON o.id = fv.item_id
+       WHERE fv.usuario_id = $1 AND fv.item_tipo = 'obra' AND fv.notificado = false
+         AND o.status = 'aberta' AND o.status_aprovacao = 'aprovada'
+         AND o.expira_em > NOW() AND o.match_usuario_id IS NULL
+         AND o.latitude IS NOT NULL AND o.longitude IS NOT NULL
+         AND ABS(o.latitude - $2) < $4 AND ABS(o.longitude - $3) < $4
+         AND NOT EXISTS (
+           SELECT 1 FROM candidaturas c WHERE c.obra_id = o.id AND c.usuario_id = $1
+         )`,
+      [req.usuario.id, lat, lng, RAIO_GRAUS]
+    )
+
+    // Exact planar distance (same formula as verificarPrestadoresProximos)
+    const candidatos = [...reparos.rows, ...obras.rows]
+      .map(item => {
+        const dLat = Math.abs(lat - item.latitude) * 111
+        const dLon = Math.abs(lng - item.longitude) * 111 * Math.cos(lat * Math.PI / 180)
+        return { ...item, distanciaKm: Math.sqrt(dLat * dLat + dLon * dLon) }
+      })
+      .filter(item => item.distanciaKm <= RAIO_KM)
+      .sort((a, b) => a.distanciaKm - b.distanciaKm)
+
+    if (candidatos.length === 0) return res.json({ notificado: false })
+
+    // Only the closest one per call — avoids push spam on app open
+    const alvo = candidatos[0]
+
+    // Mark BEFORE sending (safer against double-send on retry)
+    await pool.query(
+      `UPDATE feed_visualizacoes SET notificado = true WHERE id = $1`,
+      [alvo.visualizacao_id]
+    )
+
+    const tokenResult = await pool.query(
+      `SELECT push_token FROM usuarios WHERE id = $1`,
+      [req.usuario.id]
+    )
+    const pushToken = tokenResult.rows[0]?.push_token
+    if (pushToken) {
+      const kmTexto = alvo.distanciaKm < 1 ? 'menos de 1 km' : `${alvo.distanciaKm.toFixed(1)} km`
+      enviarPushNotificacao(
+        pushToken,
+        '📍 Oportunidade perto de você!',
+        `"${alvo.titulo}" está a ${kmTexto} de onde você está agora. Que tal dar uma olhada?`,
+        alvo.tipo === 'reparo' ? { tipo: 'reparo_proximo', reparo_id: alvo.id } : { tipo: 'obra_proxima', obra_id: alvo.id }
+      ).catch(() => {})
+    }
+
+    res.json({ notificado: true, item: { tipo: alvo.tipo, id: alvo.id, titulo: alvo.titulo, distancia_km: Number(alvo.distanciaKm.toFixed(1)) } })
+  } catch (err) {
+    console.error('[ChecarProximidade] Erro:', err.message)
+    res.status(500).json({ erro: 'Erro ao checar proximidade' })
+  }
+})
+
 router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
   try {
     const { valor, mensagem } = req.body
