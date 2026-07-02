@@ -188,6 +188,21 @@ const migracaoPronta = (async () => {
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS prestadores_bloqueados_dono_dono_idx ON prestadores_bloqueados_dono (dono_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS prestadores_bloqueados_dono_prestador_idx ON prestadores_bloqueados_dono (prestador_id)`)
+    // Avaliações bilaterais 5 estrelas no encerramento (dono avalia prestador e vice-versa).
+    // UNIQUE(contrato_tipo, contrato_id, avaliador_id): cada lado avalia uma única vez por contrato.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS avaliacoes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        contrato_tipo TEXT NOT NULL CHECK (contrato_tipo IN ('reparo', 'obra')),
+        contrato_id UUID NOT NULL,
+        avaliador_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        avaliado_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        estrelas INTEGER NOT NULL CHECK (estrelas BETWEEN 1 AND 5),
+        criado_em TIMESTAMP DEFAULT NOW(),
+        UNIQUE(contrato_tipo, contrato_id, avaliador_id)
+      )
+    `)
+    await client.query(`CREATE INDEX IF NOT EXISTS avaliacoes_avaliado_idx ON avaliacoes (avaliado_id)`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -2405,6 +2420,85 @@ router.get('/candidaturas/pendentes',     autenticar, exigirAdmin, candidaturasC
 router.get('/candidaturas/obra/:obra_id', autenticar, candidaturasCtrl.porObra)
 router.post('/candidaturas/:id/aprovar',  autenticar, candidaturasCtrl.aprovar)
 router.post('/candidaturas/:id/recusar',  autenticar, candidaturasCtrl.recusar)
+
+// AVALIAÇÕES — sistema bilateral 5 estrelas no encerramento do contrato.
+// Rotas estáticas ('/avaliacoes', '/avaliacoes/media/:usuario_id') não conflitam com
+// nenhum padrão /:id, mas seguem a convenção de registro dedicado como meus-contratos.
+
+// POST /avaliacoes — o dono avalia o prestador do match, ou o prestador avalia o dono.
+router.post('/avaliacoes', autenticar, async (req, res) => {
+  try {
+    const { contrato_tipo, contrato_id, estrelas } = req.body
+
+    if (!['reparo', 'obra'].includes(contrato_tipo)) {
+      return res.status(400).json({ erro: 'contrato_tipo deve ser reparo ou obra' })
+    }
+    const estrelasInt = parseInt(estrelas)
+    if (!estrelasInt || estrelasInt < 1 || estrelasInt > 5) {
+      return res.status(400).json({ erro: 'estrelas deve ser um número de 1 a 5' })
+    }
+    if (!contrato_id) {
+      return res.status(400).json({ erro: 'contrato_id é obrigatório' })
+    }
+
+    // contrato_tipo já validado contra whitelist acima — interpolação de tabela é segura.
+    const tabela = contrato_tipo === 'reparo' ? 'reparos' : 'obras'
+    const contrato = await pool.query(
+      `SELECT criado_por, match_usuario_id, status FROM ${tabela} WHERE id = $1`,
+      [contrato_id]
+    )
+    if (contrato.rows.length === 0) return res.status(404).json({ erro: 'Contrato não encontrado' })
+
+    const c = contrato.rows[0]
+    if (c.status !== 'encerrada') {
+      return res.status(400).json({ erro: 'Só é possível avaliar contratos encerrados' })
+    }
+    if (!c.match_usuario_id) {
+      return res.status(400).json({ erro: 'Este contrato não teve prestador vinculado' })
+    }
+
+    const uid = req.usuario.id
+    let avaliado_id
+    if (uid === c.criado_por) {
+      avaliado_id = c.match_usuario_id       // dono avalia prestador
+    } else if (uid === c.match_usuario_id) {
+      avaliado_id = c.criado_por             // prestador avalia dono
+    } else {
+      return res.status(403).json({ erro: 'Você não participou deste contrato' })
+    }
+
+    const result = await pool.query(
+      `INSERT INTO avaliacoes (contrato_tipo, contrato_id, avaliador_id, avaliado_id, estrelas)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (contrato_tipo, contrato_id, avaliador_id) DO NOTHING
+       RETURNING id`,
+      [contrato_tipo, contrato_id, uid, avaliado_id, estrelasInt]
+    )
+    if (result.rows.length === 0) {
+      return res.status(409).json({ erro: 'Você já avaliou este contrato' })
+    }
+
+    res.status(201).json({ mensagem: 'Avaliação registrada!', id: result.rows[0].id })
+  } catch (err) {
+    console.error('[Avaliacoes] Erro:', err.message)
+    res.status(500).json({ erro: 'Erro ao registrar avaliação' })
+  }
+})
+
+// GET /avaliacoes/media/:usuario_id — média e total de estrelas recebidas por um usuário.
+router.get('/avaliacoes/media/:usuario_id', autenticar, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT COUNT(*)::int AS total, COALESCE(ROUND(AVG(estrelas)::numeric, 1), 0) AS media
+       FROM avaliacoes WHERE avaliado_id = $1`,
+      [req.params.usuario_id]
+    )
+    res.json({ total: result.rows[0].total, media: parseFloat(result.rows[0].media) })
+  } catch (err) {
+    console.error('[Avaliacoes] Erro média:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar avaliações' })
+  }
+})
 
 router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
   try {
