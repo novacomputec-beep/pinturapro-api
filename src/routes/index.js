@@ -203,6 +203,20 @@ const migracaoPronta = (async () => {
       )
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS avaliacoes_avaliado_idx ON avaliacoes (avaliado_id)`)
+    // Visualizações de feed (proximidade): item visto no feed sem manifestar interesse.
+    // notificado marca o push one-time já enviado. UNIQUE evita duplicar a mesma view.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS feed_visualizacoes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        item_tipo TEXT NOT NULL CHECK (item_tipo IN ('reparo', 'obra')),
+        item_id UUID NOT NULL,
+        notificado BOOLEAN DEFAULT false,
+        criado_em TIMESTAMP DEFAULT NOW(),
+        UNIQUE(usuario_id, item_tipo, item_id)
+      )
+    `)
+    await client.query(`CREATE INDEX IF NOT EXISTS feed_visualizacoes_usuario_notif_idx ON feed_visualizacoes (usuario_id, notificado)`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -2516,6 +2530,39 @@ router.get('/avaliacoes/media/:usuario_id', autenticar, async (req, res) => {
   } catch (err) {
     console.error('[Avaliacoes] Erro média:', err.message)
     res.status(500).json({ erro: 'Erro ao buscar avaliações' })
+  }
+})
+
+// FEED — visualizações de proximidade. Rota estática ('/feed/visualizacoes'), sem
+// conflito com padrões /:id, seguindo a convenção de registro dedicado como avaliacoes.
+
+// POST /feed/visualizacoes — registra em lote os itens vistos no feed (sem interesse).
+router.post('/feed/visualizacoes', autenticar, async (req, res) => {
+  try {
+    const { itens } = req.body
+    if (!Array.isArray(itens) || itens.length === 0) {
+      return res.status(400).json({ erro: 'itens deve ser um array não-vazio' })
+    }
+    if (itens.length > 50) {
+      return res.status(400).json({ erro: 'Máximo de 50 itens por chamada' })
+    }
+
+    let registrados = 0
+    for (const item of itens) {
+      if (!item || !['reparo', 'obra'].includes(item.tipo) || !item.id) continue
+      const result = await pool.query(
+        `INSERT INTO feed_visualizacoes (usuario_id, item_tipo, item_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (usuario_id, item_tipo, item_id) DO NOTHING`,
+        [req.usuario.id, item.tipo, item.id]
+      )
+      registrados += result.rowCount
+    }
+
+    res.json({ registrados })
+  } catch (err) {
+    console.error('[FeedVisualizacoes] Erro:', err.message)
+    res.status(500).json({ erro: 'Erro ao registrar visualizações' })
   }
 })
 
