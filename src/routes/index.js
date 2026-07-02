@@ -1907,7 +1907,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
                 CASE WHEN ir.status = 'aceito' THEN u.logradouro ELSE NULL END as logradouro,
                 CASE WHEN ir.status = 'aceito' THEN u.numero ELSE NULL END as numero,
                 CASE WHEN ir.status = 'aceito' THEN u.bairro ELSE NULL END as bairro,
-                CASE WHEN ir.status = 'aceito' THEN u.telefone ELSE NULL END as telefone
+                CASE WHEN ir.status = 'aceito' THEN u.telefone ELSE NULL END as telefone,
+                (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_total,
+                (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_media
          FROM interesse_reparos ir
          JOIN usuarios u ON ir.usuario_id = u.id
          WHERE ir.reparo_id = $1

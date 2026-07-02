@@ -87,7 +87,9 @@ const porObra = async (req, res) => {
       `SELECT c.id, c.status, c.referencias, c.valor_oferta, c.mensagem_oferta, c.criado_em,
               u.id as usuario_id, u.nome, u.email,
               CASE WHEN c.status = 'aprovada' THEN u.telefone ELSE NULL END as telefone,
-              u.cidade, u.anos_experiencia, u.tamanho_equipe, u.especialidades
+              u.cidade, u.anos_experiencia, u.tamanho_equipe, u.especialidades,
+              (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_total,
+              (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_media
        FROM candidaturas c
        JOIN usuarios u ON c.usuario_id = u.id
        WHERE c.obra_id = $1
