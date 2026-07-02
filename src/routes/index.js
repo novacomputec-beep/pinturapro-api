@@ -208,6 +208,7 @@ const migracaoPronta = (async () => {
   } catch (err) {
     if (client) await client.query('ROLLBACK').catch(() => {})
     console.error('[migration] FALHOU — rollback executado:', err.message)
+    throw err
   } finally {
     if (client) client.release()
   }
