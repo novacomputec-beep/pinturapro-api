@@ -495,9 +495,13 @@ router.get('/obras/meus-contratos', autenticar, async (req, res) => {
     const result = await pool.query(
       `SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.bairro, o.uf,
               o.match_feito_em, o.status,
-              u.nome AS dono_nome, u.telefone AS dono_telefone,
+              u.id AS dono_id, u.nome AS dono_nome, u.telefone AS dono_telefone,
               (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) AS foto_capa,
-              COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado
+              COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado,
+              EXISTS (
+                SELECT 1 FROM avaliacoes a
+                WHERE a.contrato_tipo = 'obra' AND a.contrato_id = o.id AND a.avaliador_id = $1
+              ) AS ja_avaliei
        FROM obras o
        JOIN usuarios u ON o.criado_por = u.id
        LEFT JOIN candidaturas c ON c.obra_id = o.id AND c.usuario_id = $1
@@ -523,7 +527,11 @@ router.get('/obras/meus-contratos-dono', autenticar, async (req, res) => {
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
               u.logradouro, u.numero, u.bairro,
               (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) AS foto_capa,
-              COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado
+              COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado,
+              EXISTS (
+                SELECT 1 FROM avaliacoes a
+                WHERE a.contrato_tipo = 'obra' AND a.contrato_id = o.id AND a.avaliador_id = $1
+              ) AS ja_avaliei
        FROM obras o
        LEFT JOIN usuarios u ON o.match_usuario_id = u.id
        LEFT JOIN candidaturas c ON c.obra_id = o.id AND c.usuario_id = o.match_usuario_id
@@ -1262,9 +1270,13 @@ router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
     const result = await pool.query(
       `SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
               r.match_feito_em, r.status,
-              u.nome AS dono_nome, u.telefone AS dono_telefone,
+              u.id AS dono_id, u.nome AS dono_nome, u.telefone AS dono_telefone,
               (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) AS foto_capa,
-              COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado
+              COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado,
+              EXISTS (
+                SELECT 1 FROM avaliacoes a
+                WHERE a.contrato_tipo = 'reparo' AND a.contrato_id = r.id AND a.avaliador_id = $1
+              ) AS ja_avaliei
        FROM reparos r
        JOIN usuarios u ON r.criado_por = u.id
        LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.usuario_id = $1
@@ -1290,7 +1302,11 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
               u.logradouro, u.numero, u.bairro,
               (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) AS foto_capa,
-              COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado
+              COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado,
+              EXISTS (
+                SELECT 1 FROM avaliacoes a
+                WHERE a.contrato_tipo = 'reparo' AND a.contrato_id = r.id AND a.avaliador_id = $1
+              ) AS ja_avaliei
        FROM reparos r
        LEFT JOIN usuarios u ON r.match_usuario_id = u.id
        LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
