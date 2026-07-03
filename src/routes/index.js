@@ -14,6 +14,7 @@ const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = requi
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
+const { enviarEmail } = require('../services/emailService')
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const speakeasy = require('speakeasy')
@@ -466,6 +467,97 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     await client.query('ROLLBACK')
     console.error('Erro ao excluir usuário:', err)
     res.status(500).json({ erro: 'Erro ao excluir usuário' })
+  } finally {
+    client.release()
+  }
+})
+
+// E-mail de confirmação de exclusão de conta (a Google Play exige avisar o usuário).
+// Segue o mesmo caminho transacional (Brevo) usado em contratos/pagamentos/mensagens.
+const enviarEmailExclusaoConta = (email, nome) =>
+  enviarEmail({
+    para: email,
+    assunto: 'ArrumaPro — Sua conta foi excluída',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
+          <h1 style="color: #0a0a0a; margin: 0;">ArrumaPro</h1>
+        </div>
+        <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
+          <h2>Olá, ${nome}!</h2>
+          <p>Confirmamos que sua conta no ArrumaPro foi excluída permanentemente, junto com todos os dados associados (obras, reparos, candidaturas, mídias, assinaturas e avaliações).</p>
+          <p>Esta ação é irreversível. Se você <strong>não</strong> solicitou esta exclusão, entre em contato conosco imediatamente respondendo este e-mail.</p>
+          <p>Você pode criar uma nova conta a qualquer momento.</p>
+          <p><strong>Equipe ArrumaPro</strong></p>
+        </div>
+      </div>
+    `
+  })
+
+// DELETE /conta/excluir — usuário exclui a PRÓPRIA conta (self-service, exigência da Google Play).
+// Requer confirmação por senha. Reproduz a cascata do DELETE /usuarios/:id (admin), sempre sobre
+// req.usuario.id. Não altera o endpoint admin. avaliacoes cai por ON DELETE CASCADE.
+router.delete('/conta/excluir', autenticar, async (req, res) => {
+  const client = await pool.connect()
+  try {
+    const { senha } = req.body
+    if (!senha) return res.status(400).json({ erro: 'Senha é obrigatória para confirmar a exclusão' })
+
+    const userResult = await pool.query(
+      `SELECT id, nome, email, senha_hash FROM usuarios WHERE id = $1`,
+      [req.usuario.id]
+    )
+    if (userResult.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
+
+    const usuario = userResult.rows[0]
+    const senhaValida = await bcrypt.compare(senha, usuario.senha_hash)
+    if (!senhaValida) return res.status(401).json({ erro: 'Senha incorreta' })
+
+    const id = usuario.id
+
+    await client.query('BEGIN')
+
+    // Cascade obras criadas por este usuário (colunas idênticas ao DELETE /usuarios/:id)
+    await client.query(`DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
+    await client.query(`DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1))`, [id])
+    await client.query(`DELETE FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
+    await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
+    await client.query(`DELETE FROM obras WHERE criado_por = $1`, [id])
+
+    // Cascade reparos criados por este usuário
+    await client.query(`DELETE FROM interesse_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1)`, [id])
+    await client.query(`DELETE FROM midias_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1)`, [id])
+    await client.query(`DELETE FROM reparos WHERE criado_por = $1`, [id])
+
+    // NULL out match_usuario_id caso o usuário estivesse em atendimento
+    await client.query(`UPDATE obras SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1`, [id])
+    await client.query(`UPDATE reparos SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1`, [id])
+
+    // Cascade registros do próprio usuário como candidato/interessado/autor
+    await client.query(`DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE usuario_id = $1)`, [id])
+    await client.query(`DELETE FROM assinaturas WHERE usuario_id = $1`, [id])
+    await client.query(`DELETE FROM candidaturas WHERE usuario_id = $1`, [id])
+    await client.query(`DELETE FROM mensagens WHERE autor_id = $1`, [id])
+    await client.query(`DELETE FROM interesse_reparos WHERE usuario_id = $1`, [id])
+    await client.query(`DELETE FROM negociacoes WHERE autor_id = $1`, [id])
+    await client.query(`DELETE FROM localizacoes_prestadores WHERE usuario_id = $1`, [id])
+    await client.query(`DELETE FROM prestadores_bloqueados_dono WHERE dono_id = $1 OR prestador_id = $1`, [id])
+
+    // Conta em si (avaliacoes cai por ON DELETE CASCADE)
+    await client.query(`DELETE FROM usuarios WHERE id = $1`, [id])
+
+    await client.query('COMMIT')
+
+    invalidarCachesUsuario(id)
+
+    // E-mail de confirmação — fire and forget, não bloqueia a resposta
+    enviarEmailExclusaoConta(usuario.email, usuario.nome).catch(() => {})
+
+    res.json({ mensagem: 'Conta excluída com sucesso.' })
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    console.error('[ExcluirConta] Erro:', err.message)
+    res.status(500).json({ erro: 'Erro ao excluir conta. Tente novamente.' })
   } finally {
     client.release()
   }
