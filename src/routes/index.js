@@ -171,6 +171,29 @@ const migracaoPronta = (async () => {
     // inequívocas (todas em MG). Idempotente via WHERE uf IS NULL.
     await client.query(`UPDATE obras   SET uf = 'MG' WHERE uf IS NULL AND cidade = 'Patos de Minas'`)
     await client.query(`UPDATE reparos SET uf = 'MG' WHERE uf IS NULL AND cidade IN ('Patos de Minas', 'Formiga')`)
+    // Backfill de tipo_prestador (fix de preço no checkout PagBank). Prestadores com
+    // tipo_prestador NULL (linhas legadas/criadas fora do cadastro() — origem no painel-admin
+    // ou insert manual) quebrariam o checkout novo, que exige 'reparador' ou 'pintor' e
+    // devolve 422 caso contrário. Deriva o tier do valor_mensal JÁ gravado na assinatura no
+    // ato do cadastro (evidência autoritativa do que a pessoa contratou):
+    //   49.90 / 499.00 → reparador   |   99.90 / 999.00 → pintor
+    // Idempotente: WHERE tipo_prestador IS NULL → 0 linhas em reexecução (no-op, não lança).
+    // Não-destrutivo: só preenche NULLs, nunca sobrescreve um tier já definido. Um join sem
+    // assinatura correspondente simplesmente não casa nenhuma linha (também no-op).
+    await client.query(`
+      UPDATE usuarios u SET tipo_prestador = 'reparador'
+      FROM assinaturas a
+      WHERE a.usuario_id = u.id
+        AND u.role = 'prestador' AND u.tipo_prestador IS NULL
+        AND a.valor_mensal IN (49.90, 499.00)
+    `)
+    await client.query(`
+      UPDATE usuarios u SET tipo_prestador = 'pintor'
+      FROM assinaturas a
+      WHERE a.usuario_id = u.id
+        AND u.role = 'prestador' AND u.tipo_prestador IS NULL
+        AND a.valor_mensal IN (99.90, 999.00)
+    `)
     // Limpeza de linhas órfãs deixadas por exclusões antigas que falhavam no meio da
     // transação (ver B72-01). Uma assinatura órfã (usuario_id de usuário já apagado)
     // não afeta o novo cadastro do mesmo CPF — ele recebe novo id — mas suja relatórios

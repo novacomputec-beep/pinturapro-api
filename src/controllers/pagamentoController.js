@@ -104,7 +104,7 @@ const criarAssinatura = async (req, res) => {
     const usuario = req.usuario
 
     const usuarioResult = await pool.query(
-      'SELECT nome, email, cpf_cnpj, telefone FROM usuarios WHERE id = $1',
+      'SELECT nome, email, cpf_cnpj, telefone, tipo_prestador FROM usuarios WHERE id = $1',
       [usuario.id]
     )
     const dadosUsuario = usuarioResult.rows[0]
@@ -118,15 +118,33 @@ const criarAssinatura = async (req, res) => {
     const telArea   = telLimpo.substring(0, 2) || '34'
     const telNumero = telLimpo.substring(2)    || '999999999'
 
-    let valor     = 9990
-    let descricao = 'ArrumaPro — Plano Mensal'
+    const nomePlano = plano === 'anual' ? 'Anual' : 'Mensal'
+
+    // Preço definido pelo TIER do prestador (tipo_prestador), NÃO pelo role:
+    // todos os prestadores (pintor/construtor e reparador) têm role='prestador',
+    // então usar role cobrava R$ 49,90 de todo mundo. O tier real é tipo_prestador.
+    //   reparador           → R$ 49,90 / mês (R$ 499,00 anual)
+    //   pintor (construção) → R$ 99,90 / mês (R$ 999,00 anual)
+    let valor, descricao
 
     if (usuario.role === 'prestador') {
-      valor     = plano === 'anual' ? 49900 : 4990
-      descricao = `ArrumaPro Serviços — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`
+      const tipoPrestador = dadosUsuario?.tipo_prestador
+
+      if (tipoPrestador === 'reparador') {
+        valor     = plano === 'anual' ? 49900 : 4990
+        descricao = `ArrumaPro Serviços — Plano ${nomePlano}`
+      } else if (tipoPrestador === 'pintor') {
+        valor     = plano === 'anual' ? 99900 : 9990
+        descricao = `ArrumaPro — Plano ${nomePlano}`
+      } else {
+        // Tier não mapeado: falha alto em vez de cobrar silenciosamente o plano barato.
+        console.error(`[pagamento] tipo_prestador não mapeado para preço — usuario=${usuario.id} tipo_prestador=${JSON.stringify(tipoPrestador)}`)
+        return res.status(422).json({ erro: 'Tipo de prestador não reconhecido para cobrança. Atualize seu cadastro ou contate o suporte.' })
+      }
     } else {
+      // Donos de obra têm acesso gratuito; assinantes genéricos pagam o plano padrão.
       valor     = plano === 'anual' ? 99900 : 9990
-      descricao = `ArrumaPro — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`
+      descricao = `ArrumaPro — Plano ${nomePlano}`
     }
 
     const body = {
