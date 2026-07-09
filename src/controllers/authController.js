@@ -1,4 +1,4 @@
-const bcrypt = require('bcryptjs')
+const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
 const { pool } = require('../utils/supabase')
 const nodemailer = require('nodemailer')
@@ -22,6 +22,7 @@ const transporter = nodemailer.createTransport({
 
 const cadastrar = async (req, res) => {
   const ts = new Date().toISOString()
+  let client
   try {
     const { nome, email, telefone, senha, cidade, uf,
             especialidades, anos_experiencia, tamanho_equipe,
@@ -47,31 +48,11 @@ const cadastrar = async (req, res) => {
 
     const emailNormalizado = email.toLowerCase().trim()
 
-    console.log(`[CADASTRO][${ts}] ▶ verificando email no banco | email=${emailNormalizado}`)
-    const existente = await pool.query('SELECT id FROM usuarios WHERE email = $1', [emailNormalizado])
-    if (existente.rows.length > 0) {
-      console.log(`[CADASTRO][${ts}] ✗ 409 email duplicado | email=${emailNormalizado}`)
-      return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
-    }
-    console.log(`[CADASTRO][${ts}] ✓ email disponivel`)
-
-    // Verifica CPF/CNPJ duplicado
-    if (cpf_cnpj) {
-      const cpfLimpo = cpf_cnpj.replace(/\D/g, '')
-      console.log(`[CADASTRO][${ts}] ▶ verificando cpf_cnpj no banco | cpfLimpo=${cpfLimpo}`)
-      const cpfExistente = await pool.query(
-        `SELECT id FROM usuarios WHERE regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') = $1`,
-        [cpfLimpo]
-      )
-      if (cpfExistente.rows.length > 0) {
-        console.log(`[CADASTRO][${ts}] ✗ 409 cpf_cnpj duplicado | cpfLimpo=${cpfLimpo}`)
-        return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
-      }
-      console.log(`[CADASTRO][${ts}] ✓ cpf_cnpj disponivel`)
-    }
-
+    // Hash FORA da transação: o bcrypt nativo roda na threadpool do libuv (não
+    // bloqueia o event loop), então não seguramos uma conexão/lock do Postgres
+    // durante o custo de CPU do hash — a transação abaixo fica curta.
     console.log(`[CADASTRO][${ts}] ▶ gerando hash de senha`)
-    const senha_hash = await bcrypt.hash(senha, 12)
+    const senha_hash = await bcrypt.hash(senha, 10)
     console.log(`[CADASTRO][${ts}] ✓ senha hash gerada`)
 
     let role = 'assinante'
@@ -89,9 +70,45 @@ const cadastrar = async (req, res) => {
     else if (tipo_conta === 'prestador') tipo_prestador = 'reparador'
 
     const verificacaoStatus = role === 'prestador' ? 'pendente' : 'nao_solicitada'
+    const planoEscolhido = plano || 'mensal'
+
+    // Transação única: o INSERT em usuarios e o INSERT em assinaturas commitam
+    // JUNTOS ou nada. Antes, cada pool.query fazia autocommit isolado — se a
+    // resposta se perdesse (timeout/rede) após o INSERT em usuarios já commitado,
+    // o usuário ficava meio-criado e todo retry virava um 409 legítimo ("CPF só
+    // no fim"). Agora, qualquer falha antes do COMMIT desfaz tudo → o retry é limpo.
+    client = await pool.connect()
+    await client.query('BEGIN')
+
+    // Pré-checagens amigáveis DENTRO da transação (mensagem limpa). Em corrida
+    // real, o índice único (email + cpf_cnpj normalizado) é a garantia final e
+    // cai no handler de 23505 abaixo.
+    console.log(`[CADASTRO][${ts}] ▶ verificando email no banco | email=${emailNormalizado}`)
+    const existente = await client.query('SELECT id FROM usuarios WHERE email = $1', [emailNormalizado])
+    if (existente.rows.length > 0) {
+      await client.query('ROLLBACK')
+      console.log(`[CADASTRO][${ts}] ✗ 409 email duplicado | email=${emailNormalizado}`)
+      return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
+    }
+    console.log(`[CADASTRO][${ts}] ✓ email disponivel`)
+
+    if (cpf_cnpj) {
+      const cpfLimpo = cpf_cnpj.replace(/\D/g, '')
+      console.log(`[CADASTRO][${ts}] ▶ verificando cpf_cnpj no banco | cpfLimpo=${cpfLimpo}`)
+      const cpfExistente = await client.query(
+        `SELECT id FROM usuarios WHERE regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') = $1`,
+        [cpfLimpo]
+      )
+      if (cpfExistente.rows.length > 0) {
+        await client.query('ROLLBACK')
+        console.log(`[CADASTRO][${ts}] ✗ 409 cpf_cnpj duplicado | cpfLimpo=${cpfLimpo}`)
+        return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
+      }
+      console.log(`[CADASTRO][${ts}] ✓ cpf_cnpj disponivel`)
+    }
 
     console.log(`[CADASTRO][${ts}] ▶ INSERT usuarios | role=${role} tipo_dono=${tipo_dono} tipo_prestador=${tipo_prestador} verificacao_status=${verificacaoStatus}`)
-    const result = await pool.query(
+    const result = await client.query(
       `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade, uf,
         especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo,
         tipo_dono, pix_reembolso, referencias,
@@ -119,11 +136,9 @@ const cadastrar = async (req, res) => {
     const usuario = result.rows[0]
     console.log(`[CADASTRO][${ts}] ✓ usuario criado | id=${usuario.id} role=${usuario.role} tipo_prestador=${usuario.tipo_prestador}`)
 
-    const planoEscolhido = plano || 'mensal'
-
     if (role === 'dono_obra') {
       console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura gratuita | usuario_id=${usuario.id}`)
-      await pool.query(
+      await client.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
          VALUES ($1, 'mensal', 0, 'ativa', 'gratuito')`,
         [usuario.id]
@@ -132,7 +147,7 @@ const cadastrar = async (req, res) => {
     } else if (role === 'prestador') {
       const valorMensal = planoEscolhido === 'anual' ? 499.00 : (tipo_conta === 'pintor' || tipo_conta === 'construtor' ? 99.90 : 49.90)
       console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura prestador | usuario_id=${usuario.id} plano=${planoEscolhido} valor=${valorMensal}`)
-      await pool.query(
+      await client.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
          VALUES ($1, $2, $3, 'pendente')`,
         [usuario.id, planoEscolhido, valorMensal]
@@ -141,7 +156,7 @@ const cadastrar = async (req, res) => {
     } else {
       const valorMensal = planoEscolhido === 'anual' ? 999.00 : 99.90
       console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura assinante | usuario_id=${usuario.id} plano=${planoEscolhido} valor=${valorMensal}`)
-      await pool.query(
+      await client.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
          VALUES ($1, $2, $3, 'pendente')`,
         [usuario.id, planoEscolhido, valorMensal]
@@ -149,13 +164,16 @@ const cadastrar = async (req, res) => {
       console.log(`[CADASTRO][${ts}] ✓ assinatura pendente criada | valor=${valorMensal}`)
     }
 
-    const token = gerarToken(usuario)
-    console.log(`[CADASTRO][${ts}] ✓ token gerado | usuario_id=${usuario.id} — respondendo 201`)
-    const assinaturaResult = await pool.query(
+    const assinaturaResult = await client.query(
       `SELECT status, plano, proximo_vencimento, valor_mensal FROM assinaturas WHERE usuario_id = $1 ORDER BY criado_em DESC LIMIT 1`,
       [usuario.id]
     )
     const assinatura = assinaturaResult.rows[0] || null
+
+    await client.query('COMMIT')
+
+    const token = gerarToken(usuario)
+    console.log(`[CADASTRO][${ts}] ✓ commit ok — token gerado | usuario_id=${usuario.id} — respondendo 201`)
     res.status(201).json({ usuario, token, assinatura })
 
     // E-mails especiais de teste — aprovação automática imediata (configurar via EMAILS_ESPECIAIS no Railway)
@@ -183,7 +201,11 @@ const cadastrar = async (req, res) => {
     })
 
   } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => {})
     const ts2 = new Date().toISOString()
+    // 23505 = unique_violation. Agora COBRE de fato o CPF: o índice único no
+    // cpf_cnpj normalizado existe (migração em routes/index.js) e seu nome contém
+    // "cpf", então a corrida real cai aqui e vira um 409 limpo em vez de 500.
     if (err.code === '23505') {
       console.error(`[CADASTRO][${ts2}] ✗ 409 unicidade BD | constraint=${err.constraint} | msg=${err.message}`)
       if (err.constraint?.includes('cpf')) return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
@@ -192,6 +214,8 @@ const cadastrar = async (req, res) => {
     }
     console.error(`[CADASTRO][${ts2}] ✗ ERRO INTERNO | msg="${err.message}" | code=${err.code}\n${err.stack}`)
     res.status(500).json({ erro: err.message || 'Erro ao criar conta' })
+  } finally {
+    if (client) client.release()
   }
 }
 
@@ -325,7 +349,7 @@ const alterarSenha = async (req, res) => {
     if (!senhaValida) {
       return res.status(401).json({ erro: 'Senha atual incorreta' })
     }
-    const nova_hash = await bcrypt.hash(nova_senha, 12)
+    const nova_hash = await bcrypt.hash(nova_senha, 10)
     await pool.query('UPDATE usuarios SET senha_hash = $1 WHERE id = $2', [nova_hash, req.usuario.id])
     res.json({ mensagem: 'Senha alterada com sucesso' })
   } catch (err) {

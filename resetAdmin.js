@@ -1,5 +1,5 @@
 require('dotenv').config()
-const bcrypt = require('bcryptjs')
+const bcrypt = require('bcrypt')
 const { Pool } = require('pg')
 
 if (!process.env.DATABASE_URL) {
@@ -13,7 +13,7 @@ const pool = new Pool({
 })
 
 async function reset() {
-  const hash = await bcrypt.hash('Admin123', 12)
+  const hash = await bcrypt.hash('Admin123', 10)
   const result = await pool.query(
     `UPDATE usuarios SET senha_hash = $1, role = 'admin', ativo = true WHERE email = $2 RETURNING id, nome, email, role`,
     [hash, 'admin@pinturapro.com.br']

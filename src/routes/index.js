@@ -15,7 +15,7 @@ const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestado
 const { ufDeCidade } = require('../utils/localidade')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const { enviarEmail } = require('../services/emailService')
-const bcrypt = require('bcryptjs')
+const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
 const speakeasy = require('speakeasy')
 
@@ -200,6 +200,20 @@ const migracaoPronta = (async () => {
     // e a base. Idempotente: só apaga o que não tem usuário correspondente.
     await client.query(`DELETE FROM assinaturas a WHERE NOT EXISTS (SELECT 1 FROM usuarios u WHERE u.id = a.usuario_id)`)
     await client.query(`DELETE FROM localizacoes_prestadores lp WHERE NOT EXISTS (SELECT 1 FROM usuarios u WHERE u.id = lp.usuario_id)`)
+    // UNIQUE no CPF/CNPJ NORMALIZADO (só dígitos) — MESMA expressão dos lookups de
+    // cadastro/pré-checagem (regexp_replace(cpf_cnpj,'[^0-9]','','g')). Faz duas coisas:
+    //   1) impede CPFs duplicados por corrida (dois submits simultâneos passavam o
+    //      SELECT e ambos inseriam, pois não havia constraint — o email já tinha, o CPF não);
+    //   2) torna aqueles lookups INDEXÁVEIS, eliminando o Seq Scan (a base cresce rápido
+    //      com tráfego pago). Partial WHERE: linhas com cpf_cnpj NULL/vazio não colidem
+    //      entre si. Produção tem 0 duplicados hoje (verificado); se um dia houver, o CREATE
+    //      falha alto e derruba a migração (transação → ROLLBACK → server não sobe), em vez
+    //      de corromper dados. Nome contém "cpf" p/ o handler 23505 do cadastro casar.
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS usuarios_cpf_cnpj_normalizado_unico_idx
+      ON usuarios ((regexp_replace(cpf_cnpj, '[^0-9]', '', 'g')))
+      WHERE cpf_cnpj IS NOT NULL AND cpf_cnpj <> ''
+    `)
     // Lista de bloqueio global por dono (separada do array per-reparo prestadores_bloqueados).
     await client.query(`
       CREATE TABLE IF NOT EXISTS prestadores_bloqueados_dono (
@@ -3084,7 +3098,7 @@ router.post('/admin/trocar-senha', autenticar, exigirAdmin, async (req, res) => 
     const result = await pool.query(`SELECT senha_hash FROM usuarios WHERE id = $1`, [req.usuario.id])
     const ok = await bcrypt.compare(senha_atual, result.rows[0].senha_hash)
     if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' })
-    const hash = await bcrypt.hash(nova_senha, 12)
+    const hash = await bcrypt.hash(nova_senha, 10)
     await pool.query(`UPDATE usuarios SET senha_hash = $1 WHERE id = $2`, [hash, req.usuario.id])
     res.json({ mensagem: 'Senha alterada com sucesso' })
   } catch (err) {

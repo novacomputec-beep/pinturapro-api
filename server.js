@@ -36,7 +36,10 @@ app.use(rateLimit({
 }))
 
 app.use('/api/auth/login',    rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }))
-app.use('/api/auth/cadastro', rateLimit({ windowMs: 60 * 60 * 1000, max: 5 }))
+// 20/h (era 5/h): usuários de celular saem por CGNAT do carrier — muitos aparelhos
+// reais compartilham o mesmo IP público, então 5/h bloqueava gente legítima. O limite
+// também era consumido pelos próprios retries que os timeouts de cadastro provocavam.
+app.use('/api/auth/cadastro', rateLimit({ windowMs: 60 * 60 * 1000, max: 20 }))
 
 // Webhook PagBank precisa do corpo cru (bytes exatos) p/ validar a assinatura
 // SHA-256. Escopado só a esta rota — não retém buffers crus no resto da API.
