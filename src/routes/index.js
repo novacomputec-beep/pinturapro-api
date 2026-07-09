@@ -310,6 +310,24 @@ const exigirPrestador = async (req, res, next) => {
   }
 }
 
+// Enforça o TIER do prestador no servidor (não só na UI): pintor/construtor
+// (tipo_prestador='pintor') só participa de OBRAS; reparador só participa de
+// REPAROS. Antes, nenhum feed/ação filtrava por tipo_prestador — a separação
+// existia só no app, então um pintor via reparos e um reparador via obras.
+// tipo_prestador vem em req.usuario (carregado no autenticar). admin/aprovador
+// passam (painel/moderação). Qualquer outro tier — inclusive prestador com
+// tipo_prestador NULL (legado) — falha FECHADO com 403, nunca vaza o feed errado.
+const exigirTipoPrestador = (tipoEsperado, msg) => (req, res, next) => {
+  if (req.usuario.role === 'admin' || req.usuario.role === 'aprovador') return next()
+  if (req.usuario.role !== 'prestador' || req.usuario.tipo_prestador !== tipoEsperado) {
+    return res.status(403).json({ erro: msg, codigo: 'TIER_INCORRETO' })
+  }
+  next()
+}
+// Verificar cada tier explicitamente (regra do projeto: um não replica o outro).
+const exigirPintor    = exigirTipoPrestador('pintor',    'Este recurso é exclusivo para prestadores de construção/pintura (obras).')
+const exigirReparador = exigirTipoPrestador('reparador', 'Este recurso é exclusivo para prestadores de reparos domésticos.')
+
 // ============================================================
 // STATS PÚBLICOS (sem auth)
 // ============================================================
@@ -755,7 +773,7 @@ router.post('/obras-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req,
   }
 })
 
-router.get('/obras', autenticar, exigirAssinaturaAtiva, async (req, res) => {
+router.get('/obras', autenticar, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
   try {
     const page  = parseInt(req.query.page)  || 1
     const limit = parseInt(req.query.limit) || 20
@@ -882,7 +900,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
 })
 
 // POST /obras/:id/candidatura — pintor se candidata a uma obra
-router.post('/obras/:id/candidatura', autenticar, async (req, res) => {
+router.post('/obras/:id/candidatura', autenticar, exigirPintor, async (req, res) => {
   try {
     const { mensagem, valor_proposto } = req.body
     const existente = await pool.query(
@@ -971,7 +989,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
 })
 
 // POST /obras/:id/candidatura/:candidaturaId/pintor-responder — pintor responde a contraproposta
-router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar, async (req, res) => {
+router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar, exigirPintor, async (req, res) => {
   try {
     const { action, valor } = req.body
     const { id: obra_id, candidaturaId } = req.params
@@ -1021,7 +1039,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
 })
 
 // POST /obras/:id/match — pintor confirma ida ao local
-router.post('/obras/:id/match', autenticar, async (req, res) => {
+router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
   try {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
@@ -1465,7 +1483,7 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
   }
 })
 
-router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
+router.get('/reparos', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
   try {
     const page  = parseInt(req.query.page)  || 1
     const limit = parseInt(req.query.limit) || 20
@@ -1574,7 +1592,7 @@ router.get('/reparos', autenticar, exigirPrestador, async (req, res) => {
   }
 })
 
-router.post('/reparos/:id/interesse', autenticar, exigirPrestador, async (req, res) => {
+router.post('/reparos/:id/interesse', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
   try {
     const { mensagem, valor_proposto } = req.body
     const existente = await pool.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
@@ -1599,7 +1617,7 @@ router.post('/reparos/:id/interesse', autenticar, exigirPrestador, async (req, r
   }
 })
 
-router.post('/reparos/:id/match', autenticar, exigirPrestador, async (req, res) => {
+router.post('/reparos/:id/match', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
@@ -1720,7 +1738,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
 })
 
 // Prestador responde a uma contraproposta do dono
-router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autenticar, exigirPrestador, async (req, res) => {
+router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
   try {
     const { action, valor } = req.body
     const { id: reparo_id, interesse_id } = req.params

@@ -61,7 +61,7 @@ const autenticar = async (req, res, next) => {
     let usuario = getCacheUsuario(decoded.id)
     if (!usuario) {
       const result = await pool.query(
-        'SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1',
+        'SELECT id, nome, email, role, ativo, tipo_prestador FROM usuarios WHERE id = $1',
         [decoded.id]
       )
       if (result.rows.length === 0) {
