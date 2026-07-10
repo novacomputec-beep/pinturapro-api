@@ -873,15 +873,18 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     let candidatos = []
     if (ehDono || req.usuario.role === 'admin') {
       const candidatosResult = await pool.query(
+        // Contato/endereço do pintor são revelados ao dono APENAS após o match
+        // (obras.match_usuario_id aponta para o pintor que confirmou a ida), e só
+        // para o pintor efetivamente casado — nunca no mero aceite (status='aceito').
         `SELECT c.id, c.status, c.valor_proposto, c.valor_contraproposta, c.mensagem,
                 u.nome, u.cidade, u.foto_url, c.usuario_id,
-                CASE WHEN c.status = 'aceito' THEN u.logradouro ELSE NULL END as logradouro,
-                CASE WHEN c.status = 'aceito' THEN u.numero ELSE NULL END as numero,
-                CASE WHEN c.status = 'aceito' THEN u.bairro ELSE NULL END as bairro,
-                CASE WHEN c.status = 'aceito' THEN u.telefone ELSE NULL END as telefone
+                CASE WHEN c.usuario_id = $2 THEN u.logradouro ELSE NULL END as logradouro,
+                CASE WHEN c.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
+                CASE WHEN c.usuario_id = $2 THEN u.bairro ELSE NULL END as bairro,
+                CASE WHEN c.usuario_id = $2 THEN u.telefone ELSE NULL END as telefone
          FROM candidaturas c JOIN usuarios u ON u.id = c.usuario_id
          WHERE c.obra_id = $1 ORDER BY c.criado_em DESC`,
-        [req.params.id]
+        [req.params.id, obra.match_usuario_id]
       )
       candidatos = candidatosResult.rows
     }
@@ -2063,20 +2066,23 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     let interessados = []
     if (ehDono || req.usuario.role === 'admin') {
       const result2 = await pool.query(
+        // Contato/endereço do prestador são revelados ao dono APENAS após o match
+        // (reparos.match_usuario_id aponta para o prestador que confirmou a ida), e
+        // só para o prestador efetivamente casado — nunca no mero aceite (status='aceito').
         `SELECT ir.id, ir.usuario_id, ir.status, ir.mensagem, ir.criado_em,
                 ir.valor_proposto, ir.valor_contraproposta, ir.rodada,
                 u.nome, u.cidade,
-                CASE WHEN ir.status = 'aceito' THEN u.logradouro ELSE NULL END as logradouro,
-                CASE WHEN ir.status = 'aceito' THEN u.numero ELSE NULL END as numero,
-                CASE WHEN ir.status = 'aceito' THEN u.bairro ELSE NULL END as bairro,
-                CASE WHEN ir.status = 'aceito' THEN u.telefone ELSE NULL END as telefone,
+                CASE WHEN ir.usuario_id = $2 THEN u.logradouro ELSE NULL END as logradouro,
+                CASE WHEN ir.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
+                CASE WHEN ir.usuario_id = $2 THEN u.bairro ELSE NULL END as bairro,
+                CASE WHEN ir.usuario_id = $2 THEN u.telefone ELSE NULL END as telefone,
                 (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_total,
                 (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_media
          FROM interesse_reparos ir
          JOIN usuarios u ON ir.usuario_id = u.id
          WHERE ir.reparo_id = $1
          ORDER BY ir.criado_em ASC`,
-        [req.params.id]
+        [req.params.id, reparo.match_usuario_id]
       )
       interessados = result2.rows
     }
