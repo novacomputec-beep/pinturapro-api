@@ -88,7 +88,7 @@ const cadastrar = async (req, res) => {
     if (existente.rows.length > 0) {
       await client.query('ROLLBACK')
       console.log(`[CADASTRO][${ts}] ✗ 409 email duplicado | email=${emailNormalizado}`)
-      return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
+      return res.status(409).json({ erro: 'Este e-mail já está cadastrado.', codigo: 'email_duplicado' })
     }
     console.log(`[CADASTRO][${ts}] ✓ email disponivel`)
 
@@ -102,7 +102,7 @@ const cadastrar = async (req, res) => {
       if (cpfExistente.rows.length > 0) {
         await client.query('ROLLBACK')
         console.log(`[CADASTRO][${ts}] ✗ 409 cpf_cnpj duplicado | cpfLimpo=${cpfLimpo}`)
-        return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
+        return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.', codigo: 'cpf_duplicado' })
       }
       console.log(`[CADASTRO][${ts}] ✓ cpf_cnpj disponivel`)
     }
@@ -208,9 +208,11 @@ const cadastrar = async (req, res) => {
     // "cpf", então a corrida real cai aqui e vira um 409 limpo em vez de 500.
     if (err.code === '23505') {
       console.error(`[CADASTRO][${ts2}] ✗ 409 unicidade BD | constraint=${err.constraint} | msg=${err.message}`)
-      if (err.constraint?.includes('cpf')) return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
-      if (err.constraint?.includes('email')) return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
-      return res.status(409).json({ erro: 'Dados já cadastrados. Verifique seu e-mail e CPF/CNPJ.' })
+      // `codigo` é a chave ESTÁVEL que o app usa p/ classificar sem depender do texto
+      // em português. `erro` continua sendo a mensagem humana (retrocompatível).
+      if (err.constraint?.includes('cpf')) return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.', codigo: 'cpf_duplicado' })
+      if (err.constraint?.includes('email')) return res.status(409).json({ erro: 'Este e-mail já está cadastrado.', codigo: 'email_duplicado' })
+      return res.status(409).json({ erro: 'Dados já cadastrados. Verifique seu e-mail e CPF/CNPJ.', codigo: 'dados_duplicados' })
     }
     console.error(`[CADASTRO][${ts2}] ✗ ERRO INTERNO | msg="${err.message}" | code=${err.code}\n${err.stack}`)
     res.status(500).json({ erro: err.message || 'Erro ao criar conta' })

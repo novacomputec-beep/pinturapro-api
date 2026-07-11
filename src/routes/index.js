@@ -2147,7 +2147,7 @@ router.post('/auth/verificar-disponibilidade', async (req, res) => {
       const existe = await pool.query('SELECT id FROM usuarios WHERE email = $1', [emailNormalizado])
       if (existe.rows.length > 0) {
         console.log(`[VERIF][${ts}] ✗ 409 email duplicado | email=${emailNormalizado}`)
-        return res.status(409).json({ erro: 'Este e-mail já está cadastrado.' })
+        return res.status(409).json({ erro: 'Este e-mail já está cadastrado.', codigo: 'email_duplicado' })
       }
       console.log(`[VERIF][${ts}] ✓ email disponivel`)
     }
@@ -2160,7 +2160,7 @@ router.post('/auth/verificar-disponibilidade', async (req, res) => {
       )
       if (existe.rows.length > 0) {
         console.log(`[VERIF][${ts}] ✗ 409 cpf_cnpj duplicado | cpfLimpo=${cpfLimpo}`)
-        return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.' })
+        return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.', codigo: 'cpf_duplicado' })
       }
       console.log(`[VERIF][${ts}] ✓ cpf_cnpj disponivel`)
     }
