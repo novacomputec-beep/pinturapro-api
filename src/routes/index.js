@@ -200,6 +200,58 @@ const migracaoPronta = (async () => {
     // e a base. Idempotente: só apaga o que não tem usuário correspondente.
     await client.query(`DELETE FROM assinaturas a WHERE NOT EXISTS (SELECT 1 FROM usuarios u WHERE u.id = a.usuario_id)`)
     await client.query(`DELETE FROM localizacoes_prestadores lp WHERE NOT EXISTS (SELECT 1 FROM usuarios u WHERE u.id = lp.usuario_id)`)
+    // A1 — o app envia o cpf_cnpj JÁ MASCARADO e o INSERT o grava cru (só o índice
+    // normaliza p/ dígitos). Mascarado, um CPF tem 14 chars ("123.456.789-00") e um CNPJ
+    // tem 18 ("12.345.678/0001-90"). A coluna cabia o CPF (14) mas era estreita demais p/
+    // o CNPJ (18): o INSERT era REJEITADO pelo Postgres (22001 value too long), caía no
+    // catch como 500 e o app exibia "Conexão lenta"/"já cadastrado" — NENHUM CNPJ
+    // conseguia se cadastrar. Alargamos p/ TEXT (não VARCHAR(14) — insuficiente p/ os 18
+    // chars do CNPJ mascarado): varchar→text é BINÁRIO-COERCÍVEL → SEM rewrite da tabela
+    // (só um ACCESS EXCLUSIVE lock breve) e TEXT remove qualquer teto de comprimento; quem
+    // garante a unicidade real é o índice NORMALIZADO (dígitos), não o limite do varchar.
+    //
+    // ÍNDICE DEPENDENTE (usuarios_cpf_cnpj_normalizado_unico_idx): NÃO precisa de
+    // DROP/CREATE manual. O ALTER COLUMN ... TYPE reconstrói automaticamente os índices
+    // que dependem da coluna, de forma transacional, dentro deste mesmo BEGIN. E como o
+    // índice é sobre uma EXPRESSÃO cujo tipo de saída é sempre `text`
+    // (regexp_replace(...) retorna text tanto para varchar quanto para text de entrada),
+    // a chave e a operator class do índice NÃO mudam — a reconstrução é trivialmente
+    // válida, sem risco de incompatibilidade. Único bloqueador possível de um ALTER TYPE
+    // seria uma VIEW/rule dependente da coluna (não há; ver query de pré-checagem no PR).
+    //
+    // Guardado por tipo: roda o ALTER UMA vez (quando ainda é varchar). Em boots
+    // seguintes a coluna já é `text` e o bloco não faz NADA — sem lock, sem reindex.
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'usuarios' AND column_name = 'cpf_cnpj'
+            AND data_type <> 'text'
+        ) THEN
+          ALTER TABLE usuarios ALTER COLUMN cpf_cnpj TYPE TEXT;
+        END IF;
+      END $$;
+    `)
+    // Fail-loud: alargar a coluna NÃO altera valores já gravados, logo nenhum duplicado NOVO
+    // pode surgir daqui. Ainda assim asseguramos alto — se por qualquer motivo existirem dois
+    // cpf_cnpj que normalizam igual, aborta a migração (RAISE → catch → ROLLBACK → server não
+    // sobe) com mensagem clara, em vez de deixar o CREATE UNIQUE INDEX abaixo falhar obscuro.
+    await client.query(`
+      DO $$
+      DECLARE dups int;
+      BEGIN
+        SELECT count(*) INTO dups FROM (
+          SELECT regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') AS n
+          FROM usuarios
+          WHERE cpf_cnpj IS NOT NULL AND cpf_cnpj <> ''
+          GROUP BY 1 HAVING count(*) > 1
+        ) d;
+        IF dups > 0 THEN
+          RAISE EXCEPTION 'A1: % cpf_cnpj normalizados duplicados — migracao abortada', dups;
+        END IF;
+      END $$;
+    `)
     // UNIQUE no CPF/CNPJ NORMALIZADO (só dígitos) — MESMA expressão dos lookups de
     // cadastro/pré-checagem (regexp_replace(cpf_cnpj,'[^0-9]','','g')). Faz duas coisas:
     //   1) impede CPFs duplicados por corrida (dois submits simultâneos passavam o
