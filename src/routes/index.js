@@ -11,6 +11,7 @@ const mensagensCtrl    = require('../controllers/mensagensController')
 const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = require('../services/uploadService')
+const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
@@ -2236,6 +2237,12 @@ router.get('/upload/assinatura-publica', (req, res) => {
     res.status(500).json({ erro: 'Erro ao gerar assinatura de upload' })
   }
 })
+
+// Upload server-mediado de UMA mídia (imagem OU vídeo) em STREAMING (phone → API →
+// Cloudinary), sem bufferizar o arquivo em memória. Contexto no próprio handler: com token
+// válido = autenticado (obra/reparo, aceita vídeo); sem token = pré-auth (cadastro) com
+// rate limit + só imagem. Fase 2 — aditivo; nenhum fluxo atual usa esta rota ainda.
+router.post('/upload/midia', uploadMidiaStream)
 
 const CLOUDINARY_FOLDERS_PERMITIDAS = new Set([
   'pinturapro/videos',
