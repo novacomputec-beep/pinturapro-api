@@ -446,6 +446,18 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
   }
 })
 
+// Limpa o push_token da própria conta no logout, evitando que um device que
+// troca de conta continue recebendo notificações do usuário anterior (só mexe
+// na linha do req.usuario.id — nunca em outras contas).
+router.post('/auth/push-token/clear', autenticar, async (req, res) => {
+  try {
+    await pool.query('UPDATE usuarios SET push_token = NULL WHERE id = $1', [req.usuario.id])
+    res.json({ mensagem: 'Token removido' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao remover token' })
+  }
+})
+
 // Lista de bloqueio global por dono (prestadores_bloqueados_dono). Separada do array
 // per-reparo prestadores_bloqueados — estes endpoints NÃO afetam o feed ainda.
 router.post('/usuarios/bloquear-prestador', autenticar, async (req, res) => {
