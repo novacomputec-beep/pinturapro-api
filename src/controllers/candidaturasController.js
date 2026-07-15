@@ -78,9 +78,12 @@ const porObra = async (req, res) => {
     const limit  = parseInt(req.query.limit) || 20
     const offset = (page - 1) * limit
 
-    const obraExiste = await pool.query(`SELECT id FROM obras WHERE id = $1`, [req.params.obra_id])
+    const obraExiste = await pool.query(`SELECT id, criado_por FROM obras WHERE id = $1`, [req.params.obra_id])
     if (obraExiste.rows.length === 0) {
       return res.status(404).json({ erro: 'Obra não encontrada' })
+    }
+    if (obraExiste.rows[0].criado_por !== req.usuario.id && req.usuario.role !== 'admin') {
+      return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
 
     const result = await pool.query(
