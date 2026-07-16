@@ -1,0 +1,149 @@
+================================================================================
+INVESTIGAÇÃO — UPLOAD DE MÍDIA E CRON DE LIMPEZA (Fase 3, incertezas resolvidas)
+Data: 2026-07-15
+================================================================================
+
+NOTA: Este arquivo foi criado nesta investigação. A investigação anterior sobre
+push-notifications (findings #1–#5) NÃO está presente neste repositório (o
+RELATORIO.txt referenciado não existe no disco nem no histórico git deste repo).
+Esta seção documenta apenas as três incertezas resolvidas da Fase 3 (upload).
+
+--------------------------------------------------------------------------------
+FINDING A — POST /upload/midia EXISTE neste checkout (refuta a Fase 3)
+--------------------------------------------------------------------------------
+
+O endpoint POST /upload/midia ESTÁ presente neste checkout, contradizendo a
+afirmação da investigação anterior da Fase 3 de que ele estaria ausente. Aquela
+busca anterior só verificou o caminho antigo (uploadService.js / uploadController.js,
+o upload multer bufferizado) e não encontrou o controller de streaming mais novo.
+
+Localização:
+  - Rota:    src/routes/index.js:2245  ->  router.post('/upload/midia', uploadMidiaStream)
+             (a rota NÃO tem middleware de auth na linha de registro — a autenticação
+             é tratada DENTRO do handler; ver "modo de auth" abaixo.)
+  - Handler: src/controllers/uploadStreamController.js:51-196  (uploadMidiaStream)
+             Usa busboy e pipa o stream do arquivo DIRETO em
+             cloudinary.uploader.upload_stream — sem bufferizar o arquivo inteiro
+             em memória (O(chunk), não O(arquivo)).
+  - Introduzido no commit 9ac4e71 ("feat: POST /upload/midia — stream images and
+    videos to Cloudinary (no in-memory buffering)"), que é ancestral do HEAD atual
+    e de origin/main.
+
+CONTRATO COMPLETO (exatamente como encontrado):
+
+  Corpo da requisição:
+    - multipart/form-data, campo de arquivo único chamado "arquivo".
+    - Máximo de 1 arquivo (busboy limits: { files: 1 }).
+    - Requisição não-multipart -> 400 { codigo: 'formato_invalido' }.
+
+  Modo de autenticação (dual, uploadStreamController.js:55-77):
+    - Token Bearer válido  -> AUTENTICADO (fluxo obra/reparo): sem rate limit,
+                              envio de vídeo permitido.
+    - Sem token            -> PRÉ-AUTH (fluxo cadastro): rate limit por IP de
+                              30/min, SOMENTE imagem (vídeo bloqueado).
+    - Token presente porém malformado / inválido / expirado / tipo '2fa_pendente'
+                           -> 401 { codigo: 'token_invalido' } — NÃO rebaixa
+                              silenciosamente para o modo pré-auth.
+
+  Parâmetro de query opcional:
+    - ?pasta=  restrito a uma whitelist: pinturapro/verificacao, pinturapro/fotos,
+      pinturapro/perfil, pinturapro/videos. Se ausente/inválido, usa default por
+      tipo/autenticação (vídeo -> pinturapro/videos; imagem autenticada ->
+      pinturapro/fotos; imagem pré-auth -> pinturapro/verificacao).
+
+  Tipos MIME permitidos:
+    - Imagens: image/jpeg, image/png, image/webp
+    - Vídeos:  video/mp4, video/quicktime
+    - Outro MIME              -> 415 { codigo: 'mime_invalido' }
+    - Vídeo sem autenticação  -> 401 { codigo: 'video_requer_auth' }
+
+  Resposta de sucesso:
+    - 201 { secure_url, public_id, resource_type }
+
+  Códigos de erro:
+    - 400 formato_invalido    (não é multipart/form-data)
+    - 400 multipart_invalido  (requisição multipart inválida ao instanciar busboy)
+    - 400 sem_arquivo         (nenhum arquivo no campo "arquivo")
+    - 400 upload_invalido     (erro do busboy)
+    - 400 leitura_falha       (erro ao ler o stream do arquivo)
+    - 401 token_invalido      (token malformado/inválido/expirado)
+    - 401 video_requer_auth   (vídeo enviado sem autenticação)
+    - 413 muito_grande        (excedeu limite por tipo — ver Finding B)
+    - 415 mime_invalido       (tipo de arquivo não permitido)
+    - 429 rate_limit          (pré-auth excedeu 30 req/min por IP)
+    - 502 cloudinary_falha    (falha genérica do Cloudinary)
+    - 504 cloudinary_timeout  (timeout na requisição ao Cloudinary; teto 180s)
+
+  Observação: o comentário na linha 2244 da rota afirma "Fase 2 — aditivo; nenhum
+  fluxo atual usa esta rota ainda", ou seja, a rota está registrada mas, segundo o
+  próprio código, nenhum fluxo a chama ainda. Isso é uma afirmação sobre o lado da
+  API; se o app a chama ou não não pode ser verificado a partir deste repositório.
+
+--------------------------------------------------------------------------------
+FINDING B — Limites de tamanho: 100MB e 150MB são ambos reais, mas em caminhos
+            de código DIFERENTES
+--------------------------------------------------------------------------------
+
+O conflito entre 100MB e 150MB se reconcilia como DOIS endpoints separados, não
+uma contradição dentro de um mesmo endpoint:
+
+  - /upload/midia (endpoint de STREAMING, o relevante para a Fase 3):
+      uploadStreamController.js:28  -> VIDEO_MAX = 100 MB  (vídeo)
+      uploadStreamController.js:27  -> IMG_MAX   = 10 MB   (imagem)
+    Enforce por tipo: contagem de bytes no stream (linha 147) + backstop do busboy
+    (fileSize: VIDEO_MAX). Mensagem ao usuário: "Vídeo muito grande. O limite é
+    100MB." / "Imagem muito grande. O limite é 10MB."
+
+  - Caminho legado multer bufferizado (uploadService.js):
+      uploadService.js:14  -> limits: { fileSize: 150 * 1024 * 1024 }  (150 MB,
+      teto global único, sem distinção imagem/vídeo). Usado pelo middleware
+      `upload` (memoryStorage) do uploadController.js — o endpoint ANTIGO.
+
+FLAG: Estes são genuinamente limites diferentes em endpoints diferentes. Qual
+limite está "em vigor" para um dado fluxo do app depende de QUAL endpoint aquele
+fluxo chama. Se o fluxo de cadastro/obra/reparo usar /upload/midia, o teto de
+vídeo efetivo é 100MB (imagem 10MB); se algum fluxo ainda usar o middleware multer
+legado, aquele caminho permite até 150MB. Este repositório sozinho NÃO consegue
+confirmar qual endpoint as telas de obra/reparo do app vão acabar usando até que a
+fiação (wiring) da Fase 3 esteja feita — isso exige o repositório do app ou
+observação em produção.
+
+--------------------------------------------------------------------------------
+FINDING C — Cron de limpeza do Cloudinary: CONFIRMADO existir, e trata vídeo
+            corretamente — mas é setInterval, não uma biblioteca de cron
+--------------------------------------------------------------------------------
+
+Confirmado. O job de limpeza existe neste checkout:
+
+  - Definição:    server.js:201-243  ->  função deletarMidiasAntigas
+  - Agendamento:  server.js:325      ->  setInterval(() => { deletarMidiasAntigas() },
+                  24 * 60 * 60 * 1000) — roda a cada 24h a partir do boot do
+                  processo (NÃO é horário de relógio / wall-clock cron).
+  - Lógica: deleta mídias de reparos/obras com status = 'encerrada' e
+    encerrado_em < NOW() - INTERVAL '7 days' (linhas 208-210 e 227-229). Para cada
+    linha lê a coluna `tipo` (mr.tipo / m.tipo) e chama deletarDoCloudinary(url, tipo).
+  - resource_type correto: deletarDoCloudinary (uploadService.js:77-92) mapeia
+    tipo === 'video' -> resource_type: 'video', caso contrário 'image' (linha 84),
+    e então chama cloudinary.uploader.destroy(publicId, { resource_type }) (linha 85).
+    Logo, vídeos são deletados com resource_type='video'. A afirmação do RELATORIO
+    (de que o cron já apaga vídeos corretamente lendo a coluna tipo e passando o
+    resource_type certo) fica CONFIRMADA — inclusive a dependência da coluna `tipo`,
+    com a qual o uploadStreamController.js foi explicitamente projetado para manter
+    compatibilidade (ver comentário de cabeçalho, linhas 7-10).
+
+Dependência (refuta a suposição de "node-cron"):
+  - package.json NÃO tem dependência de cron — nem node-cron, nem node-schedule,
+    nem nada relacionado a agendamento.
+  - Todos os jobs agendados (limpeza de mídia, engajamento, expiração, etc.) usam
+    setInterval puro em server.js:319-329. Ou seja, o "cron" é real em função, mas
+    é um timer de intervalo em processo, não uma biblioteca de cron.
+
+RESSALVA: por ser setInterval a partir do boot (não cron persistente), o timing do
+job reinicia a cada redeploy, e ele só limpa mídias vinculadas a obras/reparos
+'encerrada' com mais de 7 dias — NÃO é um varredor geral de órfãos (orphan
+sweeper). Isso bate com o código, mas pode divergir de qualquer suposição de que
+ele capture todos os assets perdidos no Cloudinary.
+
+================================================================================
+FIM DA SEÇÃO (investigação upload/cron — Fase 3)
+================================================================================
