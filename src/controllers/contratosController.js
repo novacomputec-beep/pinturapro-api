@@ -229,7 +229,7 @@ const enviarContratoReparo = async (reparoId) => {
               u_prest.telefone as prest_telefone, u_prest.cpf_cnpj as prest_cpf,
               (SELECT ir.id FROM interesse_reparos ir
                 WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
-                  AND ir.status IN ('aceito','aprovada')
+                  AND ir.status = 'aceito'
                 ORDER BY ir.criado_em DESC LIMIT 1) as interesse_id
        FROM reparos r
        JOIN usuarios u_dono  ON r.criado_por       = u_dono.id

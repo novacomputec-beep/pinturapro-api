@@ -1,0 +1,52 @@
+-- ============================================================================
+-- DROP da tabela negociacoes — fluxo de negociação legado
+-- Data: 2026-07-16
+-- ============================================================================
+--
+-- ATENÇÃO: ESTE ARQUIVO NÃO RODA SOZINHO — E ISSO É PROPOSITAL.
+--
+-- Ele é um .sql avulso e NÃO foi colocado na migração de boot (o IIFE
+-- `migracaoPronta`, src/routes/index.js:24). Aquele bloco executa a cada start
+-- do servidor: um DDL destrutivo ali seria aplicado no próximo deploy, sem
+-- nenhuma revisão. DDL destrutivo tem que ser um ato deliberado.
+--
+-- ----------------------------------------------------------------------------
+-- CONTEXTO
+-- ----------------------------------------------------------------------------
+-- A tabela negociacoes era escrita por POST /candidaturas/:id/negociar e lida
+-- por GET /candidaturas/:id/negociacoes. Os dois endpoints foram removidos.
+--
+-- O fluxo VIVO de contraproposta nunca usou esta tabela — ele usa a coluna
+-- candidaturas.valor_contraproposta com status 'contraproposta_dono'. Esta
+-- tabela era do fluxo legado, já substituído.
+--
+-- Produção conferida em 2026-07-16: 0 linhas, MAX(criado_em) NULL — a tabela
+-- nunca recebeu uma única linha. Não há dado a preservar nem backfill a fazer.
+--
+-- ----------------------------------------------------------------------------
+-- ORDEM DE EXECUÇÃO — OBRIGATÓRIA, NÃO INVERTER
+-- ----------------------------------------------------------------------------
+--   1) Fazer deploy do código que remove os `DELETE FROM negociacoes` das rotas
+--      de exclusão de conta e de limpeza admin.
+--   2) SÓ DEPOIS executar este arquivo.
+--
+-- Inverter a ordem QUEBRA a exclusão de conta em produção: enquanto o código
+-- antigo estiver no ar, DELETE /conta/excluir, DELETE /usuarios/:id e os
+-- /admin/limpar-* ainda executam `DELETE FROM negociacoes` e passariam a
+-- lançar: relation "negociacoes" does not exist.
+--
+-- ----------------------------------------------------------------------------
+-- COMO EXECUTAR (manual, deliberado)
+-- ----------------------------------------------------------------------------
+--   psql "$DATABASE_URL" -f migrations/2026-07-16-drop-negociacoes.sql
+--   (ou colar o comando abaixo no Data tab do Railway)
+--
+-- ----------------------------------------------------------------------------
+-- IRREVERSÍVEL: não há rollback. A tabela e sua definição deixam de existir.
+--
+-- Sem CASCADE de propósito: se existir algum objeto dependente não mapeado
+-- (view, FK de outra tabela), o comando falha em vez de destruí-lo em silêncio.
+-- Uma falha aqui é sinal para investigar, não para acrescentar CASCADE.
+-- ============================================================================
+
+DROP TABLE IF EXISTS negociacoes;

@@ -538,10 +538,6 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     if (obrasRes.rows.length > 0) {
       const obraIds = obrasRes.rows.map(r => r.id)
       await client.query('DELETE FROM mensagens WHERE obra_id = ANY($1::uuid[])', [obraIds])
-      await client.query(
-        'DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE obra_id = ANY($1::uuid[]))',
-        [obraIds]
-      )
       await client.query('DELETE FROM candidaturas WHERE obra_id = ANY($1::uuid[])', [obraIds])
       await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
       await client.query('DELETE FROM obras WHERE criado_por = $1', [id])
@@ -561,15 +557,10 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     await client.query('UPDATE reparos SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1', [id])
 
     // Cascade registros do próprio usuário como candidato/interessado
-    await client.query(
-      'DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE usuario_id = $1)',
-      [id]
-    )
     await client.query('DELETE FROM assinaturas WHERE usuario_id = $1', [id])
     await client.query('DELETE FROM candidaturas WHERE usuario_id = $1', [id])
     await client.query('DELETE FROM mensagens WHERE autor_id = $1', [id])
     await client.query('DELETE FROM interesse_reparos WHERE usuario_id = $1', [id])
-    await client.query('DELETE FROM negociacoes WHERE autor_id = $1', [id])
     // localizacoes_prestadores tem FK para usuarios (sem CASCADE) — todo prestador que
     // já compartilhou GPS tem linha aqui. Se não apagar, o DELETE FROM usuarios abaixo
     // estoura violação de FK e a transação INTEIRA sofre ROLLBACK, desfazendo inclusive
@@ -639,7 +630,6 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
 
     // Cascade obras criadas por este usuário (colunas idênticas ao DELETE /usuarios/:id)
     await client.query(`DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
-    await client.query(`DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1))`, [id])
     await client.query(`DELETE FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
     await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
     await client.query(`DELETE FROM obras WHERE criado_por = $1`, [id])
@@ -654,12 +644,10 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
     await client.query(`UPDATE reparos SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1`, [id])
 
     // Cascade registros do próprio usuário como candidato/interessado/autor
-    await client.query(`DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE usuario_id = $1)`, [id])
     await client.query(`DELETE FROM assinaturas WHERE usuario_id = $1`, [id])
     await client.query(`DELETE FROM candidaturas WHERE usuario_id = $1`, [id])
     await client.query(`DELETE FROM mensagens WHERE autor_id = $1`, [id])
     await client.query(`DELETE FROM interesse_reparos WHERE usuario_id = $1`, [id])
-    await client.query(`DELETE FROM negociacoes WHERE autor_id = $1`, [id])
     await client.query(`DELETE FROM localizacoes_prestadores WHERE usuario_id = $1`, [id])
     await client.query(`DELETE FROM prestadores_bloqueados_dono WHERE dono_id = $1 OR prestador_id = $1`, [id])
 
@@ -1113,7 +1101,7 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
     if (obra.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Esta obra já tem um pintor a caminho' })
     const candidaturaAceita = await pool.query(
-      `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2 AND status IN ('aceito','aprovada')`,
+      `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2 AND status = 'aceito'`,
       [req.params.id, req.usuario.id]
     )
     if (candidaturaAceita.rows.length === 0) return res.status(403).json({ erro: 'Sua candidatura ainda não foi aceita para esta obra.' })
@@ -1691,7 +1679,7 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, exigirReparador, 
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
     if (reparo.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Este reparo já tem um prestador a caminho' })
     const interesseAceito = await pool.query(
-      `SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2 AND status IN ('aceito','aprovada')`,
+      `SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2 AND status = 'aceito'`,
       [req.params.id, req.usuario.id]
     )
     if (interesseAceito.rows.length === 0) return res.status(403).json({ erro: 'Sua proposta ainda não foi aceita para este reparo.' })
@@ -2343,7 +2331,6 @@ router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) =>
     await client.query(`DELETE FROM interesse_reparos`)
     await client.query(`DELETE FROM midias_reparos`)
     await client.query(`DELETE FROM reparos`)
-    await client.query(`DELETE FROM negociacoes`)
     await client.query(`DELETE FROM candidaturas`)
     await client.query(`DELETE FROM midias`)
     await client.query(`DELETE FROM obras`)
@@ -2880,162 +2867,6 @@ router.post('/feed/checar-proximidade', autenticar, async (req, res) => {
   }
 })
 
-router.post('/candidaturas/:id/negociar', autenticar, async (req, res) => {
-  try {
-    const { valor, mensagem } = req.body
-    const { id } = req.params
-    const candidatura = await pool.query(
-      `SELECT c.*, o.criado_por as dono_id, o.titulo, u.push_token
-       FROM candidaturas c JOIN obras o ON c.obra_id = o.id JOIN usuarios u ON c.usuario_id = u.id
-       WHERE c.id = $1`, [id]
-    )
-    if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
-    const cand = candidatura.rows[0]
-    if (req.usuario.id !== cand.dono_id && req.usuario.id !== cand.usuario_id) return res.status(403).json({ erro: 'Sem permissão' })
-    const negociacao = await pool.query(
-      `INSERT INTO negociacoes (candidatura_id, autor_id, tipo, valor, mensagem) VALUES ($1, $2, 'contra_oferta', $3, $4) RETURNING *`,
-      [id, req.usuario.id, valor, mensagem]
-    )
-    const ehDono = req.usuario.id === cand.dono_id
-    if (!ehDono) {
-      const donoResult = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [cand.dono_id])
-      if (donoResult.rows[0]?.push_token) {
-        await enviarPushNotificacao(donoResult.rows[0].push_token, '🎨 Nova contra-oferta!',
-          `Um pintor propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${cand.titulo}"`,
-          { tipo: 'contra_oferta', candidatura_id: id })
-      }
-    } else if (cand.push_token) {
-      await enviarPushNotificacao(cand.push_token, '🎨 O dono fez uma contra-oferta!',
-        `Nova proposta de R$ ${Number(valor).toLocaleString('pt-BR')} para "${cand.titulo}"`,
-        { tipo: 'contra_oferta', candidatura_id: id })
-    }
-    res.status(201).json(negociacao.rows[0])
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao registrar negociação' })
-  }
-})
-
-// [DEAD CODE — fluxo legado 'aprovada'] Nenhuma tela do app atual chama este
-// endpoint; o aceite vivo usa /obras/:id/candidatura/:id/responder → status
-// 'aceito'. Emite push 'candidatura_aprovada', que portanto NÃO é disparado pelo
-// app atual (confirmado por busca em todo o app, jun/2026). Mantido só por
-// compatibilidade com builds antigos / possível uso pelo painel admin.
-// Dono responds to a candidatura: aceitar | recusar | contraproposta
-router.post('/candidaturas/:id/dono-responder', autenticar, async (req, res) => {
-  try {
-    const { action, valor, mensagem } = req.body
-    const { id } = req.params
-    const candidatura = await pool.query(
-      `SELECT c.*, o.criado_por as dono_id, o.titulo, u.push_token as pintor_token
-       FROM candidaturas c JOIN obras o ON c.obra_id = o.id JOIN usuarios u ON c.usuario_id = u.id
-       WHERE c.id = $1`, [id]
-    )
-    if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
-    const cand = candidatura.rows[0]
-    if (req.usuario.id !== cand.dono_id) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
-
-    if (action === 'aceitar') {
-      await pool.query(`UPDATE candidaturas SET status = 'aprovada' WHERE id = $1`, [id])
-      if (cand.pintor_token) {
-        enviarPushNotificacao(cand.pintor_token, '✅ Candidatura aprovada!',
-          `O dono aprovou sua candidatura para "${cand.titulo}". Entre em contato!`,
-          { tipo: 'candidatura_aprovada', candidatura_id: id }).catch(() => {})
-      }
-      return res.json({ mensagem: 'Candidatura aprovada!' })
-    }
-    if (action === 'recusar') {
-      await pool.query(`UPDATE candidaturas SET status = 'recusada' WHERE id = $1`, [id])
-      if (cand.pintor_token) {
-        enviarPushNotificacao(cand.pintor_token, '❌ Candidatura não selecionada',
-          `Sua candidatura para "${cand.titulo}" não foi selecionada desta vez.`,
-          { tipo: 'candidatura_recusada', candidatura_id: id }).catch(() => {})
-      }
-      return res.json({ mensagem: 'Candidatura recusada.' })
-    }
-    if (action === 'contraproposta') {
-      if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
-      await pool.query(
-        `INSERT INTO negociacoes (candidatura_id, autor_id, tipo, valor, mensagem) VALUES ($1, $2, 'contra_oferta', $3, $4)`,
-        [id, req.usuario.id, valor, mensagem || null]
-      )
-      if (cand.pintor_token) {
-        enviarPushNotificacao(cand.pintor_token, '💬 O dono fez uma proposta!',
-          `Nova proposta de R$ ${Number(valor).toLocaleString('pt-BR')} para "${cand.titulo}". Veja no app!`,
-          { tipo: 'contra_oferta', candidatura_id: id }).catch(() => {})
-      }
-      return res.json({ mensagem: 'Contraproposta enviada!' })
-    }
-    res.status(400).json({ erro: 'Ação inválida' })
-  } catch (err) {
-    console.error('Erro ao responder candidatura (dono):', err)
-    res.status(500).json({ erro: 'Erro ao responder' })
-  }
-})
-
-// [DEAD CODE — fluxo legado 'aprovada'] Não é chamado por nenhuma tela do app
-// atual (ver nota em /candidaturas/:id/dono-responder). Emite 'candidatura_aprovada'.
-// Pintor responds to dono's counter-offer: aceitar | recusar
-router.post('/candidaturas/:id/pintor-responder', autenticar, async (req, res) => {
-  try {
-    const { action } = req.body
-    const { id } = req.params
-    const candidatura = await pool.query(
-      `SELECT c.*, o.criado_por as dono_id, o.titulo
-       FROM candidaturas c JOIN obras o ON c.obra_id = o.id
-       WHERE c.id = $1 AND c.usuario_id = $2`, [id, req.usuario.id]
-    )
-    if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
-    const cand = candidatura.rows[0]
-    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [cand.dono_id])
-
-    if (action === 'aceitar') {
-      await pool.query(`UPDATE candidaturas SET status = 'aprovada' WHERE id = $1`, [id])
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '✅ Proposta aceita!',
-          `O pintor aceitou sua proposta para "${cand.titulo}"!`,
-          { tipo: 'candidatura_aprovada', candidatura_id: id }).catch(() => {})
-      }
-      return res.json({ mensagem: 'Proposta aceita!' })
-    }
-    if (action === 'recusar') {
-      await pool.query(`UPDATE candidaturas SET status = 'recusada' WHERE id = $1`, [id])
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '❌ Proposta recusada',
-          `O pintor recusou sua proposta para "${cand.titulo}".`,
-          { tipo: 'candidatura_recusada', candidatura_id: id }).catch(() => {})
-      }
-      return res.json({ mensagem: 'Proposta recusada.' })
-    }
-    res.status(400).json({ erro: 'Ação inválida' })
-  } catch (err) {
-    console.error('Erro ao responder candidatura (pintor):', err)
-    res.status(500).json({ erro: 'Erro ao responder' })
-  }
-})
-
-router.get('/candidaturas/:id/negociacoes', autenticar, async (req, res) => {
-  try {
-    const ownership = await pool.query(
-      `SELECT c.usuario_id, o.criado_por as dono_id FROM candidaturas c
-       JOIN obras o ON c.obra_id = o.id WHERE c.id = $1`,
-      [req.params.id]
-    )
-    if (ownership.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
-    const { usuario_id, dono_id } = ownership.rows[0]
-    if (req.usuario.id !== usuario_id && req.usuario.id !== dono_id) {
-      return res.status(403).json({ erro: 'Sem permissão para ver estas negociações' })
-    }
-    const result = await pool.query(
-      `SELECT n.*, u.nome as autor_nome, u.role as autor_role FROM negociacoes n
-       JOIN usuarios u ON n.autor_id = u.id WHERE n.candidatura_id = $1 ORDER BY n.criado_em ASC`,
-      [req.params.id]
-    )
-    res.json({ negociacoes: result.rows })
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao buscar negociações' })
-  }
-})
-
 // ============================================================
 // MENSAGENS
 // ============================================================
@@ -3113,7 +2944,6 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
     await client.query(`DELETE FROM localizacoes_prestadores WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
     // Cascade das obras criadas pelos usuários alvo (filho antes do pai; mensagens
     // antes de obras por causa da FK mensagens.obra_id)
-    await client.query(`DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1)))`, [ids])
     await client.query(`DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
     await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
     await client.query(`DELETE FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
@@ -3124,8 +2954,6 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
     await client.query(`DELETE FROM reparos WHERE criado_por = ANY($1)`, [ids])
     // Registros dos usuários alvo como participantes (candidato/interessado/autor) em
     // itens de terceiros — necessário antes do DELETE FROM usuarios por causa das FKs
-    await client.query(`DELETE FROM negociacoes WHERE autor_id = ANY($1)`, [ids])
-    await client.query(`DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE usuario_id = ANY($1))`, [ids])
     await client.query(`DELETE FROM candidaturas WHERE usuario_id = ANY($1)`, [ids])
     await client.query(`DELETE FROM interesse_reparos WHERE usuario_id = ANY($1)`, [ids])
     await client.query(`DELETE FROM mensagens WHERE autor_id = ANY($1)`, [ids])
@@ -3144,7 +2972,6 @@ router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => 
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    await client.query(`DELETE FROM negociacoes WHERE candidatura_id IN (SELECT id FROM candidaturas)`)
     await client.query(`DELETE FROM candidaturas`)
     await client.query(`DELETE FROM midias`)
     await client.query(`DELETE FROM obras`)
@@ -3163,7 +2990,6 @@ router.post('/admin/limpar-reparos', autenticar, exigirAdmin, async (req, res) =
     await client.query('BEGIN')
     await client.query(`DELETE FROM interesse_reparos`)
     await client.query(`DELETE FROM midias_reparos`)
-    await client.query(`DELETE FROM negociacoes`)
     await client.query(`DELETE FROM reparos`)
     await client.query('COMMIT')
     res.json({ mensagem: 'Reparos removidos com sucesso' })
