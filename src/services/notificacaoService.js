@@ -57,24 +57,4 @@ const notificarNovaObra = async (pool, obra) => {
   }
 }
 
-const notificarCandidaturaAprovada = async (pool, usuarioId, obraTitulo) => {
-  try {
-    const result = await pool.query(
-      `SELECT push_token FROM usuarios WHERE id = $1 AND push_token IS NOT NULL`,
-      [usuarioId]
-    )
-
-    if (result.rows.length === 0 || !result.rows[0].push_token) return
-
-    await enviarNotificacao(
-      [result.rows[0].push_token],
-      '✅ Candidatura aprovada!',
-      `Você foi aprovado para a obra: ${obraTitulo}`,
-      { tipo: 'candidatura_aprovada' }
-    )
-  } catch (err) {
-    console.error('Erro ao notificar candidatura:', err)
-  }
-}
-
-module.exports = { enviarNotificacao, notificarNovaObra, notificarCandidaturaAprovada }
+module.exports = { enviarNotificacao, notificarNovaObra }

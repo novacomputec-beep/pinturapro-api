@@ -1,55 +1,6 @@
 const { pool } = require('../utils/supabase')
 const { enviarContratoObra } = require('./contratosController')
 
-const candidatar = async (req, res) => {
-  try {
-    const { obra_id, referencias } = req.body
-
-    if (!obra_id) {
-      return res.status(400).json({ erro: 'obra_id é obrigatório' })
-    }
-
-    const obraResult = await pool.query(
-      `SELECT id, titulo, status, expira_em FROM obras WHERE id = $1 AND status = 'aberta'`,
-      [obra_id]
-    )
-
-    if (obraResult.rows.length === 0) {
-      return res.status(404).json({ erro: 'Obra não encontrada ou não está disponível' })
-    }
-
-    const obra = obraResult.rows[0]
-
-    if (new Date(obra.expira_em) < new Date()) {
-      return res.status(400).json({ erro: 'O prazo para aceite desta obra expirou' })
-    }
-
-    const existente = await pool.query(
-      `SELECT id, status FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
-      [obra_id, req.usuario.id]
-    )
-
-    if (existente.rows.length > 0) {
-      return res.status(409).json({
-        erro: 'Você já demonstrou interesse nesta obra',
-        candidatura: existente.rows[0]
-      })
-    }
-
-    const result = await pool.query(
-      `INSERT INTO candidaturas (obra_id, usuario_id, referencias, status)
-       VALUES ($1, $2, $3, 'pendente') RETURNING *`,
-      [obra_id, req.usuario.id, referencias]
-    )
-
-    res.status(201).json(result.rows[0])
-
-  } catch (err) {
-    console.error('Erro ao candidatar:', err)
-    res.status(500).json({ erro: 'Erro ao registrar candidatura' })
-  }
-}
-
 const minhas = async (req, res) => {
   try {
     const page   = parseInt(req.query.page)  || 1
@@ -84,9 +35,12 @@ const porObra = async (req, res) => {
     }
 
     const result = await pool.query(
+      // telefone é sempre NULL aqui de propósito: o contato do pintor só é revelado
+      // ao dono APÓS o match, nunca no aceite (regra de negócio — ver GET /obras/:id).
+      // Não ligar esta coluna a c.status: reintroduziria o vazamento corrigido em 4fbdab1.
       `SELECT c.id, c.status, c.referencias, c.valor_oferta, c.mensagem_oferta, c.criado_em,
               u.id as usuario_id, u.nome, u.email,
-              CASE WHEN c.status = 'aprovada' THEN u.telefone ELSE NULL END as telefone,
+              NULL as telefone,
               u.cidade, u.anos_experiencia, u.tamanho_equipe, u.especialidades,
               (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_total,
               (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_media
@@ -153,8 +107,16 @@ const aprovar = async (req, res) => {
       return res.status(400).json({ erro: 'Candidatura já foi processada' })
     }
 
+    const jaAceito = await pool.query(
+      `SELECT id FROM candidaturas WHERE obra_id = $1 AND status = 'aceito' AND id != $2`,
+      [existe.rows[0].obra_id, id]
+    )
+    if (jaAceito.rows.length > 0) {
+      return res.status(409).json({ erro: 'Já existe um candidato aceito para esta obra' })
+    }
+
     const result = await pool.query(
-      `UPDATE candidaturas SET status = 'aprovada', aprovado_por = $1
+      `UPDATE candidaturas SET status = 'aceito', aprovado_por = $1
        WHERE id = $2 RETURNING *`,
       [req.usuario.id, id]
     )
@@ -167,6 +129,14 @@ const aprovar = async (req, res) => {
     )
 
   } catch (err) {
+    // 23505 = unique_violation. O único write daqui é o UPDATE acima, e o único
+    // índice único que ele pode violar é candidaturas_aceito_unica_idx (UNIQUE em
+    // obra_id WHERE status='aceito') — ou seja: outro aceite para a mesma obra
+    // entrou entre o SELECT do jaAceito e o UPDATE. O guard acima resolve o caso
+    // comum; este catch fecha a corrida. Mesma resposta nos dois caminhos.
+    if (err.code === '23505') {
+      return res.status(409).json({ erro: 'Já existe um candidato aceito para esta obra' })
+    }
     console.error('Erro ao aprovar candidatura:', err)
     res.status(500).json({ erro: 'Erro ao aprovar candidatura' })
   }
@@ -197,7 +167,7 @@ const recusar = async (req, res) => {
     }
 
     const result = await pool.query(
-      `UPDATE candidaturas SET status = 'recusada', aprovado_por = $1
+      `UPDATE candidaturas SET status = 'recusado', aprovado_por = $1
        WHERE id = $2 RETURNING *`,
       [req.usuario.id, id]
     )
@@ -210,4 +180,4 @@ const recusar = async (req, res) => {
   }
 }
 
-module.exports = { candidatar, minhas, porObra, pendentes, aprovar, recusar }
+module.exports = { minhas, porObra, pendentes, aprovar, recusar }
