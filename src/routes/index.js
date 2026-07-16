@@ -696,7 +696,7 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
       `SELECT o.*,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id AND status = 'pendente') as candidaturas_pendentes,
-        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa,
+        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa,
         (SELECT COALESCE(c.valor_contraproposta, c.valor_proposto)
            FROM candidaturas c
           WHERE c.obra_id = o.id AND c.usuario_id = o.match_usuario_id
@@ -723,7 +723,7 @@ router.get('/obras/meus-contratos', autenticar, async (req, res) => {
       `SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.bairro, o.uf,
               o.match_feito_em, o.status,
               u.id AS dono_id, u.nome AS dono_nome, u.telefone AS dono_telefone,
-              (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) AS foto_capa,
+              (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) AS foto_capa,
               COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado,
               EXISTS (
                 SELECT 1 FROM avaliacoes a
@@ -753,7 +753,7 @@ router.get('/obras/meus-contratos-dono', autenticar, async (req, res) => {
               u.id AS prestador_id,
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
               u.logradouro, u.numero, u.bairro,
-              (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) AS foto_capa,
+              (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) AS foto_capa,
               COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado,
               EXISTS (
                 SELECT 1 FROM avaliacoes a
@@ -806,7 +806,7 @@ router.get('/obras-aprovacao', autenticar, exigirAdmin, async (req, res) => {
 
     const result = await pool.query(
       `SELECT o.*, u.nome as dono_nome, u.email as dono_email, u.telefone as dono_telefone,
-        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
+        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
        FROM obras o JOIN usuarios u ON o.criado_por = u.id
        WHERE o.enviada_por_dono = true AND o.status_aprovacao = 'pendente'
        ORDER BY o.criado_em DESC
@@ -906,7 +906,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     const result = await pool.query(
       `SELECT o.*,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
-        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
+        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
        FROM obras o WHERE o.id = $1`,
       [req.params.id]
     )
@@ -1335,7 +1335,7 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
       `SELECT r.*,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id AND status = 'pendente') as interesses_pendentes,
-        (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa,
+        (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa,
         (SELECT COALESCE(ir.valor_contraproposta, ir.valor_proposto)
            FROM interesse_reparos ir
           WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
@@ -1474,7 +1474,7 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
       SELECT ir.id, ir.status, ir.valor_proposto, ir.valor_contraproposta, ir.rodada, ir.criado_em,
              r.id as reparo_id, r.titulo, r.categoria, r.descricao, r.valor_estimado,
              r.cidade, r.bairro, r.latitude, r.longitude, r.expira_em, r.status as reparo_status, r.prazo_atendimento_horas,
-             (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa
+             (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM interesse_reparos ir
       JOIN reparos r ON ir.reparo_id = r.id
       WHERE ir.usuario_id = $1
@@ -1501,7 +1501,7 @@ router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
       `SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
               r.match_feito_em, r.status,
               u.id AS dono_id, u.nome AS dono_nome, u.telefone AS dono_telefone,
-              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) AS foto_capa,
+              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) AS foto_capa,
               COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado,
               EXISTS (
                 SELECT 1 FROM avaliacoes a
@@ -1531,7 +1531,7 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
               u.id AS prestador_id,
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
               u.logradouro, u.numero, u.bairro,
-              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) AS foto_capa,
+              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) AS foto_capa,
               COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado,
               EXISTS (
                 SELECT 1 FROM avaliacoes a
@@ -1568,7 +1568,7 @@ router.get('/reparos', autenticar, exigirPrestador, exigirReparador, async (req,
              r.match_feito_em, r.match_usuario_id, r.pedido_tempo_status,
              r.prestadores_bloqueados, r.client_request_id,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
-        (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY ordem LIMIT 1) as foto_capa
+        (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM reparos r
       WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()
         AND r.match_usuario_id IS NULL
