@@ -14,7 +14,7 @@ const listar = async (req, res) => {
              0 as distancia_metros,
              (SELECT COUNT(*) FROM midias WHERE obra_id = o.id) as total_midias,
              (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
-             (SELECT url FROM midias WHERE obra_id = o.id ORDER BY ordem LIMIT 1) as foto_capa
+             (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM obras o
       WHERE o.status = 'aberta'
       AND o.status_aprovacao = 'aprovada'
