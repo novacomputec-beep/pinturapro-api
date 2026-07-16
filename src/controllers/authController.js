@@ -145,7 +145,9 @@ const cadastrar = async (req, res) => {
       )
       console.log(`[CADASTRO][${ts}] ✓ assinatura gratuita criada`)
     } else if (role === 'prestador') {
-      const valorMensal = planoEscolhido === 'anual' ? 499.00 : (tipo_conta === 'pintor' || tipo_conta === 'construtor' ? 99.90 : 49.90)
+      const valorMensal = tipo_prestador === 'pintor'
+        ? (planoEscolhido === 'anual' ? 999.00 : 99.90)
+        : (planoEscolhido === 'anual' ? 499.00 : 49.90)
       console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura prestador | usuario_id=${usuario.id} plano=${planoEscolhido} valor=${valorMensal}`)
       await client.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
