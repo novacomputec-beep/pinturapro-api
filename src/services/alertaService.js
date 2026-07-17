@@ -397,7 +397,7 @@ const verificarObrasExpirandoSemInteressados = async () => {
   try {
     const obras = await pool.query(`
       SELECT o.id, o.titulo,
-             EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 as horas_para_expirar,
+             COALESCE(o.horas_para_expirar, 720) as horas_para_expirar,
              u.push_token
       FROM obras o
       JOIN usuarios u ON o.criado_por = u.id
@@ -406,11 +406,11 @@ const verificarObrasExpirandoSemInteressados = async () => {
         AND u.push_token IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM candidaturas c WHERE c.obra_id = o.id)
         AND (
-          (EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 <= 1  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '15 minutes')
-          OR (EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 > 1 AND EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 <= 4  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '30 minutes')
-          OR (EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 > 4 AND EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 <= 8  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '1 hour')
-          OR (EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 > 8 AND EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 <= 24 AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '2 hours')
-          OR (EXTRACT(EPOCH FROM (o.expira_em - o.criado_em)) / 3600 > 24 AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '6 hours')
+          (COALESCE(o.horas_para_expirar, 720) <= 1  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '15 minutes')
+          OR (COALESCE(o.horas_para_expirar, 720) > 1 AND COALESCE(o.horas_para_expirar, 720) <= 4  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '30 minutes')
+          OR (COALESCE(o.horas_para_expirar, 720) > 4 AND COALESCE(o.horas_para_expirar, 720) <= 8  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '1 hour')
+          OR (COALESCE(o.horas_para_expirar, 720) > 8 AND COALESCE(o.horas_para_expirar, 720) <= 24 AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '2 hours')
+          OR (COALESCE(o.horas_para_expirar, 720) > 24 AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '6 hours')
         )
     `)
 
