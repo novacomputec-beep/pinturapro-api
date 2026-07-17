@@ -76,6 +76,17 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS numero VARCHAR(20)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS complemento VARCHAR(100)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS bairro VARCHAR(100)`)
+    // Diagnóstico de push: por que o usuário está sem push_token. Hoje só existe o sinal
+    // push_token IS NULL, que confunde quatro estados distintos. push_status registra o
+    // motivo, reportado pelo app. Valores aceitos (texto puro, sem CHECK — mesma convenção
+    // de verificacao_status): 'concedida' (permissão dada), 'negada' (permissão recusada),
+    // 'bloqueada' (recusa permanente, canAskAgain=false), 'erro_registro' (falha ao obter/
+    // enviar o token). Default 'desconhecido' enquanto o app ainda não reportou.
+    // push_status_em = quando o estado foi observado (sem default: NULL até o 1º report,
+    // evitando o rewrite de tabela que um default volátil como NOW() forçaria). Colunas
+    // aditivas: nenhuma query existente as lê.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS push_status VARCHAR(50) DEFAULT 'desconhecido'`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS push_status_em TIMESTAMPTZ`)
     // Flag global "Modo Auto" — garante a existência da linha (tabela já existe em prod).
     // Default 'false' = OFF: novos prestadores aguardam revisão manual do admin.
     await client.query(`CREATE TABLE IF NOT EXISTS configuracoes (chave TEXT PRIMARY KEY, valor TEXT, atualizado_em TIMESTAMPTZ DEFAULT NOW())`)
@@ -455,6 +466,28 @@ router.post('/auth/push-token/clear', autenticar, async (req, res) => {
     res.json({ mensagem: 'Token removido' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao remover token' })
+  }
+})
+
+// Registra o motivo de o usuário estar sem push_token (diagnóstico). Nunca escreve
+// push_token — só push_status/push_status_em, e só na linha do req.usuario.id. Endpoint
+// separado do /auth/push-token de propósito: aquele é o único caminho de escrita do token
+// e não deve ser tocado. Os estados são mutuamente exclusivos (ou o app obteve token, ou
+// falhou), então o app chama um endpoint ou o outro, nunca os dois.
+router.post('/auth/push-status', autenticar, async (req, res) => {
+  try {
+    const { status } = req.body
+    const permitidos = ['concedida', 'negada', 'bloqueada', 'erro_registro']
+    if (!permitidos.includes(status)) {
+      return res.status(400).json({ erro: 'Status inválido' })
+    }
+    await pool.query(
+      'UPDATE usuarios SET push_status = $1, push_status_em = NOW() WHERE id = $2',
+      [status, req.usuario.id]
+    )
+    res.json({ mensagem: 'Status registrado' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao registrar status' })
   }
 })
 
