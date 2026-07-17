@@ -170,16 +170,19 @@ const criar = async (req, res) => {
 
     // Rede de segurança: deriva o uf da cidade quando o cliente não envia
     const ufFinal = uf || await ufDeCidade(cidade)
-    const expira_em = new Date(Date.now() + (horas_para_expirar || 48) * 3600 * 1000)
+    // Janela original resolvida UMA vez (default 48 aqui, não 720). Esta rota insere já como
+    // 'aberta' — publica na hora —, então grava horas_para_expirar E publicado_em = NOW().
+    const horasExpiracao = horas_para_expirar || 48
+    const expira_em = new Date(Date.now() + horasExpiracao * 3600 * 1000)
 
     const result = await pool.query(
       `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf,
-        latitude, longitude, metragem, prazo_execucao_dias, expira_em, descricao, tags, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'aberta')
+        latitude, longitude, metragem, prazo_execucao_dias, expira_em, descricao, tags, status, horas_para_expirar, publicado_em)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'aberta',$15,NOW())
        RETURNING *`,
       [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal,
        latitude || null, longitude || null, metragem, prazo_execucao_dias,
-       expira_em.toISOString(), descricao, tags || []]
+       expira_em.toISOString(), descricao, tags || [], horasExpiracao]
     )
 
     const obra = result.rows[0]

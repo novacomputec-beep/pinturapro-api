@@ -110,6 +110,29 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS contrato_enviado BOOLEAN DEFAULT false`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
+    // Relógio de publicação da obra — traz a obra à paridade que o reparo já tem (criado_em é
+    // o instante de publicação do reparo + prazo_atendimento_horas é a janela). horas_para_expirar
+    // guarda a janela original; publicado_em guarda o instante em que a obra foi ao ar. A obra
+    // nasce 'rascunho' e só publica na aprovação — por isso publicado_em fica NULL até lá (é
+    // definido na aprovação), enquanto o reparo publica na criação. NUMERIC (não INTEGER): o
+    // backfill deriva horas fracionárias, pois expira_em vem do Date.now() do app e criado_em do
+    // NOW() do banco, então (expira_em - criado_em) carrega o atraso da request (sub-segundo).
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS horas_para_expirar NUMERIC`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS publicado_em TIMESTAMPTZ`)
+    // Backfill idempotente (WHERE ... IS NULL) e NULL-safe. Correto porque NENHUM endpoint de
+    // extensão jamais existiu: até aqui o expira_em de toda obra é exatamente criado_em + janela
+    // original, então (expira_em - criado_em) reconstrói a janela. COALESCE p/ 720 cobre linha
+    // com timestamp nulo — horas_para_expirar nunca fica NULL. publicado_em = criado_em porque
+    // historicamente o relógio sempre correu desde a criação (rascunho existente é sobrescrito
+    // por publicado_em = NOW() na aprovação, então o valor do backfill nele é inócuo).
+    await client.query(`
+      UPDATE obras SET horas_para_expirar = COALESCE(EXTRACT(EPOCH FROM (expira_em - criado_em)) / 3600, 720)
+      WHERE horas_para_expirar IS NULL
+    `)
+    await client.query(`
+      UPDATE obras SET publicado_em = criado_em
+      WHERE publicado_em IS NULL
+    `)
     // Backfill one-time de encerrado_em para linhas já encerradas antes da coluna existir.
     // Usa match_feito_em como melhor aproximação, caindo para criado_em quando o item foi
     // encerrado sem nunca ter match. Idempotente via WHERE encerrado_em IS NULL.
@@ -828,16 +851,20 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     }
     const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags, endereco_obra, latitude, longitude, client_request_id } = req.body
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
-    const expira_em = new Date(Date.now() + (horas_para_expirar || 720) * 3600 * 1000)
+    // Janela original resolvida UMA vez: mesma base do expira_em e do horas_para_expirar gravado,
+    // sem risco de os dois divergirem. publicado_em fica NULL — obra nasce 'rascunho', só publica
+    // na aprovação. Validação do input segue DEFERIDA (não mexer nos creates).
+    const horasExpiracao = horas_para_expirar || 720
+    const expira_em = new Date(Date.now() + horasExpiracao * 3600 * 1000)
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam a obra já criada em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, latitude, longitude, status, enviada_por_dono, status_aprovacao, client_request_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'rascunho',true,'pendente',$16)
+      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, latitude, longitude, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'rascunho',true,'pendente',$16,$17)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, latitude, longitude, client_request_id || null]
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, latitude, longitude, client_request_id || null, horasExpiracao]
     )
     res.status(201).json(result.rows[0])
   } catch (err) {
@@ -869,7 +896,22 @@ router.get('/obras-aprovacao', autenticar, exigirAdmin, async (req, res) => {
 
 router.post('/obras-aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
   try {
-    await pool.query(`UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta' WHERE id = $1`, [req.params.id])
+    // Aprovação PUBLICA a obra e reinicia o relógio a partir de agora: o expira_em setado na
+    // criação correu durante a fila de aprovação, então uma obra podia ir ao ar já expirada.
+    // publicado_em = NOW() é a âncora do ciclo de vida. COALESCE(..., 720) é obrigatório:
+    // NOW() + NULL = NULL, e um expira_em NULL sumiria do feed e quebraria os classificadores
+    // de histórico em JS (new Date(null)). Backfill garante que linhas antigas têm a coluna.
+    // Guarda de idempotência (status_aprovacao <> 'aprovada'): o relógio só reinicia na
+    // TRANSIÇÃO para aprovada. Sem ela, re-aprovar (duplo clique do admin) reiniciaria
+    // publicado_em/expira_em — extensão grátis e backdoor no teto de vida 2x do PR2, cuja
+    // âncora é publicado_em. Admite pendente E recusada (reaprovar rejeitada é fluxo válido);
+    // bloqueia só quem já está aprovada. Como status e status_aprovacao são setados no mesmo
+    // UPDATE, é impossível ficar aprovada com status ainda 'rascunho'.
+    await pool.query(
+      `UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta',
+         publicado_em = NOW(),
+         expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
+       WHERE id = $1 AND status_aprovacao <> 'aprovada'`, [req.params.id])
     res.json({ mensagem: 'Obra aprovada e publicada!' })
     notificarPintoresSobreNovaObra(req.params.id).catch(err => console.error('Erro notificar pintores:', err))
   } catch (err) {
