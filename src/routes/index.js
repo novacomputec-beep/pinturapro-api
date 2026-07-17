@@ -991,6 +991,58 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
   }
 })
 
+// POST /obras/:id/estender — dono estende o prazo da própria obra, respeitando o teto de
+// 2x a janela original. Re-arma o alerta de "expirando sem interessados"
+// (alerta_sem_interessados_em = NULL): sem isso a obra estendida morreria sem novo aviso.
+// FORWARD DEPENDENCY: quando as colunas de marco 60/30/15 min forem adicionadas, este
+// UPDATE TAMBÉM precisa limpá-las, exatamente como limpa alerta_sem_interessados_em — senão
+// a obra estendida mantém os marcos já gastos e não recebe nova contagem regressiva.
+router.post('/obras/:id/estender', autenticar, async (req, res) => {
+  try {
+    const obra = await pool.query(
+      `SELECT id, criado_por, status, match_usuario_id, expira_em, criado_em, publicado_em, horas_para_expirar
+       FROM obras WHERE id = $1 AND criado_por = $2`,
+      [req.params.id, req.usuario.id]
+    )
+    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    const o = obra.rows[0]
+    if (o.status !== 'aberta') return res.status(409).json({ erro: 'Só é possível estender uma obra aberta' })
+    if (o.match_usuario_id) return res.status(409).json({ erro: 'Não é possível estender uma obra com pintor a caminho' })
+
+    const horas = Number(req.body?.horas)
+    if (!Number.isFinite(horas) || horas < 1) return res.status(400).json({ erro: 'horas inválido: informe um número >= 1' })
+
+    // teto = âncora + 2x janela original. COALESCE(publicado_em, criado_em): PUT /obras/:id
+    // (admin editar) pode abrir uma obra sem setar publicado_em; criado_em é sempre <= o
+    // instante real de publicação, então só pode SUB-conceder orçamento, nunca conceder a mais.
+    // COALESCE(horas_para_expirar, 720) espelha o default usado no expira_em na criação.
+    // budget_antes = horas máximas que ainda cabem agora (a partir de GREATEST(expira_em, NOW())).
+    const cap = await pool.query(
+      `SELECT
+         GREATEST($1::timestamptz, NOW()) + ($2::numeric * INTERVAL '1 hour') AS novo_expira_em,
+         GREATEST(0, EXTRACT(EPOCH FROM (
+           (COALESCE($3::timestamptz, $4::timestamptz) + (2 * COALESCE($5::numeric, 720) * INTERVAL '1 hour'))
+           - GREATEST($1::timestamptz, NOW())
+         )) / 3600) AS budget_antes`,
+      [o.expira_em, horas, o.publicado_em, o.criado_em, o.horas_para_expirar]
+    )
+    const budgetAntes = Number(cap.rows[0].budget_antes)
+    if (horas > budgetAntes) {
+      return res.status(422).json({ erro: 'Extensão excede o teto de 2x a janela original', extensao_maxima_horas: Math.max(0, budgetAntes) })
+    }
+
+    const upd = await pool.query(
+      `UPDATE obras SET expira_em = $1, alerta_sem_interessados_em = NULL
+       WHERE id = $2 AND criado_por = $3 RETURNING expira_em`,
+      [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id]
+    )
+    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: Math.max(0, budgetAntes - horas) })
+  } catch (err) {
+    console.error('[obras/estender]', err.message)
+    res.status(500).json({ erro: 'Erro ao estender prazo da obra' })
+  }
+})
+
 router.get('/obras/:id', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
@@ -1050,7 +1102,14 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       delete obra.endereco_obra
     }
 
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos })
+    // Advisory: quanto o dono ainda pode estender (teto 2x). Mesma fórmula que /obras/:id/estender
+    // enforça de forma autoritativa — aqui é só p/ o app oferecer opções válidas. Anchor obra:
+    // COALESCE(publicado_em, criado_em); janela COALESCE(horas_para_expirar, 720).
+    const ancoraObraMs = new Date(obra.publicado_em || obra.criado_em).getTime()
+    const tetoObraMs = ancoraObraMs + 2 * (Number(obra.horas_para_expirar) || 720) * 3600 * 1000
+    const baseObraMs = Math.max(new Date(obra.expira_em).getTime(), Date.now())
+    const extensao_maxima_horas = Math.max(0, (tetoObraMs - baseObraMs) / 3600000)
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, extensao_maxima_horas })
   } catch (err) {
     console.error('Erro ao buscar obra:', err)
     res.status(500).json({ erro: 'Erro ao buscar obra' })
@@ -1486,6 +1545,54 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
   } catch (err) {
     console.error('Erro ao deletar reparo:', err)
     res.status(500).json({ erro: 'Erro ao excluir reparo' })
+  }
+})
+
+// POST /reparos/:id/estender — simétrico a /obras/:id/estender. Diferença deliberada: a âncora
+// é criado_em SEM COALESCE — o reparo publica na criação, então criado_em é o instante de
+// publicação e nunca é NULL (obra precisa de COALESCE(publicado_em, criado_em); reparo não).
+// A JANELA usa COALESCE(prazo_atendimento_horas, 720): a coluna PODE ser NULL (o create grava
+// prazo_atendimento_horas || null) enquanto o expira_em da criação já usa o default 720 —
+// sem o COALESCE, um reparo de prazo NULL teria teto NULL e seria ineextensível.
+// FORWARD DEPENDENCY: igual à obra — marcos 60/30/15 min futuros também devem ser limpos aqui.
+router.post('/reparos/:id/estender', autenticar, async (req, res) => {
+  try {
+    const reparo = await pool.query(
+      `SELECT id, criado_por, status, match_usuario_id, expira_em, criado_em, prazo_atendimento_horas
+       FROM reparos WHERE id = $1 AND criado_por = $2`,
+      [req.params.id, req.usuario.id]
+    )
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    const r = reparo.rows[0]
+    if (r.status !== 'aberta') return res.status(409).json({ erro: 'Só é possível estender um reparo aberto' })
+    if (r.match_usuario_id) return res.status(409).json({ erro: 'Não é possível estender um reparo com prestador a caminho' })
+
+    const horas = Number(req.body?.horas)
+    if (!Number.isFinite(horas) || horas < 1) return res.status(400).json({ erro: 'horas inválido: informe um número >= 1' })
+
+    const cap = await pool.query(
+      `SELECT
+         GREATEST($1::timestamptz, NOW()) + ($2::numeric * INTERVAL '1 hour') AS novo_expira_em,
+         GREATEST(0, EXTRACT(EPOCH FROM (
+           ($3::timestamptz + (2 * COALESCE($4::numeric, 720) * INTERVAL '1 hour'))
+           - GREATEST($1::timestamptz, NOW())
+         )) / 3600) AS budget_antes`,
+      [r.expira_em, horas, r.criado_em, r.prazo_atendimento_horas]
+    )
+    const budgetAntes = Number(cap.rows[0].budget_antes)
+    if (horas > budgetAntes) {
+      return res.status(422).json({ erro: 'Extensão excede o teto de 2x a janela original', extensao_maxima_horas: Math.max(0, budgetAntes) })
+    }
+
+    const upd = await pool.query(
+      `UPDATE reparos SET expira_em = $1, alerta_sem_interessados_em = NULL
+       WHERE id = $2 AND criado_por = $3 RETURNING expira_em`,
+      [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id]
+    )
+    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: Math.max(0, budgetAntes - horas) })
+  } catch (err) {
+    console.error('[reparos/estender]', err.message)
+    res.status(500).json({ erro: 'Erro ao estender prazo do reparo' })
   }
 })
 
@@ -2248,11 +2355,18 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       delete reparo.endereco_reparo
     }
 
+    // Advisory: quanto o dono ainda pode estender (teto 2x). Autoritativo é /reparos/:id/estender.
+    // Anchor reparo: criado_em (nunca NULL, publica na criação); janela COALESCE(prazo_atendimento_horas, 720).
+    const ancoraReparoMs = new Date(reparo.criado_em).getTime()
+    const tetoReparoMs = ancoraReparoMs + 2 * (Number(reparo.prazo_atendimento_horas) || 720) * 3600 * 1000
+    const baseReparoMs = Math.max(new Date(reparo.expira_em).getTime(), Date.now())
+    const extensao_maxima_horas = Math.max(0, (tetoReparoMs - baseReparoMs) / 3600000)
     res.json({
       reparo,
       midias: midias.rows,
       meu_interesse: interesse.rows[0] || null,
       interessados,
+      extensao_maxima_horas,
     })
   } catch (err) {
     console.error('Erro ao buscar reparo:', err)
