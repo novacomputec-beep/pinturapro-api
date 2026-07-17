@@ -395,20 +395,47 @@ const exigirReparador = exigirTipoPrestador('reparador', 'Este recurso é exclus
 // ============================================================
 // STATS PÚBLICOS (sem auth)
 // ============================================================
+// Cache de processo (valor único) para o payload público. Este endpoint é batido a
+// cada abertura do app, pré-login, por todos — sem cache ia direto ao Postgres com
+// as subqueries agregadas a cada request. TTL 60s. Segue o precedente do repo (Map +
+// timestamp + TTL em :334), mas aqui é um único valor global, então um objeto
+// { payload, timestamp } basta. Process-local: com N réplicas cada uma guarda o seu —
+// aceitável para um agregado que tolera 60s de defasagem.
+let statsPublicoCache = { payload: null, timestamp: 0 }
+const STATS_PUBLICO_TTL = 60 * 1000
+
 router.get('/stats/publico', async (req, res) => {
   try {
+    // Hit: serve da memória sem tocar o Postgres.
+    if (statsPublicoCache.payload && Date.now() - statsPublicoCache.timestamp < STATS_PUBLICO_TTL) {
+      return res.json(statsPublicoCache.payload)
+    }
+
     const result = await pool.query(`
       SELECT
         COALESCE((SELECT SUM(valor_estimado) FROM reparos WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()), 0)
         + COALESCE((SELECT SUM(valor) FROM obras WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()), 0) AS total_valor,
         (SELECT COUNT(*) FROM reparos WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW())
-        + (SELECT COUNT(*) FROM obras WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()) AS total_ativas
+        + (SELECT COUNT(*) FROM obras WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()) AS total_ativas,
+        (SELECT COUNT(*) FROM obras WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW() AND match_usuario_id IS NULL) AS obras_abertas,
+        (SELECT COUNT(*) FROM reparos WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW() AND match_usuario_id IS NULL) AS reparos_abertos
     `)
+    // total_valor/total_ativas: legado, INTOCADO — mesma query mesclada obras+reparos,
+    // sem match_usuario_id IS NULL (a build instalada renderiza estas duas chaves).
+    // obras_abertas/reparos_abertos: novas, por vertical, com as MESMAS cláusulas do
+    // feed (obrasController.js:19-22 e routes/index.js:1594-1595) — aberta + aprovada +
+    // não expirada + SEM match — para o número bater com o que o prestador vê no feed.
     const row = result.rows[0]
-    res.json({
+    const payload = {
       total_valor_obras: parseFloat(row.total_valor) || 0,
-      total_obras_ativas: parseInt(row.total_ativas) || 0
-    })
+      total_obras_ativas: parseInt(row.total_ativas) || 0,
+      obras:   { demandas_abertas: parseInt(row.obras_abertas) || 0 },
+      reparos: { demandas_abertas: parseInt(row.reparos_abertos) || 0 }
+    }
+    // Refill só após sucesso — uma falha cai no catch (500) e deixa o último payload
+    // bom intacto, nunca envenena o cache.
+    statsPublicoCache = { payload, timestamp: Date.now() }
+    res.json(payload)
   } catch (err) {
     console.error('[stats/publico]', err.message)
     res.status(500).json({ erro: 'Erro ao buscar estatísticas' })
