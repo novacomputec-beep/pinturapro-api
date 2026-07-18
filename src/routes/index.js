@@ -168,14 +168,18 @@ const migracaoPronta = (async () => {
     // não disparar uma rajada de alertas atrasados. Idempotente (WHERE marco_X_em IS NULL →
     // no-op em reboots) e NULL-safe (expira_em NULL não casa: NULL <= ... resulta NULL). O 6h
     // respeita o gate de janela > 12h, então demanda de janela curta mantém marco_6h_em NULL.
-    await client.query(`UPDATE obras SET marco_6h_em = NOW() WHERE marco_6h_em IS NULL AND status = 'aberta' AND COALESCE(horas_para_expirar, 720) > 12 AND expira_em <= NOW() + INTERVAL '6 hours'`)
-    await client.query(`UPDATE obras SET marco_60_em = NOW() WHERE marco_60_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '60 minutes'`)
-    await client.query(`UPDATE obras SET marco_30_em = NOW() WHERE marco_30_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '30 minutes'`)
-    await client.query(`UPDATE obras SET marco_15_em = NOW() WHERE marco_15_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '15 minutes'`)
-    await client.query(`UPDATE reparos SET marco_6h_em = NOW() WHERE marco_6h_em IS NULL AND status = 'aberta' AND prazo_atendimento_horas > 12 AND expira_em <= NOW() + INTERVAL '6 hours'`)
-    await client.query(`UPDATE reparos SET marco_60_em = NOW() WHERE marco_60_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '60 minutes'`)
-    await client.query(`UPDATE reparos SET marco_30_em = NOW() WHERE marco_30_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '30 minutes'`)
-    await client.query(`UPDATE reparos SET marco_15_em = NOW() WHERE marco_15_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '15 minutes'`)
+    // Gate de push_token (EXISTS): só marca como enviado se o dono TEM token entregável (não-null
+    // E não-vazio). Sem isso, o backfill queimaria o marco de um dono sem token — o alerta jamais
+    // seria entregue nem re-tentado. Deixando NULL, o job dispara numa tick futura quando o dono
+    // ganhar token E ainda estiver na banda daquele marco. Mesma condição do claim do job.
+    await client.query(`UPDATE obras SET marco_6h_em = NOW() WHERE marco_6h_em IS NULL AND status = 'aberta' AND COALESCE(horas_para_expirar, 720) > 12 AND expira_em <= NOW() + INTERVAL '6 hours' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = obras.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
+    await client.query(`UPDATE obras SET marco_60_em = NOW() WHERE marco_60_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '60 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = obras.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
+    await client.query(`UPDATE obras SET marco_30_em = NOW() WHERE marco_30_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '30 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = obras.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
+    await client.query(`UPDATE obras SET marco_15_em = NOW() WHERE marco_15_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '15 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = obras.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
+    await client.query(`UPDATE reparos SET marco_6h_em = NOW() WHERE marco_6h_em IS NULL AND status = 'aberta' AND prazo_atendimento_horas > 12 AND expira_em <= NOW() + INTERVAL '6 hours' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = reparos.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
+    await client.query(`UPDATE reparos SET marco_60_em = NOW() WHERE marco_60_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '60 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = reparos.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
+    await client.query(`UPDATE reparos SET marco_30_em = NOW() WHERE marco_30_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '30 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = reparos.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
+    await client.query(`UPDATE reparos SET marco_15_em = NOW() WHERE marco_15_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '15 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = reparos.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
     // Backfill one-time de encerrado_em para linhas já encerradas antes da coluna existir.
     // Usa match_feito_em como melhor aproximação, caindo para criado_em quando o item foi
     // encerrado sem nunca ter match. Idempotente via WHERE encerrado_em IS NULL.

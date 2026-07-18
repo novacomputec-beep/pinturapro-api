@@ -419,7 +419,7 @@ const verificarMarcosExpiracao = async () => {
             AND d.status = 'aberta'
             ${lado.statusAprovacao}
             AND d.match_usuario_id IS NULL
-            AND u.push_token IS NOT NULL
+            AND u.push_token IS NOT NULL AND u.push_token <> ''
             AND NOT EXISTS (${lado.interesse})
             AND d.${marco.col} IS NULL
             AND d.expira_em <= NOW() + INTERVAL '${marco.sup}'
