@@ -377,27 +377,27 @@ const verificarMarcosExpiracao = async () => {
     {
       tabela: 'obras',
       idKey: 'obra_id',
+      janelaCol: 'horas_para_expirar',
       statusAprovacao: `AND d.status_aprovacao = 'aprovada'`,
       interesse: `SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id`,
-      gate6h: `AND COALESCE(d.horas_para_expirar, 720) > 12`,
       marcos: [
-        { col: 'marco_6h_em', sup: '6 hours',    inf: '60 minutes', seisHoras: true, tipo: 'obra_expirando_6h', titulo: '⏰ Sua obra expira em 6 horas',    corpo: t => `Sua obra '${t}' expira em 6 horas e ainda não tem interessados. Estenda o prazo para continuar recebendo candidatos.` },
-        { col: 'marco_60_em', sup: '60 minutes', inf: '30 minutes',                  tipo: 'obra_expirando_60', titulo: '⏰ Sua obra expira em 1 hora',     corpo: t => `Sua obra '${t}' expira em 1 hora e ainda não tem interessados. Estenda o prazo.` },
-        { col: 'marco_30_em', sup: '30 minutes', inf: '15 minutes',                  tipo: 'obra_expirando_30', titulo: '⏰ Sua obra expira em 30 minutos', corpo: t => `Sua obra '${t}' expira em 30 minutos e ainda não tem interessados. Estenda o prazo.` },
-        { col: 'marco_15_em', sup: '15 minutes', inf: '0 minutes',                   tipo: 'obra_expirando_15', titulo: '⏰ Sua obra expira em 15 minutos', corpo: t => `Última chance: sua obra '${t}' expira em 15 minutos sem interessados. Estenda o prazo agora.` },
+        { col: 'marco_6h_em', sup: '6 hours',    inf: '60 minutes', mMin: 360, tipo: 'obra_expirando_6h', titulo: '⏰ Sua obra expira em 6 horas',    corpo: t => `Sua obra '${t}' expira em 6 horas e ainda não tem interessados. Estenda o prazo para continuar recebendo candidatos.` },
+        { col: 'marco_60_em', sup: '60 minutes', inf: '30 minutes', mMin: 60,  tipo: 'obra_expirando_60', titulo: '⏰ Sua obra expira em 1 hora',     corpo: t => `Sua obra '${t}' expira em 1 hora e ainda não tem interessados. Estenda o prazo.` },
+        { col: 'marco_30_em', sup: '30 minutes', inf: '15 minutes', mMin: 30,  tipo: 'obra_expirando_30', titulo: '⏰ Sua obra expira em 30 minutos', corpo: t => `Sua obra '${t}' expira em 30 minutos e ainda não tem interessados. Estenda o prazo.` },
+        { col: 'marco_15_em', sup: '15 minutes', inf: '0 minutes',  mMin: 15,  tipo: 'obra_expirando_15', titulo: '⏰ Sua obra expira em 15 minutos', corpo: t => `Última chance: sua obra '${t}' expira em 15 minutos sem interessados. Estenda o prazo agora.` },
       ],
     },
     {
       tabela: 'reparos',
       idKey: 'reparo_id',
+      janelaCol: 'prazo_atendimento_horas',
       statusAprovacao: '',
       interesse: `SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = d.id`,
-      gate6h: `AND d.prazo_atendimento_horas > 12`,
       marcos: [
-        { col: 'marco_6h_em', sup: '6 hours',    inf: '60 minutes', seisHoras: true, tipo: 'reparo_expirando_6h', titulo: '⏰ Seu reparo expira em 6 horas',    corpo: t => `Seu reparo '${t}' expira em 6 horas e ainda não tem interessados. Aumente o prazo para continuar recebendo profissionais.` },
-        { col: 'marco_60_em', sup: '60 minutes', inf: '30 minutes',                  tipo: 'reparo_expirando_60', titulo: '⏰ Seu reparo expira em 1 hora',     corpo: t => `Seu reparo '${t}' expira em 1 hora e ainda não tem interessados. Aumente o prazo.` },
-        { col: 'marco_30_em', sup: '30 minutes', inf: '15 minutes',                  tipo: 'reparo_expirando_30', titulo: '⏰ Seu reparo expira em 30 minutos', corpo: t => `Seu reparo '${t}' expira em 30 minutos e ainda não tem interessados. Aumente o prazo.` },
-        { col: 'marco_15_em', sup: '15 minutes', inf: '0 minutes',                   tipo: 'reparo_expirando_15', titulo: '⏰ Última chance para seu reparo',   corpo: t => `Seu reparo '${t}' expira em 15 minutos sem interessados. Aumente o prazo agora.` },
+        { col: 'marco_6h_em', sup: '6 hours',    inf: '60 minutes', mMin: 360, tipo: 'reparo_expirando_6h', titulo: '⏰ Seu reparo expira em 6 horas',    corpo: t => `Seu reparo '${t}' expira em 6 horas e ainda não tem interessados. Aumente o prazo para continuar recebendo profissionais.` },
+        { col: 'marco_60_em', sup: '60 minutes', inf: '30 minutes', mMin: 60,  tipo: 'reparo_expirando_60', titulo: '⏰ Seu reparo expira em 1 hora',     corpo: t => `Seu reparo '${t}' expira em 1 hora e ainda não tem interessados. Aumente o prazo.` },
+        { col: 'marco_30_em', sup: '30 minutes', inf: '15 minutes', mMin: 30,  tipo: 'reparo_expirando_30', titulo: '⏰ Seu reparo expira em 30 minutos', corpo: t => `Seu reparo '${t}' expira em 30 minutos e ainda não tem interessados. Aumente o prazo.` },
+        { col: 'marco_15_em', sup: '15 minutes', inf: '0 minutes',  mMin: 15,  tipo: 'reparo_expirando_15', titulo: '⏰ Última chance para seu reparo',   corpo: t => `Seu reparo '${t}' expira em 15 minutos sem interessados. Aumente o prazo agora.` },
       ],
     },
   ]
@@ -406,7 +406,11 @@ const verificarMarcosExpiracao = async () => {
   try {
     for (const lado of lados) {
       for (const marco of lado.marcos) {
-        const gate = marco.seisHoras ? lado.gate6h : ''
+        // Gate de janela ORIGINAL uniforme: o marco M só dispara se a janela original da demanda
+        // (janelaCol em horas × 60) for MAIOR que M em minutos — um alerta "faltam 60min" nunca
+        // chega a quem nunca teve 60min. Substitui o antigo gate especial de 6h (>12h), agora só
+        // o caso M=360. Fronteira estrita (>): janela == M não dispara M (ex.: 1h não dispara o 60).
+        const gate = `AND d.${lado.janelaCol} * 60 > ${marco.mMin}`
         const claim = await pool.query(`
           UPDATE ${lado.tabela} d
           SET ${marco.col} = NOW()
