@@ -351,86 +351,93 @@ const verificarObrasComBaixoEngajamento = async () => {
   }
 }
 
-const verificarReparosExpirandoSemInteressados = async () => {
+// Marcos fixos de expiração: alerta o dono de uma demanda SEM match e SEM interessados a 6h,
+// 60min, 30min e 15min de expira_em, cada um com deep-link para a tela de detalhe (onde fica o
+// botão de estender). Substitui os dois jobs single-shot "expirando sem interessados".
+//
+// Bandas ancoradas em expira_em (tempo restante), semi-abertas e DISJUNTAS — (inferior, superior]:
+//   marco_15: (NOW,        NOW+15min]
+//   marco_30: (NOW+15min,  NOW+30min]
+//   marco_60: (NOW+30min,  NOW+60min]
+//   marco_6h: (NOW+60min,  NOW+6h]   — só quando a janela ORIGINAL > 12h
+// Como as bandas não se sobrepõem, a demanda cai em no máximo uma por run → no máximo um push por
+// marco (reforçado pelo claim marco_X_em IS NULL). Uma demanda cuja vida inteira é < 15min só
+// entra na banda de 15 → recebe apenas o alerta de 15min (cobertura, não sequência). Deploy-
+// tolerante: bandas de 15..300min de largura absorvem minutos perdidos entre runs.
+//
+// Elegibilidade reaproveitada dos jobs aposentados: status='aberta', match_usuario_id IS NULL,
+// e o MESMO teste de interesse (obras: NOT EXISTS candidaturas; reparos: NOT EXISTS
+// interesse_reparos). Obras exigem status_aprovacao='aprovada' (reparos não, por decisão).
+//
+// Claim-then-send: o UPDATE ... FROM usuarios ... WHERE marco_X_em IS NULL ... RETURNING reivindica
+// a linha no MESMO statement que a seleciona — replica-safe, sem duplo envio (a 2ª réplica vê
+// marco_X_em já preenchido e retorna 0 linhas). Empurra só para as linhas retornadas.
+const verificarMarcosExpiracao = async () => {
+  const lados = [
+    {
+      tabela: 'obras',
+      idKey: 'obra_id',
+      statusAprovacao: `AND d.status_aprovacao = 'aprovada'`,
+      interesse: `SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id`,
+      gate6h: `AND COALESCE(d.horas_para_expirar, 720) > 12`,
+      marcos: [
+        { col: 'marco_6h_em', sup: '6 hours',    inf: '60 minutes', seisHoras: true, tipo: 'obra_expirando_6h', titulo: '⏰ Sua obra expira em 6 horas',    corpo: t => `Sua obra '${t}' expira em 6 horas e ainda não tem interessados. Estenda o prazo para continuar recebendo candidatos.` },
+        { col: 'marco_60_em', sup: '60 minutes', inf: '30 minutes',                  tipo: 'obra_expirando_60', titulo: '⏰ Sua obra expira em 1 hora',     corpo: t => `Sua obra '${t}' expira em 1 hora e ainda não tem interessados. Estenda o prazo.` },
+        { col: 'marco_30_em', sup: '30 minutes', inf: '15 minutes',                  tipo: 'obra_expirando_30', titulo: '⏰ Sua obra expira em 30 minutos', corpo: t => `Sua obra '${t}' expira em 30 minutos e ainda não tem interessados. Estenda o prazo.` },
+        { col: 'marco_15_em', sup: '15 minutes', inf: '0 minutes',                   tipo: 'obra_expirando_15', titulo: '⏰ Sua obra expira em 15 minutos', corpo: t => `Última chance: sua obra '${t}' expira em 15 minutos sem interessados. Estenda o prazo agora.` },
+      ],
+    },
+    {
+      tabela: 'reparos',
+      idKey: 'reparo_id',
+      statusAprovacao: '',
+      interesse: `SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = d.id`,
+      gate6h: `AND d.prazo_atendimento_horas > 12`,
+      marcos: [
+        { col: 'marco_6h_em', sup: '6 hours',    inf: '60 minutes', seisHoras: true, tipo: 'reparo_expirando_6h', titulo: '⏰ Seu reparo expira em 6 horas',    corpo: t => `Seu reparo '${t}' expira em 6 horas e ainda não tem interessados. Aumente o prazo para continuar recebendo profissionais.` },
+        { col: 'marco_60_em', sup: '60 minutes', inf: '30 minutes',                  tipo: 'reparo_expirando_60', titulo: '⏰ Seu reparo expira em 1 hora',     corpo: t => `Seu reparo '${t}' expira em 1 hora e ainda não tem interessados. Aumente o prazo.` },
+        { col: 'marco_30_em', sup: '30 minutes', inf: '15 minutes',                  tipo: 'reparo_expirando_30', titulo: '⏰ Seu reparo expira em 30 minutos', corpo: t => `Seu reparo '${t}' expira em 30 minutos e ainda não tem interessados. Aumente o prazo.` },
+        { col: 'marco_15_em', sup: '15 minutes', inf: '0 minutes',                   tipo: 'reparo_expirando_15', titulo: '⏰ Última chance para seu reparo',   corpo: t => `Seu reparo '${t}' expira em 15 minutos sem interessados. Aumente o prazo agora.` },
+      ],
+    },
+  ]
+
+  let totalEnviados = 0
   try {
-    const reparos = await pool.query(`
-      SELECT r.id, r.titulo, r.prazo_atendimento_horas, u.push_token
-      FROM reparos r
-      JOIN usuarios u ON r.criado_por = u.id
-      WHERE r.status = 'aberta'
-        AND r.match_usuario_id IS NULL
-        AND r.alerta_sem_interessados_em IS NULL
-        AND u.push_token IS NOT NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = r.id
-        )
-        AND (
-          (r.prazo_atendimento_horas <= 1  AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '15 minutes')
-          OR (r.prazo_atendimento_horas > 1 AND r.prazo_atendimento_horas <= 4  AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '30 minutes')
-          OR (r.prazo_atendimento_horas > 4 AND r.prazo_atendimento_horas <= 8  AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '1 hour')
-          OR (r.prazo_atendimento_horas > 8 AND r.prazo_atendimento_horas <= 24 AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '2 hours')
-          OR (r.prazo_atendimento_horas > 24 AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '6 hours')
-        )
-    `)
+    for (const lado of lados) {
+      for (const marco of lado.marcos) {
+        const gate = marco.seisHoras ? lado.gate6h : ''
+        const claim = await pool.query(`
+          UPDATE ${lado.tabela} d
+          SET ${marco.col} = NOW()
+          FROM usuarios u
+          WHERE d.criado_por = u.id
+            AND d.status = 'aberta'
+            ${lado.statusAprovacao}
+            AND d.match_usuario_id IS NULL
+            AND u.push_token IS NOT NULL
+            AND NOT EXISTS (${lado.interesse})
+            AND d.${marco.col} IS NULL
+            AND d.expira_em <= NOW() + INTERVAL '${marco.sup}'
+            AND d.expira_em >  NOW() + INTERVAL '${marco.inf}'
+            ${gate}
+          RETURNING d.id, d.titulo, u.push_token
+        `)
 
-    if (reparos.rows.length > 0) {
-      const ids = reparos.rows.map(r => r.id)
-      await pool.query(`UPDATE reparos SET alerta_sem_interessados_em = NOW() WHERE id = ANY($1)`, [ids])
-
-      for (const reparo of reparos.rows) {
-        await enviarPushNotificacao(
-          reparo.push_token,
-          '⏰ Reparo expirando em breve!',
-          `Seu reparo '${reparo.titulo}' está expirando em breve e ainda não tem interessados! Considere aumentar o prazo.`,
-          { tipo: 'reparo_expirando_sem_interessados', reparo_id: reparo.id }
-        )
+        for (const row of claim.rows) {
+          await enviarPushEmLote(
+            [{ push_token: row.push_token }],
+            marco.titulo,
+            marco.corpo(row.titulo),
+            { tipo: marco.tipo, [lado.idKey]: row.id }
+          )
+          totalEnviados++
+        }
       }
     }
-
-    console.log(`[ExpirandoSemInteressados] ${reparos.rows.length} donos notificados`)
+    console.log(`[MarcosExpiracao] ${totalEnviados} alerta(s) de expiração enviado(s)`)
   } catch (err) {
-    console.error('Erro ao verificar reparos expirando sem interessados:', err)
-  }
-}
-
-const verificarObrasExpirandoSemInteressados = async () => {
-  try {
-    const obras = await pool.query(`
-      SELECT o.id, o.titulo,
-             COALESCE(o.horas_para_expirar, 720) as horas_para_expirar,
-             u.push_token
-      FROM obras o
-      JOIN usuarios u ON o.criado_por = u.id
-      WHERE o.status = 'aberta'
-        AND o.alerta_sem_interessados_em IS NULL
-        AND u.push_token IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM candidaturas c WHERE c.obra_id = o.id)
-        AND (
-          (COALESCE(o.horas_para_expirar, 720) <= 1  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '15 minutes')
-          OR (COALESCE(o.horas_para_expirar, 720) > 1 AND COALESCE(o.horas_para_expirar, 720) <= 4  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '30 minutes')
-          OR (COALESCE(o.horas_para_expirar, 720) > 4 AND COALESCE(o.horas_para_expirar, 720) <= 8  AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '1 hour')
-          OR (COALESCE(o.horas_para_expirar, 720) > 8 AND COALESCE(o.horas_para_expirar, 720) <= 24 AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '2 hours')
-          OR (COALESCE(o.horas_para_expirar, 720) > 24 AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '6 hours')
-        )
-    `)
-
-    if (obras.rows.length > 0) {
-      const ids = obras.rows.map(o => o.id)
-      await pool.query(`UPDATE obras SET alerta_sem_interessados_em = NOW() WHERE id = ANY($1)`, [ids])
-
-      for (const obra of obras.rows) {
-        await enviarPushNotificacao(
-          obra.push_token,
-          '⏰ Obra expirando em breve!',
-          `Sua obra '${obra.titulo}' está expirando em breve e ainda não tem interessados! Considere atualizar o prazo.`,
-          { tipo: 'obra_expirando_sem_interessados', obra_id: obra.id }
-        )
-      }
-    }
-
-    console.log(`[ExpirandoSemInteressados] ${obras.rows.length} donos de obra notificados`)
-  } catch (err) {
-    console.error('Erro ao verificar obras expirando sem interessados:', err)
+    console.error('Erro ao verificar marcos de expiração:', err.message)
   }
 }
 
@@ -498,7 +505,6 @@ module.exports = {
   notificarPrestadoresSobreNovoReparo,
   verificarObrasExpirando,
   verificarObrasComBaixoEngajamento,
-  verificarReparosExpirandoSemInteressados,
-  verificarObrasExpirandoSemInteressados,
+  verificarMarcosExpiracao,
   verificarCronometroReparos
 }

@@ -5,7 +5,7 @@ const helmet = require('helmet')
 const rateLimit = require('express-rate-limit')
 const rotasApp = require('./src/routes')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarReparosExpirandoSemInteressados, verificarObrasExpirandoSemInteressados, verificarCronometroReparos } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos } = require('./src/services/alertaService')
 const { invalidarCacheAssinatura } = require('./src/middlewares/auth')
 const { deletarDoCloudinary } = require('./src/services/uploadService')
 
@@ -311,16 +311,14 @@ const iniciarAgendador = () => {
     verificarObrasComBaixoEngajamento()
     verificarObrasExpirando()
     verificarPrestadoresProximos()
-    verificarReparosExpirandoSemInteressados()
-    verificarObrasExpirandoSemInteressados()
+    verificarMarcosExpiracao()
     verificarCronometroReparos()
   }, 60 * 1000)
 
   setInterval(() => { verificarObrasComBaixoEngajamento() }, INTERVALO_ENGAJAMENTO)
   setInterval(() => { verificarObrasExpirando() }, INTERVALO_EXPIRACAO)
   setInterval(() => { verificarPrestadoresProximos() }, INTERVALO_PROXIMIDADE)
-  setInterval(() => { verificarReparosExpirandoSemInteressados() }, INTERVALO_EXPIRACAO)
-  setInterval(() => { verificarObrasExpirandoSemInteressados() }, INTERVALO_EXPIRACAO)
+  setInterval(() => { verificarMarcosExpiracao() }, INTERVALO_CRONOMETRO)
   setInterval(() => { verificarCronometroReparos() }, INTERVALO_CRONOMETRO)
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
   setInterval(() => { expirarAssinaturasVencidas() }, 60 * 60 * 1000)
@@ -360,7 +358,7 @@ const iniciarAgendador = () => {
     }
   }, 10 * 60 * 1000)
 
-  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min | expirando sem interessados (reparos+obras): 1h | cronômetro reparos: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 24h')
+  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 24h')
 }
 
 rotasApp.migracaoPronta

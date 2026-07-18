@@ -133,6 +133,49 @@ const migracaoPronta = (async () => {
       UPDATE obras SET publicado_em = criado_em
       WHERE publicado_em IS NULL
     `)
+    // Marcos de expiração (alertas 6h/60min/30min/15min antes de expira_em). NULL = marco ainda
+    // não disparado; o job seta o timestamp ao disparar (claim). Aditivas: nenhuma query legada
+    // as lê. Simétricas em obras e reparos — só muda a fonte da janela original (obras:
+    // horas_para_expirar; reparos: prazo_atendimento_horas). Ver verificarMarcosExpiracao.
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_6h_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_60_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_30_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_15_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_6h_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_60_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_30_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_15_em TIMESTAMPTZ`)
+    // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o job filtra
+    // sempre expira_em numa faixa de minutos à frente de NOW(), então o range scan lê só as
+    // demandas prestes a expirar — NÃO o backlog de demandas expiradas que permanecem 'aberta'
+    // para sempre (essas ficam no extremo passado do btree e nunca são varridas, pois toda banda
+    // tem limite inferior expira_em > NOW()+X). O WHERE parcial mantém o índice pequeno: exclui
+    // demandas com match, não-aprovadas (obras) e aquelas cujos 4 marcos já foram enviados —
+    // a linha sai do índice assim que casa/encerra ou é totalmente notificada. Criado AQUI, no
+    // bloco de boot, portanto ANTES de iniciarAgendador() registrar o job (server.js).
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS obras_marcos_pendentes_idx ON obras (expira_em)
+      WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND match_usuario_id IS NULL
+        AND (marco_6h_em IS NULL OR marco_60_em IS NULL OR marco_30_em IS NULL OR marco_15_em IS NULL)
+    `)
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS reparos_marcos_pendentes_idx ON reparos (expira_em)
+      WHERE status = 'aberta' AND match_usuario_id IS NULL
+        AND (marco_6h_em IS NULL OR marco_60_em IS NULL OR marco_30_em IS NULL OR marco_15_em IS NULL)
+    `)
+    // Backfill anti-rajada: para demandas JÁ 'aberta' no deploy, marca como enviado todo marco
+    // cujo limiar já passou (expira_em já dentro/além do limiar), para o 1º run do job de 1min
+    // não disparar uma rajada de alertas atrasados. Idempotente (WHERE marco_X_em IS NULL →
+    // no-op em reboots) e NULL-safe (expira_em NULL não casa: NULL <= ... resulta NULL). O 6h
+    // respeita o gate de janela > 12h, então demanda de janela curta mantém marco_6h_em NULL.
+    await client.query(`UPDATE obras SET marco_6h_em = NOW() WHERE marco_6h_em IS NULL AND status = 'aberta' AND COALESCE(horas_para_expirar, 720) > 12 AND expira_em <= NOW() + INTERVAL '6 hours'`)
+    await client.query(`UPDATE obras SET marco_60_em = NOW() WHERE marco_60_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '60 minutes'`)
+    await client.query(`UPDATE obras SET marco_30_em = NOW() WHERE marco_30_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '30 minutes'`)
+    await client.query(`UPDATE obras SET marco_15_em = NOW() WHERE marco_15_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '15 minutes'`)
+    await client.query(`UPDATE reparos SET marco_6h_em = NOW() WHERE marco_6h_em IS NULL AND status = 'aberta' AND prazo_atendimento_horas > 12 AND expira_em <= NOW() + INTERVAL '6 hours'`)
+    await client.query(`UPDATE reparos SET marco_60_em = NOW() WHERE marco_60_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '60 minutes'`)
+    await client.query(`UPDATE reparos SET marco_30_em = NOW() WHERE marco_30_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '30 minutes'`)
+    await client.query(`UPDATE reparos SET marco_15_em = NOW() WHERE marco_15_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '15 minutes'`)
     // Backfill one-time de encerrado_em para linhas já encerradas antes da coluna existir.
     // Usa match_feito_em como melhor aproximação, caindo para criado_em quando o item foi
     // encerrado sem nunca ter match. Idempotente via WHERE encerrado_em IS NULL.
@@ -992,11 +1035,10 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
 })
 
 // POST /obras/:id/estender — dono estende o prazo da própria obra, respeitando o teto de
-// 2x a janela original. Re-arma o alerta de "expirando sem interessados"
-// (alerta_sem_interessados_em = NULL): sem isso a obra estendida morreria sem novo aviso.
-// FORWARD DEPENDENCY: quando as colunas de marco 60/30/15 min forem adicionadas, este
-// UPDATE TAMBÉM precisa limpá-las, exatamente como limpa alerta_sem_interessados_em — senão
-// a obra estendida mantém os marcos já gastos e não recebe nova contagem regressiva.
+// 2x a janela original. Re-arma TODOS os marcos de expiração (marco_6h/60/30/15_em = NULL):
+// como expira_em foi empurrado para frente, os 4 alertas precisam re-disparar contra o novo
+// prazo, senão a obra estendida mantém os marcos já gastos e não recebe nova contagem
+// regressiva. (Substitui o antigo clear de alerta_sem_interessados_em, cujo job foi aposentado.)
 router.post('/obras/:id/estender', autenticar, async (req, res) => {
   try {
     const obra = await pool.query(
@@ -1032,7 +1074,8 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
     }
 
     const upd = await pool.query(
-      `UPDATE obras SET expira_em = $1, alerta_sem_interessados_em = NULL
+      `UPDATE obras SET expira_em = $1,
+         marco_6h_em = NULL, marco_60_em = NULL, marco_30_em = NULL, marco_15_em = NULL
        WHERE id = $2 AND criado_por = $3 RETURNING expira_em`,
       [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id]
     )
@@ -1554,7 +1597,9 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
 // A JANELA usa COALESCE(prazo_atendimento_horas, 720): a coluna PODE ser NULL (o create grava
 // prazo_atendimento_horas || null) enquanto o expira_em da criação já usa o default 720 —
 // sem o COALESCE, um reparo de prazo NULL teria teto NULL e seria ineextensível.
-// FORWARD DEPENDENCY: igual à obra — marcos 60/30/15 min futuros também devem ser limpos aqui.
+// Re-arma TODOS os marcos de expiração (marco_6h/60/30/15_em = NULL), igual à obra: expira_em
+// avança, então os 4 alertas re-disparam contra o novo prazo. (Substitui o clear de
+// alerta_sem_interessados_em, cujo job foi aposentado.)
 router.post('/reparos/:id/estender', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(
@@ -1585,7 +1630,8 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
     }
 
     const upd = await pool.query(
-      `UPDATE reparos SET expira_em = $1, alerta_sem_interessados_em = NULL
+      `UPDATE reparos SET expira_em = $1,
+         marco_6h_em = NULL, marco_60_em = NULL, marco_30_em = NULL, marco_15_em = NULL
        WHERE id = $2 AND criado_por = $3 RETURNING expira_em`,
       [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id]
     )
