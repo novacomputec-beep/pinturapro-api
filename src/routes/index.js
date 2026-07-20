@@ -3021,6 +3021,57 @@ router.get('/avaliacoes/media/:usuario_id', autenticar, async (req, res) => {
   }
 })
 
+// GET /avaliacoes/recebidas — lista as avaliações RECEBIDAS pelo usuário autenticado
+// (avaliado_id = req.usuario.id), com o nome de quem avaliou (transparência estilo iFood)
+// e um resumo (média + total) para o cabeçalho da tela. Rota estática — registrada depois de
+// '/avaliacoes/media/:usuario_id' e não colide com ela (segmento 'recebidas' != 'media').
+router.get('/avaliacoes/recebidas', autenticar, async (req, res) => {
+  try {
+    const uid = req.usuario.id
+    const page  = parseInt(req.query.page)  || 1
+    const limit = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+
+    // Resumo (média + total): computado on-read — não há coluna cacheada em usuarios.
+    // Espelha GET /avaliacoes/media/:usuario_id acima.
+    const resumo = await pool.query(
+      `SELECT COUNT(*)::int AS total, COALESCE(ROUND(AVG(estrelas)::numeric, 1), 0) AS media
+       FROM avaliacoes WHERE avaliado_id = $1`,
+      [uid]
+    )
+
+    // Lista paginada. Colunas EXPLÍCITAS (nunca SELECT *): do avaliador expõe SÓ u.nome —
+    // jamais email/telefone/CPF/qualquer outro PII. comentario ainda não existe no schema
+    // (a avaliação só grava estrelas) → devolvido como NULL, placeholder de contrato até a
+    // captura de comentário existir no write-path e no app.
+    const lista = await pool.query(
+      `SELECT a.id,
+              a.estrelas      AS nota,
+              NULL::text      AS comentario,
+              a.criado_em     AS created_at,
+              a.contrato_tipo AS contrato_tipo,
+              u.nome          AS avaliador_nome
+       FROM avaliacoes a
+       JOIN usuarios u ON u.id = a.avaliador_id
+       WHERE a.avaliado_id = $1
+       ORDER BY a.criado_em DESC
+       LIMIT $2 OFFSET $3`,
+      [uid, limit, offset]
+    )
+
+    res.json({
+      media: parseFloat(resumo.rows[0].media),
+      total: resumo.rows[0].total,
+      page,
+      limit,
+      avaliacoes: lista.rows
+    })
+  } catch (err) {
+    console.error('[Avaliacoes] Erro recebidas:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar avaliações recebidas' })
+  }
+})
+
 // FEED — visualizações de proximidade. Rota estática ('/feed/visualizacoes'), sem
 // conflito com padrões /:id, seguindo a convenção de registro dedicado como avaliacoes.
 
