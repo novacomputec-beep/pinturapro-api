@@ -460,8 +460,7 @@ const verificarCronometroReparos = async () => {
         AND r.prazo_atendimento_horas IS NOT NULL
         AND r.notif_5min_enviada = false
         AND u.push_token IS NOT NULL
-        AND (r.match_feito_em + (r.prazo_atendimento_horas * INTERVAL '1 hour'))
-              BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
+        AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
     `)
 
     if (cincoMin.rows.length > 0) {
@@ -492,7 +491,7 @@ const verificarCronometroReparos = async () => {
         expira_em = NOW() + (prazo_atendimento_horas * INTERVAL '1 hour')
       WHERE match_usuario_id IS NOT NULL
         AND prazo_atendimento_horas IS NOT NULL
-        AND (match_feito_em + (prazo_atendimento_horas * INTERVAL '1 hour')) <= NOW()
+        AND expira_em <= NOW()
       RETURNING id
     `)
 
