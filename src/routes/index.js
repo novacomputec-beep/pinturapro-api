@@ -39,6 +39,9 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_status VARCHAR(50)`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_motivo TEXT`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS pedido_tempo_minutos INTEGER`)
+    // Flag "aviso de 5min já enviado" do cronômetro de obras (espelha reparos.notif_5min_enviada).
+    // Evita reenviar o aviso pré-expiração a cada tick de 1min enquanto o match está na janela final.
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS notif_5min_enviada BOOLEAN DEFAULT false`)
     await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`)
     await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS mensagem TEXT`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`)
@@ -162,6 +165,14 @@ const migracaoPronta = (async () => {
       CREATE INDEX IF NOT EXISTS reparos_marcos_pendentes_idx ON reparos (expira_em)
       WHERE status = 'aberta' AND match_usuario_id IS NULL
         AND (marco_6h_em IS NULL OR marco_60_em IS NULL OR marco_30_em IS NULL OR marco_15_em IS NULL)
+    `)
+    // Índice parcial do cronômetro de obras (job de 1min): coluna líder expira_em para o range
+    // scan de matches prestes a expirar. Predicado TIME-FREE (só status e match_usuario_id, ambos
+    // imutáveis) — Postgres proíbe NOW()/CURRENT_TIMESTAMP em índice parcial; o filtro temporal
+    // (expira_em <= NOW()) vive no WHERE do JOB, não no índice. Pequeno: só obras casadas e abertas.
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS obras_matches_pendentes_idx ON obras (expira_em)
+      WHERE status = 'aberta' AND match_usuario_id IS NOT NULL
     `)
     // Backfill anti-rajada: para demandas JÁ 'aberta' no deploy, marca como enviado todo marco
     // cujo limiar já passou (expira_em já dentro/além do limiar), para o 1º run do job de 1min

@@ -501,6 +501,62 @@ const verificarCronometroReparos = async () => {
   }
 }
 
+// Cronômetro de matches de obras — espelha verificarCronometroReparos com as colunas reais de obra.
+// Prazo único: a contagem pós-match vai até o expira_em ORIGINAL (o match não reseta expira_em).
+// (a) A 5 minutos do fim: avisa o dono uma única vez por match (notif_5min_enviada).
+// (b) Quando expira_em zera: devolve a obra ao feed e limpa o match, reiniciando a janela
+//     PRÉ-match (horas_para_expirar) para a próxima rodada de candidatos.
+const verificarCronometroObras = async () => {
+  try {
+    // (a) 5 minutos restantes → notifica o dono (uma vez por match)
+    const cincoMin = await pool.query(`
+      SELECT o.id, o.titulo, u.push_token
+      FROM obras o
+      JOIN usuarios u ON o.criado_por = u.id
+      WHERE o.status = 'aberta'
+        AND o.match_usuario_id IS NOT NULL
+        AND o.notif_5min_enviada = false
+        AND u.push_token IS NOT NULL
+        AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
+    `)
+
+    if (cincoMin.rows.length > 0) {
+      const ids = cincoMin.rows.map(o => o.id)
+      await pool.query(`UPDATE obras SET notif_5min_enviada = true WHERE id = ANY($1)`, [ids])
+
+      for (const obra of cincoMin.rows) {
+        await enviarPushNotificacao(
+          obra.push_token,
+          '⏰ O pintor ainda não chegou?',
+          'Faltam 5 minutos. Se ele ainda não chegou, você pode aumentar o prazo ou aguardar o cronômetro zerar.',
+          { tipo: 'obra_5min_restantes', obra_id: obra.id }
+        )
+      }
+    }
+
+    // (b) Cronômetro zerou → devolve a obra ao feed e limpa o match, reiniciando a contagem
+    // com a janela original. COALESCE(horas_para_expirar, 720): horas_para_expirar pode ser NULL
+    // em obras legadas; sem o COALESCE, NOW() + NULL = NULL e a obra sumiria do feed para sempre
+    // (expira_em > NOW() nunca casa NULL). 720h = default de criação (mesma base de index.js:960).
+    const expirados = await pool.query(`
+      UPDATE obras SET
+        status = 'aberta',
+        match_feito_em = NULL,
+        match_usuario_id = NULL,
+        notif_5min_enviada = false,
+        expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
+      WHERE status = 'aberta'
+        AND match_usuario_id IS NOT NULL
+        AND expira_em <= NOW()
+      RETURNING id
+    `)
+
+    console.log(`[CronômetroObras] 5min notificados: ${cincoMin.rows.length} | matches expirados (devolvidos ao feed): ${expirados.rows.length}`)
+  } catch (err) {
+    console.error('Erro ao verificar cronômetro de obras:', err.message)
+  }
+}
+
 module.exports = {
   enviarPushNotificacao,
   enviarBoasVindas,
@@ -509,5 +565,6 @@ module.exports = {
   verificarObrasExpirando,
   verificarObrasComBaixoEngajamento,
   verificarMarcosExpiracao,
-  verificarCronometroReparos
+  verificarCronometroReparos,
+  verificarCronometroObras
 }
