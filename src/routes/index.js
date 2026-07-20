@@ -136,46 +136,48 @@ const migracaoPronta = (async () => {
       UPDATE obras SET publicado_em = criado_em
       WHERE publicado_em IS NULL
     `)
-    // Marcos de expiração (alertas 6h/60min/30min/15min antes de expira_em). NULL = marco ainda
-    // não disparado; o job seta o timestamp ao disparar (claim). Aditivas: nenhuma query legada
-    // as lê. Simétricas em obras e reparos — só muda a fonte da janela original (obras:
-    // horas_para_expirar; reparos: prazo_atendimento_horas). Ver verificarMarcosExpiracao.
-    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_6h_em TIMESTAMPTZ`)
-    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_60_em TIMESTAMPTZ`)
-    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_30_em TIMESTAMPTZ`)
-    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_15_em TIMESTAMPTZ`)
-    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_6h_em TIMESTAMPTZ`)
-    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_60_em TIMESTAMPTZ`)
-    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_30_em TIMESTAMPTZ`)
-    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_15_em TIMESTAMPTZ`)
+    // Marcos de expiração PROPORCIONAIS: NULL = marco ainda não disparado; o job seta o timestamp
+    // ao disparar (claim). Ver verificarMarcosExpiracao + src/utils/faixasPrazo.js.
     // Marcos genéricos (1º/2º/3º) — os offsets variam por faixa de prazo (ver faixasPrazo.js), então
     // as colunas guardam só "qual marco já foi enviado", com o tempo definido pela faixa em código.
-    // Passo 3/6: colunas ADICIONADAS mas INERTES — nada lê/escreve ainda. O job, os índices parciais
-    // e o estender continuam nos marco_6h/60/30/15_em antigos até o passo 4 fazer o swap atômico.
+    // Passo 4/6: estas são as colunas ATIVAS — o job, os índices parciais e o estender usam elas.
+    // As 4 antigas (marco_6h/60/30/15_em) NÃO são derrubadas neste boot (expand/contract): sua
+    // remoção fica deferida ao passo 4b, quando o job novo estiver confirmado limpo em produção e o
+    // container anterior já tiver saído.
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_1_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_2_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_3_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_1_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_2_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_3_em TIMESTAMPTZ`)
-    // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o job filtra
-    // sempre expira_em numa faixa de minutos à frente de NOW(), então o range scan lê só as
-    // demandas prestes a expirar — NÃO o backlog de demandas expiradas que permanecem 'aberta'
-    // para sempre (essas ficam no extremo passado do btree e nunca são varridas, pois toda banda
-    // tem limite inferior expira_em > NOW()+X). O WHERE parcial mantém o índice pequeno: exclui
-    // demandas com match, não-aprovadas (obras) e aquelas cujos 4 marcos já foram enviados —
-    // a linha sai do índice assim que casa/encerra ou é totalmente notificada. Criado AQUI, no
-    // bloco de boot, portanto ANTES de iniciarAgendador() registrar o job (server.js).
+    // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o range scan lê
+    // só as demandas prestes a expirar. O WHERE parcial (TIME-FREE, sem NOW()) mantém o índice
+    // pequeno: exclui match, não-aprovadas (obras) e as que já enviaram os 3 marcos genéricos.
+    // Passo 4: DROP do índice antigo (predicado nos marco_6h/60/30/15) ANTES do CREATE porque reusa
+    // o MESMO nome; recria com o predicado dos marcos genéricos (marco_1/2/3). Criado AQUI, no bloco
+    // de boot, portanto ANTES de iniciarAgendador() registrar o job (server.js).
+    await client.query(`DROP INDEX IF EXISTS obras_marcos_pendentes_idx`)
+    await client.query(`DROP INDEX IF EXISTS reparos_marcos_pendentes_idx`)
     await client.query(`
       CREATE INDEX IF NOT EXISTS obras_marcos_pendentes_idx ON obras (expira_em)
       WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND match_usuario_id IS NULL
-        AND (marco_6h_em IS NULL OR marco_60_em IS NULL OR marco_30_em IS NULL OR marco_15_em IS NULL)
+        AND (marco_1_em IS NULL OR marco_2_em IS NULL OR marco_3_em IS NULL)
     `)
     await client.query(`
       CREATE INDEX IF NOT EXISTS reparos_marcos_pendentes_idx ON reparos (expira_em)
       WHERE status = 'aberta' AND match_usuario_id IS NULL
-        AND (marco_6h_em IS NULL OR marco_60_em IS NULL OR marco_30_em IS NULL OR marco_15_em IS NULL)
+        AND (marco_1_em IS NULL OR marco_2_em IS NULL OR marco_3_em IS NULL)
     `)
+    // As 4 colunas antigas de marco (marco_6h/60/30/15_em) NÃO são derrubadas aqui — padrão
+    // expand/contract. O deploy do Railway é overlapping (sem railway.json → health-check default):
+    // o container ANTIGO ainda roda o job de 1min e o /estender antigos durante a janela de overlap;
+    // se derrubássemos as colunas agora, esse código antigo bateria em coluna inexistente (job:
+    // erro engolido pelo try/catch, mas alertas perdidos; /estender: 500 pro usuário). As colunas
+    // ficam órfãs mas inofensivas (o job novo e o /estender novo só usam marco_1/2/3_em).
+    //
+    // DEFERRED (4b): DROP COLUMN marco_6h/60/30/15_em on obras+reparos + drop old index — only after
+    // the new milestone job is confirmed clean in prod and the previous container is gone;
+    // unconditionally safe then because no running code will reference these columns.
     // Índice parcial do cronômetro de obras (job de 1min): coluna líder expira_em para o range
     // scan de matches prestes a expirar. Predicado TIME-FREE (só status e match_usuario_id, ambos
     // imutáveis) — Postgres proíbe NOW()/CURRENT_TIMESTAMP em índice parcial; o filtro temporal
@@ -184,23 +186,10 @@ const migracaoPronta = (async () => {
       CREATE INDEX IF NOT EXISTS obras_matches_pendentes_idx ON obras (expira_em)
       WHERE status = 'aberta' AND match_usuario_id IS NOT NULL
     `)
-    // Backfill anti-rajada: para demandas JÁ 'aberta' no deploy, marca como enviado todo marco
-    // cujo limiar já passou (expira_em já dentro/além do limiar), para o 1º run do job de 1min
-    // não disparar uma rajada de alertas atrasados. Idempotente (WHERE marco_X_em IS NULL →
-    // no-op em reboots) e NULL-safe (expira_em NULL não casa: NULL <= ... resulta NULL). O 6h
-    // respeita o gate de janela > 12h, então demanda de janela curta mantém marco_6h_em NULL.
-    // Gate de push_token (EXISTS): só marca como enviado se o dono TEM token entregável (não-null
-    // E não-vazio). Sem isso, o backfill queimaria o marco de um dono sem token — o alerta jamais
-    // seria entregue nem re-tentado. Deixando NULL, o job dispara numa tick futura quando o dono
-    // ganhar token E ainda estiver na banda daquele marco. Mesma condição do claim do job.
-    await client.query(`UPDATE obras SET marco_6h_em = NOW() WHERE marco_6h_em IS NULL AND status = 'aberta' AND COALESCE(horas_para_expirar, 720) > 12 AND expira_em <= NOW() + INTERVAL '6 hours' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = obras.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
-    await client.query(`UPDATE obras SET marco_60_em = NOW() WHERE marco_60_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '60 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = obras.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
-    await client.query(`UPDATE obras SET marco_30_em = NOW() WHERE marco_30_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '30 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = obras.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
-    await client.query(`UPDATE obras SET marco_15_em = NOW() WHERE marco_15_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '15 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = obras.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
-    await client.query(`UPDATE reparos SET marco_6h_em = NOW() WHERE marco_6h_em IS NULL AND status = 'aberta' AND prazo_atendimento_horas > 12 AND expira_em <= NOW() + INTERVAL '6 hours' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = reparos.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
-    await client.query(`UPDATE reparos SET marco_60_em = NOW() WHERE marco_60_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '60 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = reparos.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
-    await client.query(`UPDATE reparos SET marco_30_em = NOW() WHERE marco_30_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '30 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = reparos.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
-    await client.query(`UPDATE reparos SET marco_15_em = NOW() WHERE marco_15_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '15 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = reparos.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
+    // Sem backfill anti-rajada: as bandas disjuntas do job garantem no máximo UM marco por run
+    // (a demanda cai em uma banda só), então o 1º run pós-deploy não gera rajada — cada demanda
+    // dispara no máximo o marco da banda em que está agora. (O backfill antigo, que marcava os
+    // marcos fixos já passados, saiu junto com as colunas antigas.)
     // "Esta semana" passou de 72h para 168h (7 dias). Reclassifica as demandas legadas de faixa:
     // 72 → 168, apenas a coluna de janela (o rótulo da faixa para os marcos proporcionais futuros).
     // NÃO mexe em expira_em — as linhas mantêm o prazo atual que já foi calculado a partir de 72h;
@@ -1108,7 +1097,7 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
 
     const upd = await pool.query(
       `UPDATE obras SET expira_em = $1,
-         marco_6h_em = NULL, marco_60_em = NULL, marco_30_em = NULL, marco_15_em = NULL
+         marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
        WHERE id = $2 AND criado_por = $3 RETURNING expira_em`,
       [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id]
     )
@@ -1664,7 +1653,7 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
 
     const upd = await pool.query(
       `UPDATE reparos SET expira_em = $1,
-         marco_6h_em = NULL, marco_60_em = NULL, marco_30_em = NULL, marco_15_em = NULL
+         marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
        WHERE id = $2 AND criado_por = $3 RETURNING expira_em`,
       [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id]
     )

@@ -1,5 +1,6 @@
 const { pool } = require('../utils/supabase')
 const { Expo } = require('expo-server-sdk')
+const { getFaixa } = require('../utils/faixasPrazo')
 
 const expo = new Expo()
 
@@ -351,92 +352,100 @@ const verificarObrasComBaixoEngajamento = async () => {
   }
 }
 
-// Marcos fixos de expiração: alerta o dono de uma demanda SEM match e SEM interessados a 6h,
-// 60min, 30min e 15min de expira_em, cada um com deep-link para a tela de detalhe (onde fica o
-// botão de estender). Substitui os dois jobs single-shot "expirando sem interessados".
+// Marcos de expiração PROPORCIONAIS à faixa de prazo da demanda (ver src/utils/faixasPrazo.js).
+// Alerta o dono de uma demanda SEM match e SEM interessados em 3 marcos cujos offsets VARIAM por
+// faixa: ex. faixa 1h → [15,10,5] min antes de expira_em; faixa 168h → [1 dia, 8h, 4h]. Cada push
+// tem deep-link para a tela de detalhe (onde fica o botão de estender).
 //
-// Bandas ancoradas em expira_em (tempo restante), semi-abertas e DISJUNTAS — (inferior, superior]:
-//   marco_15: (NOW,        NOW+15min]
-//   marco_30: (NOW+15min,  NOW+30min]
-//   marco_60: (NOW+30min,  NOW+60min]
-//   marco_6h: (NOW+60min,  NOW+6h]   — só quando a janela ORIGINAL > 12h
-// Como as bandas não se sobrepõem, a demanda cai em no máximo uma por run → no máximo um push por
-// marco (reforçado pelo claim marco_X_em IS NULL). Uma demanda cuja vida inteira é < 15min só
-// entra na banda de 15 → recebe apenas o alerta de 15min (cobertura, não sequência). Deploy-
-// tolerante: bandas de 15..300min de largura absorvem minutos perdidos entre runs.
+// Bandas contíguas e DISJUNTAS a partir dos 3 offsets [m1>m2>m3]:
+//   marco_1: (m2, m1]   marco_2: (m3, m2]   marco_3: (0, m3]
+// Como não se sobrepõem, a demanda cai em no máximo uma banda por run → no máximo um push por marco
+// (reforçado pelo claim marco_N_em IS NULL). Demanda que só aparece já dentro da banda menor recebe
+// só aquele alerta (cobertura, não sequência). SEM backfill anti-rajada: as bandas disjuntas já
+// garantem no máximo um disparo por run, então o 1º run pós-deploy não gera rajada de alertas.
 //
-// Elegibilidade reaproveitada dos jobs aposentados: status='aberta', match_usuario_id IS NULL,
-// e o MESMO teste de interesse (obras: NOT EXISTS candidaturas; reparos: NOT EXISTS
-// interesse_reparos). Obras exigem status_aprovacao='aprovada' (reparos não, por decisão).
+// Elegibilidade: status='aberta', match_usuario_id IS NULL, sem interesse (obras: NOT EXISTS
+// candidaturas; reparos: NOT EXISTS interesse_reparos), dono com push_token entregável. Obras
+// exigem status_aprovacao='aprovada' (reparos não, por decisão).
 //
-// Claim-then-send: o UPDATE ... FROM usuarios ... WHERE marco_X_em IS NULL ... RETURNING reivindica
-// a linha no MESMO statement que a seleciona — replica-safe, sem duplo envio (a 2ª réplica vê
-// marco_X_em já preenchido e retorna 0 linhas). Empurra só para as linhas retornadas.
+// Claim-then-send replica-safe: o SELECT reúne candidatos; o UPDATE ... WHERE marco_N_em IS NULL
+// RETURNING reivindica a coluna atomicamente — a 2ª réplica vê a coluna já preenchida e retorna 0
+// linhas, então só uma envia o push. Faixa desconhecida (getFaixa null) → pula com log, sem crash.
+
+// Formata minutos em rótulo PT-BR curto: 5→"5 minutos", 60→"1 hora", 90→"1h30", 1440→"1 dia".
+const formatarTempoRestante = (min) => {
+  if (min >= 1440) { const d = Math.round(min / 1440); return d === 1 ? '1 dia' : `${d} dias` }
+  if (min >= 60) {
+    const h = Math.floor(min / 60), m = min % 60
+    if (m === 0) return h === 1 ? '1 hora' : `${h} horas`
+    return `${h}h${String(m).padStart(2, '0')}`
+  }
+  return `${min} minutos`
+}
+
 const verificarMarcosExpiracao = async () => {
   const lados = [
-    {
-      tabela: 'obras',
-      idKey: 'obra_id',
-      janelaCol: 'horas_para_expirar',
-      statusAprovacao: `AND d.status_aprovacao = 'aprovada'`,
-      interesse: `SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id`,
-      marcos: [
-        { col: 'marco_6h_em', sup: '6 hours',    inf: '60 minutes', mMin: 360, tipo: 'obra_expirando_6h', titulo: '⏰ Sua obra expira em 6 horas',    corpo: t => `Sua obra '${t}' expira em 6 horas e ainda não tem interessados. Estenda o prazo para continuar recebendo candidatos.` },
-        { col: 'marco_60_em', sup: '60 minutes', inf: '30 minutes', mMin: 60,  tipo: 'obra_expirando_60', titulo: '⏰ Sua obra expira em 1 hora',     corpo: t => `Sua obra '${t}' expira em 1 hora e ainda não tem interessados. Estenda o prazo.` },
-        { col: 'marco_30_em', sup: '30 minutes', inf: '15 minutes', mMin: 30,  tipo: 'obra_expirando_30', titulo: '⏰ Sua obra expira em 30 minutos', corpo: t => `Sua obra '${t}' expira em 30 minutos e ainda não tem interessados. Estenda o prazo.` },
-        { col: 'marco_15_em', sup: '15 minutes', inf: '0 minutes',  mMin: 15,  tipo: 'obra_expirando_15', titulo: '⏰ Sua obra expira em 15 minutos', corpo: t => `Última chance: sua obra '${t}' expira em 15 minutos sem interessados. Estenda o prazo agora.` },
-      ],
-    },
-    {
-      tabela: 'reparos',
-      idKey: 'reparo_id',
-      janelaCol: 'prazo_atendimento_horas',
-      statusAprovacao: '',
-      interesse: `SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = d.id`,
-      marcos: [
-        { col: 'marco_6h_em', sup: '6 hours',    inf: '60 minutes', mMin: 360, tipo: 'reparo_expirando_6h', titulo: '⏰ Seu reparo expira em 6 horas',    corpo: t => `Seu reparo '${t}' expira em 6 horas e ainda não tem interessados. Aumente o prazo para continuar recebendo profissionais.` },
-        { col: 'marco_60_em', sup: '60 minutes', inf: '30 minutes', mMin: 60,  tipo: 'reparo_expirando_60', titulo: '⏰ Seu reparo expira em 1 hora',     corpo: t => `Seu reparo '${t}' expira em 1 hora e ainda não tem interessados. Aumente o prazo.` },
-        { col: 'marco_30_em', sup: '30 minutes', inf: '15 minutes', mMin: 30,  tipo: 'reparo_expirando_30', titulo: '⏰ Seu reparo expira em 30 minutos', corpo: t => `Seu reparo '${t}' expira em 30 minutos e ainda não tem interessados. Aumente o prazo.` },
-        { col: 'marco_15_em', sup: '15 minutes', inf: '0 minutes',  mMin: 15,  tipo: 'reparo_expirando_15', titulo: '⏰ Última chance para seu reparo',   corpo: t => `Seu reparo '${t}' expira em 15 minutos sem interessados. Aumente o prazo agora.` },
-      ],
-    },
+    { tabela: 'obras',   idKey: 'obra_id',   janelaCol: 'horas_para_expirar',      substantivo: 'Sua obra',   verbo: 'Estenda o prazo',
+      tipoPrefixo: 'obra_expirando',   statusAprovacao: `AND d.status_aprovacao = 'aprovada'`, interesse: `SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id` },
+    { tabela: 'reparos', idKey: 'reparo_id', janelaCol: 'prazo_atendimento_horas', substantivo: 'Seu reparo', verbo: 'Aumente o prazo',
+      tipoPrefixo: 'reparo_expirando', statusAprovacao: '',                          interesse: `SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = d.id` },
   ]
 
   let totalEnviados = 0
   try {
     for (const lado of lados) {
-      for (const marco of lado.marcos) {
-        // Gate de janela ORIGINAL uniforme: o marco M só dispara se a janela original da demanda
-        // (janelaCol em horas × 60) for MAIOR que M em minutos — um alerta "faltam 60min" nunca
-        // chega a quem nunca teve 60min. Substitui o antigo gate especial de 6h (>12h), agora só
-        // o caso M=360. Fronteira estrita (>): janela == M não dispara M (ex.: 1h não dispara o 60).
-        const gate = `AND d.${lado.janelaCol} * 60 > ${marco.mMin}`
-        const claim = await pool.query(`
-          UPDATE ${lado.tabela} d
-          SET ${marco.col} = NOW()
-          FROM usuarios u
-          WHERE d.criado_por = u.id
-            AND d.status = 'aberta'
-            ${lado.statusAprovacao}
-            AND d.match_usuario_id IS NULL
-            AND u.push_token IS NOT NULL AND u.push_token <> ''
-            AND NOT EXISTS (${lado.interesse})
-            AND d.${marco.col} IS NULL
-            AND d.expira_em <= NOW() + INTERVAL '${marco.sup}'
-            AND d.expira_em >  NOW() + INTERVAL '${marco.inf}'
-            ${gate}
-          RETURNING d.id, d.titulo, u.push_token
-        `)
+      // Candidatos elegíveis com algum marco pendente e expira_em dentro do MAIOR offset possível
+      // (1440min = 24h, faixa 168) — demandas mais distantes que isso não entram em banda nenhuma.
+      const candidatos = await pool.query(`
+        SELECT d.id, d.titulo, d.${lado.janelaCol} AS janela, d.expira_em,
+               d.marco_1_em, d.marco_2_em, d.marco_3_em, u.push_token
+        FROM ${lado.tabela} d
+        JOIN usuarios u ON d.criado_por = u.id
+        WHERE d.status = 'aberta'
+          ${lado.statusAprovacao}
+          AND d.match_usuario_id IS NULL
+          AND u.push_token IS NOT NULL AND u.push_token <> ''
+          AND NOT EXISTS (${lado.interesse})
+          AND (d.marco_1_em IS NULL OR d.marco_2_em IS NULL OR d.marco_3_em IS NULL)
+          AND d.expira_em > NOW()
+          AND d.expira_em <= NOW() + INTERVAL '1440 minutes'
+      `)
 
-        for (const row of claim.rows) {
-          await enviarPushEmLote(
-            [{ push_token: row.push_token }],
-            marco.titulo,
-            marco.corpo(row.titulo),
-            { tipo: marco.tipo, [lado.idKey]: row.id }
-          )
-          totalEnviados++
+      for (const d of candidatos.rows) {
+        const faixa = getFaixa(Math.round(Number(d.janela)))
+        if (!faixa) {
+          console.warn(`[MarcosExpiracao] faixa desconhecida (janela=${d.janela}) — ${lado.tabela} ${d.id} ignorado`)
+          continue
         }
+        const [m1, m2, m3] = faixa.milestones
+        const restante = (new Date(d.expira_em).getTime() - Date.now()) / 60000
+
+        // Banda disjunta — no máximo um marco por run.
+        let alvo = null
+        if      (d.marco_1_em === null && restante <= m1 && restante > m2) alvo = { n: 1, col: 'marco_1_em', offset: m1 }
+        else if (d.marco_2_em === null && restante <= m2 && restante > m3) alvo = { n: 2, col: 'marco_2_em', offset: m2 }
+        else if (d.marco_3_em === null && restante <= m3 && restante > 0)  alvo = { n: 3, col: 'marco_3_em', offset: m3 }
+        if (!alvo) continue
+
+        // Claim-then-send: reivindica a coluna no mesmo UPDATE (replica-safe).
+        const claim = await pool.query(
+          `UPDATE ${lado.tabela} SET ${alvo.col} = NOW() WHERE id = $1 AND ${alvo.col} IS NULL RETURNING id`,
+          [d.id]
+        )
+        if (claim.rows.length === 0) continue
+
+        const label = formatarTempoRestante(alvo.offset)
+        const titulo = `⏰ ${lado.substantivo} está expirando`
+        const corpo = alvo.n === 3
+          ? `Última chance: ${lado.substantivo.toLowerCase()} '${d.titulo}' expira em menos de ${label} e ainda não tem interessados. ${lado.verbo} agora.`
+          : `${lado.substantivo} '${d.titulo}' expira em menos de ${label} e ainda não tem interessados. ${lado.verbo}.`
+        await enviarPushEmLote(
+          [{ push_token: d.push_token }],
+          titulo,
+          corpo,
+          { tipo: `${lado.tipoPrefixo}_${alvo.n}`, [lado.idKey]: d.id }
+        )
+        totalEnviados++
       }
     }
     console.log(`[MarcosExpiracao] ${totalEnviados} alerta(s) de expiração enviado(s)`)
