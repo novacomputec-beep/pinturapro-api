@@ -191,6 +191,14 @@ const migracaoPronta = (async () => {
     await client.query(`UPDATE reparos SET marco_60_em = NOW() WHERE marco_60_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '60 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = reparos.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
     await client.query(`UPDATE reparos SET marco_30_em = NOW() WHERE marco_30_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '30 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = reparos.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
     await client.query(`UPDATE reparos SET marco_15_em = NOW() WHERE marco_15_em IS NULL AND status = 'aberta' AND expira_em <= NOW() + INTERVAL '15 minutes' AND EXISTS (SELECT 1 FROM usuarios u WHERE u.id = reparos.criado_por AND u.push_token IS NOT NULL AND u.push_token <> '')`)
+    // "Esta semana" passou de 72h para 168h (7 dias). Reclassifica as demandas legadas de faixa:
+    // 72 → 168, apenas a coluna de janela (o rótulo da faixa para os marcos proporcionais futuros).
+    // NÃO mexe em expira_em — as linhas mantêm o prazo atual que já foi calculado a partir de 72h;
+    // recalcular empurraria deadlines ao vivo. Idempotente: após rodar, nenhuma linha tem 72, então
+    // re-executar a cada boot é no-op. Update de valor simples, sem risco de constraint (não lança).
+    // Obras hoje não têm nenhuma linha 72 → no-op inofensivo, mantido por simetria com reparos.
+    await client.query(`UPDATE reparos SET prazo_atendimento_horas = 168 WHERE prazo_atendimento_horas = 72`)
+    await client.query(`UPDATE obras   SET horas_para_expirar      = 168 WHERE horas_para_expirar      = 72`)
     // Backfill one-time de encerrado_em para linhas já encerradas antes da coluna existir.
     // Usa match_feito_em como melhor aproximação, caindo para criado_em quando o item foi
     // encerrado sem nunca ter match. Idempotente via WHERE encerrado_em IS NULL.
