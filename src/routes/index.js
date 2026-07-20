@@ -148,6 +148,16 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_60_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_30_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_15_em TIMESTAMPTZ`)
+    // Marcos genéricos (1º/2º/3º) — os offsets variam por faixa de prazo (ver faixasPrazo.js), então
+    // as colunas guardam só "qual marco já foi enviado", com o tempo definido pela faixa em código.
+    // Passo 3/6: colunas ADICIONADAS mas INERTES — nada lê/escreve ainda. O job, os índices parciais
+    // e o estender continuam nos marco_6h/60/30/15_em antigos até o passo 4 fazer o swap atômico.
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_1_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_2_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS marco_3_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_1_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_2_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_3_em TIMESTAMPTZ`)
     // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o job filtra
     // sempre expira_em numa faixa de minutos à frente de NOW(), então o range scan lê só as
     // demandas prestes a expirar — NÃO o backlog de demandas expiradas que permanecem 'aberta'
