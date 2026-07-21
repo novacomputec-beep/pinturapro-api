@@ -83,12 +83,19 @@ app.use((err, req, res, next) => {
 
 const RAIO_KM              = 5
 const RAIO_GRAUS           = RAIO_KM / 111
-const COOLDOWN_PROXIMIDADE = 4 * 60 * 60 * 1000   // 4 hours per prestador+job pair
-const notificacoesEnviadas = new Map()
+// Cooldown de proximidade (4h por par prestador+demanda) agora é DURÁVEL e replica-safe:
+// tabela proximidade_notificacoes + claim atômico. A janela de 4h vive no INTERVAL do SQL.
 
 const verificarPrestadoresProximos = async () => {
-  const agora = Date.now()
   try {
+    // Higiene: o claim só olha linhas < 4h; remove o que passou de 1 dia para a tabela ficar
+    // pequena. Falha aqui nunca aborta o run (try/catch isolado).
+    try {
+      await pool.query(`DELETE FROM proximidade_notificacoes WHERE notificado_em < NOW() - INTERVAL '1 day'`)
+    } catch (e) {
+      console.error('[Proximidade] limpeza de cooldown falhou (ignorado):', e.message)
+    }
+
     // ── REPAROS → prestadores ───────────────────────────────────────────────
     const reparos = await pool.query(`
       SELECT id, titulo, latitude, longitude, prestadores_bloqueados
@@ -125,10 +132,18 @@ const verificarPrestadoresProximos = async () => {
         const dLon = distLon * 111 * Math.cos(prestador.latitude * Math.PI / 180)
         const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
         if (distanciaKm > RAIO_KM) continue
-        const chave = `${prestador.usuario_id}_reparo_${reparo.id}`
-        const ultimaEnviada = notificacoesEnviadas.get(chave)
-        if (ultimaEnviada && agora - ultimaEnviada < COOLDOWN_PROXIMIDADE) continue
-        notificacoesEnviadas.set(chave, agora)
+        // Claim atômico do cooldown de 4h (replica-safe): concede (RETURNING) só se não houve
+        // notificação nas últimas 4h para este par. Sem linha retornada → pula o push.
+        const claim = await pool.query(
+          `INSERT INTO proximidade_notificacoes (prestador_id, demanda_tipo, demanda_id, notificado_em)
+           VALUES ($1, 'reparo', $2, NOW())
+           ON CONFLICT (prestador_id, demanda_tipo, demanda_id)
+           DO UPDATE SET notificado_em = NOW()
+             WHERE proximidade_notificacoes.notificado_em <= NOW() - INTERVAL '4 hours'
+           RETURNING prestador_id`,
+          [prestador.usuario_id, reparo.id]
+        )
+        if (claim.rowCount === 0) continue
         const dist = distanciaKm < 1
           ? `${Math.round(distanciaKm * 1000)}m`
           : `${distanciaKm.toFixed(1)}km`
@@ -175,10 +190,18 @@ const verificarPrestadoresProximos = async () => {
         const dLon = distLon * 111 * Math.cos(pintor.latitude * Math.PI / 180)
         const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
         if (distanciaKm > RAIO_KM) continue
-        const chave = `${pintor.usuario_id}_obra_${obra.id}`
-        const ultimaEnviada = notificacoesEnviadas.get(chave)
-        if (ultimaEnviada && agora - ultimaEnviada < COOLDOWN_PROXIMIDADE) continue
-        notificacoesEnviadas.set(chave, agora)
+        // Claim atômico do cooldown de 4h (replica-safe): concede (RETURNING) só se não houve
+        // notificação nas últimas 4h para este par. Sem linha retornada → pula o push.
+        const claim = await pool.query(
+          `INSERT INTO proximidade_notificacoes (prestador_id, demanda_tipo, demanda_id, notificado_em)
+           VALUES ($1, 'obra', $2, NOW())
+           ON CONFLICT (prestador_id, demanda_tipo, demanda_id)
+           DO UPDATE SET notificado_em = NOW()
+             WHERE proximidade_notificacoes.notificado_em <= NOW() - INTERVAL '4 hours'
+           RETURNING prestador_id`,
+          [pintor.usuario_id, obra.id]
+        )
+        if (claim.rowCount === 0) continue
         const dist = distanciaKm < 1
           ? `${Math.round(distanciaKm * 1000)}m`
           : `${distanciaKm.toFixed(1)}km`

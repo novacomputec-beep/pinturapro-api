@@ -407,6 +407,19 @@ const migracaoPronta = (async () => {
       )
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS feed_visualizacoes_usuario_notif_idx ON feed_visualizacoes (usuario_id, notificado)`)
+    // Cooldown DURÁVEL do cron de proximidade (verificarPrestadoresProximos). Substitui o Map em
+    // memória (perdido a cada deploy, não compartilhado entre réplicas). Uma linha por par
+    // (prestador, demanda); o claim atômico (INSERT ... ON CONFLICT DO UPDATE ... WHERE) só concede
+    // se não houve notificação nas últimas 4h. PK cobre o conflito e o lookup — sem índice extra.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS proximidade_notificacoes (
+        prestador_id  UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        demanda_tipo  TEXT NOT NULL CHECK (demanda_tipo IN ('reparo','obra')),
+        demanda_id    UUID NOT NULL,
+        notificado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (prestador_id, demanda_tipo, demanda_id)
+      )
+    `)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
