@@ -116,7 +116,7 @@ const cadastrar = async (req, res) => {
         verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador, cep, latitude, longitude,
         logradouro, numero, complemento, bairro)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
-       RETURNING id, nome, email, role, tipo_dono, tipo_prestador, foto_url`,
+       RETURNING id, nome, email, telefone, cidade, role, tipo_dono, tipo_prestador, foto_url`,
       [nome.trim(), emailNormalizado, telefone, senha_hash, cidade, uf || null,
        especialidades || [], anos_experiencia || 0,
        tamanho_equipe || 1, cpf_cnpj, role,
@@ -234,7 +234,7 @@ const login = async (req, res) => {
     const emailNormalizado = email.toLowerCase().trim()
 
     const result = await pool.query(
-      'SELECT id, nome, email, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida FROM usuarios WHERE email = $1',
+      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida FROM usuarios WHERE email = $1',
       [emailNormalizado]
     )
 
@@ -284,6 +284,8 @@ const login = async (req, res) => {
         id: usuario.id,
         nome: usuario.nome,
         email: usuario.email,
+        telefone: usuario.telefone || null,
+        cidade: usuario.cidade || null,
         role: usuario.role,
         foto_url: usuario.foto_url || null,
         tipo_dono: usuario.tipo_dono || null,
@@ -327,7 +329,7 @@ const atualizarPerfil = async (req, res) => {
     }
 
     const result = await pool.query(
-      'UPDATE usuarios SET nome=$1, telefone=$2, cidade=$3 WHERE id=$4 RETURNING id, nome, email, cidade, foto_url',
+      'UPDATE usuarios SET nome=$1, telefone=$2, cidade=$3 WHERE id=$4 RETURNING id, nome, email, telefone, cidade, foto_url',
       [nome.trim(), telefone, cidade, req.usuario.id]
     )
     res.json(result.rows[0])
