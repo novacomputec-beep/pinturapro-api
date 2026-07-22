@@ -440,7 +440,7 @@ const iniciarAgendador = () => {
 
 rotasApp.migracaoPronta
   .then(() => {
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`
 ╔══════════════════════════════════════╗
 ║   PinturaPro API — v1.0.0            ║
@@ -450,6 +450,19 @@ rotasApp.migracaoPronta
       console.log('[PagBank] token:', process.env.PAGBANK_TOKEN ? 'configurado' : 'AUSENTE', '| env:', process.env.PAGBANK_ENV || 'production')
       iniciarAgendador()
     })
+
+    // Keep-alive: o default do Node é 5s, curto demais para um proxy à frente (o edge da
+    // Railway mantém a conexão upstream por bem mais que isso). Com 5s, o proxy pode
+    // escrever numa conexão que o Node acabou de fechar e a requisição morre como 502 —
+    // sem nunca virar log de aplicação.
+    //
+    // A ORDEM DOS DOIS VALORES É OBRIGATÓRIA: headersTimeout > keepAliveTimeout. O default
+    // de headersTimeout no Node 18 é 60000, MENOR que os 65000 abaixo — deixá-lo como está
+    // faria o Node abortar conexões no meio da requisição. Se um dia mexer em um, mexa nos
+    // dois. NÃO mexer em requestTimeout: os 300s do default são o que permite os uploads
+    // grandes (express.json/urlencoded aceitam 100mb).
+    server.keepAliveTimeout = 65000
+    server.headersTimeout   = 70000
   })
   .catch((err) => {
     console.error('Falha na migração de boot — servidor não iniciado:', err)
