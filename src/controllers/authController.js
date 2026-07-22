@@ -322,15 +322,25 @@ const perfil = async (req, res) => {
 
 const atualizarPerfil = async (req, res) => {
   try {
-    const { nome, telefone, cidade } = req.body
+    const { nome, telefone, cidade, uf } = req.body
 
     if (!nome || !nome.trim()) {
       return res.status(400).json({ erro: 'Nome é obrigatório' })
     }
 
+    // cidade/uf são não-destrutivos: só sobrescrevem quando vem valor não-vazio.
+    // Antes o UPDATE gravava cidade incondicionalmente, então salvar o perfil com o
+    // campo em branco (a tela valida só o nome) APAGAVA a cidade do usuário — e cidade
+    // vazia degrada o feed inteiro (o filtro geográfico não resolve e a busca perde o
+    // recorte). NULLIF(btrim($n), '') transforma ausente/em branco em NULL e o COALESCE
+    // mantém o valor já gravado.
     const result = await pool.query(
-      'UPDATE usuarios SET nome=$1, telefone=$2, cidade=$3 WHERE id=$4 RETURNING id, nome, email, telefone, cidade, foto_url',
-      [nome.trim(), telefone, cidade, req.usuario.id]
+      `UPDATE usuarios SET nome = $1, telefone = $2,
+              cidade = COALESCE(NULLIF(btrim($3), ''), cidade),
+              uf     = COALESCE(NULLIF(btrim($4), ''), uf)
+        WHERE id = $5
+        RETURNING id, nome, email, telefone, cidade, uf, foto_url`,
+      [nome.trim(), telefone, cidade || '', uf || '', req.usuario.id]
     )
     res.json(result.rows[0])
   } catch (err) {
