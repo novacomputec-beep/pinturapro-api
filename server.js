@@ -86,6 +86,23 @@ const RAIO_GRAUS           = RAIO_KM / 111
 // Cooldown de proximidade (4h por par prestador+demanda) agora é DURÁVEL e replica-safe:
 // tabela proximidade_notificacoes + claim atômico. A janela de 4h vive no INTERVAL do SQL.
 
+// Corpo do push de proximidade. Quando a coordenada da demanda veio do CENTRO DO MUNICÍPIO
+// (coordenadas_origem = 'centro_cidade'), a distância calculada é precisão de CIDADE fingindo
+// ser precisão de RUA: dizer "a apenas 800m de você" seria uma invenção confiante. Nesses
+// casos citamos a cidade e omitimos a distância. O raio de 5km continua valendo — o que muda
+// é só o texto. Origem 'cliente' ou NULL (linha legada) mantém a frase de hoje, byte a byte.
+const textoProximidade = (rotulo, titulo, cidade, origem, distanciaKm) => {
+  if (origem === 'centro_cidade') {
+    return cidade
+      ? `Há ${rotulo} "${titulo}" em ${cidade}!`
+      : `Há ${rotulo} "${titulo}" perto de você!`
+  }
+  const dist = distanciaKm < 1
+    ? `${Math.round(distanciaKm * 1000)}m`
+    : `${distanciaKm.toFixed(1)}km`
+  return `Há ${rotulo} "${titulo}" a apenas ${dist} de você!`
+}
+
 const verificarPrestadoresProximos = async () => {
   try {
     // Higiene: o claim só olha linhas < 4h; remove o que passou de 1 dia para a tabela ficar
@@ -98,7 +115,7 @@ const verificarPrestadoresProximos = async () => {
 
     // ── REPAROS → prestadores ───────────────────────────────────────────────
     const reparos = await pool.query(`
-      SELECT id, titulo, latitude, longitude, prestadores_bloqueados
+      SELECT id, titulo, cidade, coordenadas_origem, latitude, longitude, prestadores_bloqueados
       FROM reparos
       WHERE status = 'aberta'
         AND status_aprovacao = 'aprovada'
@@ -144,13 +161,10 @@ const verificarPrestadoresProximos = async () => {
           [prestador.usuario_id, reparo.id]
         )
         if (claim.rowCount === 0) continue
-        const dist = distanciaKm < 1
-          ? `${Math.round(distanciaKm * 1000)}m`
-          : `${distanciaKm.toFixed(1)}km`
         await enviarPushNotificacao(
           prestador.push_token,
           '📍 Serviço próximo a você!',
-          `Há um reparo "${reparo.titulo}" a apenas ${dist} de você!`,
+          textoProximidade('um reparo', reparo.titulo, reparo.cidade, reparo.coordenadas_origem, distanciaKm),
           { tipo: 'reparo_proximo', reparo_id: reparo.id }
         ).catch(err => console.error('Erro push proximidade reparo:', err))
         notifReparos++
@@ -159,7 +173,7 @@ const verificarPrestadoresProximos = async () => {
 
     // ── OBRAS → assinantes (pintores) ───────────────────────────────────────
     const obras = await pool.query(`
-      SELECT id, titulo, latitude, longitude
+      SELECT id, titulo, cidade, coordenadas_origem, latitude, longitude
       FROM obras
       WHERE status = 'aberta'
         AND status_aprovacao = 'aprovada'
@@ -202,13 +216,10 @@ const verificarPrestadoresProximos = async () => {
           [pintor.usuario_id, obra.id]
         )
         if (claim.rowCount === 0) continue
-        const dist = distanciaKm < 1
-          ? `${Math.round(distanciaKm * 1000)}m`
-          : `${distanciaKm.toFixed(1)}km`
         await enviarPushNotificacao(
           pintor.push_token,
           '🎨 Obra próxima a você!',
-          `Há uma obra "${obra.titulo}" a apenas ${dist} de você!`,
+          textoProximidade('uma obra', obra.titulo, obra.cidade, obra.coordenadas_origem, distanciaKm),
           { tipo: 'obra_proxima', obra_id: obra.id }
         ).catch(err => console.error('Erro push proximidade obra:', err))
         notifObras++
