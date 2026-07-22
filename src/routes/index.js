@@ -14,6 +14,7 @@ const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = requi
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
+const { coordsDeCidade } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const { enviarEmail } = require('../services/emailService')
 const bcrypt = require('bcrypt')
@@ -53,6 +54,12 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS endereco_obra TEXT`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS latitude NUMERIC`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS longitude NUMERIC`)
+    // Procedência da coordenada: 'cliente' = veio do app (endereço exato, precisão de rua);
+    // 'centro_cidade' = derivada da sede do município (precisão de cidade). NULL = linha
+    // legada, origem desconhecida — o app deve tratar NULL como 'cliente' (comportamento de
+    // hoje), por isso NÃO há backfill de origem para linhas antigas que já tinham coordenada.
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS coordenadas_origem TEXT`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS coordenadas_origem TEXT`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_status VARCHAR(50) DEFAULT 'nao_solicitada'`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_doc_frente_url TEXT`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_doc_verso_url TEXT`)
@@ -271,6 +278,54 @@ const migracaoPronta = (async () => {
     // inequívocas (todas em MG). Idempotente via WHERE uf IS NULL.
     await client.query(`UPDATE obras   SET uf = 'MG' WHERE uf IS NULL AND cidade = 'Patos de Minas'`)
     await client.query(`UPDATE reparos SET uf = 'MG' WHERE uf IS NULL AND cidade IN ('Patos de Minas', 'Formiga')`)
+    // Backfill de coordenadas — mesmo espírito do backfill de uf acima. Linhas antigas
+    // nasceram sem lat/lng porque o geocode do app é best-effort e falha em silêncio; sem
+    // coordenada a demanda fica invisível ao filtro por raio (exige latitude IS NOT NULL),
+    // ao cron de proximidade (server.js:107) e ao rótulo de distância do card. Preenche com
+    // o CENTRO do município e marca coordenadas_origem='centro_cidade'.
+    // Idempotente: WHERE latitude IS NULL AND longitude IS NULL → reexecução não casa nada.
+    // Não-destrutivo: só toca linhas SEM as duas coordenadas, então nunca sobrescreve uma
+    // coordenada real (ex.: o reparo de Ituiutaba, que já tem lat/lng corretas).
+    // Município não resolvido (nome ambíguo sem uf, grafia fora do IBGE) → registra e PULA.
+    for (const tabela of ['reparos', 'obras']) {
+      const grupos = await client.query(
+        `SELECT cidade, uf, COUNT(*)::int AS linhas
+           FROM ${tabela}
+          WHERE latitude IS NULL AND longitude IS NULL
+            AND cidade IS NOT NULL AND btrim(cidade) <> ''
+          GROUP BY cidade, uf`
+      )
+      let preenchidas = 0
+      const naoResolvidos = []
+      for (const g of grupos.rows) {
+        const centro = coordsDeCidade(g.cidade, g.uf)
+        if (!centro) {
+          naoResolvidos.push(`${g.cidade}/${g.uf || 'sem uf'} (${g.linhas} linha[s])`)
+          continue
+        }
+        const r = await client.query(
+          `UPDATE ${tabela}
+              SET latitude = $1, longitude = $2, coordenadas_origem = 'centro_cidade'
+            WHERE latitude IS NULL AND longitude IS NULL
+              AND cidade = $3 AND (uf = $4 OR (uf IS NULL AND $4 IS NULL))`,
+          [centro.lat, centro.lng, g.cidade, g.uf]
+        )
+        if (r.rowCount > 0) {
+          preenchidas += r.rowCount
+          console.log(`[migration][coords] ${tabela}: ${r.rowCount} linha(s) em ${g.cidade}/${centro.uf} -> ${centro.lat}, ${centro.lng}`)
+        }
+      }
+      // Meia-coordenada (só uma das duas colunas nula) é inútil para o raio, que exige as
+      // duas. Não é preenchida de propósito — sobrescrever a metade preenchida apagaria um
+      // dado real. Só reporta, para não sumir do radar.
+      const meias = await client.query(
+        `SELECT COUNT(*)::int AS n FROM ${tabela}
+          WHERE (latitude IS NULL) <> (longitude IS NULL)`
+      )
+      console.log(`[migration][coords] ${tabela}: ${preenchidas} linha(s) preenchida(s)` +
+        (naoResolvidos.length ? ` | municipio nao resolvido, PULADO: ${naoResolvidos.join(', ')}` : '') +
+        (meias.rows[0].n ? ` | ATENCAO ${meias.rows[0].n} linha(s) com apenas uma coordenada (nao tocadas)` : ''))
+    }
     // Backfill de tipo_prestador (fix de preço no checkout PagBank). Prestadores com
     // tipo_prestador NULL (linhas legadas/criadas fora do cadastro() — origem no painel-admin
     // ou insert manual) quebrariam o checkout novo, que exige 'reparador' ou 'pintor' e
@@ -420,6 +475,11 @@ const migracaoPronta = (async () => {
         PRIMARY KEY (prestador_id, demanda_tipo, demanda_id)
       )
     `)
+    // Contador de envios por par (prestador, demanda): o cron insiste a cada ~10 min e para
+    // no 3º aviso. DEFAULT 1 é o valor correto para as linhas que já existem — elas já
+    // receberam pelo menos um envio. NOT NULL + DEFAULT em PG 11+ não reescreve a tabela
+    // (o default fica no catálogo), então é barato mesmo com a tabela populada.
+    await client.query(`ALTER TABLE proximidade_notificacoes ADD COLUMN IF NOT EXISTS envios INT NOT NULL DEFAULT 1`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -492,6 +552,25 @@ const exigirTipoPrestador = (tipoEsperado, msg) => (req, res, next) => {
 // Verificar cada tier explicitamente (regra do projeto: um não replica o outro).
 const exigirPintor    = exigirTipoPrestador('pintor',    'Este recurso é exclusivo para prestadores de construção/pintura (obras).')
 const exigirReparador = exigirTipoPrestador('reparador', 'Este recurso é exclusivo para prestadores de reparos domésticos.')
+
+// Rede de segurança de coordenadas na criação — simétrica ao `uf || ufDeCidade(cidade)`.
+// O app geocodifica no cliente (ViaCEP -> Nominatim) e isso falha em silêncio: CEP sem
+// logradouro, Nominatim sem resultado ou fora do ar. Uma demanda sem lat/lng nasce invisível
+// ao filtro por raio, ao cron de proximidade e ao rótulo de distância — então o centro do
+// município é o PISO, nunca a preferência.
+//   cliente mandou as duas  -> usa as do cliente          (origem 'cliente',       rua)
+//   cliente omitiu          -> centro do município        (origem 'centro_cidade', cidade)
+//   município não resolvido -> NULL + aviso, MAS CRIA     (origem NULL)
+// Nunca rejeita a criação: perder uma demanda real é pior que uma coordenada imprecisa.
+const resolverCoordenadas = (cidade, uf, latitude, longitude, rotulo) => {
+  if (latitude !== undefined && latitude !== null && longitude !== undefined && longitude !== null) {
+    return { lat: latitude, lng: longitude, origem: 'cliente' }
+  }
+  const centro = coordsDeCidade(cidade, uf)
+  if (centro) return { lat: centro.lat, lng: centro.lng, origem: 'centro_cidade' }
+  console.warn(`${rotulo} sem coordenadas do cliente e municipio nao resolvido — criando sem lat/lng | cidade=${cidade} uf=${uf}`)
+  return { lat: null, lng: null, origem: null }
+}
 
 // ============================================================
 // STATS PÚBLICOS (sem auth)
@@ -929,6 +1008,7 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     }
     const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags, endereco_obra, latitude, longitude, client_request_id } = req.body
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
+    const { lat: latFinal, lng: lngFinal, origem: coordOrigem } = resolverCoordenadas(cidade, ufFinal, latitude, longitude, '[obras/dono]')
     // Janela original resolvida UMA vez: mesma base do expira_em e do horas_para_expirar gravado,
     // sem risco de os dois divergirem. publicado_em fica NULL — obra nasce 'rascunho', só publica
     // na aprovação. Validação do input segue DEFERIDA (não mexer nos creates).
@@ -937,12 +1017,12 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam a obra já criada em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, latitude, longitude, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'rascunho',true,'pendente',$16,$17)
+      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, latitude, longitude, coordenadas_origem, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'rascunho',true,'pendente',$17,$18)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, latitude, longitude, client_request_id || null, horasExpiracao]
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao]
     )
     res.status(201).json(result.rows[0])
   } catch (err) {
@@ -1588,17 +1668,18 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     }
     const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, latitude, longitude, client_request_id } = req.body
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
+    const { lat: latFinal, lng: lngFinal, origem: coordOrigem } = resolverCoordenadas(cidade, ufFinal, latitude, longitude, '[reparos/dono]')
     const horasExpiracao = prazo_atendimento_horas || 720
     const expira_em = new Date(Date.now() + horasExpiracao * 3600 * 1000)
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam o reparo já criado em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, latitude, longitude, client_request_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',$10,$11,$12,$13,$14,$15)
+      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, latitude, longitude, coordenadas_origem, client_request_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',$10,$11,$12,$13,$14,$15,$16)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null, endereco_obra, latitude, longitude, client_request_id || null]
+      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null, endereco_obra, latFinal, lngFinal, coordOrigem, client_request_id || null]
     )
     res.status(201).json(result.rows[0])
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))

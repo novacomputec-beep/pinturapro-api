@@ -83,22 +83,74 @@ app.use((err, req, res, next) => {
 
 const RAIO_KM              = 5
 const RAIO_GRAUS           = RAIO_KM / 111
-// Cooldown de proximidade (4h por par prestador+demanda) agora é DURÁVEL e replica-safe:
-// tabela proximidade_notificacoes + claim atômico. A janela de 4h vive no INTERVAL do SQL.
+// Cooldown de proximidade é DURÁVEL e replica-safe: tabela proximidade_notificacoes +
+// claim atômico (INSERT ... ON CONFLICT DO UPDATE ... WHERE).
+//
+// Regra: a demanda INSISTE a cada varredura (~10 min) e para no 3º aviso — ~20 min de
+// insistência por par (prestador, demanda), depois silêncio definitivo.
+//
+// PROXIMIDADE_COOLDOWN < INTERVALO_PROXIMIDADE de propósito. Com cooldown de 10 min e
+// varredura de 10 min, qualquer jitter (drift do setInterval, tempo até o par ser
+// alcançado dentro da varredura, latência do push) faria o "faltam 200ms" perder a janela
+// e empurrar o envio para a varredura seguinte — 3 avisos levariam 40-60 min em vez de 20.
+// 9 min dão ~60s de folga, que cobre a variação de posição do par dentro da varredura na
+// escala atual. Se uma varredura passar a demorar mais de ~1 min até o último par, revisar.
+const PROXIMIDADE_COOLDOWN   = '9 minutes'
+const PROXIMIDADE_MAX_ENVIOS = 3
+
+// Corpo do push de proximidade. Quando a coordenada da demanda veio do CENTRO DO MUNICÍPIO
+// (coordenadas_origem = 'centro_cidade'), a distância calculada é precisão de CIDADE fingindo
+// ser precisão de RUA: dizer "a apenas 800m de você" seria uma invenção confiante. Nesses
+// casos citamos a cidade e omitimos a distância. O raio de 5km continua valendo — o que muda
+// é só o texto. Origem 'cliente' ou NULL (linha legada) mantém a frase de hoje, byte a byte.
+const textoProximidade = (rotulo, titulo, cidade, origem, distanciaKm) => {
+  if (origem === 'centro_cidade') {
+    return cidade
+      ? `Há ${rotulo} "${titulo}" em ${cidade}!`
+      : `Há ${rotulo} "${titulo}" perto de você!`
+  }
+  const dist = distanciaKm < 1
+    ? `${Math.round(distanciaKm * 1000)}m`
+    : `${distanciaKm.toFixed(1)}km`
+  return `Há ${rotulo} "${titulo}" a apenas ${dist} de você!`
+}
 
 const verificarPrestadoresProximos = async () => {
   try {
-    // Higiene: o claim só olha linhas < 4h; remove o que passou de 1 dia para a tabela ficar
-    // pequena. Falha aqui nunca aborta o run (try/catch isolado).
+    // Higiene: a retenção é AMARRADA AO CICLO DE VIDA DA DEMANDA, não a um prazo fixo.
+    //
+    // Antes era "apaga o que passou de 1 dia". Com o teto de 3 envios isso viraria um bug
+    // sério: apagar a linha ZERA o contador, e o mesmo par voltaria a receber mais 3 avisos
+    // — todo dia, pelo resto da vida da demanda. Demandas vivem até 720h (30 dias) e ainda
+    // podem ser estendidas (/estender, até 2x), então NENHUM prazo fixo é seguro.
+    //
+    // A linha só é removida quando a demanda não pode mais notificar: expirada ou já
+    // deletada (demanda_id é polimórfico, sem FK — órfãs precisam ser varridas aqui).
+    // Sobrevive a match/unmatch e a extensões de prazo, que é o ponto.
+    //
+    // O corte absoluto de 90 dias é só uma rede de segurança contra crescimento sem limite
+    // (bem acima dos 60 dias de uma demanda estendida ao máximo).
+    // Falha aqui nunca aborta o run (try/catch isolado).
     try {
-      await pool.query(`DELETE FROM proximidade_notificacoes WHERE notificado_em < NOW() - INTERVAL '1 day'`)
+      await pool.query(`
+        DELETE FROM proximidade_notificacoes pn
+        WHERE pn.notificado_em < NOW() - INTERVAL '90 days'
+           OR (NOT EXISTS (
+                 SELECT 1 FROM reparos r
+                  WHERE pn.demanda_tipo = 'reparo' AND r.id = pn.demanda_id AND r.expira_em > NOW()
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM obras o
+                  WHERE pn.demanda_tipo = 'obra' AND o.id = pn.demanda_id AND o.expira_em > NOW()
+               ))
+      `)
     } catch (e) {
       console.error('[Proximidade] limpeza de cooldown falhou (ignorado):', e.message)
     }
 
     // ── REPAROS → prestadores ───────────────────────────────────────────────
     const reparos = await pool.query(`
-      SELECT id, titulo, latitude, longitude, prestadores_bloqueados
+      SELECT id, titulo, cidade, coordenadas_origem, latitude, longitude, prestadores_bloqueados
       FROM reparos
       WHERE status = 'aberta'
         AND status_aprovacao = 'aprovada'
@@ -132,25 +184,25 @@ const verificarPrestadoresProximos = async () => {
         const dLon = distLon * 111 * Math.cos(prestador.latitude * Math.PI / 180)
         const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
         if (distanciaKm > RAIO_KM) continue
-        // Claim atômico do cooldown de 4h (replica-safe): concede (RETURNING) só se não houve
-        // notificação nas últimas 4h para este par. Sem linha retornada → pula o push.
+        // Claim atômico (replica-safe): concede o envio (RETURNING) só se o último foi há
+        // pelo menos PROXIMIDADE_COOLDOWN E o par ainda não bateu PROXIMIDADE_MAX_ENVIOS.
+        // O contador é incrementado NA MESMA instrução. Sem linha retornada → pula o push.
         const claim = await pool.query(
-          `INSERT INTO proximidade_notificacoes (prestador_id, demanda_tipo, demanda_id, notificado_em)
-           VALUES ($1, 'reparo', $2, NOW())
+          `INSERT INTO proximidade_notificacoes (prestador_id, demanda_tipo, demanda_id, notificado_em, envios)
+           VALUES ($1, 'reparo', $2, NOW(), 1)
            ON CONFLICT (prestador_id, demanda_tipo, demanda_id)
-           DO UPDATE SET notificado_em = NOW()
-             WHERE proximidade_notificacoes.notificado_em <= NOW() - INTERVAL '4 hours'
-           RETURNING prestador_id`,
-          [prestador.usuario_id, reparo.id]
+           DO UPDATE SET notificado_em = NOW(),
+                         envios = proximidade_notificacoes.envios + 1
+             WHERE proximidade_notificacoes.notificado_em <= NOW() - $3::interval
+               AND proximidade_notificacoes.envios < $4
+           RETURNING envios`,
+          [prestador.usuario_id, reparo.id, PROXIMIDADE_COOLDOWN, PROXIMIDADE_MAX_ENVIOS]
         )
         if (claim.rowCount === 0) continue
-        const dist = distanciaKm < 1
-          ? `${Math.round(distanciaKm * 1000)}m`
-          : `${distanciaKm.toFixed(1)}km`
         await enviarPushNotificacao(
           prestador.push_token,
           '📍 Serviço próximo a você!',
-          `Há um reparo "${reparo.titulo}" a apenas ${dist} de você!`,
+          textoProximidade('um reparo', reparo.titulo, reparo.cidade, reparo.coordenadas_origem, distanciaKm),
           { tipo: 'reparo_proximo', reparo_id: reparo.id }
         ).catch(err => console.error('Erro push proximidade reparo:', err))
         notifReparos++
@@ -159,7 +211,7 @@ const verificarPrestadoresProximos = async () => {
 
     // ── OBRAS → assinantes (pintores) ───────────────────────────────────────
     const obras = await pool.query(`
-      SELECT id, titulo, latitude, longitude
+      SELECT id, titulo, cidade, coordenadas_origem, latitude, longitude
       FROM obras
       WHERE status = 'aberta'
         AND status_aprovacao = 'aprovada'
@@ -190,25 +242,25 @@ const verificarPrestadoresProximos = async () => {
         const dLon = distLon * 111 * Math.cos(pintor.latitude * Math.PI / 180)
         const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
         if (distanciaKm > RAIO_KM) continue
-        // Claim atômico do cooldown de 4h (replica-safe): concede (RETURNING) só se não houve
-        // notificação nas últimas 4h para este par. Sem linha retornada → pula o push.
+        // Claim atômico (replica-safe): concede o envio (RETURNING) só se o último foi há
+        // pelo menos PROXIMIDADE_COOLDOWN E o par ainda não bateu PROXIMIDADE_MAX_ENVIOS.
+        // O contador é incrementado NA MESMA instrução. Sem linha retornada → pula o push.
         const claim = await pool.query(
-          `INSERT INTO proximidade_notificacoes (prestador_id, demanda_tipo, demanda_id, notificado_em)
-           VALUES ($1, 'obra', $2, NOW())
+          `INSERT INTO proximidade_notificacoes (prestador_id, demanda_tipo, demanda_id, notificado_em, envios)
+           VALUES ($1, 'obra', $2, NOW(), 1)
            ON CONFLICT (prestador_id, demanda_tipo, demanda_id)
-           DO UPDATE SET notificado_em = NOW()
-             WHERE proximidade_notificacoes.notificado_em <= NOW() - INTERVAL '4 hours'
-           RETURNING prestador_id`,
-          [pintor.usuario_id, obra.id]
+           DO UPDATE SET notificado_em = NOW(),
+                         envios = proximidade_notificacoes.envios + 1
+             WHERE proximidade_notificacoes.notificado_em <= NOW() - $3::interval
+               AND proximidade_notificacoes.envios < $4
+           RETURNING envios`,
+          [pintor.usuario_id, obra.id, PROXIMIDADE_COOLDOWN, PROXIMIDADE_MAX_ENVIOS]
         )
         if (claim.rowCount === 0) continue
-        const dist = distanciaKm < 1
-          ? `${Math.round(distanciaKm * 1000)}m`
-          : `${distanciaKm.toFixed(1)}km`
         await enviarPushNotificacao(
           pintor.push_token,
           '🎨 Obra próxima a você!',
-          `Há uma obra "${obra.titulo}" a apenas ${dist} de você!`,
+          textoProximidade('uma obra', obra.titulo, obra.cidade, obra.coordenadas_origem, distanciaKm),
           { tipo: 'obra_proxima', obra_id: obra.id }
         ).catch(err => console.error('Erro push proximidade obra:', err))
         notifObras++
@@ -327,7 +379,7 @@ const notificarAssinaturasProximasVencimento = async () => {
 const iniciarAgendador = () => {
   const INTERVALO_ENGAJAMENTO  = 8 * 60 * 60 * 1000
   const INTERVALO_EXPIRACAO    = 60 * 60 * 1000
-  const INTERVALO_PROXIMIDADE  = 15 * 60 * 1000
+  const INTERVALO_PROXIMIDADE  = 10 * 60 * 1000
   const INTERVALO_CRONOMETRO   = 60 * 1000
 
   setTimeout(() => {
@@ -383,7 +435,7 @@ const iniciarAgendador = () => {
     }
   }, 10 * 60 * 1000)
 
-  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 15min | verificação timeout: 10min | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 24h')
+  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 10min | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 24h')
 }
 
 rotasApp.migracaoPronta
