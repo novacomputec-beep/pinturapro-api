@@ -475,6 +475,11 @@ const migracaoPronta = (async () => {
         PRIMARY KEY (prestador_id, demanda_tipo, demanda_id)
       )
     `)
+    // Contador de envios por par (prestador, demanda): o cron insiste a cada ~10 min e para
+    // no 3º aviso. DEFAULT 1 é o valor correto para as linhas que já existem — elas já
+    // receberam pelo menos um envio. NOT NULL + DEFAULT em PG 11+ não reescreve a tabela
+    // (o default fica no catálogo), então é barato mesmo com a tabela populada.
+    await client.query(`ALTER TABLE proximidade_notificacoes ADD COLUMN IF NOT EXISTS envios INT NOT NULL DEFAULT 1`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
