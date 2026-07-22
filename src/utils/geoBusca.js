@@ -185,4 +185,91 @@ const resolverBusca = async ({ cidade_busca, uf_busca, lat, lng, usuarioId }) =>
   return { escopo, ancora: { lat: null, lng: null, origem: null } }
 }
 
-module.exports = { coordsDeCidade, resolverBusca, MUNICIPIOS }
+// ─── Montagem do filtro geográfico (compartilhado por /reparos e /obras) ──────
+//
+// Os dois feeds eram cópias byte a byte um do outro e carregavam o MESMO defeito: quando
+// o guard não resolvia (`if (cidade)` / `if (raio && lat && lng)`), a cláusula simplesmente
+// não era anexada e a busca virava "o Brasil inteiro". Aqui isso é impossível por
+// construção: todo caminho termina em raio, cidade, uf ou 'nenhum' — e 'nenhum' devolve
+// lista vazia sem consultar, em vez de varrer a tabela para um usuário que não sabemos onde está.
+
+// Pertencimento textual. A uf entra como (uf = $n OR uf IS NULL): desempata homônimos
+// (Bonito/PE x Bonito/MS x Bonito/BA) sem esconder linhas legadas que ainda têm uf NULL —
+// exigir uf sem ressalva apagaria do feed justamente as linhas antigas.
+const clausulaCidade = (alias, escopo, params) => {
+  params.push(escopo.cidade)
+  const cidade = `${alias}.cidade = $${params.length}`
+  if (!escopo.uf) return cidade
+  params.push(escopo.uf)
+  return `(${cidade} AND (${alias}.uf = $${params.length} OR ${alias}.uf IS NULL))`
+}
+
+const clausulaUf = (alias, escopo, params) => {
+  params.push(escopo.uf)
+  return `${alias}.uf = $${params.length}`
+}
+
+// Bounding box (sargável, usa o índice btree (latitude, longitude)) + haversine exato.
+// Texto e ordem dos parâmetros preservados do original para não alterar plano nem resultado.
+const clausulaRaio = (alias, raio, ancora, params) => {
+  const KM_POR_GRAU = 111.045
+  const latNum = ancora.lat
+  const lngNum = ancora.lng
+  const latDelta = raio / KM_POR_GRAU
+  const cosBorda = Math.cos(Math.min(89.9, Math.abs(latNum) + latDelta) * Math.PI / 180)
+  const lngDelta = cosBorda > 0.0001 ? raio / (KM_POR_GRAU * cosBorda) : 180
+  const latMin = latNum - latDelta
+  const latMax = latNum + latDelta
+  const lngMin = Math.max(-180, lngNum - lngDelta)
+  const lngMax = Math.min(180, lngNum + lngDelta)
+  const latIdx = params.length + 1
+  const lngIdx = params.length + 2
+  const raioIdx = params.length + 3
+  const latMinIdx = params.length + 4
+  const latMaxIdx = params.length + 5
+  const lngMinIdx = params.length + 6
+  const lngMaxIdx = params.length + 7
+  params.push(latNum, lngNum, raio, latMin, latMax, lngMin, lngMax)
+  return `(${alias}.latitude IS NOT NULL AND ${alias}.longitude IS NOT NULL
+          AND ${alias}.latitude BETWEEN $${latMinIdx} AND $${latMaxIdx}
+          AND ${alias}.longitude BETWEEN $${lngMinIdx} AND $${lngMaxIdx}
+          AND (6371 * acos(LEAST(1.0, cos(radians($${latIdx})) * cos(radians(${alias}.latitude::float)) * cos(radians(${alias}.longitude::float) - radians($${lngIdx})) + sin(radians($${latIdx})) * sin(radians(${alias}.latitude::float))))) <= $${raioIdx})`
+}
+
+// Monta a cláusula geográfica para os modos 'raio' e 'cidade' ('estado' e 'pais' seguem
+// no chamador, intocados). Muta `params` e devolve { sql, meta }.
+//
+// sql === null significa "não há recorte possível": o chamador devolve lista vazia com
+// meta.aplicado = 'nenhum'. NUNCA significa "sem filtro".
+//
+// A cascata respeita a INTENÇÃO: quando o usuário escolheu uma cidade, o escopo é dela
+// (cidade e uf DELA), então o degradê cai para a uf da cidade ESCOLHIDA — nunca para a uf
+// do próprio usuário. Quem escolheu a Paraíba não pode receber Minas de consolação.
+const montarFiltroGeo = ({ alias, modo, raio, escopo, ancora, params }) => {
+  const meta = (aplicado, degradado, motivo) => ({ modo, aplicado, degradado, motivo })
+
+  if (modo === 'raio') {
+    if (ancora.lat !== null && ancora.lng !== null && !isNaN(raio)) {
+      // Raio cumulativo: dentro de X km (linhas com coordenada) OU pertencente à cidade do
+      // escopo — "sem lat/lng" não pode significar "invisível".
+      let condicao = clausulaRaio(alias, raio, ancora, params)
+      if (escopo.cidade) condicao = `(${condicao} OR ${clausulaCidade(alias, escopo, params)})`
+      return { sql: ` AND ${condicao}`, meta: meta('raio', false, null) }
+    }
+    // Sem âncora não há distância possível. Cair para a cidade é exatamente o que o app já
+    // supõe que aconteça (ver o comentário em FeedReparosScreen.js:391).
+    if (escopo.cidade) return { sql: ` AND ${clausulaCidade(alias, escopo, params)}`, meta: meta('cidade', true, 'sem_coordenadas_para_ancora') }
+    if (escopo.uf)     return { sql: ` AND ${clausulaUf(alias, escopo, params)}`,     meta: meta('uf', true, 'sem_coordenadas_para_ancora') }
+    return { sql: null, meta: meta('nenhum', true, 'sem_localizacao') }
+  }
+
+  if (modo === 'cidade') {
+    if (escopo.cidade) return { sql: ` AND ${clausulaCidade(alias, escopo, params)}`, meta: meta('cidade', false, null) }
+    if (escopo.uf)     return { sql: ` AND ${clausulaUf(alias, escopo, params)}`,     meta: meta('uf', true, 'cidade_nao_resolvida') }
+    return { sql: null, meta: meta('nenhum', true, 'sem_localizacao') }
+  }
+
+  return { sql: null, meta: meta(modo, false, null) }
+}
+
+module.exports = { coordsDeCidade, resolverBusca, montarFiltroGeo, MUNICIPIOS }

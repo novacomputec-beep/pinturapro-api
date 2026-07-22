@@ -1,6 +1,7 @@
 const { pool } = require('../utils/supabase')
 const { notificarNovaObra } = require('../services/notificacaoService')
 const { ufDeCidade } = require('../utils/localidade')
+const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 
 const listar = async (req, res) => {
   try {
@@ -9,7 +10,7 @@ const listar = async (req, res) => {
 
     let query = `
       SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.estado, o.bairro, o.uf,
-             o.latitude, o.longitude,
+             o.latitude, o.longitude, o.coordenadas_origem,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status,
              0 as distancia_metros,
              (SELECT COUNT(*) FROM midias WHERE obra_id = o.id) as total_midias,
@@ -33,16 +34,35 @@ const listar = async (req, res) => {
       query += ` AND o.categoria = $${params.length}`
     }
 
-    if (raio_km === 'cidade' && req.usuario?.id) {
-      let cidade = (req.query.cidade_busca || '').trim()
-      if (!cidade) {
-        const cidadeResult = await pool.query(`SELECT cidade FROM usuarios WHERE id = $1`, [req.usuario.id])
-        cidade = cidadeResult.rows[0]?.cidade
+    // Mesmo resolvedor compartilhado de /reparos (geoBusca): âncora e escopo separados,
+    // e nenhum caminho degrada para "país inteiro". 'estado' e 'pais' seguem inalterados.
+    // Sem raio_km a busca não tem recorte (comportamento de hoje, preservado): o metadado
+    // reporta 'pais' porque é o que de fato acontece — o app sempre envia raio_km.
+    let filtroMeta = { modo: raio_km || null, aplicado: (!raio_km || raio_km === 'pais') ? 'pais' : raio_km, degradado: false, motivo: null }
+    let escopo = null
+    let ancora = null
+
+    const modoGeo = (raio_km === 'cidade' && req.usuario?.id) ? 'cidade'
+      : (raio_km && raio_km !== 'pais' && raio_km !== 'estado' && !isNaN(parseFloat(raio_km))) ? 'raio'
+      : null
+
+    if (modoGeo) {
+      const busca = await resolverBusca({
+        cidade_busca: req.query.cidade_busca,
+        uf_busca: req.query.uf_busca,
+        lat, lng,
+        usuarioId: req.usuario?.id
+      })
+      escopo = busca.escopo
+      ancora = busca.ancora
+      const filtro = montarFiltroGeo({
+        alias: 'o', modo: modoGeo, raio: parseFloat(raio_km), escopo, ancora, params
+      })
+      filtroMeta = filtro.meta
+      if (filtro.sql === null) {
+        return res.json({ obras: [], pagina: parseInt(page), total: 0, filtro: filtroMeta, escopo, ancora })
       }
-      if (cidade) {
-        params.push(cidade)
-        query += ` AND o.cidade = $${params.length}`
-      }
+      query += filtro.sql
     } else if (raio_km === 'estado' && req.usuario?.id) {
       let uf = (req.query.uf_busca || '').trim()
       if (!uf) {
@@ -52,48 +72,6 @@ const listar = async (req, res) => {
       if (uf) {
         params.push(uf)
         query += ` AND o.uf = $${params.length}`
-      }
-    } else if (raio_km && raio_km !== 'pais' && lat && lng) {
-      const raio = parseFloat(raio_km)
-      const latNum = parseFloat(lat)
-      const lngNum = parseFloat(lng)
-      if (!isNaN(raio) && !isNaN(latNum) && !isNaN(lngNum)) {
-        // Raio cumulativo: inclui obras dentro de X km (com coordenadas) OU da cidade do
-        // usuário (mesmo sem coordenadas geocodificadas — "sem lat/lng" não pode significar "invisível")
-        let cidade = (req.query.cidade_busca || '').trim()
-        if (!cidade && req.usuario?.id) {
-          const cidadeResult = await pool.query(`SELECT cidade FROM usuarios WHERE id = $1`, [req.usuario.id])
-          cidade = cidadeResult.rows[0]?.cidade
-        }
-        // Pré-filtro por bounding box (sargável → usa o índice btree (latitude, longitude))
-        // antes do haversine exato por linha. A caixa é um superconjunto do círculo de raio
-        // R (usa cos na latitude da borda mais próxima do polo), então não há falsos negativos:
-        // o haversine continua sendo o filtro exato.
-        const KM_POR_GRAU = 111.045
-        const latDelta = raio / KM_POR_GRAU
-        const cosBorda = Math.cos(Math.min(89.9, Math.abs(latNum) + latDelta) * Math.PI / 180)
-        const lngDelta = cosBorda > 0.0001 ? raio / (KM_POR_GRAU * cosBorda) : 180
-        const latMin = latNum - latDelta
-        const latMax = latNum + latDelta
-        const lngMin = Math.max(-180, lngNum - lngDelta)
-        const lngMax = Math.min(180, lngNum + lngDelta)
-        const latIdx = params.length + 1
-        const lngIdx = params.length + 2
-        const raioIdx = params.length + 3
-        const latMinIdx = params.length + 4
-        const latMaxIdx = params.length + 5
-        const lngMinIdx = params.length + 6
-        const lngMaxIdx = params.length + 7
-        params.push(latNum, lngNum, raio, latMin, latMax, lngMin, lngMax)
-        let condicao = `(o.latitude IS NOT NULL AND o.longitude IS NOT NULL
-          AND o.latitude BETWEEN $${latMinIdx} AND $${latMaxIdx}
-          AND o.longitude BETWEEN $${lngMinIdx} AND $${lngMaxIdx}
-          AND (6371 * acos(LEAST(1.0, cos(radians($${latIdx})) * cos(radians(o.latitude::float)) * cos(radians(o.longitude::float) - radians($${lngIdx})) + sin(radians($${latIdx})) * sin(radians(o.latitude::float))))) <= $${raioIdx})`
-        if (cidade) {
-          params.push(cidade)
-          condicao = `(${condicao} OR o.cidade = $${params.length})`
-        }
-        query += ` AND ${condicao}`
       }
     }
 
@@ -105,7 +83,10 @@ const listar = async (req, res) => {
     res.json({
       obras: result.rows,
       pagina: parseInt(page),
-      total: result.rows.length
+      total: result.rows.length,
+      filtro: filtroMeta,
+      escopo,
+      ancora
     })
 
   } catch (err) {

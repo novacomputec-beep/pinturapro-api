@@ -14,7 +14,7 @@ const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = requi
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
-const { coordsDeCidade } = require('../utils/geoBusca')
+const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const { enviarEmail } = require('../services/emailService')
 const bcrypt = require('bcrypt')
@@ -1922,7 +1922,7 @@ router.get('/reparos', autenticar, exigirPrestador, exigirReparador, async (req,
 
     let query = `
       SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
-             r.latitude, r.longitude,
+             r.latitude, r.longitude, r.coordenadas_origem,
              r.status, r.status_aprovacao, r.expira_em, r.criado_em, r.criado_por,
              r.match_feito_em, r.match_usuario_id, r.pedido_tempo_status,
              r.prestadores_bloqueados, r.client_request_id,
@@ -1942,16 +1942,39 @@ router.get('/reparos', autenticar, exigirPrestador, exigirReparador, async (req,
       query += ` AND r.categoria = $${params.length}`
     }
 
-    if (raio_km === 'cidade') {
-      let cidade = (req.query.cidade_busca || '').trim()
-      if (!cidade) {
-        const cidadeResult = await pool.query(`SELECT cidade FROM usuarios WHERE id = $1`, [req.usuario.id])
-        cidade = cidadeResult.rows[0]?.cidade
+    // Modos 'cidade' e raio numérico passam pelo resolvedor compartilhado (geoBusca):
+    // ele decide a ÂNCORA (centro do raio) e o ESCOPO (recorte textual) separadamente e
+    // garante que nenhum caminho degrade para "país inteiro". 'estado' e 'pais' seguem
+    // no fluxo original logo abaixo, inalterados.
+    // Sem raio_km a busca não tem recorte (comportamento de hoje, preservado): o metadado
+    // reporta 'pais' porque é o que de fato acontece — o app sempre envia raio_km.
+    let filtroMeta = { modo: raio_km || null, aplicado: (!raio_km || raio_km === 'pais') ? 'pais' : raio_km, degradado: false, motivo: null }
+    let escopo = null
+    let ancora = null
+
+    const modoGeo = raio_km === 'cidade' ? 'cidade'
+      : (raio_km && raio_km !== 'pais' && raio_km !== 'estado' && !isNaN(parseFloat(raio_km))) ? 'raio'
+      : null
+
+    if (modoGeo) {
+      const busca = await resolverBusca({
+        cidade_busca: req.query.cidade_busca,
+        uf_busca: req.query.uf_busca,
+        lat, lng,
+        usuarioId: req.usuario.id
+      })
+      escopo = busca.escopo
+      ancora = busca.ancora
+      const filtro = montarFiltroGeo({
+        alias: 'r', modo: modoGeo, raio: parseFloat(raio_km), escopo, ancora, params
+      })
+      filtroMeta = filtro.meta
+      // Nada resolvido: devolve vazio SEM consultar. Varrer o país inteiro para um usuário
+      // que não sabemos localizar é exatamente o bug que este passo elimina.
+      if (filtro.sql === null) {
+        return res.json({ reparos: [], page, limit, filtro: filtroMeta, escopo, ancora })
       }
-      if (cidade) {
-        params.push(cidade)
-        query += ` AND r.cidade = $${params.length}`
-      }
+      query += filtro.sql
     } else if (raio_km === 'estado') {
       let uf = (req.query.uf_busca || '').trim()
       if (!uf) {
@@ -1962,48 +1985,6 @@ router.get('/reparos', autenticar, exigirPrestador, exigirReparador, async (req,
         params.push(uf)
         query += ` AND r.uf = $${params.length}`
       }
-    } else if (raio_km && raio_km !== 'pais' && lat && lng) {
-      const raio = parseFloat(raio_km)
-      const latNum = parseFloat(lat)
-      const lngNum = parseFloat(lng)
-      if (!isNaN(raio) && !isNaN(latNum) && !isNaN(lngNum)) {
-        // Raio cumulativo: inclui reparos dentro de X km (com coordenadas) OU da cidade do
-        // usuário (mesmo sem coordenadas geocodificadas — "sem lat/lng" não pode significar "invisível")
-        let cidade = (req.query.cidade_busca || '').trim()
-        if (!cidade) {
-          const cidadeResult = await pool.query(`SELECT cidade FROM usuarios WHERE id = $1`, [req.usuario.id])
-          cidade = cidadeResult.rows[0]?.cidade
-        }
-        // Pré-filtro por bounding box (sargável → usa o índice btree (latitude, longitude))
-        // antes do haversine exato por linha. A caixa é um superconjunto do círculo de raio
-        // R (usa cos na latitude da borda mais próxima do polo), então não há falsos negativos:
-        // o haversine continua sendo o filtro exato.
-        const KM_POR_GRAU = 111.045
-        const latDelta = raio / KM_POR_GRAU
-        const cosBorda = Math.cos(Math.min(89.9, Math.abs(latNum) + latDelta) * Math.PI / 180)
-        const lngDelta = cosBorda > 0.0001 ? raio / (KM_POR_GRAU * cosBorda) : 180
-        const latMin = latNum - latDelta
-        const latMax = latNum + latDelta
-        const lngMin = Math.max(-180, lngNum - lngDelta)
-        const lngMax = Math.min(180, lngNum + lngDelta)
-        const latIdx = params.length + 1
-        const lngIdx = params.length + 2
-        const raioIdx = params.length + 3
-        const latMinIdx = params.length + 4
-        const latMaxIdx = params.length + 5
-        const lngMinIdx = params.length + 6
-        const lngMaxIdx = params.length + 7
-        params.push(latNum, lngNum, raio, latMin, latMax, lngMin, lngMax)
-        let condicao = `(r.latitude IS NOT NULL AND r.longitude IS NOT NULL
-          AND r.latitude BETWEEN $${latMinIdx} AND $${latMaxIdx}
-          AND r.longitude BETWEEN $${lngMinIdx} AND $${lngMaxIdx}
-          AND (6371 * acos(LEAST(1.0, cos(radians($${latIdx})) * cos(radians(r.latitude::float)) * cos(radians(r.longitude::float) - radians($${lngIdx})) + sin(radians($${latIdx})) * sin(radians(r.latitude::float))))) <= $${raioIdx})`
-        if (cidade) {
-          params.push(cidade)
-          condicao = `(${condicao} OR r.cidade = $${params.length})`
-        }
-        query += ` AND ${condicao}`
-      }
     }
 
     params.push(limit)
@@ -2012,7 +1993,7 @@ router.get('/reparos', autenticar, exigirPrestador, exigirReparador, async (req,
     query += ` OFFSET $${params.length}`
 
     const result = await pool.query(query, params)
-    res.json({ reparos: result.rows, page, limit })
+    res.json({ reparos: result.rows, page, limit, filtro: filtroMeta, escopo, ancora })
   } catch (err) {
     console.error('Erro ao buscar reparos:', err)
     res.status(500).json({ erro: 'Erro ao buscar reparos' })
