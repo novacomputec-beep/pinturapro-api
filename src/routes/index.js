@@ -1052,6 +1052,29 @@ router.get('/obras-aprovacao', autenticar, exigirAdmin, async (req, res) => {
   }
 })
 
+// Push para o DONO com o desfecho da análise da obra (a obra é a única vertical que passa
+// por aprovação; reparo publica direto). Segue o padrão já usado no aviso de novo candidato
+// (SELECT juntando usuarios pelo criado_por — ver mais abaixo, no /candidaturas).
+// Sem push_token cadastrado simplesmente não há o que enviar — não é erro.
+// Quem chama SEMPRE dispara fire-and-forget e só na TRANSIÇÃO de status: o painel do admin
+// não pode esperar nem falhar por causa de uma notificação, e reprocessar não pode reavisar.
+const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
+  const info = await pool.query(
+    `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
+    [obraId]
+  )
+  const { push_token, titulo } = info.rows[0] || {}
+  if (!push_token) return
+  await enviarPushNotificacao(
+    push_token,
+    aprovada ? '✅ Obra aprovada!' : '❌ Obra não aprovada',
+    aprovada
+      ? `"${titulo}" já está publicada e visível para os pintores.`
+      : `"${titulo}" não foi publicada desta vez. Toque para rever os detalhes e cadastrar novamente.`,
+    { tipo: aprovada ? 'obra_aprovada' : 'obra_recusada', obra_id: obraId }
+  )
+}
+
 router.post('/obras-aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
   try {
     // Aprovação PUBLICA a obra e reinicia o relógio a partir de agora: o expira_em setado na
@@ -1065,13 +1088,22 @@ router.post('/obras-aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req,
     // âncora é publicado_em. Admite pendente E recusada (reaprovar rejeitada é fluxo válido);
     // bloqueia só quem já está aprovada. Como status e status_aprovacao são setados no mesmo
     // UPDATE, é impossível ficar aprovada com status ainda 'rascunho'.
-    await pool.query(
+    const atualizada = await pool.query(
       `UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta',
          publicado_em = NOW(),
          expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
-       WHERE id = $1 AND status_aprovacao <> 'aprovada'`, [req.params.id])
+       WHERE id = $1 AND status_aprovacao <> 'aprovada'
+       RETURNING id`, [req.params.id])
     res.json({ mensagem: 'Obra aprovada e publicada!' })
-    notificarPintoresSobreNovaObra(req.params.id).catch(err => console.error('Erro notificar pintores:', err))
+    // Os DOIS avisos só na TRANSIÇÃO pendente/recusada → aprovada. rowCount 0 significa que o
+    // UPDATE não mudou nada (já estava aprovada — duplo clique do admin — ou o id não existe):
+    // reavisar o dono seria ruído, e rebroadcastar aos pintores anunciaria como "nova" uma obra
+    // publicada dias atrás, para até 500 pessoas de uma vez.
+    if (atualizada.rowCount > 0) {
+      notificarPintoresSobreNovaObra(req.params.id).catch(err => console.error('Erro notificar pintores:', err))
+      notificarDonoSobreAnaliseObra(req.params.id, true)
+        .catch(err => console.error('Erro notificar dono (obra aprovada):', err.message))
+    }
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao aprovar obra' })
   }
@@ -1079,8 +1111,17 @@ router.post('/obras-aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req,
 
 router.post('/obras-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req, res) => {
   try {
-    await pool.query(`UPDATE obras SET status_aprovacao = 'recusada', status = 'cancelada' WHERE id = $1`, [req.params.id])
+    // Guarda de idempotência espelhando a da aprovação: sem ela, reprocessar uma recusa
+    // (duplo clique do admin) reavisaria o dono de uma decisão que ele já recebeu.
+    const atualizada = await pool.query(
+      `UPDATE obras SET status_aprovacao = 'recusada', status = 'cancelada'
+        WHERE id = $1 AND status_aprovacao <> 'recusada'
+        RETURNING id`, [req.params.id])
     res.json({ mensagem: 'Obra recusada' })
+    if (atualizada.rowCount > 0) {
+      notificarDonoSobreAnaliseObra(req.params.id, false)
+        .catch(err => console.error('Erro notificar dono (obra recusada):', err.message))
+    }
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao recusar obra' })
   }
