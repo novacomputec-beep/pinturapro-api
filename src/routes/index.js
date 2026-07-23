@@ -104,11 +104,12 @@ const migracaoPronta = (async () => {
                         SELECT 'aprovacao_automatica', 'false'
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'aprovacao_automatica')`)
     // Janela de lançamento grátis — valor = timestamp ISO enquanto o período está
-    // ativo, NULL/vazio quando desligado. Governa apenas NOVOS cadastros; linhas
+    // ativo, string vazia '' quando desligado. Governa apenas NOVOS cadastros; linhas
     // tipo='gratuito' já criadas permanecem grátis (a lógica de aprovação mesclada
     // mantém proximo_vencimento NULL para elas). Admin liga/desliga pelo painel.
+    // valor é NOT NULL: seed com '' (não NULL) para não violar a constraint no boot.
     await client.query(`INSERT INTO configuracoes (chave, valor)
-                        SELECT 'lancamento_data_fim', NULL
+                        SELECT 'lancamento_data_fim', ''
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'lancamento_data_fim')`)
     // Contratos de reparo: referência ao interesse aceito (paridade com candidatura_id de obra)
     await client.query(`ALTER TABLE contratos ADD COLUMN IF NOT EXISTS interesse_id uuid`)
@@ -3024,7 +3025,9 @@ router.get('/config/lancamento', async (req, res) => {
 router.post('/config/lancamento', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { data_fim } = req.body
-    let valor = null
+    // valor é NOT NULL na tabela: usar '' (não null) como estado "desligado" para
+    // nunca violar a constraint. Downstream trata '' e ausência como janela off.
+    let valor = ''
     if (data_fim !== null && data_fim !== undefined && data_fim !== '') {
       const d = new Date(data_fim)
       if (isNaN(d.getTime())) return res.status(400).json({ erro: 'data_fim inválida — use uma data ISO válida ou null para desligar' })
@@ -3034,7 +3037,7 @@ router.post('/config/lancamento', autenticar, exigirAdmin, async (req, res) => {
       `UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'lancamento_data_fim'`,
       [valor]
     )
-    res.json({ data_fim: valor, gratis: !!valor && new Date(valor) > new Date() })
+    res.json({ data_fim: valor || null, gratis: !!valor && new Date(valor) > new Date() })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar janela de lançamento' })
   }
