@@ -83,20 +83,6 @@ app.use((err, req, res, next) => {
 
 const RAIO_KM              = 5
 const RAIO_GRAUS           = RAIO_KM / 111
-// Cooldown de proximidade é DURÁVEL e replica-safe: tabela proximidade_notificacoes +
-// claim atômico (INSERT ... ON CONFLICT DO UPDATE ... WHERE).
-//
-// Regra: a demanda INSISTE a cada varredura (~10 min) e para no 3º aviso — ~20 min de
-// insistência por par (prestador, demanda), depois silêncio definitivo.
-//
-// PROXIMIDADE_COOLDOWN < INTERVALO_PROXIMIDADE de propósito. Com cooldown de 10 min e
-// varredura de 10 min, qualquer jitter (drift do setInterval, tempo até o par ser
-// alcançado dentro da varredura, latência do push) faria o "faltam 200ms" perder a janela
-// e empurrar o envio para a varredura seguinte — 3 avisos levariam 40-60 min em vez de 20.
-// 9 min dão ~60s de folga, que cobre a variação de posição do par dentro da varredura na
-// escala atual. Se uma varredura passar a demorar mais de ~1 min até o último par, revisar.
-const PROXIMIDADE_COOLDOWN   = '9 minutes'
-const PROXIMIDADE_MAX_ENVIOS = 3
 
 // Corpo do push de proximidade. Quando a coordenada da demanda veio do CENTRO DO MUNICÍPIO
 // (coordenadas_origem = 'centro_cidade'), a distância calculada é precisão de CIDADE fingindo
@@ -117,157 +103,69 @@ const textoProximidade = (rotulo, titulo, cidade, origem, distanciaKm) => {
 
 const verificarPrestadoresProximos = async () => {
   try {
-    // Higiene: a retenção é AMARRADA AO CICLO DE VIDA DA DEMANDA, não a um prazo fixo.
+    // Redesenho: dispara sobre reparos ARMADOS (aberturas_detalhe.notificado=false — o reparador
+    // abriu o detalhe estando a >5km do cadastro) quando a posição AO VIVO chega a <5km.
+    // Reparadores + reparos APENAS (obras/pintores removidos). O dedup agora é
+    // aberturas_detalhe.notificado (claim atômico), NÃO mais proximidade_notificacoes (vestigial).
     //
-    // Antes era "apaga o que passou de 1 dia". Com o teto de 3 envios isso viraria um bug
-    // sério: apagar a linha ZERA o contador, e o mesmo par voltaria a receber mais 3 avisos
-    // — todo dia, pelo resto da vida da demanda. Demandas vivem até 720h (30 dias) e ainda
-    // podem ser estendidas (/estender, até 2x), então NENHUM prazo fixo é seguro.
-    //
-    // A linha só é removida quando a demanda não pode mais notificar: expirada ou já
-    // deletada (demanda_id é polimórfico, sem FK — órfãs precisam ser varridas aqui).
-    // Sobrevive a match/unmatch e a extensões de prazo, que é o ponto.
-    //
-    // O corte absoluto de 90 dias é só uma rede de segurança contra crescimento sem limite
-    // (bem acima dos 60 dias de uma demanda estendida ao máximo).
-    // Falha aqui nunca aborta o run (try/catch isolado).
-    try {
-      await pool.query(`
-        DELETE FROM proximidade_notificacoes pn
-        WHERE pn.notificado_em < NOW() - INTERVAL '90 days'
-           OR (NOT EXISTS (
-                 SELECT 1 FROM reparos r
-                  WHERE pn.demanda_tipo = 'reparo' AND r.id = pn.demanda_id AND r.expira_em > NOW()
-               )
-               AND NOT EXISTS (
-                 SELECT 1 FROM obras o
-                  WHERE pn.demanda_tipo = 'obra' AND o.id = pn.demanda_id AND o.expira_em > NOW()
-               ))
-      `)
-    } catch (e) {
-      console.error('[Proximidade] limpeza de cooldown falhou (ignorado):', e.message)
-    }
-
-    // ── REPAROS → prestadores ───────────────────────────────────────────────
-    const reparos = await pool.query(`
-      SELECT id, titulo, cidade, coordenadas_origem, latitude, longitude, prestadores_bloqueados
-      FROM reparos
-      WHERE status = 'aberta'
-        AND status_aprovacao = 'aprovada'
-        AND expira_em > NOW()
-        AND match_usuario_id IS NULL
-        AND latitude IS NOT NULL
-        AND longitude IS NOT NULL
+    // Uma linha = um par (reparador armado, reparo) elegível: reparo válido (aberta/aprovada/não
+    // expirado/sem match/com coords — mesma validade do endpoint app-open), reparador com
+    // localização fresca (<30min), assinatura ativa, tier ESTRITO reparador (= exigirReparador:
+    // role='prestador' AND tipo_prestador='reparador'), push_token, e sem engajamento prévio.
+    const armados = await pool.query(`
+      SELECT ad.reparador_id, ad.reparo_id,
+             r.titulo, r.cidade, r.coordenadas_origem,
+             r.latitude  AS r_lat, r.longitude AS r_lng,
+             lp.latitude AS p_lat, lp.longitude AS p_lng,
+             u.push_token
+      FROM aberturas_detalhe ad
+      JOIN reparos r                 ON r.id = ad.reparo_id
+      JOIN localizacoes_prestadores lp ON lp.usuario_id = ad.reparador_id
+      JOIN usuarios u                ON u.id = ad.reparador_id
+      JOIN assinaturas a             ON a.usuario_id = u.id AND a.status = 'ativa'
+      WHERE ad.notificado = false
+        AND r.status = 'aberta' AND r.status_aprovacao = 'aprovada'
+        AND r.expira_em > NOW() AND r.match_usuario_id IS NULL
+        AND r.latitude IS NOT NULL AND r.longitude IS NOT NULL
+        AND lp.atualizado_em > NOW() - INTERVAL '30 minutes'
+        AND u.push_token IS NOT NULL
+        AND u.role = 'prestador' AND u.tipo_prestador = 'reparador'
+        AND NOT (ad.reparador_id = ANY(COALESCE(r.prestadores_bloqueados, '{}')))
+        AND NOT EXISTS (
+          SELECT 1 FROM interesse_reparos ir
+          WHERE ir.reparo_id = r.id AND ir.usuario_id = ad.reparador_id
+        )
     `)
-
-    const prestadores = reparos.rows.length > 0
-      ? await pool.query(`
-          SELECT lp.usuario_id, lp.latitude, lp.longitude, u.push_token, u.nome
-          FROM localizacoes_prestadores lp
-          JOIN usuarios u ON lp.usuario_id = u.id
-          JOIN assinaturas a ON a.usuario_id = u.id AND a.status = 'ativa'
-          WHERE lp.atualizado_em > NOW() - INTERVAL '30 minutes'
-            AND u.push_token IS NOT NULL
-            AND u.role = 'prestador' AND u.tipo_prestador IS DISTINCT FROM 'pintor'
-        `)
-      : { rows: [] }
 
     let notifReparos = 0
-    for (const reparo of reparos.rows) {
-      const bloqueados = reparo.prestadores_bloqueados || []
-      for (const prestador of prestadores.rows) {
-        if (bloqueados.includes(prestador.usuario_id)) continue
-        const distLat = Math.abs(prestador.latitude - reparo.latitude)
-        const distLon = Math.abs(prestador.longitude - reparo.longitude)
-        if (distLat > RAIO_GRAUS || distLon > RAIO_GRAUS) continue
-        const dLat = distLat * 111
-        const dLon = distLon * 111 * Math.cos(prestador.latitude * Math.PI / 180)
-        const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
-        if (distanciaKm > RAIO_KM) continue
-        // Claim atômico (replica-safe): concede o envio (RETURNING) só se o último foi há
-        // pelo menos PROXIMIDADE_COOLDOWN E o par ainda não bateu PROXIMIDADE_MAX_ENVIOS.
-        // O contador é incrementado NA MESMA instrução. Sem linha retornada → pula o push.
-        const claim = await pool.query(
-          `INSERT INTO proximidade_notificacoes (prestador_id, demanda_tipo, demanda_id, notificado_em, envios)
-           VALUES ($1, 'reparo', $2, NOW(), 1)
-           ON CONFLICT (prestador_id, demanda_tipo, demanda_id)
-           DO UPDATE SET notificado_em = NOW(),
-                         envios = proximidade_notificacoes.envios + 1
-             WHERE proximidade_notificacoes.notificado_em <= NOW() - $3::interval
-               AND proximidade_notificacoes.envios < $4
-           RETURNING envios`,
-          [prestador.usuario_id, reparo.id, PROXIMIDADE_COOLDOWN, PROXIMIDADE_MAX_ENVIOS]
-        )
-        if (claim.rowCount === 0) continue
-        await enviarPushNotificacao(
-          prestador.push_token,
-          '📍 Serviço próximo a você!',
-          textoProximidade('um reparo', reparo.titulo, reparo.cidade, reparo.coordenadas_origem, distanciaKm),
-          { tipo: 'reparo_proximo', reparo_id: reparo.id }
-        ).catch(err => console.error('Erro push proximidade reparo:', err))
-        notifReparos++
-      }
+    for (const par of armados.rows) {
+      const distLat = Math.abs(par.p_lat - par.r_lat)
+      const distLon = Math.abs(par.p_lng - par.r_lng)
+      if (distLat > RAIO_GRAUS || distLon > RAIO_GRAUS) continue
+      const dLat = distLat * 111
+      const dLon = distLon * 111 * Math.cos(par.p_lat * Math.PI / 180)
+      const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
+      if (distanciaKm > RAIO_KM) continue
+      // CLAIM ATÔMICO (replica-safe): só envia se a linha ainda está notificado=false. Réplicas
+      // do cron e o endpoint /feed/checar-proximidade competem pela mesma linha — só uma vence
+      // (RETURNING). Sem linha retornada → já notificado → pula o push. One-time por reparo.
+      const claim = await pool.query(
+        `UPDATE aberturas_detalhe SET notificado = true
+         WHERE reparador_id = $1 AND reparo_id = $2 AND notificado = false
+         RETURNING reparo_id`,
+        [par.reparador_id, par.reparo_id]
+      )
+      if (claim.rowCount === 0) continue
+      await enviarPushNotificacao(
+        par.push_token,
+        '📍 Serviço próximo a você!',
+        textoProximidade('um reparo', par.titulo, par.cidade, par.coordenadas_origem, distanciaKm),
+        { tipo: 'reparo_proximo', reparo_id: par.reparo_id }
+      ).catch(err => console.error('Erro push proximidade reparo:', err))
+      notifReparos++
     }
 
-    // ── OBRAS → assinantes (pintores) ───────────────────────────────────────
-    const obras = await pool.query(`
-      SELECT id, titulo, cidade, coordenadas_origem, latitude, longitude
-      FROM obras
-      WHERE status = 'aberta'
-        AND status_aprovacao = 'aprovada'
-        AND expira_em > NOW()
-        AND latitude IS NOT NULL
-        AND longitude IS NOT NULL
-    `)
-
-    const pintores = obras.rows.length > 0
-      ? await pool.query(`
-          SELECT lp.usuario_id, lp.latitude, lp.longitude, u.push_token, u.nome
-          FROM localizacoes_prestadores lp
-          JOIN usuarios u ON lp.usuario_id = u.id
-          JOIN assinaturas a ON a.usuario_id = u.id AND a.status = 'ativa'
-          WHERE lp.atualizado_em > NOW() - INTERVAL '30 minutes'
-            AND u.push_token IS NOT NULL
-            AND u.role = 'prestador' AND u.tipo_prestador = 'pintor'
-        `)
-      : { rows: [] }
-
-    let notifObras = 0
-    for (const obra of obras.rows) {
-      for (const pintor of pintores.rows) {
-        const distLat = Math.abs(pintor.latitude - obra.latitude)
-        const distLon = Math.abs(pintor.longitude - obra.longitude)
-        if (distLat > RAIO_GRAUS || distLon > RAIO_GRAUS) continue
-        const dLat = distLat * 111
-        const dLon = distLon * 111 * Math.cos(pintor.latitude * Math.PI / 180)
-        const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
-        if (distanciaKm > RAIO_KM) continue
-        // Claim atômico (replica-safe): concede o envio (RETURNING) só se o último foi há
-        // pelo menos PROXIMIDADE_COOLDOWN E o par ainda não bateu PROXIMIDADE_MAX_ENVIOS.
-        // O contador é incrementado NA MESMA instrução. Sem linha retornada → pula o push.
-        const claim = await pool.query(
-          `INSERT INTO proximidade_notificacoes (prestador_id, demanda_tipo, demanda_id, notificado_em, envios)
-           VALUES ($1, 'obra', $2, NOW(), 1)
-           ON CONFLICT (prestador_id, demanda_tipo, demanda_id)
-           DO UPDATE SET notificado_em = NOW(),
-                         envios = proximidade_notificacoes.envios + 1
-             WHERE proximidade_notificacoes.notificado_em <= NOW() - $3::interval
-               AND proximidade_notificacoes.envios < $4
-           RETURNING envios`,
-          [pintor.usuario_id, obra.id, PROXIMIDADE_COOLDOWN, PROXIMIDADE_MAX_ENVIOS]
-        )
-        if (claim.rowCount === 0) continue
-        await enviarPushNotificacao(
-          pintor.push_token,
-          '🎨 Obra próxima a você!',
-          textoProximidade('uma obra', obra.titulo, obra.cidade, obra.coordenadas_origem, distanciaKm),
-          { tipo: 'obra_proxima', obra_id: obra.id }
-        ).catch(err => console.error('Erro push proximidade obra:', err))
-        notifObras++
-      }
-    }
-
-    console.log(`[Proximidade] reparos: ${reparos.rows.length} | prestadores ativos: ${prestadores.rows.length} | notif enviadas: ${notifReparos} | obras: ${obras.rows.length} | pintores ativos: ${pintores.rows.length} | notif enviadas: ${notifObras}`)
+    console.log(`[Proximidade] pares armados elegíveis: ${armados.rows.length} | notif enviadas: ${notifReparos}`)
   } catch (err) {
     console.error('[Proximidade] Erro na verificação:', err.message)
   }

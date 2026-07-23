@@ -2092,9 +2092,9 @@ router.post('/reparos/:id/interesse', autenticar, exigirPrestador, exigirReparad
 
 // POST /reparos/:id/abertura — "arma" o reparador para este reparo quando ele ABRE o
 // detalhe ("Ver serviço") estando a >5km do ENDEREÇO DE CADASTRO (usuarios.latitude/
-// longitude, NÃO GPS ao vivo). Um passo futuro (live-location) dispara o push quando ele
-// chegar a <5km de um reparo armado. Aqui NÃO há push nem checagem de GPS ao vivo — só
-// grava a linha de armamento. Inerte: nada consome aberturas_detalhe ainda.
+// longitude, NÃO GPS ao vivo). Aqui NÃO há push nem checagem de GPS ao vivo — só grava a
+// linha de armamento. O disparo do push (quando a posição AO VIVO chega a <5km de um reparo
+// armado) fica no cron verificarPrestadoresProximos e no POST /feed/checar-proximidade.
 router.post('/reparos/:id/abertura', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
   try {
     // Mesmas condições de validade que a checagem de proximidade usa (index.js:3300-3313
@@ -3354,10 +3354,13 @@ router.post('/feed/visualizacoes', autenticar, async (req, res) => {
   }
 })
 
-// POST /feed/checar-proximidade — chamado na abertura do app com a localização atual.
-// Encontra itens vistos-mas-não-notificados dentro de 5km em que o usuário não engajou,
-// envia UM push (o mais próximo) e marca notificado=true. One-time por item.
-router.post('/feed/checar-proximidade', autenticar, async (req, res) => {
+// POST /feed/checar-proximidade — chamado na abertura do app com a localização AO VIVO.
+// Redesenho: dispara sobre reparos ARMADOS (aberturas_detalhe.notificado=false — o reparador
+// abriu o detalhe estando a >5km do cadastro), NÃO sobre impressões de feed. Reparadores +
+// reparos apenas (gate exigirReparador, estrito tipo_prestador='reparador'). Quando a posição
+// ao vivo chega a <5km de um reparo armado, envia UM push (o mais próximo) e marca notificado
+// via CLAIM ATÔMICO. One-time por reparo, para sempre.
+router.post('/feed/checar-proximidade', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
   try {
     const { latitude, longitude } = req.body
     const lat = parseFloat(latitude)
@@ -3369,40 +3372,27 @@ router.post('/feed/checar-proximidade', autenticar, async (req, res) => {
     const RAIO_KM = 5
     const RAIO_GRAUS = RAIO_KM / 111
 
-    // Candidate reparos: seen, not notified, still open/available, has coords,
-    // and the user has NOT expressed interest
+    // Reparos ARMADOS não notificados: reparo válido (aberta/aprovada/não expirado/sem match/
+    // com coords — mesma validade da checagem anterior e do cron server.js:152-161), dentro do
+    // bbox da posição ao vivo, e sem engajamento (interesse_reparos). Obras removidas — só reparos.
     const reparos = await pool.query(
-      `SELECT fv.id AS visualizacao_id, r.id, r.titulo, r.latitude, r.longitude, 'reparo' AS tipo
-       FROM feed_visualizacoes fv
-       JOIN reparos r ON r.id = fv.item_id
-       WHERE fv.usuario_id = $1 AND fv.item_tipo = 'reparo' AND fv.notificado = false
+      `SELECT r.id, r.titulo, r.latitude, r.longitude
+       FROM aberturas_detalhe ad
+       JOIN reparos r ON r.id = ad.reparo_id
+       WHERE ad.reparador_id = $1 AND ad.notificado = false
          AND r.status = 'aberta' AND r.status_aprovacao = 'aprovada'
          AND r.expira_em > NOW() AND r.match_usuario_id IS NULL
          AND r.latitude IS NOT NULL AND r.longitude IS NOT NULL
          AND ABS(r.latitude - $2) < $4 AND ABS(r.longitude - $3) < $4
+         AND NOT ($1::uuid = ANY(COALESCE(r.prestadores_bloqueados, '{}')))
          AND NOT EXISTS (
            SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = r.id AND ir.usuario_id = $1
          )`,
       [req.usuario.id, lat, lng, RAIO_GRAUS]
     )
 
-    const obras = await pool.query(
-      `SELECT fv.id AS visualizacao_id, o.id, o.titulo, o.latitude, o.longitude, 'obra' AS tipo
-       FROM feed_visualizacoes fv
-       JOIN obras o ON o.id = fv.item_id
-       WHERE fv.usuario_id = $1 AND fv.item_tipo = 'obra' AND fv.notificado = false
-         AND o.status = 'aberta' AND o.status_aprovacao = 'aprovada'
-         AND o.expira_em > NOW() AND o.match_usuario_id IS NULL
-         AND o.latitude IS NOT NULL AND o.longitude IS NOT NULL
-         AND ABS(o.latitude - $2) < $4 AND ABS(o.longitude - $3) < $4
-         AND NOT EXISTS (
-           SELECT 1 FROM candidaturas c WHERE c.obra_id = o.id AND c.usuario_id = $1
-         )`,
-      [req.usuario.id, lat, lng, RAIO_GRAUS]
-    )
-
-    // Exact planar distance (same formula as verificarPrestadoresProximos)
-    const candidatos = [...reparos.rows, ...obras.rows]
+    // Distância planar exata (mesma fórmula de verificarPrestadoresProximos server.js:183-185).
+    const candidatos = reparos.rows
       .map(item => {
         const dLat = Math.abs(lat - item.latitude) * 111
         const dLon = Math.abs(lng - item.longitude) * 111 * Math.cos(lat * Math.PI / 180)
@@ -3413,14 +3403,19 @@ router.post('/feed/checar-proximidade', autenticar, async (req, res) => {
 
     if (candidatos.length === 0) return res.json({ notificado: false })
 
-    // Only the closest one per call — avoids push spam on app open
+    // Só o mais próximo por chamada — evita spam de push na abertura do app.
     const alvo = candidatos[0]
 
-    // Mark BEFORE sending (safer against double-send on retry)
-    await pool.query(
-      `UPDATE feed_visualizacoes SET notificado = true WHERE id = $1`,
-      [alvo.visualizacao_id]
+    // CLAIM ATÔMICO (replica-safe): concede o envio só se a linha ainda está notificado=false.
+    // Réplicas do cron / chamadas concorrentes de app-open competem pela mesma linha — só uma
+    // vence (RETURNING). Sem linha retornada → outra já notificou → não envia.
+    const claim = await pool.query(
+      `UPDATE aberturas_detalhe SET notificado = true
+       WHERE reparador_id = $1 AND reparo_id = $2 AND notificado = false
+       RETURNING reparo_id`,
+      [req.usuario.id, alvo.id]
     )
+    if (claim.rowCount === 0) return res.json({ notificado: false })
 
     const tokenResult = await pool.query(
       `SELECT push_token FROM usuarios WHERE id = $1`,
@@ -3433,11 +3428,11 @@ router.post('/feed/checar-proximidade', autenticar, async (req, res) => {
         pushToken,
         '📍 Oportunidade perto de você!',
         `"${alvo.titulo}" está a ${kmTexto} de onde você está agora. Que tal dar uma olhada?`,
-        alvo.tipo === 'reparo' ? { tipo: 'reparo_proximo', reparo_id: alvo.id } : { tipo: 'obra_proxima', obra_id: alvo.id }
+        { tipo: 'reparo_proximo', reparo_id: alvo.id }
       ).catch(() => {})
     }
 
-    res.json({ notificado: true, item: { tipo: alvo.tipo, id: alvo.id, titulo: alvo.titulo, distancia_km: Number(alvo.distanciaKm.toFixed(1)) } })
+    res.json({ notificado: true, item: { tipo: 'reparo', id: alvo.id, titulo: alvo.titulo, distancia_km: Number(alvo.distanciaKm.toFixed(1)) } })
   } catch (err) {
     console.error('[ChecarProximidade] Erro:', err.message)
     res.status(500).json({ erro: 'Erro ao checar proximidade' })
