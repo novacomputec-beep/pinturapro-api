@@ -2806,7 +2806,10 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
     )
     await pool.query(
       `UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
-        proximo_vencimento = CASE WHEN plano = 'anual' THEN NOW() + INTERVAL '365 days' ELSE NOW() + INTERVAL '30 days' END
+        proximo_vencimento = CASE
+          WHEN tipo = 'gratuito' THEN NULL
+          WHEN plano = 'anual'   THEN NOW() + INTERVAL '365 days'
+          ELSE NOW() + INTERVAL '30 days' END
        WHERE usuario_id = $1`, [id]
     )
 
@@ -2979,7 +2982,10 @@ router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req,
         // Aprovação em lote ao ligar o Modo Auto: também é não-revisada → marca automática
         await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
         await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
-          proximo_vencimento = CASE WHEN plano = 'anual' THEN NOW() + INTERVAL '365 days' ELSE NOW() + INTERVAL '30 days' END
+          proximo_vencimento = CASE
+            WHEN tipo = 'gratuito' THEN NULL
+            WHEN plano = 'anual'   THEN NOW() + INTERVAL '365 days'
+            ELSE NOW() + INTERVAL '30 days' END
          WHERE usuario_id = $1`, [p.id])
       }
       console.log(`[Modo automático] ${pendentes.rows.length} prestadores aprovados automaticamente`)

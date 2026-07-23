@@ -72,6 +72,12 @@ const cadastrar = async (req, res) => {
     const verificacaoStatus = role === 'prestador' ? 'pendente' : 'nao_solicitada'
     const planoEscolhido = plano || 'mensal'
 
+    // Janela de lançamento: prestador entra SEM pagar mas AINDA aguarda aprovação
+    // do admin (idoneidade nunca é pulada). A flag só remove o paywall — a fila de
+    // aprovação continua. "gratuito não expira" é gravado no tipo da linha, não na
+    // flag, então continua correto mesmo depois que a flag for desligada.
+    const lancamentoGratis = process.env.LANCAMENTO_GRATIS === 'true'
+
     // Transação única: o INSERT em usuarios e o INSERT em assinaturas commitam
     // JUNTOS ou nada. Antes, cada pool.query fazia autocommit isolado — se a
     // resposta se perdesse (timeout/rede) após o INSERT em usuarios já commitado,
@@ -148,13 +154,28 @@ const cadastrar = async (req, res) => {
       const valorMensal = tipo_prestador === 'pintor'
         ? (planoEscolhido === 'anual' ? 999.00 : 99.90)
         : (planoEscolhido === 'anual' ? 499.00 : 49.90)
-      console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura prestador | usuario_id=${usuario.id} plano=${planoEscolhido} valor=${valorMensal}`)
-      await client.query(
-        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
-         VALUES ($1, $2, $3, 'pendente')`,
-        [usuario.id, planoEscolhido, valorMensal]
-      )
-      console.log(`[CADASTRO][${ts}] ✓ assinatura pendente criada | valor=${valorMensal}`)
+      if (lancamentoGratis) {
+        // Janela de lançamento: sem paywall, MAS ainda aguarda aprovação do admin.
+        // status='pendente_verificacao' → app mostra tela de verificação (não libera).
+        // tipo='gratuito' → a aprovação deixa proximo_vencimento NULL (nunca expira).
+        // valor_mensal REAL (49.90/99.90) é preservado para uma conversão paga futura.
+        // proximo_vencimento OMITIDO → NULL. verificacao_status continua 'pendente'.
+        console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura prestador GRATIS (lançamento) | usuario_id=${usuario.id} plano=${planoEscolhido} valor=${valorMensal}`)
+        await client.query(
+          `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
+           VALUES ($1, $2, $3, 'pendente_verificacao', 'gratuito')`,
+          [usuario.id, planoEscolhido, valorMensal]
+        )
+        console.log(`[CADASTRO][${ts}] ✓ assinatura pendente_verificacao gratuita criada | valor=${valorMensal}`)
+      } else {
+        console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura prestador | usuario_id=${usuario.id} plano=${planoEscolhido} valor=${valorMensal}`)
+        await client.query(
+          `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
+           VALUES ($1, $2, $3, 'pendente')`,
+          [usuario.id, planoEscolhido, valorMensal]
+        )
+        console.log(`[CADASTRO][${ts}] ✓ assinatura pendente criada | valor=${valorMensal}`)
+      }
     } else {
       const valorMensal = planoEscolhido === 'anual' ? 999.00 : 99.90
       console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura assinante | usuario_id=${usuario.id} plano=${planoEscolhido} valor=${valorMensal}`)
