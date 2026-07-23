@@ -73,10 +73,11 @@ const cadastrar = async (req, res) => {
     const planoEscolhido = plano || 'mensal'
 
     // Janela de lançamento: prestador entra SEM pagar mas AINDA aguarda aprovação
-    // do admin (idoneidade nunca é pulada). A flag só remove o paywall — a fila de
+    // do admin (idoneidade nunca é pulada). A janela só remove o paywall — a fila de
     // aprovação continua. "gratuito não expira" é gravado no tipo da linha, não na
-    // flag, então continua correto mesmo depois que a flag for desligada.
-    const lancamentoGratis = process.env.LANCAMENTO_GRATIS === 'true'
+    // janela, então continua correto mesmo depois que a janela for desligada.
+    // Config em banco (chave='lancamento_data_fim'): admin liga/desliga/estende pelo
+    // painel, sem mexer no Railway. Lido no MESMO client da transação abaixo.
 
     // Transação única: o INSERT em usuarios e o INSERT em assinaturas commitam
     // JUNTOS ou nada. Antes, cada pool.query fazia autocommit isolado — se a
@@ -85,6 +86,12 @@ const cadastrar = async (req, res) => {
     // no fim"). Agora, qualquer falha antes do COMMIT desfaz tudo → o retry é limpo.
     client = await pool.connect()
     await client.query('BEGIN')
+
+    // Lê a janela de lançamento no MESMO client (snapshot consistente da transação).
+    // gratuito só vale se há data_fim futura; NULL/vazio ou passado = janela desligada.
+    const cfgLancamento = await client.query(`SELECT valor FROM configuracoes WHERE chave = 'lancamento_data_fim'`)
+    const dataFimLancamento = cfgLancamento.rows[0]?.valor || null
+    const lancamentoGratis = !!dataFimLancamento && new Date(dataFimLancamento) > new Date()
 
     // Pré-checagens amigáveis DENTRO da transação (mensagem limpa). Em corrida
     // real, o índice único (email + cpf_cnpj normalizado) é a garantia final e
