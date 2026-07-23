@@ -103,6 +103,13 @@ const migracaoPronta = (async () => {
     await client.query(`INSERT INTO configuracoes (chave, valor)
                         SELECT 'aprovacao_automatica', 'false'
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'aprovacao_automatica')`)
+    // Janela de lançamento grátis — valor = timestamp ISO enquanto o período está
+    // ativo, NULL/vazio quando desligado. Governa apenas NOVOS cadastros; linhas
+    // tipo='gratuito' já criadas permanecem grátis (a lógica de aprovação mesclada
+    // mantém proximo_vencimento NULL para elas). Admin liga/desliga pelo painel.
+    await client.query(`INSERT INTO configuracoes (chave, valor)
+                        SELECT 'lancamento_data_fim', NULL
+                        WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'lancamento_data_fim')`)
     // Contratos de reparo: referência ao interesse aceito (paridade com candidatura_id de obra)
     await client.query(`ALTER TABLE contratos ADD COLUMN IF NOT EXISTS interesse_id uuid`)
     // Idempotência de criação de obra/reparo — evita duplicatas em retries após timeout/ERR_NETWORK
@@ -2994,6 +3001,42 @@ router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req,
     res.json({ mensagem: ativo ? 'Modo automático ativado' : 'Modo automático desativado', ativo })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar configuração' })
+  }
+})
+
+// ============================================================
+// JANELA DE LANÇAMENTO GRÁTIS (config em banco — sem Railway)
+// ============================================================
+
+// Status público — a tela de cadastro roda PRÉ-LOGIN, então NÃO exige token.
+// Só expõe se a promoção está ativa e até quando (não-sensível).
+router.get('/config/lancamento', async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT valor FROM configuracoes WHERE chave = 'lancamento_data_fim'`)
+    const valor = r.rows[0]?.valor || null
+    res.json({ gratis: !!valor && new Date(valor) > new Date(), data_fim: valor })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar janela de lançamento' })
+  }
+})
+
+// Admin liga/estende/desliga a janela. data_fim = ISO futuro liga/estende; null desliga.
+router.post('/config/lancamento', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { data_fim } = req.body
+    let valor = null
+    if (data_fim !== null && data_fim !== undefined && data_fim !== '') {
+      const d = new Date(data_fim)
+      if (isNaN(d.getTime())) return res.status(400).json({ erro: 'data_fim inválida — use uma data ISO válida ou null para desligar' })
+      valor = d.toISOString()
+    }
+    await pool.query(
+      `UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'lancamento_data_fim'`,
+      [valor]
+    )
+    res.json({ data_fim: valor, gratis: !!valor && new Date(valor) > new Date() })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao atualizar janela de lançamento' })
   }
 })
 
