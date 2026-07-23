@@ -488,6 +488,22 @@ const migracaoPronta = (async () => {
     // receberam pelo menos um envio. NOT NULL + DEFAULT em PG 11+ não reescreve a tabela
     // (o default fica no catálogo), então é barato mesmo com a tabela populada.
     await client.query(`ALTER TABLE proximidade_notificacoes ADD COLUMN IF NOT EXISTS envios INT NOT NULL DEFAULT 1`)
+    // Armamento por abertura de detalhe (redesenho de proximidade — reparadores + reparos).
+    // Uma linha = um reparador que ABRIU o detalhe de um reparo enquanto estava a >5km do
+    // endereço de cadastro dele. notificado marca o push one-time (consumido num passo futuro;
+    // nada lê esta tabela ainda). PK (reparador_id, reparo_id) torna re-aberturas idempotentes.
+    // Tabela NOVA: colunas NOT NULL têm DEFAULT (ou são preenchidas no INSERT), então não há
+    // risco de violar constraint em linhas existentes — não existem linhas.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS aberturas_detalhe (
+        reparador_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        reparo_id    UUID NOT NULL REFERENCES reparos(id) ON DELETE CASCADE,
+        aberto_em    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        notificado   BOOLEAN NOT NULL DEFAULT false,
+        PRIMARY KEY (reparador_id, reparo_id)
+      )
+    `)
+    await client.query(`CREATE INDEX IF NOT EXISTS aberturas_detalhe_reparador_notif_idx ON aberturas_detalhe (reparador_id, notificado)`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -2071,6 +2087,64 @@ router.post('/reparos/:id/interesse', autenticar, exigirPrestador, exigirReparad
     res.status(201).json(result.rows[0])
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao registrar interesse' })
+  }
+})
+
+// POST /reparos/:id/abertura — "arma" o reparador para este reparo quando ele ABRE o
+// detalhe ("Ver serviço") estando a >5km do ENDEREÇO DE CADASTRO (usuarios.latitude/
+// longitude, NÃO GPS ao vivo). Um passo futuro (live-location) dispara o push quando ele
+// chegar a <5km de um reparo armado. Aqui NÃO há push nem checagem de GPS ao vivo — só
+// grava a linha de armamento. Inerte: nada consome aberturas_detalhe ainda.
+router.post('/reparos/:id/abertura', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
+  try {
+    // Mesmas condições de validade que a checagem de proximidade usa (index.js:3300-3313
+    // e o cron server.js:152-161): aberta/aprovada, não expirada, sem match, com coords.
+    const reparoResult = await pool.query(
+      `SELECT latitude, longitude FROM reparos
+       WHERE id = $1 AND status = 'aberta' AND status_aprovacao = 'aprovada'
+         AND expira_em > NOW() AND match_usuario_id IS NULL
+         AND latitude IS NOT NULL AND longitude IS NOT NULL`,
+      [req.params.id]
+    )
+    // Reparo inexistente/inválido → responde OK mas NÃO arma (idempotente, sem erro ao app).
+    if (reparoResult.rows.length === 0) return res.json({ armado: false })
+
+    const reparo = reparoResult.rows[0]
+
+    // Coords de CADASTRO do reparador (não GPS ao vivo).
+    const usuarioResult = await pool.query(
+      `SELECT latitude, longitude FROM usuarios WHERE id = $1`,
+      [req.usuario.id]
+    )
+    const usuario = usuarioResult.rows[0]
+
+    // Qualquer lado sem coords → não arma (não dá pra medir distância).
+    if (!usuario || usuario.latitude == null || usuario.longitude == null) {
+      return res.json({ armado: false })
+    }
+
+    // MESMA fórmula planar de 5km do código de proximidade existente
+    // (index.js:3333-3335, espelhando server.js:183-185). RAIO_KM = 5.
+    const RAIO_KM = 5
+    const lat = parseFloat(usuario.latitude)
+    const lng = parseFloat(usuario.longitude)
+    const dLat = Math.abs(lat - reparo.latitude) * 111
+    const dLon = Math.abs(lng - reparo.longitude) * 111 * Math.cos(lat * Math.PI / 180)
+    const distanciaKm = Math.sqrt(dLat * dLat + dLon * dLon)
+
+    // <=5km: já está perto — não arma. >5km: arma (upsert idempotente, nunca reseta notificado).
+    if (distanciaKm <= RAIO_KM) return res.json({ armado: false })
+
+    await pool.query(
+      `INSERT INTO aberturas_detalhe (reparador_id, reparo_id)
+       VALUES ($1, $2)
+       ON CONFLICT (reparador_id, reparo_id) DO NOTHING`,
+      [req.usuario.id, req.params.id]
+    )
+    res.json({ armado: true })
+  } catch (err) {
+    console.error('[AberturaDetalhe] Erro:', err.message)
+    res.status(500).json({ erro: 'Erro ao registrar abertura' })
   }
 })
 
