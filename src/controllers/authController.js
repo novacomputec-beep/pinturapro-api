@@ -195,7 +195,7 @@ const cadastrar = async (req, res) => {
     }
 
     const assinaturaResult = await client.query(
-      `SELECT status, plano, proximo_vencimento, valor_mensal FROM assinaturas WHERE usuario_id = $1 ORDER BY criado_em DESC LIMIT 1`,
+      `SELECT status, tipo, plano, proximo_vencimento, valor_mensal FROM assinaturas WHERE usuario_id = $1 ORDER BY criado_em DESC LIMIT 1`,
       [usuario.id]
     )
     const assinatura = assinaturaResult.rows[0] || null
@@ -298,7 +298,7 @@ const login = async (req, res) => {
     }
 
     const assinaturaResult = await pool.query(
-      `SELECT status, plano, proximo_vencimento, valor_mensal FROM assinaturas
+      `SELECT status, tipo, plano, proximo_vencimento, valor_mensal FROM assinaturas
        WHERE usuario_id = $1
        ORDER BY CASE status WHEN 'ativa' THEN 1 WHEN 'pendente' THEN 2 ELSE 3 END, criado_em DESC
        LIMIT 1`,
@@ -337,7 +337,7 @@ const perfil = async (req, res) => {
       [req.usuario.id]
     )
     const assinaturaResult = await pool.query(
-      `SELECT plano, status, proximo_vencimento, valor_mensal FROM assinaturas
+      `SELECT plano, status, tipo, proximo_vencimento, valor_mensal FROM assinaturas
        WHERE usuario_id = $1
        ORDER BY CASE status WHEN 'ativa' THEN 1 WHEN 'pendente' THEN 2 ELSE 3 END, criado_em DESC LIMIT 1`,
       [req.usuario.id]
