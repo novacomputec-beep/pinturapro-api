@@ -1340,7 +1340,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
 })
 
 // POST /obras/:id/candidatura — pintor se candidata a uma obra
-router.post('/obras/:id/candidatura', autenticar, exigirPintor, async (req, res) => {
+router.post('/obras/:id/candidatura', autenticar, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
   try {
     const { mensagem, valor_proposto } = req.body
     const existente = await pool.query(
@@ -1479,7 +1479,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
 })
 
 // POST /obras/:id/match — pintor confirma ida ao local
-router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
+router.post('/obras/:id/match', autenticar, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
   try {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
