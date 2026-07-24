@@ -9,7 +9,8 @@ const minhas = async (req, res) => {
 
     const result = await pool.query(
       `SELECT c.id, c.status, c.criado_em, c.valor_contraproposta, c.valor_proposto,
-              o.id as obra_id, o.titulo, o.categoria, o.valor, o.cidade, o.status as obra_status
+              o.id as obra_id, o.titulo, o.categoria, o.valor, o.cidade, o.status as obra_status,
+              o.match_usuario_id, o.match_feito_em
        FROM candidaturas c
        JOIN obras o ON c.obra_id = o.id
        WHERE c.usuario_id = $1

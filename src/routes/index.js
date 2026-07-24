@@ -1901,6 +1901,7 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
       SELECT ir.id, ir.status, ir.valor_proposto, ir.valor_contraproposta, ir.rodada, ir.criado_em,
              r.id as reparo_id, r.titulo, r.categoria, r.descricao, r.valor_estimado,
              r.cidade, r.bairro, r.latitude, r.longitude, r.expira_em, r.status as reparo_status, r.prazo_atendimento_horas,
+             r.match_usuario_id, r.match_feito_em,
              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM interesse_reparos ir
       JOIN reparos r ON ir.reparo_id = r.id
