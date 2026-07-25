@@ -282,7 +282,11 @@ const iniciarAgendador = () => {
 
   setTimeout(() => {
     verificarObrasComBaixoEngajamento()
-    verificarObrasExpirando()
+    // APOSENTADO: verificarObrasExpirando() enviava o texto fixo "expira em 24 horas!" para qualquer
+    // demanda a <24h de expira_em, independente do tempo real restante. Substituído por
+    // verificarMarcosExpiracao (marcos proporcionais à faixa de prazo). Função mantida em
+    // alertaService.js, apenas não é mais agendada nem disparada no boot.
+    // verificarObrasExpirando()
     verificarPrestadoresProximos()
     verificarMarcosExpiracao()
     verificarCronometroReparos()
@@ -290,7 +294,8 @@ const iniciarAgendador = () => {
   }, 60 * 1000)
 
   setInterval(() => { verificarObrasComBaixoEngajamento() }, INTERVALO_ENGAJAMENTO)
-  setInterval(() => { verificarObrasExpirando() }, INTERVALO_EXPIRACAO)
+  // APOSENTADO (ver comentário acima): expiração agora é notificada SÓ por verificarMarcosExpiracao.
+  // setInterval(() => { verificarObrasExpirando() }, INTERVALO_EXPIRACAO)
   setInterval(() => { verificarPrestadoresProximos() }, INTERVALO_PROXIMIDADE)
   setInterval(() => { verificarMarcosExpiracao() }, INTERVALO_CRONOMETRO)
   setInterval(() => { verificarCronometroReparos() }, INTERVALO_CRONOMETRO)
