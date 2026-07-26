@@ -3572,9 +3572,23 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
     await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
     // CONTRATOS primeiro: contratos.candidatura_id → candidaturas.id e
     // contratos.interesse_id → interesse_reparos.id. Sem isso a transação faz
-    // rollback na FK ao apagar candidaturas/interesse_reparos. Wipe total é
-    // correto aqui — esta rotina apaga todos os dados não-admin.
-    await client.query(`DELETE FROM contratos`)
+    // rollback na FK ao apagar candidaturas/interesse_reparos.
+    // Escopado aos usuários alvo (mesma cobertura do passo 0 de limpar-teste.js):
+    // prestador (candidaturas/interesse_reparos.usuario_id) e dono (via
+    // obras.criado_por / reparos.criado_por). Contratos entre admins não são tocados.
+    await client.query(`
+      DELETE FROM contratos
+       WHERE candidatura_id IN (
+               SELECT c.id FROM candidaturas c
+                WHERE c.usuario_id = ANY($1)
+                   OR c.obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))
+             )
+          OR interesse_id IN (
+               SELECT ir.id FROM interesse_reparos ir
+                WHERE ir.usuario_id = ANY($1)
+                   OR ir.reparo_id IN (SELECT id FROM reparos WHERE criado_por = ANY($1))
+             )
+    `, [ids])
     await client.query(`DELETE FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
     await client.query(`DELETE FROM obras WHERE criado_por = ANY($1)`, [ids])
     // Cascade dos reparos criados pelos usuários alvo
