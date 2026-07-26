@@ -785,6 +785,40 @@ router.post('/auth/boas-vindas-confirmada', autenticar, async (req, res) => {
 // ============================================================
 // USUARIOS
 // ============================================================
+
+// Contratos do usuário — PRIMEIRO passo de toda exclusão de conta.
+//
+// `contratos` não aponta para `usuarios`: o vínculo é INDIRETO, pela candidatura
+// (fluxo obra, contratos.candidatura_id → candidaturas.id) ou pelo interesse
+// (fluxo reparo, contratos.interesse_id → interesse_reparos.id). Como as cascatas
+// de exclusão apagavam candidaturas/interesse_reparos SEM apagar os contratos que
+// os referenciam, um usuário COM contrato podia derrubar a transação inteira por
+// violação de FK (23503) → ROLLBACK → a conta (e o cpf_cnpj dela) SOBREVIVIA, e o
+// app só mostrava "Erro ao excluir conta". Apagando os contratos antes dos pais, a
+// FK deixa de bloquear. Onde a FK não existir, isto ainda é necessário: sem ele
+// ficam linhas ÓRFÃS em contratos apontando para candidaturas/interesses que não
+// existem mais (mesma sujeira que a limpeza de assinaturas órfãs acima resolve).
+//
+// Cobre os DOIS lados do contrato, nos dois fluxos:
+//   • usuário como PRESTADOR → candidaturas.usuario_id / interesse_reparos.usuario_id
+//   • usuário como DONO      → candidaturas.obra_id → obras.criado_por
+//                              interesse_reparos.reparo_id → reparos.criado_por
+// Uma linha de contratos tem candidatura_id XOR interesse_id; o lado NULL
+// simplesmente não casa em nenhum IN (NULL IN (...) → NULL, não apaga nada).
+const SQL_DELETE_CONTRATOS_DO_USUARIO = `
+  DELETE FROM contratos
+   WHERE candidatura_id IN (
+           SELECT c.id FROM candidaturas c
+            WHERE c.usuario_id = $1
+               OR c.obra_id IN (SELECT id FROM obras WHERE criado_por = $1)
+         )
+      OR interesse_id IN (
+           SELECT ir.id FROM interesse_reparos ir
+            WHERE ir.usuario_id = $1
+               OR ir.reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1)
+         )
+`
+
 router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
@@ -796,6 +830,10 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     if (usuario.rows[0].role === 'admin') return res.status(400).json({ erro: 'Não é possível excluir um administrador' })
 
     await client.query('BEGIN')
+
+    // Contratos ANTES de candidaturas/interesse_reparos/obras/reparos (ver comentário
+    // em SQL_DELETE_CONTRATOS_DO_USUARIO): a FK indireta bloqueava a exclusão.
+    await client.query(SQL_DELETE_CONTRATOS_DO_USUARIO, [id])
 
     // Cascade obras criadas por este usuário (dono_obra)
     const obrasRes = await client.query('SELECT id FROM obras WHERE criado_por = $1', [id])
@@ -891,6 +929,11 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
     const id = usuario.id
 
     await client.query('BEGIN')
+
+    // Contratos ANTES de candidaturas/interesse_reparos/obras/reparos (ver comentário
+    // em SQL_DELETE_CONTRATOS_DO_USUARIO): a FK indireta bloqueava a exclusão e fazia
+    // esta transação inteira sofrer ROLLBACK, deixando a conta e o cpf_cnpj no banco.
+    await client.query(SQL_DELETE_CONTRATOS_DO_USUARIO, [id])
 
     // Cascade obras criadas por este usuário (colunas idênticas ao DELETE /usuarios/:id)
     await client.query(`DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
@@ -2814,6 +2857,11 @@ router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) =>
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    // CONTRATOS primeiro: contratos.candidatura_id → candidaturas.id e
+    // contratos.interesse_id → interesse_reparos.id. Sem isso a transação faz
+    // rollback na FK ao apagar candidaturas/interesse_reparos. Wipe total é
+    // correto aqui — esta rotina apaga todos os dados não-admin.
+    await client.query(`DELETE FROM contratos`)
     await client.query(`DELETE FROM interesse_reparos`)
     await client.query(`DELETE FROM midias_reparos`)
     await client.query(`DELETE FROM reparos`)
@@ -3522,6 +3570,11 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
     // antes de obras por causa da FK mensagens.obra_id)
     await client.query(`DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
     await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
+    // CONTRATOS primeiro: contratos.candidatura_id → candidaturas.id e
+    // contratos.interesse_id → interesse_reparos.id. Sem isso a transação faz
+    // rollback na FK ao apagar candidaturas/interesse_reparos. Wipe total é
+    // correto aqui — esta rotina apaga todos os dados não-admin.
+    await client.query(`DELETE FROM contratos`)
     await client.query(`DELETE FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
     await client.query(`DELETE FROM obras WHERE criado_por = ANY($1)`, [ids])
     // Cascade dos reparos criados pelos usuários alvo
