@@ -151,6 +151,24 @@ async function main() {
         `CREATE TEMP TABLE _del ON COMMIT DROP AS SELECT id FROM usuarios WHERE ${ONDE_DELETAR}`,
         PARAMS)
 
+      // 0) CONTRATOS primeiro — `contratos` não referencia `usuarios`, e sim a
+      //    candidatura (fluxo obra) ou o interesse (fluxo reparo). Apagar
+      //    candidaturas/interesse_reparos sem apagar os contratos que os apontam
+      //    estourava FK (23503) e fazia ROLLBACK de TUDO (nada era apagado, e a conta
+      //    + cpf_cnpj sobreviviam). Cobre o usuário como PRESTADOR (usuario_id) e como
+      //    DONO (via obras.criado_por / reparos.criado_por), nos dois fluxos.
+      await del('contratos',                        `DELETE FROM contratos
+                                                      WHERE candidatura_id IN (
+                                                              SELECT c.id FROM candidaturas c
+                                                               WHERE c.usuario_id IN (SELECT id FROM _del)
+                                                                  OR c.obra_id IN (SELECT id FROM obras WHERE criado_por IN (SELECT id FROM _del))
+                                                            )
+                                                         OR interesse_id IN (
+                                                              SELECT ir.id FROM interesse_reparos ir
+                                                               WHERE ir.usuario_id IN (SELECT id FROM _del)
+                                                                  OR ir.reparo_id IN (SELECT id FROM reparos WHERE criado_por IN (SELECT id FROM _del))
+                                                            )`)
+
       // 1) Itens CRIADOS pelos usuários a deletar + filhos (filhos primeiro).
       await del('mensagens (de obras deletadas)',   `DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por IN (SELECT id FROM _del))`)
       await del('candidaturas (de obras deletadas)', `DELETE FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por IN (SELECT id FROM _del))`)
