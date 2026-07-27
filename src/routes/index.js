@@ -991,6 +991,14 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
       `SELECT o.*,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id AND status = 'pendente') as candidaturas_pendentes,
+        -- Candidatura pendente mais recente: deixa o app chavear o modal de nova proposta
+        -- por candidatura, não por obra. Ordena por criado_em (id é UUID aleatório, então
+        -- MAX(id) não é "a mais nova"); id DESC só desempata criado_em idêntico. NULL se
+        -- não houver nenhuma pendente.
+        (SELECT c.id FROM candidaturas c
+          WHERE c.obra_id = o.id AND c.status = 'pendente'
+          ORDER BY c.criado_em DESC, c.id DESC
+          LIMIT 1) as candidatura_pendente_recente_id,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa,
         (SELECT COALESCE(c.valor_contraproposta, c.valor_proposto)
            FROM candidaturas c
@@ -1753,6 +1761,14 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
       `SELECT r.*,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id AND status = 'pendente') as interesses_pendentes,
+        -- Interesse pendente mais recente: deixa o app chavear o modal de nova proposta
+        -- por interesse, não por reparo. Ordena por criado_em (id é UUID aleatório, então
+        -- MAX(id) não é "o mais novo"); id DESC só desempata criado_em idêntico. NULL se
+        -- não houver nenhum pendente.
+        (SELECT ir.id FROM interesse_reparos ir
+          WHERE ir.reparo_id = r.id AND ir.status = 'pendente'
+          ORDER BY ir.criado_em DESC, ir.id DESC
+          LIMIT 1) as interesse_pendente_recente_id,
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa,
         (SELECT COALESCE(ir.valor_contraproposta, ir.valor_proposto)
            FROM interesse_reparos ir
