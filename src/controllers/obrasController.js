@@ -25,6 +25,15 @@ const listar = async (req, res) => {
         SELECT 1 FROM prestadores_bloqueados_dono pb
         WHERE pb.dono_id = o.criado_por AND pb.prestador_id = $1
       )
+      -- Obra que este pintor já recusou não volta ao feed: o card ficava visível mas
+      -- POST /obras/:id/candidatura rejeita com 409 (guarda de duplicidade), então era
+      -- um card em que ele não podia mais agir. Fica na BASE do WHERE, antes de qualquer
+      -- filtro dinâmico, para valer em todos os modos (cidade, raio, estado e sem
+      -- recorte). Só 'recusado' — pendente/contraproposta_dono/aceito seguem iguais.
+      AND NOT EXISTS (
+        SELECT 1 FROM candidaturas c
+        WHERE c.obra_id = o.id AND c.usuario_id = $1 AND c.status = 'recusado'
+      )
     `
     // $1 reservado para o usuario_id (filtro de bloqueio global por dono)
     const params = [req.usuario.id]

@@ -2067,6 +2067,15 @@ router.get('/reparos', autenticar, exigirPrestador, exigirReparador, async (req,
         AND NOT EXISTS (
           SELECT 1 FROM prestadores_bloqueados_dono pb
           WHERE pb.dono_id = r.criado_por AND pb.prestador_id = $1
+        )
+        -- Reparo que este prestador já recusou não volta ao feed: o card ficava visível
+        -- mas POST /reparos/:id/interesse rejeita com 409 (guarda de duplicidade), então
+        -- era um card em que ele não podia mais agir. Fica na BASE do WHERE, antes de
+        -- qualquer filtro dinâmico, para valer em todos os modos (cidade, raio, estado e
+        -- sem recorte). Só 'recusado' — pendente/contraproposta_dono/aceito seguem iguais.
+        AND NOT EXISTS (
+          SELECT 1 FROM interesse_reparos ir
+          WHERE ir.reparo_id = r.id AND ir.usuario_id = $1 AND ir.status = 'recusado'
         )`
 
     if (categoria && categoria !== 'todas') {
