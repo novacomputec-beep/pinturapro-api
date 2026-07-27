@@ -1327,6 +1327,11 @@ router.get('/obras/:id', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT o.*,
+        -- "Expirada" não é status no banco: é uma obra ainda 'aberta' cujo expira_em já
+        -- passou. Calculado no SQL (relógio do servidor) para a tela de detalhe gatear o
+        -- botão de estender sem comparar com o relógio do aparelho. Mesma expressão do
+        -- GET /obras/admin e do GET /obras/minhas.
+        (o.status = 'aberta' AND o.expira_em <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
        FROM obras o WHERE o.id = $1`,
@@ -2639,7 +2644,15 @@ router.post('/reparos/:id/responder-tempo', autenticar, async (req, res) => {
 // CORRIGIDO: aceita dono do reparo E prestador (não só prestador)
 router.get('/reparos/:id', autenticar, async (req, res) => {
   try {
-    const result = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
+    // expirada: mesma expressão do GET /reparos/admin e do GET /reparos/minhas — "expirado"
+    // não é status no banco, é um reparo ainda 'aberta' cujo expira_em já passou. Calculado
+    // no SQL (relógio do servidor) para a tela de detalhe gatear o botão de estender sem
+    // comparar com o relógio do aparelho.
+    const result = await pool.query(
+      `SELECT *, (status = 'aberta' AND expira_em <= NOW()) AS expirada
+         FROM reparos WHERE id = $1`,
+      [req.params.id]
+    )
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
 
     const reparo = result.rows[0]
