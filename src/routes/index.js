@@ -989,10 +989,11 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
 
     const result = await pool.query(
       `SELECT o.*,
-        -- "Expirada" não é status no banco: é uma obra ainda 'aberta' cujo expira_em já
-        -- passou. Calculado no SQL (relógio do servidor) para o cliente não precisar
-        -- comparar expira_em com o relógio do aparelho. Mesma expressão do GET /obras/admin.
-        (o.status = 'aberta' AND o.expira_em <= NOW()) AS expirada,
+        -- "Expirada" não é status no banco: é uma obra NÃO encerrada cujo expira_em já
+        -- passou — vale em qualquer status vivo (inclusive 'rascunho', que também tem
+        -- expira_em desde a criação). Calculado no SQL (relógio do servidor) para o cliente
+        -- não precisar comparar expira_em com o relógio do aparelho.
+        (o.status <> 'encerrada' AND o.expira_em <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
         -- Conta 'pendente' E 'contraproposta_dono': uma obra em negociação (contraproposta
         -- enviada, aguardando o pintor) continua tendo interessado, e antes aparecia como zero.
@@ -1015,7 +1016,7 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
       [req.usuario.id, limit, offset]
     )
     const agora = new Date()
-    const eArquivada = o => o.status === 'encerrada' || (o.status === 'aberta' && o.expira_em && new Date(o.expira_em) < agora)
+    const eArquivada = o => o.status === 'encerrada' || (o.expira_em && new Date(o.expira_em) < agora)
     const obras     = result.rows.filter(o => !eArquivada(o))
     const historico = result.rows.filter(o =>  eArquivada(o))
     res.json({ obras, historico, page, limit })
@@ -1327,11 +1328,11 @@ router.get('/obras/:id', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT o.*,
-        -- "Expirada" não é status no banco: é uma obra ainda 'aberta' cujo expira_em já
+        -- "Expirada" não é status no banco: é uma obra NÃO encerrada cujo expira_em já
         -- passou. Calculado no SQL (relógio do servidor) para a tela de detalhe gatear o
         -- botão de estender sem comparar com o relógio do aparelho. Mesma expressão do
-        -- GET /obras/admin e do GET /obras/minhas.
-        (o.status = 'aberta' AND o.expira_em <= NOW()) AS expirada,
+        -- GET /obras/minhas.
+        (o.status <> 'encerrada' AND o.expira_em <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
        FROM obras o WHERE o.id = $1`,
@@ -1770,10 +1771,10 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
 
     const result = await pool.query(
       `SELECT r.*,
-        -- "Expirado" não é status no banco: é um reparo ainda 'aberta' cujo expira_em já
-        -- passou. Calculado no SQL (relógio do servidor) para o cliente não precisar
-        -- comparar expira_em com o relógio do aparelho. Mesma expressão do GET /reparos/admin.
-        (r.status = 'aberta' AND r.expira_em <= NOW()) AS expirada,
+        -- "Expirado" não é status no banco: é um reparo NÃO encerrado cujo expira_em já
+        -- passou — vale em qualquer status vivo. Calculado no SQL (relógio do servidor)
+        -- para o cliente não precisar comparar expira_em com o relógio do aparelho.
+        (r.status <> 'encerrada' AND r.expira_em <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         -- Conta 'pendente' E 'contraproposta_dono': um reparo em negociação (contraproposta
         -- enviada, aguardando o prestador) continua tendo interessado, e antes aparecia como zero.
@@ -1796,7 +1797,7 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
       [req.usuario.id, limit, offset]
     )
     const agora = new Date()
-    const eArquivado = r => r.status === 'encerrada' || (r.status === 'aberta' && r.expira_em && new Date(r.expira_em) < agora)
+    const eArquivado = r => r.status === 'encerrada' || (r.expira_em && new Date(r.expira_em) < agora)
     const reparos   = result.rows.filter(r => !eArquivado(r))
     const historico = result.rows.filter(r =>  eArquivado(r))
     res.json({ reparos, historico, page, limit })
@@ -2644,12 +2645,12 @@ router.post('/reparos/:id/responder-tempo', autenticar, async (req, res) => {
 // CORRIGIDO: aceita dono do reparo E prestador (não só prestador)
 router.get('/reparos/:id', autenticar, async (req, res) => {
   try {
-    // expirada: mesma expressão do GET /reparos/admin e do GET /reparos/minhas — "expirado"
-    // não é status no banco, é um reparo ainda 'aberta' cujo expira_em já passou. Calculado
-    // no SQL (relógio do servidor) para a tela de detalhe gatear o botão de estender sem
-    // comparar com o relógio do aparelho.
+    // expirada: mesma expressão do GET /reparos/minhas — "expirado" não é status no banco,
+    // é um reparo NÃO encerrado cujo expira_em já passou. Calculado no SQL (relógio do
+    // servidor) para a tela de detalhe gatear o botão de estender sem comparar com o
+    // relógio do aparelho.
     const result = await pool.query(
-      `SELECT *, (status = 'aberta' AND expira_em <= NOW()) AS expirada
+      `SELECT *, (status <> 'encerrada' AND expira_em <= NOW()) AS expirada
          FROM reparos WHERE id = $1`,
       [req.params.id]
     )
