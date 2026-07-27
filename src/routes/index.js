@@ -989,6 +989,10 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
 
     const result = await pool.query(
       `SELECT o.*,
+        -- "Expirada" não é status no banco: é uma obra ainda 'aberta' cujo expira_em já
+        -- passou. Calculado no SQL (relógio do servidor) para o cliente não precisar
+        -- comparar expira_em com o relógio do aparelho. Mesma expressão do GET /obras/admin.
+        (o.status = 'aberta' AND o.expira_em <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
         -- Conta 'pendente' E 'contraproposta_dono': uma obra em negociação (contraproposta
         -- enviada, aguardando o pintor) continua tendo interessado, e antes aparecia como zero.
@@ -1761,6 +1765,10 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
 
     const result = await pool.query(
       `SELECT r.*,
+        -- "Expirado" não é status no banco: é um reparo ainda 'aberta' cujo expira_em já
+        -- passou. Calculado no SQL (relógio do servidor) para o cliente não precisar
+        -- comparar expira_em com o relógio do aparelho. Mesma expressão do GET /reparos/admin.
+        (r.status = 'aberta' AND r.expira_em <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         -- Conta 'pendente' E 'contraproposta_dono': um reparo em negociação (contraproposta
         -- enviada, aguardando o prestador) continua tendo interessado, e antes aparecia como zero.
