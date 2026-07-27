@@ -383,12 +383,17 @@ const formatarTempoRestante = (min) => {
   return `${min} minutos`
 }
 
+// `interesse`: subconsulta do NOT EXISTS que suprime o alerta quando a demanda JÁ tem
+// interessado. Testava só a EXISTÊNCIA da linha, então uma candidatura/interesse já
+// RECUSADO calava o alerta para sempre — justamente quando o dono mais precisa dele
+// (demanda expirando e sem ninguém vivo na fila). Agora só linhas vivas suprimem.
+// IS DISTINCT FROM (e não <>) por ser NULL-safe: status NULL continua suprimindo, como hoje.
 const verificarMarcosExpiracao = async () => {
   const lados = [
     { tabela: 'obras',   idKey: 'obra_id',   janelaCol: 'horas_para_expirar',      substantivo: 'Sua obra',   verbo: 'Estenda o prazo',
-      tipoPrefixo: 'obra_expirando',   statusAprovacao: `AND d.status_aprovacao = 'aprovada'`, interesse: `SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id` },
+      tipoPrefixo: 'obra_expirando',   statusAprovacao: `AND d.status_aprovacao = 'aprovada'`, interesse: `SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id AND c.status IS DISTINCT FROM 'recusado'` },
     { tabela: 'reparos', idKey: 'reparo_id', janelaCol: 'prazo_atendimento_horas', substantivo: 'Seu reparo', verbo: 'Aumente o prazo',
-      tipoPrefixo: 'reparo_expirando', statusAprovacao: '',                          interesse: `SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = d.id` },
+      tipoPrefixo: 'reparo_expirando', statusAprovacao: '',                          interesse: `SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = d.id AND ir.status IS DISTINCT FROM 'recusado'` },
   ]
 
   let totalEnviados = 0
