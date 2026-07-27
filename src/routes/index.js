@@ -990,7 +990,9 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
     const result = await pool.query(
       `SELECT o.*,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
-        (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id AND status = 'pendente') as candidaturas_pendentes,
+        -- Conta 'pendente' E 'contraproposta_dono': uma obra em negociação (contraproposta
+        -- enviada, aguardando o pintor) continua tendo interessado, e antes aparecia como zero.
+        (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id AND status IN ('pendente', 'contraproposta_dono')) as candidaturas_pendentes,
         -- Candidatura pendente mais recente: deixa o app chavear o modal de nova proposta
         -- por candidatura, não por obra. Ordena por criado_em (id é UUID aleatório, então
         -- MAX(id) não é "a mais nova"); id DESC só desempata criado_em idêntico. NULL se
@@ -1760,7 +1762,9 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
     const result = await pool.query(
       `SELECT r.*,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
-        (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id AND status = 'pendente') as interesses_pendentes,
+        -- Conta 'pendente' E 'contraproposta_dono': um reparo em negociação (contraproposta
+        -- enviada, aguardando o prestador) continua tendo interessado, e antes aparecia como zero.
+        (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id AND status IN ('pendente', 'contraproposta_dono')) as interesses_pendentes,
         -- Interesse pendente mais recente: deixa o app chavear o modal de nova proposta
         -- por interesse, não por reparo. Ordena por criado_em (id é UUID aleatório, então
         -- MAX(id) não é "o mais novo"); id DESC só desempata criado_em idêntico. NULL se
