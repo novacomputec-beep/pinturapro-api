@@ -250,10 +250,14 @@ const montarFiltroGeo = ({ alias, modo, raio, escopo, ancora, params }) => {
 
   if (modo === 'raio') {
     if (ancora.lat !== null && ancora.lng !== null && !isNaN(raio)) {
-      // Raio cumulativo: dentro de X km (linhas com coordenada) OU pertencente à cidade do
-      // escopo — "sem lat/lng" não pode significar "invisível".
+      // Raio cumulativo: dentro de X km OU pertencente à cidade do escopo — mas, em modo
+      // RAIO, os dois lados exigem coordenada. Sem lat/lng não há distância, e a metade
+      // textual estava colando essas linhas em TODO raio (o mesmo item aparecia igual em
+      // +40 e em +500 km). Elas seguem visíveis no modo 'cidade', que é sobre pertencer,
+      // não sobre distância. O IS NOT NULL fica AQUI, e não dentro de clausulaCidade, que
+      // é compartilhada com o modo 'cidade' e com os degradês — lá o filtro continua puramente textual.
       let condicao = clausulaRaio(alias, raio, ancora, params)
-      if (escopo.cidade) condicao = `(${condicao} OR ${clausulaCidade(alias, escopo, params)})`
+      if (escopo.cidade) condicao = `(${condicao} OR (${clausulaCidade(alias, escopo, params)} AND ${alias}.latitude IS NOT NULL AND ${alias}.longitude IS NOT NULL))`
       return { sql: ` AND ${condicao}`, meta: meta('raio', false, null) }
     }
     // Sem âncora não há distância possível. Cair para a cidade é exatamente o que o app já
