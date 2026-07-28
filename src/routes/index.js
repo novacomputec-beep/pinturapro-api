@@ -1272,8 +1272,13 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
   }
 })
 
-// POST /obras/:id/estender — dono estende o prazo da própria obra, respeitando o teto de
-// 2x a janela original. Re-arma TODOS os marcos de expiração (marco_6h/60/30/15_em = NULL):
+// Teto de segurança PLANO da extensão de obra: 365 dias. Substitui o antigo teto de 2x a
+// janela original — não há mais orçamento derivado de publicado_em/horas_para_expirar; o
+// único limite é absoluto, para barrar valor absurdo (ex.: um dígito a mais por engano).
+const TETO_ESTENDER_OBRA_HORAS = 8760
+
+// POST /obras/:id/estender — dono estende o prazo da própria obra, respeitando o teto plano
+// de 8760h. Re-arma TODOS os marcos de expiração (marco_6h/60/30/15_em = NULL):
 // como expira_em foi empurrado para frente, os 4 alertas precisam re-disparar contra o novo
 // prazo, senão a obra estendida mantém os marcos já gastos e não recebe nova contagem
 // regressiva. (Substitui o antigo clear de alerta_sem_interessados_em, cujo job foi aposentado.)
@@ -1291,25 +1296,17 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
 
     const horas = Number(req.body?.horas)
     if (!Number.isFinite(horas) || horas < 1) return res.status(400).json({ erro: 'horas inválido: informe um número >= 1' })
-
-    // teto = âncora + 2x janela original. COALESCE(publicado_em, criado_em): PUT /obras/:id
-    // (admin editar) pode abrir uma obra sem setar publicado_em; criado_em é sempre <= o
-    // instante real de publicação, então só pode SUB-conceder orçamento, nunca conceder a mais.
-    // COALESCE(horas_para_expirar, 720) espelha o default usado no expira_em na criação.
-    // budget_antes = horas máximas que ainda cabem agora (a partir de GREATEST(expira_em, NOW())).
-    const cap = await pool.query(
-      `SELECT
-         GREATEST($1::timestamptz, NOW()) + ($2::numeric * INTERVAL '1 hour') AS novo_expira_em,
-         GREATEST(0, EXTRACT(EPOCH FROM (
-           (COALESCE($3::timestamptz, $4::timestamptz) + (2 * COALESCE($5::numeric, 720) * INTERVAL '1 hour'))
-           - GREATEST($1::timestamptz, NOW())
-         )) / 3600) AS budget_antes`,
-      [o.expira_em, horas, o.publicado_em, o.criado_em, o.horas_para_expirar]
-    )
-    const budgetAntes = Number(cap.rows[0].budget_antes)
-    if (horas > budgetAntes) {
-      return res.status(422).json({ erro: 'Extensão excede o teto de 2x a janela original', extensao_maxima_horas: Math.max(0, budgetAntes) })
+    if (horas > TETO_ESTENDER_OBRA_HORAS) {
+      return res.status(400).json({ erro: `horas inválido: máximo de ${TETO_ESTENDER_OBRA_HORAS} (365 dias)`, extensao_maxima_horas: TETO_ESTENDER_OBRA_HORAS })
     }
+
+    // Só o novo expira_em: sem orçamento a calcular, a query perdeu a metade budget_antes.
+    // GREATEST(expira_em, NOW()) preservado — obra já vencida estende a partir de agora, e
+    // não de um vencimento no passado (senão "+2h" compraria menos de 2h de vida real).
+    const cap = await pool.query(
+      `SELECT GREATEST($1::timestamptz, NOW()) + ($2::numeric * INTERVAL '1 hour') AS novo_expira_em`,
+      [o.expira_em, horas]
+    )
 
     const upd = await pool.query(
       `UPDATE obras SET expira_em = $1,
@@ -1317,7 +1314,7 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
        WHERE id = $2 AND criado_por = $3 RETURNING expira_em`,
       [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id]
     )
-    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: Math.max(0, budgetAntes - horas) })
+    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: TETO_ESTENDER_OBRA_HORAS - horas })
   } catch (err) {
     console.error('[obras/estender]', err.message)
     res.status(500).json({ erro: 'Erro ao estender prazo da obra' })
@@ -1391,13 +1388,21 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       delete obra.endereco_obra
     }
 
-    // Advisory: quanto o dono ainda pode estender (teto 2x). Mesma fórmula que /obras/:id/estender
-    // enforça de forma autoritativa — aqui é só p/ o app oferecer opções válidas. Anchor obra:
-    // COALESCE(publicado_em, criado_em); janela COALESCE(horas_para_expirar, 720).
+    // Advisory: quanto o dono ainda pode estender, contra o teto plano de
+    // TETO_ESTENDER_OBRA_HORAS (365 dias) — só p/ o app oferecer opções válidas.
+    // "Horas já usadas" = o quanto expira_em já foi empurrado ALÉM do vencimento original
+    // (âncora + janela), não o tempo decorrido: envelhecer sem estender não consome teto.
+    // Anchor obra: COALESCE(publicado_em, criado_em); janela COALESCE(horas_para_expirar, 720).
+    //
+    // ATENÇÃO — este advisory é CUMULATIVO, mas POST /obras/:id/estender valida por REQUISIÇÃO
+    // (rejeita 400 só se horas > 8760, sem somar extensões anteriores). Ou seja: o app oferece
+    // no máximo o que sobra do total, e o endpoint aceitaria mais. Erra para o lado seguro
+    // (nunca oferece o que tomaria 400), mas os dois só ficam idênticos quando o endpoint
+    // também passar a descontar o acumulado.
     const ancoraObraMs = new Date(obra.publicado_em || obra.criado_em).getTime()
-    const tetoObraMs = ancoraObraMs + 2 * (Number(obra.horas_para_expirar) || 720) * 3600 * 1000
-    const baseObraMs = Math.max(new Date(obra.expira_em).getTime(), Date.now())
-    const extensao_maxima_horas = Math.max(0, (tetoObraMs - baseObraMs) / 3600000)
+    const expiraOriginalObraMs = ancoraObraMs + (Number(obra.horas_para_expirar) || 720) * 3600 * 1000
+    const horasUsadasObra = Math.max(0, (new Date(obra.expira_em).getTime() - expiraOriginalObraMs) / 3600000)
+    const extensao_maxima_horas = Math.max(0, TETO_ESTENDER_OBRA_HORAS - horasUsadasObra)
     res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, extensao_maxima_horas })
   } catch (err) {
     console.error('Erro ao buscar obra:', err)
@@ -1852,12 +1857,21 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
   }
 })
 
-// POST /reparos/:id/estender — simétrico a /obras/:id/estender. Diferença deliberada: a âncora
-// é criado_em SEM COALESCE — o reparo publica na criação, então criado_em é o instante de
-// publicação e nunca é NULL (obra precisa de COALESCE(publicado_em, criado_em); reparo não).
-// A JANELA usa COALESCE(prazo_atendimento_horas, 720): a coluna PODE ser NULL (o create grava
-// prazo_atendimento_horas || null) enquanto o expira_em da criação já usa o default 720 —
-// sem o COALESCE, um reparo de prazo NULL teria teto NULL e seria ineextensível.
+// Carência para estender reparo de faixa longa. "Esta semana" é a faixa > 24h; prazo NULL
+// entra junto porque é a janela mais longa que existe (o expira_em da criação usa o default
+// de 720h) e o app sequer rotula esses reparos. Faixas curtas (<= 24h) seguem sem carência:
+// quem marcou "1 hora" precisa poder corrigir na hora.
+const CARENCIA_ESTENDER_REPARO_HORAS = 1
+const FAIXA_LONGA_REPARO_HORAS = 24
+
+// Advisory de extensão do reparo. Não há mais teto no servidor (o de 2x saiu), mas o campo
+// continua na resposta porque o app filtra as opções por ele (ModalEstenderPrazo). Valor
+// generoso = "não gateia o menu"; NÃO é enforçado por nada.
+const ADVISORY_ESTENDER_REPARO_HORAS = 8760
+
+// POST /reparos/:id/estender — âncora criado_em SEM COALESCE: o reparo publica na criação,
+// então criado_em é o instante de publicação e nunca é NULL (obra precisa de
+// COALESCE(publicado_em, criado_em); reparo não). É essa mesma âncora que a carência usa.
 // Re-arma TODOS os marcos de expiração (marco_6h/60/30/15_em = NULL), igual à obra: expira_em
 // avança, então os 4 alertas re-disparam contra o novo prazo. (Substitui o clear de
 // alerta_sem_interessados_em, cujo job foi aposentado.)
@@ -1876,18 +1890,21 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
     const horas = Number(req.body?.horas)
     if (!Number.isFinite(horas) || horas < 1) return res.status(400).json({ erro: 'horas inválido: informe um número >= 1' })
 
+    // Carência e novo prazo na MESMA query: as duas comparações precisam do relógio do banco
+    // (NOW()), não do relógio do processo, senão skew de container decide quem pode estender.
     const cap = await pool.query(
       `SELECT
          GREATEST($1::timestamptz, NOW()) + ($2::numeric * INTERVAL '1 hour') AS novo_expira_em,
-         GREATEST(0, EXTRACT(EPOCH FROM (
-           ($3::timestamptz + (2 * COALESCE($4::numeric, 720) * INTERVAL '1 hour'))
-           - GREATEST($1::timestamptz, NOW())
-         )) / 3600) AS budget_antes`,
-      [r.expira_em, horas, r.criado_em, r.prazo_atendimento_horas]
+         (NOW() >= $3::timestamptz + ($4::numeric * INTERVAL '1 hour')) AS carencia_cumprida`,
+      [r.expira_em, horas, r.criado_em, CARENCIA_ESTENDER_REPARO_HORAS]
     )
-    const budgetAntes = Number(cap.rows[0].budget_antes)
-    if (horas > budgetAntes) {
-      return res.status(422).json({ erro: 'Extensão excede o teto de 2x a janela original', extensao_maxima_horas: Math.max(0, budgetAntes) })
+
+    // Faixa longa (> 24h) e prazo NULL: só estende 1h após o cadastro. NULL entra via o
+    // `=== null` explícito — Number(null) é 0, que passaria batido pela comparação numérica.
+    const prazoReparo = r.prazo_atendimento_horas === null ? null : Number(r.prazo_atendimento_horas)
+    const exigeCarencia = prazoReparo === null || prazoReparo > FAIXA_LONGA_REPARO_HORAS
+    if (exigeCarencia && !cap.rows[0].carencia_cumprida) {
+      return res.status(409).json({ erro: 'Aguarde 1 hora após o cadastro para estender' })
     }
 
     const upd = await pool.query(
@@ -1896,7 +1913,7 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
        WHERE id = $2 AND criado_por = $3 RETURNING expira_em`,
       [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id]
     )
-    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: Math.max(0, budgetAntes - horas) })
+    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: ADVISORY_ESTENDER_REPARO_HORAS })
   } catch (err) {
     console.error('[reparos/estender]', err.message)
     res.status(500).json({ erro: 'Erro ao estender prazo do reparo' })
@@ -2649,10 +2666,16 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // é um reparo NÃO encerrado cujo expira_em já passou. Calculado no SQL (relógio do
     // servidor) para a tela de detalhe gatear o botão de estender sem comparar com o
     // relógio do aparelho.
+    // pode_estender_em: instante a partir do qual POST /reparos/:id/estender para de recusar
+    // com 409. NULL = sem carência (faixa curta), pode estender já. Mesmas constantes do
+    // endpoint, então a regra não pode divergir do que ele enforça. Calculado no SQL, como
+    // `expirada`, para o app não depender do relógio do aparelho.
     const result = await pool.query(
-      `SELECT *, (status <> 'encerrada' AND expira_em <= NOW()) AS expirada
+      `SELECT *, (status <> 'encerrada' AND expira_em <= NOW()) AS expirada,
+              CASE WHEN prazo_atendimento_horas IS NULL OR prazo_atendimento_horas > $2::numeric
+                   THEN criado_em + ($3::numeric * INTERVAL '1 hour') END AS pode_estender_em
          FROM reparos WHERE id = $1`,
-      [req.params.id]
+      [req.params.id, FAIXA_LONGA_REPARO_HORAS, CARENCIA_ESTENDER_REPARO_HORAS]
     )
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
 
@@ -2719,18 +2742,19 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       delete reparo.endereco_reparo
     }
 
-    // Advisory: quanto o dono ainda pode estender (teto 2x). Autoritativo é /reparos/:id/estender.
-    // Anchor reparo: criado_em (nunca NULL, publica na criação); janela COALESCE(prazo_atendimento_horas, 720).
-    const ancoraReparoMs = new Date(reparo.criado_em).getTime()
-    const tetoReparoMs = ancoraReparoMs + 2 * (Number(reparo.prazo_atendimento_horas) || 720) * 3600 * 1000
-    const baseReparoMs = Math.max(new Date(reparo.expira_em).getTime(), Date.now())
-    const extensao_maxima_horas = Math.max(0, (tetoReparoMs - baseReparoMs) / 3600000)
+    // Advisory plano: /reparos/:id/estender não tem mais teto (o de 2x saiu), então não há
+    // orçamento a calcular — nem âncora, nem janela. O campo continua só porque o app filtra
+    // as opções por ele (ModalEstenderPrazo); a MESMA constante do endpoint, para os dois
+    // números não divergirem. NÃO reflete a carência de 1h das faixas longas: dentro da
+    // primeira hora o app ainda oferece opções que o endpoint recusa com 409.
+    const extensao_maxima_horas = ADVISORY_ESTENDER_REPARO_HORAS
     res.json({
       reparo,
       midias: midias.rows,
       meu_interesse: interesse.rows[0] || null,
       interessados,
       extensao_maxima_horas,
+      pode_estender_em: reparo.pode_estender_em,
     })
   } catch (err) {
     console.error('Erro ao buscar reparo:', err)
