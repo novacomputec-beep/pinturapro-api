@@ -492,7 +492,11 @@ const verificarCronometroReparos = async () => {
     }
 
     // (b) Cronômetro zerou → devolve o reparo ao feed e limpa o match,
-    // reiniciando a contagem com o prazo original configurado na criação
+    // reiniciando a contagem com o prazo original configurado na criação.
+    // status = 'aberta' no WHERE (espelha o cron de obras): sem ele, um reparo já
+    // ENCERRADO com expira_em vencido seria ressuscitado para o feed e perderia o
+    // match. Reparo casado permanece 'aberta' (/reparos/:id/match não mexe no status),
+    // então o filtro não exclui nenhuma linha legítima do cronômetro.
     const expirados = await pool.query(`
       UPDATE reparos SET
         status = 'aberta',
@@ -503,7 +507,8 @@ const verificarCronometroReparos = async () => {
         pedido_tempo_motivo = NULL,
         pedido_tempo_minutos = NULL,
         expira_em = NOW() + (prazo_atendimento_horas * INTERVAL '1 hour')
-      WHERE match_usuario_id IS NOT NULL
+      WHERE status = 'aberta'
+        AND match_usuario_id IS NOT NULL
         AND prazo_atendimento_horas IS NOT NULL
         AND expira_em <= NOW()
       RETURNING id
