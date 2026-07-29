@@ -5,7 +5,7 @@ const helmet = require('helmet')
 const rateLimit = require('express-rate-limit')
 const rotasApp = require('./src/routes')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes } = require('./src/services/alertaService')
 const { invalidarCacheAssinatura } = require('./src/middlewares/auth')
 const { deletarDoCloudinary } = require('./src/services/uploadService')
 
@@ -302,6 +302,8 @@ const iniciarAgendador = () => {
   setInterval(() => { verificarCronometroObras() }, INTERVALO_CRONOMETRO)
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
   setInterval(() => { expirarAssinaturasVencidas() }, 60 * 60 * 1000)
+  // De hora em hora: prazo é de 2 dias, então não há motivo para entrar no bloco de 1min.
+  setInterval(() => { autoEncerrarPendentes() }, 60 * 60 * 1000)
   setInterval(() => { notificarAssinaturasProximasVencimento() }, 24 * 60 * 60 * 1000)
 
   setInterval(async () => {

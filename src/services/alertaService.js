@@ -576,6 +576,52 @@ const verificarCronometroObras = async () => {
   }
 }
 
+// Encerramento em duas mãos: fecha sozinho a solicitação que a outra parte não confirmou
+// em 2 dias. Sem isto uma parte silenciosa deixaria a demanda pendente para sempre.
+// status = 'aberta' no WHERE (mesma lição do cron de reparos): a demanda só é candidata
+// enquanto NÃO está encerrada. Notifica quem NÃO pediu — quem pediu já sabe.
+const AUTO_ENCERRAR_APOS = '2 days'
+
+const autoEncerrarPendentes = async () => {
+  // tabela e coluna de id saem desta lista literal, nunca do request — interpolação segura.
+  const lados = [
+    { tabela: 'obras',   chave: 'obra_id',   tipoPush: 'obra_encerrada',    rotulo: 'a obra' },
+    { tabela: 'reparos', chave: 'reparo_id', tipoPush: 'reparo_encerrado',  rotulo: 'o reparo' }
+  ]
+  for (const lado of lados) {
+    try {
+      const fechados = await pool.query(`
+        UPDATE ${lado.tabela} SET
+          status = 'encerrada',
+          status_aprovacao = 'encerrada',
+          encerrado_em = NOW(),
+          encerramento_solicitado_por = NULL,
+          encerramento_solicitado_em = NULL
+        WHERE status = 'aberta'
+          AND encerramento_solicitado_por IS NOT NULL
+          AND encerramento_solicitado_em <= NOW() - INTERVAL '${AUTO_ENCERRAR_APOS}'
+        RETURNING id, titulo, criado_por, match_usuario_id, encerramento_solicitado_por
+      `)
+      for (const d of fechados.rows) {
+        // Quem NÃO solicitou é quem precisa ser avisado do fechamento automático.
+        const avisarId = d.encerramento_solicitado_por === d.criado_por ? d.match_usuario_id : d.criado_por
+        if (!avisarId) continue
+        const alvo = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [avisarId])
+        if (alvo.rows[0]?.push_token) {
+          enviarPushNotificacao(alvo.rows[0].push_token, '✅ Encerrado automaticamente',
+            `Sem confirmação em 2 dias, ${lado.rotulo} "${d.titulo}" foi encerrad${lado.tabela === 'obras' ? 'a' : 'o'} automaticamente.`,
+            { tipo: lado.tipoPush, [lado.chave]: d.id }).catch(() => {})
+        }
+      }
+      if (fechados.rows.length > 0) {
+        console.log(`[AutoEncerrar] ${lado.tabela}: ${fechados.rows.length} encerrad(a)s por falta de confirmação`)
+      }
+    } catch (err) {
+      console.error(`[AutoEncerrar] Erro em ${lado.tabela}:`, err.message)
+    }
+  }
+}
+
 module.exports = {
   enviarPushNotificacao,
   enviarBoasVindas,
@@ -585,5 +631,6 @@ module.exports = {
   verificarObrasComBaixoEngajamento,
   verificarMarcosExpiracao,
   verificarCronometroReparos,
-  verificarCronometroObras
+  verificarCronometroObras,
+  autoEncerrarPendentes
 }
