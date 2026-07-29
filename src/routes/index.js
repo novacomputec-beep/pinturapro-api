@@ -133,6 +133,15 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS contrato_enviado BOOLEAN DEFAULT false`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
+    // Encerramento em duas mãos: a 1ª chamada de /encerrar registra a solicitação, a 2ª (da
+    // OUTRA parte) fecha de fato. encerramento_solicitado_por IS NOT NULL É o estado pendente
+    // — sem status novo no banco: a demanda segue 'aberta' até fechar, e encerrado_em continua
+    // significando "fechada de verdade". _por também diz QUEM pediu, que é como o handler
+    // distingue confirmação (outra parte) de repetição (mesma parte).
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS encerramento_solicitado_por UUID REFERENCES usuarios(id)`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS encerramento_solicitado_em  TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS encerramento_solicitado_por UUID REFERENCES usuarios(id)`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS encerramento_solicitado_em  TIMESTAMPTZ`)
     // Relógio de publicação da obra — traz a obra à paridade que o reparo já tem (criado_em é
     // o instante de publicação do reparo + prazo_atendimento_horas é a janela). horas_para_expirar
     // guarda a janela original; publicado_em guarda o instante em que a obra foi ao ar. A obra
@@ -864,6 +873,10 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     // NULL out match_usuario_id caso o prestador estivesse em atendimento
     await client.query('UPDATE obras SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1', [id])
     await client.query('UPDATE reparos SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1', [id])
+    // Idem para solicitações de encerramento em aberto: a FK encerramento_solicitado_por
+    // bloquearia o DELETE do usuário. Limpar a solicitação devolve a demanda ao estado normal.
+    await client.query('UPDATE obras SET encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL WHERE encerramento_solicitado_por = $1', [id])
+    await client.query('UPDATE reparos SET encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL WHERE encerramento_solicitado_por = $1', [id])
 
     // Cascade registros do próprio usuário como candidato/interessado
     await client.query('DELETE FROM assinaturas WHERE usuario_id = $1', [id])
@@ -956,6 +969,9 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
     // NULL out match_usuario_id caso o usuário estivesse em atendimento
     await client.query(`UPDATE obras SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1`, [id])
     await client.query(`UPDATE reparos SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1`, [id])
+    // Idem para solicitações de encerramento em aberto (FK encerramento_solicitado_por).
+    await client.query(`UPDATE obras SET encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL WHERE encerramento_solicitado_por = $1`, [id])
+    await client.query(`UPDATE reparos SET encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL WHERE encerramento_solicitado_por = $1`, [id])
 
     // Cascade registros do próprio usuário como candidato/interessado/autor
     await client.query(`DELETE FROM assinaturas WHERE usuario_id = $1`, [id])
@@ -1652,7 +1668,9 @@ router.post('/obras/:id/match', autenticar, exigirAssinaturaAtiva, exigirPintor,
   }
 })
 
-// POST /obras/:id/encerrar — dono ou pintor encerra a obra
+// POST /obras/:id/encerrar — encerramento em DUAS MÃOS: a 1ª chamada registra a solicitação
+// e avisa a outra parte; a 2ª, feita pela OUTRA parte, fecha de fato. Admin e obra sem pintor
+// casado fecham na hora (não há contraparte para confirmar). Cron fecha sozinho após 2 dias.
 router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
   try {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
@@ -1662,22 +1680,64 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
     const ehPintor = o.match_usuario_id === req.usuario.id
     const ehAdmin = req.usuario.role === 'admin'
     if (!ehDono && !ehPintor && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar esta obra' })
-    await pool.query(`UPDATE obras SET status = 'encerrada', status_aprovacao = 'encerrada', encerrado_em = NOW() WHERE id = $1`, [req.params.id])
+
+    // Já encerrada → no-op idempotente. Sem isto o UPDATE reescreveria encerrado_em e
+    // empurraria para frente a exclusão de mídias de 7 dias (server.js:deletarMidiasAntigas).
+    if (o.status === 'encerrada') {
+      return res.json({ mensagem: 'Obra já encerrada.', encerramento: 'concluido' })
+    }
+
+    // Fecha na hora quando não há contraparte para confirmar: admin agindo por fora das
+    // partes, ou obra que nunca teve pintor casado.
+    const semContraparte = !o.match_usuario_id
+    if (!ehAdmin && !semContraparte) {
+      // 1ª chamada: registra a solicitação e avisa a outra parte. Não fecha.
+      if (!o.encerramento_solicitado_por) {
+        await pool.query(
+          `UPDATE obras SET encerramento_solicitado_por = $1, encerramento_solicitado_em = NOW() WHERE id = $2`,
+          [req.usuario.id, req.params.id]
+        )
+        const outroId = ehDono ? o.match_usuario_id : o.criado_por
+        const outro = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [outroId])
+        if (outro.rows[0]?.push_token) {
+          enviarPushNotificacao(outro.rows[0].push_token, '🔔 Encerramento solicitado',
+            `A outra parte pediu para encerrar a obra "${o.titulo}". Confirme no app.`,
+            { tipo: 'encerramento_solicitado', obra_id: req.params.id }).catch(() => {})
+        }
+        return res.json({ mensagem: 'Encerramento solicitado. Aguardando confirmação da outra parte.', encerramento: 'pendente' })
+      }
+      // Mesma parte chamando de novo: segue pendente. Não fecha (senão o encerramento
+      // deixaria de ser em duas mãos) e não reenvia push.
+      if (o.encerramento_solicitado_por === req.usuario.id) {
+        return res.json({ mensagem: 'Encerramento já solicitado. Aguardando a outra parte.', encerramento: 'pendente' })
+      }
+      // Outra parte confirmando → cai no fechamento abaixo.
+    }
+
+    await pool.query(
+      `UPDATE obras SET status = 'encerrada', status_aprovacao = 'encerrada', encerrado_em = NOW(),
+                       encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL
+       WHERE id = $1`,
+      [req.params.id]
+    )
+    // Pushes fire-and-forget: o UPDATE acima já commitou, então uma falha de push não pode
+    // virar 500 para um encerramento que aconteceu.
     if (ehDono && o.match_usuario_id) {
       const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.match_usuario_id])
       if (pintor.rows[0]?.push_token) {
-        await enviarPushNotificacao(pintor.rows[0].push_token, '✅ Obra encerrada!',
-          `O solicitante encerrou a obra "${o.titulo}".`, { tipo: 'obra_encerrada', obra_id: req.params.id })
+        enviarPushNotificacao(pintor.rows[0].push_token, '✅ Obra encerrada!',
+          `O solicitante encerrou a obra "${o.titulo}".`, { tipo: 'obra_encerrada', obra_id: req.params.id }).catch(() => {})
       }
     } else if (ehPintor) {
       const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
       if (dono.rows[0]?.push_token) {
-        await enviarPushNotificacao(dono.rows[0].push_token, '✅ Serviço concluído!',
-          `O pintor concluiu a obra "${o.titulo}".`, { tipo: 'obra_encerrada', obra_id: req.params.id })
+        enviarPushNotificacao(dono.rows[0].push_token, '✅ Serviço concluído!',
+          `O pintor concluiu a obra "${o.titulo}".`, { tipo: 'obra_encerrada', obra_id: req.params.id }).catch(() => {})
       }
     }
-    res.json({ mensagem: 'Obra encerrada com sucesso!' })
+    res.json({ mensagem: 'Obra encerrada com sucesso!', encerramento: 'concluido' })
   } catch (err) {
+    console.error('[obras/encerrar]', err.message)
     res.status(500).json({ erro: 'Erro ao encerrar obra' })
   }
 })
@@ -2520,6 +2580,7 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
   }
 })
 
+// Encerramento em duas mãos — ver POST /obras/:id/encerrar para o racional completo.
 router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
@@ -2529,22 +2590,55 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
     const ehPrestador = r.match_usuario_id === req.usuario.id
     const ehAdmin     = req.usuario.role === 'admin'
     if (!ehDono && !ehPrestador && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar este reparo' })
-    await pool.query(`UPDATE reparos SET status = 'encerrada', status_aprovacao = 'encerrada', encerrado_em = NOW() WHERE id = $1`, [req.params.id])
+
+    // Já encerrado → no-op idempotente (não reescreve encerrado_em).
+    if (r.status === 'encerrada') {
+      return res.json({ mensagem: 'Reparo já encerrado.', encerramento: 'concluido' })
+    }
+
+    const semContraparte = !r.match_usuario_id
+    if (!ehAdmin && !semContraparte) {
+      if (!r.encerramento_solicitado_por) {
+        await pool.query(
+          `UPDATE reparos SET encerramento_solicitado_por = $1, encerramento_solicitado_em = NOW() WHERE id = $2`,
+          [req.usuario.id, req.params.id]
+        )
+        const outroId = ehDono ? r.match_usuario_id : r.criado_por
+        const outro = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [outroId])
+        if (outro.rows[0]?.push_token) {
+          enviarPushNotificacao(outro.rows[0].push_token, '🔔 Encerramento solicitado',
+            `A outra parte pediu para encerrar o reparo "${r.titulo}". Confirme no app.`,
+            { tipo: 'encerramento_solicitado', reparo_id: req.params.id }).catch(() => {})
+        }
+        return res.json({ mensagem: 'Encerramento solicitado. Aguardando confirmação da outra parte.', encerramento: 'pendente' })
+      }
+      if (r.encerramento_solicitado_por === req.usuario.id) {
+        return res.json({ mensagem: 'Encerramento já solicitado. Aguardando a outra parte.', encerramento: 'pendente' })
+      }
+    }
+
+    await pool.query(
+      `UPDATE reparos SET status = 'encerrada', status_aprovacao = 'encerrada', encerrado_em = NOW(),
+                         encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL
+       WHERE id = $1`,
+      [req.params.id]
+    )
     if (ehDono && r.match_usuario_id) {
       const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
       if (prestador.rows[0]?.push_token) {
-        await enviarPushNotificacao(prestador.rows[0].push_token, '✅ Reparo encerrado!',
-          `O solicitante encerrou o reparo "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id })
+        enviarPushNotificacao(prestador.rows[0].push_token, '✅ Reparo encerrado!',
+          `O solicitante encerrou o reparo "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id }).catch(() => {})
       }
     } else if (ehPrestador) {
       const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.criado_por])
       if (dono.rows[0]?.push_token) {
-        await enviarPushNotificacao(dono.rows[0].push_token, '✅ Serviço concluído!',
-          `O prestador concluiu o reparo "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id })
+        enviarPushNotificacao(dono.rows[0].push_token, '✅ Serviço concluído!',
+          `O prestador concluiu o reparo "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id }).catch(() => {})
       }
     }
-    res.json({ mensagem: 'Reparo encerrado com sucesso!' })
+    res.json({ mensagem: 'Reparo encerrado com sucesso!', encerramento: 'concluido' })
   } catch (err) {
+    console.error('[reparos/encerrar]', err.message)
     res.status(500).json({ erro: 'Erro ao encerrar reparo' })
   }
 })
