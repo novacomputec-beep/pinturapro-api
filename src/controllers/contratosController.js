@@ -225,8 +225,10 @@ const enviarContratoReparo = async (reparoId) => {
       `SELECT r.*,
               u_dono.nome as dono_nome, u_dono.email as dono_email,
               u_dono.telefone as dono_telefone, u_dono.cpf_cnpj as dono_cpf,
+              u_dono.cidade as dono_cidade,
               u_prest.nome as prest_nome, u_prest.email as prest_email,
               u_prest.telefone as prest_telefone, u_prest.cpf_cnpj as prest_cpf,
+              u_prest.cidade as prest_cidade,
               (SELECT ir.id FROM interesse_reparos ir
                 WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
                   AND ir.status = 'aceito'
@@ -249,8 +251,10 @@ const enviarContratoReparo = async (reparoId) => {
     const html = gerarContratoReparo({ dono, prestador, reparo: r })
 
     const dadosPDF = {
-      contratante: { ...dono, cidade: r.cidade },
-      contratado:  { ...prestador, cidade: r.cidade },
+      // Cidade de cada parte vem do cadastro da própria parte (usuarios.cidade);
+      // só cai para a cidade da demanda quando o cadastro está sem cidade.
+      contratante: { ...dono, cidade: r.dono_cidade || r.cidade },
+      contratado:  { ...prestador, cidade: r.prest_cidade || r.cidade },
       servico: {
         tipo:       r.categoria || 'reparo',
         descricao:  r.titulo + (r.descricao ? ` — ${r.descricao}` : ''),
@@ -295,8 +299,10 @@ const enviarContratoObra = async (candidaturaId) => {
       `SELECT c.valor_oferta, c.mensagem_oferta, o.*,
               u_dono.nome  as dono_nome,  u_dono.email  as dono_email,
               u_dono.telefone  as dono_telefone,  u_dono.cpf_cnpj  as dono_cpf,
+              u_dono.cidade  as dono_cidade,
               u_prest.nome as prest_nome, u_prest.email as prest_email,
-              u_prest.telefone as prest_telefone, u_prest.cpf_cnpj as prest_cpf
+              u_prest.telefone as prest_telefone, u_prest.cpf_cnpj as prest_cpf,
+              u_prest.cidade as prest_cidade
        FROM candidaturas c
        JOIN obras o          ON c.obra_id    = o.id
        JOIN usuarios u_dono  ON o.criado_por = u_dono.id
@@ -317,8 +323,10 @@ const enviarContratoObra = async (candidaturaId) => {
     const html = gerarContratoObra({ dono, prestador, obra: r, candidatura })
 
     const dadosPDF = {
-      contratante: { ...dono, cidade: r.cidade },
-      contratado:  { ...prestador, cidade: r.cidade },
+      // Cidade de cada parte vem do cadastro da própria parte (usuarios.cidade);
+      // só cai para a cidade da demanda quando o cadastro está sem cidade.
+      contratante: { ...dono, cidade: r.dono_cidade || r.cidade },
+      contratado:  { ...prestador, cidade: r.prest_cidade || r.cidade },
       servico: {
         tipo:       r.categoria || 'pintura',
         descricao:  r.titulo,
