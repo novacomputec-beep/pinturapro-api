@@ -48,11 +48,15 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS mensagem TEXT`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS endereco_reparo TEXT`)
+    // Ponto de referência do local ("portão azul, ao lado da padaria"). Texto livre do dono,
+    // mascarado nos detalhes junto com endereco_* — mesma sensibilidade, mesma regra.
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS ponto_referencia TEXT`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS latitude NUMERIC`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS longitude NUMERIC`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS notif_5min_enviada BOOLEAN DEFAULT false`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS uf VARCHAR(2)`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS endereco_obra TEXT`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS ponto_referencia TEXT`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS latitude NUMERIC`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS longitude NUMERIC`)
     // Procedência da coordenada: 'cliente' = veio do app (endereço exato, precisão de rua);
@@ -1091,7 +1095,7 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos de obra podem cadastrar obras' })
     }
-    const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags, endereco_obra, latitude, longitude, client_request_id } = req.body
+    const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
     const { lat: latFinal, lng: lngFinal, origem: coordOrigem } = resolverCoordenadas(cidade, ufFinal, latitude, longitude, '[obras/dono]')
     // Janela original resolvida UMA vez: mesma base do expira_em e do horas_para_expirar gravado,
@@ -1102,12 +1106,12 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam a obra já criada em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, latitude, longitude, coordenadas_origem, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'rascunho',true,'pendente',$17,$18)
+      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, coordenadas_origem, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'rascunho',true,'pendente',$18,$19)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao]
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao]
     )
     res.status(201).json(result.rows[0])
   } catch (err) {
@@ -1390,10 +1394,14 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // é arbitrário e poderia ser uma candidatura recusada da mesma obra.
     const meuAceite = minhaCandidaturaResult.rows.find(c => c.status === 'aceito')
 
-    // Endereço exato só para dono, pintor do match, pintor com candidatura aceita ou
-    // admin (Finding 3.1). Coordenadas permanecem para o cálculo de distância no cliente.
+    // Endereço exato e ponto de referência só para dono, pintor do match, pintor com
+    // candidatura aceita ou admin (Finding 3.1). ponto_referencia sai junto porque também
+    // localiza o imóvel ("portão azul ao lado da padaria") — mascarar só o endereço
+    // deixaria a dica de localização vazando para qualquer assinante.
+    // Coordenadas permanecem para o cálculo de distância no cliente.
     if (obra.criado_por !== req.usuario.id && obra.match_usuario_id !== req.usuario.id && !meuAceite && req.usuario.role !== 'admin') {
       delete obra.endereco_obra
+      delete obra.ponto_referencia
     }
 
     // Advisory: quanto o dono ainda pode estender, contra o teto plano de
@@ -1859,7 +1867,7 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar reparos' })
     }
-    const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, latitude, longitude, client_request_id } = req.body
+    const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
     const { lat: latFinal, lng: lngFinal, origem: coordOrigem } = resolverCoordenadas(cidade, ufFinal, latitude, longitude, '[reparos/dono]')
     const horasExpiracao = prazo_atendimento_horas || 720
@@ -1867,12 +1875,12 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam o reparo já criado em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, latitude, longitude, coordenadas_origem, client_request_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',$10,$11,$12,$13,$14,$15,$16)
+      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',$10,$11,$12,$13,$14,$15,$16,$17)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null, endereco_obra, latFinal, lngFinal, coordOrigem, client_request_id || null]
+      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null]
     )
     res.status(201).json(result.rows[0])
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
@@ -2814,10 +2822,13 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // é arbitrário e poderia ser um interesse recusado do mesmo reparo.
     const meuAceite = interesse.rows.find(i => i.status === 'aceito')
 
-    // Endereço exato só para dono, prestador do match, prestador com interesse aceito ou
-    // admin (Finding 3.1). Coordenadas permanecem para o cálculo de distância no cliente.
+    // Endereço exato e ponto de referência só para dono, prestador do match, prestador com
+    // interesse aceito ou admin (Finding 3.1). ponto_referencia sai junto pelo mesmo motivo
+    // do lado obra: é dica de localização, não descrição do serviço.
+    // Coordenadas permanecem para o cálculo de distância no cliente.
     if (reparo.criado_por !== req.usuario.id && reparo.match_usuario_id !== req.usuario.id && !meuAceite && req.usuario.role !== 'admin') {
       delete reparo.endereco_reparo
+      delete reparo.ponto_referencia
     }
 
     // Advisory plano: /reparos/:id/estender não tem mais teto (o de 2x saiu), então não há
