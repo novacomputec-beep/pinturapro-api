@@ -1,5 +1,7 @@
 const { pool } = require('../utils/supabase')
 const { enviarContratoObra } = require('./contratosController')
+const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
+const { enviarPushNotificacao } = require('../services/alertaService')
 
 const minhas = async (req, res) => {
   try {
@@ -96,8 +98,9 @@ const aprovar = async (req, res) => {
       return res.status(404).json({ erro: 'Candidatura não encontrada' })
     }
 
+    // titulo entra aqui para compor o push "Deu match!" no fim da função, sem query extra.
     const obraCheck = await pool.query(
-      `SELECT criado_por FROM obras WHERE id = $1`,
+      `SELECT criado_por, titulo FROM obras WHERE id = $1`,
       [existe.rows[0].obra_id]
     )
     if (
@@ -134,11 +137,34 @@ const aprovar = async (req, res) => {
       [result.rows[0].usuario_id, result.rows[0].obra_id]
     )
 
+    // Token do aprovado, buscado antes da resposta para o push logo abaixo não precisar de
+    // await depois do res.json (throw pós-resposta cairia no catch e tentaria responder 2x).
+    const vencedor = await pool.query(
+      `SELECT push_token FROM usuarios WHERE id = $1`,
+      [result.rows[0].usuario_id]
+    )
+
     res.json(result.rows[0])
+
+    // Push "Deu match!" para o profissional aprovado — paridade com os outros quatro
+    // caminhos de aceite, que sempre notificam a contraparte. Este endpoint não notificava
+    // ninguém. Mesmo título, texto e payload usados em .../responder.
+    if (vencedor.rows[0]?.push_token) {
+      enviarPushNotificacao(vencedor.rows[0].push_token, '🎉 Deu match!',
+        `Parabéns! Você fechou negócio em "${obraCheck.rows[0].titulo}"! Toque para ver os detalhes.`,
+        { tipo: 'candidatura_aceita', obra_id: result.rows[0].obra_id }).catch(() => {})
+    }
 
     // Envia contrato por e-mail de forma assíncrona sem bloquear a resposta
     enviarContratoObra(id).catch(err =>
       console.error('Erro ao enviar contrato de obra:', err)
+    )
+
+    // Recusa os demais candidatos e os notifica (antes só o /match fazia isso, e hoje ele
+    // sai no early-return idempotente). Este endpoint nunca enviou push nenhum; agora ao
+    // menos os perdedores são avisados. Assíncrono, como o contrato acima.
+    rejeitarConcorrentes('obra', result.rows[0].obra_id, result.rows[0].usuario_id).catch(err =>
+      console.error('[candidaturas/aprovar] rejeitarConcorrentes:', err.message)
     )
 
   } catch (err) {
