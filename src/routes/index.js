@@ -441,8 +441,10 @@ const migracaoPronta = (async () => {
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS prestadores_bloqueados_dono_dono_idx ON prestadores_bloqueados_dono (dono_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS prestadores_bloqueados_dono_prestador_idx ON prestadores_bloqueados_dono (prestador_id)`)
-    // Avaliações bilaterais 5 estrelas no encerramento (dono avalia prestador e vice-versa).
-    // UNIQUE(contrato_tipo, contrato_id, avaliador_id): cada lado avalia uma única vez por contrato.
+    // Avaliações 5 estrelas no encerramento — UNILATERAL: só o dono (criado_por) avalia o
+    // prestador do match; o prestador recebe 403 em POST /avaliacoes (não avalia de volta).
+    // UNIQUE(contrato_tipo, contrato_id, avaliador_id): cada avaliador avalia uma única vez
+    // por contrato. Colunas seguem genéricas — ainda há linhas prestador→dono da regra antiga.
     await client.query(`
       CREATE TABLE IF NOT EXISTS avaliacoes (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3322,7 +3324,7 @@ router.post('/candidaturas/:id/recusar',  autenticar, candidaturasCtrl.recusar)
 // Rotas estáticas ('/avaliacoes', '/avaliacoes/media/:usuario_id') não conflitam com
 // nenhum padrão /:id, mas seguem a convenção de registro dedicado como meus-contratos.
 
-// POST /avaliacoes — o dono avalia o prestador do match, ou o prestador avalia o dono.
+// POST /avaliacoes — só o dono do contrato avalia o prestador do match (unilateral).
 router.post('/avaliacoes', autenticar, async (req, res) => {
   try {
     const { contrato_tipo, contrato_id, estrelas } = req.body
@@ -3354,12 +3356,15 @@ router.post('/avaliacoes', autenticar, async (req, res) => {
       return res.status(400).json({ erro: 'Este contrato não teve prestador vinculado' })
     }
 
+    // Avaliação é UNILATERAL: só o dono do contrato (criado_por) avalia o prestador do
+    // match. O prestador continua participante para todo o resto, mas não avalia de volta.
+    // Ordem das branches preserva a precedência do dono caso uid seja os dois lados.
     const uid = req.usuario.id
     let avaliado_id
     if (uid === c.criado_por) {
       avaliado_id = c.match_usuario_id       // dono avalia prestador
     } else if (uid === c.match_usuario_id) {
-      avaliado_id = c.criado_por             // prestador avalia dono
+      return res.status(403).json({ erro: 'Apenas o dono do contrato pode avaliar' })
     } else {
       return res.status(403).json({ erro: 'Você não participou deste contrato' })
     }
