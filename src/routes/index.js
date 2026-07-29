@@ -16,6 +16,7 @@ const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestado
 const { ufDeCidade } = require('../utils/localidade')
 const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
+const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 const { enviarEmail } = require('../services/emailService')
 const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
@@ -1491,6 +1492,9 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
           { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
       }
       enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
+      // Recusa os demais candidatos e os notifica (antes ficava só no /match, que hoje sai
+      // no early-return). Fire-and-forget: efeito secundário, não bloqueia a resposta.
+      rejeitarConcorrentes('obra', obra_id, cand.usuario_id).catch(err => console.error('[obras/responder] rejeitarConcorrentes:', err.message))
       return res.json({ mensagem: 'Candidatura aceita! Contrato enviado por e-mail.' })
     }
     if (action === 'recusar') {
@@ -1570,6 +1574,8 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
           { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
       }
       enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
+      // Recusa os demais candidatos e os notifica (ver POST .../responder).
+      rejeitarConcorrentes('obra', obra_id, req.usuario.id).catch(err => console.error('[obras/pintor-responder] rejeitarConcorrentes:', err.message))
       return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
     }
     if (action === 'recusar') {
@@ -1626,23 +1632,10 @@ router.post('/obras/:id/match', autenticar, exigirAssinaturaAtiva, exigirPintor,
         { tipo: 'match_obra', obra_id: req.params.id }).catch(err => console.error('[obras/match] push falhou:', err.message))
     }
     enviarContratoObra(candidaturaAceita.rows[0].id).catch(err => console.error('Erro ao enviar contrato obra:', err))
-    // Recusa os demais candidatos e os notifica — pós-resposta, não bloqueia o cliente (Finding 3.1)
-    const rejeitadosResult = await pool.query(
-      `UPDATE candidaturas SET status = 'recusado' WHERE obra_id = $1 AND usuario_id != $2 AND status NOT IN ('recusado', 'expirado') RETURNING usuario_id`,
-      [req.params.id, req.usuario.id]
-    )
-    const rejeitadosIds = rejeitadosResult.rows.map(r => r.usuario_id)
-    if (rejeitadosIds.length > 0) {
-      const tokens = await pool.query(
-        `SELECT push_token FROM usuarios WHERE id = ANY($1) AND push_token IS NOT NULL`,
-        [rejeitadosIds]
-      )
-      tokens.rows.forEach(r => {
-        enviarPushNotificacao(r.push_token, '❌ Outro profissional foi selecionado',
-          'O solicitante escolheu outro profissional para esta obra.',
-          { tipo: 'candidatura_recusada', obra_id: req.params.id }).catch(() => {})
-      })
-    }
+    // Recusa os demais candidatos e os notifica — pós-resposta, não bloqueia o cliente
+    // (Finding 3.1). Mantido aqui para linhas legadas: obras casadas por /match antes de o
+    // aceite passar a criar o match. Os caminhos de aceite chamam a mesma função.
+    await rejeitarConcorrentes('obra', req.params.id, req.usuario.id)
   } catch (err) {
     console.error('[obras/match]', err.message)
     res.status(500).json({ erro: 'Erro ao confirmar match' })
@@ -2346,23 +2339,10 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, exigirReparador, 
     }
     // Envia contrato por e-mail para dono e prestador
     enviarContratoReparo(req.params.id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
-    // Recusa os demais interessados e os notifica — pós-resposta, não bloqueia o cliente (Finding 3.1)
-    const rejeitadosResult = await pool.query(
-      `UPDATE interesse_reparos SET status = 'recusado' WHERE reparo_id = $1 AND usuario_id != $2 AND status NOT IN ('recusado', 'expirado') RETURNING usuario_id`,
-      [req.params.id, req.usuario.id]
-    )
-    const rejeitadosIds = rejeitadosResult.rows.map(r => r.usuario_id)
-    if (rejeitadosIds.length > 0) {
-      const tokens = await pool.query(
-        `SELECT push_token FROM usuarios WHERE id = ANY($1) AND push_token IS NOT NULL`,
-        [rejeitadosIds]
-      )
-      tokens.rows.forEach(r => {
-        enviarPushNotificacao(r.push_token, '❌ Outro profissional foi selecionado',
-          'O solicitante escolheu outro prestador para este reparo.',
-          { tipo: 'interesse_recusado', reparo_id: req.params.id }).catch(() => {})
-      })
-    }
+    // Recusa os demais interessados e os notifica — pós-resposta, não bloqueia o cliente
+    // (Finding 3.1). Mantido aqui para linhas legadas: reparos casados por /match antes de o
+    // aceite passar a criar o match. Os caminhos de aceite chamam a mesma função.
+    await rejeitarConcorrentes('reparo', req.params.id, req.usuario.id)
   } catch (err) {
     console.error('[reparos/match]', err.message)
     res.status(500).json({ erro: 'Erro ao confirmar match' })
@@ -2419,6 +2399,9 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
       // match_usuario_id já foi definido acima, então o contrato pode sair agora — mesmo
       // ponto do fluxo em que a obra envia o dela (POST .../responder).
       enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
+      // Recusa os demais interessados e os notifica (antes ficava só no /match, que hoje
+      // sai no early-return). Fire-and-forget: não bloqueia a resposta.
+      rejeitarConcorrentes('reparo', reparo_id, int.usuario_id).catch(err => console.error('[reparos/responder] rejeitarConcorrentes:', err.message))
       return res.json({ mensagem: 'Proposta aceita! Contrato enviado por e-mail.' })
     }
 
@@ -2505,6 +2488,8 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
       }
       // match_usuario_id já foi definido acima, então o contrato pode sair agora.
       enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
+      // Recusa os demais interessados e os notifica (ver POST .../responder).
+      rejeitarConcorrentes('reparo', reparo_id, req.usuario.id).catch(err => console.error('[reparos/prestador-responder] rejeitarConcorrentes:', err.message))
       return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
     }
 
