@@ -1384,9 +1384,14 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       candidatos = candidatosResult.rows
     }
 
-    // Endereço exato só para dono, pintor do match ou admin (Finding 3.1).
-    // Coordenadas permanecem para o cálculo de distância no cliente.
-    if (obra.criado_por !== req.usuario.id && obra.match_usuario_id !== req.usuario.id && req.usuario.role !== 'admin') {
+    // Aceite do próprio requester. Procura a linha 'aceito' EXPLICITAMENTE em vez de
+    // olhar rows[0]: a query de minha_candidatura não tem ORDER BY/LIMIT, então rows[0]
+    // é arbitrário e poderia ser uma candidatura recusada da mesma obra.
+    const meuAceite = minhaCandidaturaResult.rows.find(c => c.status === 'aceito')
+
+    // Endereço exato só para dono, pintor do match, pintor com candidatura aceita ou
+    // admin (Finding 3.1). Coordenadas permanecem para o cálculo de distância no cliente.
+    if (obra.criado_por !== req.usuario.id && obra.match_usuario_id !== req.usuario.id && !meuAceite && req.usuario.role !== 'admin') {
       delete obra.endereco_obra
     }
 
@@ -2738,9 +2743,14 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       interessados = result2.rows
     }
 
-    // Endereço exato só para dono, prestador do match ou admin (Finding 3.1).
-    // Coordenadas permanecem para o cálculo de distância no cliente.
-    if (reparo.criado_por !== req.usuario.id && reparo.match_usuario_id !== req.usuario.id && req.usuario.role !== 'admin') {
+    // Aceite do próprio requester. Procura a linha 'aceito' EXPLICITAMENTE em vez de
+    // olhar rows[0]: a query de meu_interesse não tem ORDER BY/LIMIT, então rows[0]
+    // é arbitrário e poderia ser um interesse recusado do mesmo reparo.
+    const meuAceite = interesse.rows.find(i => i.status === 'aceito')
+
+    // Endereço exato só para dono, prestador do match, prestador com interesse aceito ou
+    // admin (Finding 3.1). Coordenadas permanecem para o cálculo de distância no cliente.
+    if (reparo.criado_por !== req.usuario.id && reparo.match_usuario_id !== req.usuario.id && !meuAceite && req.usuario.role !== 'admin') {
       delete reparo.endereco_reparo
     }
 
