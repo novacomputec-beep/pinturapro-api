@@ -1373,12 +1373,14 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         // Contato/endereço do pintor são revelados ao dono APENAS após o match
         // (obras.match_usuario_id aponta para o pintor que confirmou a ida), e só
         // para o pintor efetivamente casado — nunca no mero aceite (status='aceito').
+        // EXCEÇÃO: bairro sai para todos os candidatos, junto de cidade — é granularidade
+        // de região (ajuda o dono a julgar deslocamento), não endereço. logradouro, numero
+        // e telefone continuam match-gated: só esses três localizam/contatam o pintor.
         `SELECT c.id, c.status, c.valor_proposto, c.valor_contraproposta, c.mensagem,
-                u.nome, u.cidade, u.foto_url, c.usuario_id,
+                u.nome, u.cidade, u.bairro, u.foto_url, c.usuario_id,
                 u.anos_experiencia, u.especialidades, u.tamanho_equipe,
                 CASE WHEN c.usuario_id = $2 THEN u.logradouro ELSE NULL END as logradouro,
                 CASE WHEN c.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
-                CASE WHEN c.usuario_id = $2 THEN u.bairro ELSE NULL END as bairro,
                 CASE WHEN c.usuario_id = $2 THEN u.telefone ELSE NULL END as telefone,
                 (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = c.usuario_id) AS avaliacoes_total,
                 (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = c.usuario_id) AS avaliacoes_media
@@ -2799,12 +2801,13 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
         // Contato/endereço do prestador são revelados ao dono APENAS após o match
         // (reparos.match_usuario_id aponta para o prestador que confirmou a ida), e
         // só para o prestador efetivamente casado — nunca no mero aceite (status='aceito').
+        // EXCEÇÃO: bairro sai para todos os interessados, junto de cidade — mesma regra do
+        // lado obra. logradouro, numero e telefone continuam match-gated.
         `SELECT ir.id, ir.usuario_id, ir.status, ir.mensagem, ir.criado_em,
                 ir.valor_proposto, ir.valor_contraproposta, ir.rodada,
-                u.nome, u.cidade, u.foto_url, u.anos_experiencia, u.especialidades, u.tamanho_equipe,
+                u.nome, u.cidade, u.bairro, u.foto_url, u.anos_experiencia, u.especialidades, u.tamanho_equipe,
                 CASE WHEN ir.usuario_id = $2 THEN u.logradouro ELSE NULL END as logradouro,
                 CASE WHEN ir.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
-                CASE WHEN ir.usuario_id = $2 THEN u.bairro ELSE NULL END as bairro,
                 CASE WHEN ir.usuario_id = $2 THEN u.telefone ELSE NULL END as telefone,
                 (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_total,
                 (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_media
