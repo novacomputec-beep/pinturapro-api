@@ -1461,6 +1461,15 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
     if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
     const cand = candidatura.rows[0]
     if (action === 'aceitar') {
+      // Idempotência de retry: já aceita → devolve sucesso sem reprocessar (sem repetir
+      // push nem o UPDATE do match). Sem isto o jaAceito abaixo não pega o próprio
+      // registro (id != $2). Espelha o guard de .../pintor-responder.
+      // O contrato É rechamado: se já foi enviado, o claim em enviarContratoObra sai cedo
+      // sem e-mail; se o envio anterior falhou, o claim foi liberado e esta é a retentativa.
+      if (cand.status === 'aceito') {
+        enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
+        return res.json({ mensagem: 'Candidatura aceita! Contrato enviado por e-mail.' })
+      }
       const jaAceito = await pool.query(
         `SELECT id FROM candidaturas WHERE obra_id = $1 AND status = 'aceito' AND id != $2`,
         [req.params.id, candidaturaId]
@@ -1469,6 +1478,13 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
         return res.status(409).json({ erro: 'Já existe um candidato aceito para esta obra' })
       }
       await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
+      // O aceite já casa o profissional com a obra. Guard match_usuario_id IS NULL: torna o
+      // write idempotente em retry e impede que um segundo aceite roube um match existente.
+      await pool.query(
+        `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW()
+         WHERE id = $2 AND match_usuario_id IS NULL`,
+        [cand.usuario_id, obra_id]
+      )
       if (cand.push_token) {
         enviarPushNotificacao(cand.push_token, '🎉 Deu match!',
           `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
@@ -1516,7 +1532,17 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
       [candidaturaId, obra_id, req.usuario.id]
     )
     if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
-    if (candidatura.rows[0].status !== 'contraproposta_dono') return res.status(400).json({ erro: 'Não há contraproposta pendente' })
+    if (candidatura.rows[0].status !== 'contraproposta_dono') {
+      // Idempotência de retry: já aceita → sucesso em vez de 400, espelhando o guard de
+      // .../prestador-responder (que este endpoint não tinha). O contrato é rechamado: se
+      // já foi enviado, o claim em enviarContratoObra sai cedo sem e-mail; se o envio
+      // anterior falhou, o claim foi liberado e esta é a retentativa.
+      if (action === 'aceitar' && candidatura.rows[0].status === 'aceito') {
+        enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
+        return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
+      }
+      return res.status(400).json({ erro: 'Não há contraproposta pendente' })
+    }
     const obra = await pool.query(`SELECT titulo, criado_por FROM obras WHERE id = $1`, [obra_id])
     const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [obra.rows[0].criado_por])
     if (action === 'contraproposta') {
@@ -1532,6 +1558,12 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
     }
     if (action === 'aceitar') {
       await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
+      // O aceite já casa o profissional com a obra (ver POST .../responder).
+      await pool.query(
+        `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW()
+         WHERE id = $2 AND match_usuario_id IS NULL`,
+        [req.usuario.id, obra_id]
+      )
       if (dono.rows[0]?.push_token) {
         enviarPushNotificacao(dono.rows[0].push_token, '🎉 Deu match!',
           `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
@@ -1561,7 +1593,18 @@ router.post('/obras/:id/match', autenticar, exigirAssinaturaAtiva, exigirPintor,
   try {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-    if (obra.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Esta obra já tem um pintor a caminho' })
+    // Idempotente: o aceite já casa o pintor (POST .../responder), então o app que ainda
+    // chama /match reencontra o PRÓPRIO match. Devolve 200 sem reescrever match_feito_em
+    // (não reinicia a contagem) e sem reenviar o contrato. 409 fica só para match de outro.
+    if (obra.rows[0].match_usuario_id) {
+      if (obra.rows[0].match_usuario_id === req.usuario.id) {
+        return res.json({
+          mensagem: 'Match confirmado! Contagem regressiva iniciada.',
+          match_feito_em: obra.rows[0].match_feito_em
+        })
+      }
+      return res.status(409).json({ erro: 'Esta obra já tem um pintor a caminho' })
+    }
     const candidaturaAceita = await pool.query(
       `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2 AND status = 'aceito'`,
       [req.params.id, req.usuario.id]
@@ -2266,7 +2309,18 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, exigirReparador, 
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
-    if (reparo.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Este reparo já tem um prestador a caminho' })
+    // Idempotente: o aceite já casa o prestador (POST .../responder), então o app que ainda
+    // chama /match reencontra o PRÓPRIO match. Devolve 200 sem reescrever match_feito_em
+    // (não reinicia a contagem) e sem reenviar o contrato. 409 fica só para match de outro.
+    if (reparo.rows[0].match_usuario_id) {
+      if (reparo.rows[0].match_usuario_id === req.usuario.id) {
+        return res.json({
+          mensagem: 'Match confirmado! Contagem regressiva iniciada.',
+          match_feito_em: reparo.rows[0].match_feito_em
+        })
+      }
+      return res.status(409).json({ erro: 'Este reparo já tem um prestador a caminho' })
+    }
     const interesseAceito = await pool.query(
       `SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2 AND status = 'aceito'`,
       [req.params.id, req.usuario.id]
@@ -2333,6 +2387,15 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
     const int = interesse.rows[0]
 
     if (action === 'aceitar') {
+      // Idempotência de retry: já aceito → devolve sucesso sem reprocessar (sem repetir
+      // push nem o UPDATE do match). Sem isto o jaAceito abaixo não pega o próprio
+      // registro (id != $2). Espelha o guard de .../prestador-responder.
+      // O contrato É rechamado: se já foi enviado, o claim em enviarContratoReparo sai cedo
+      // sem e-mail; se o envio anterior falhou, o claim foi liberado e esta é a retentativa.
+      if (int.status === 'aceito') {
+        enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
+        return res.json({ mensagem: 'Proposta aceita! Contrato enviado por e-mail.' })
+      }
       const jaAceito = await pool.query(
         `SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND status = 'aceito' AND id != $2`,
         [req.params.id, interesse_id]
@@ -2341,14 +2404,22 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
         return res.status(409).json({ erro: 'Já existe um prestador aceito para este reparo' })
       }
       await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
+      // O aceite já casa o prestador com o reparo. Guard match_usuario_id IS NULL: torna o
+      // write idempotente em retry e impede que um segundo aceite roube um match existente.
+      await pool.query(
+        `UPDATE reparos SET match_usuario_id = $1, match_feito_em = NOW()
+         WHERE id = $2 AND match_usuario_id IS NULL`,
+        [int.usuario_id, reparo_id]
+      )
       if (int.push_token) {
         enviarPushNotificacao(int.push_token, '🎉 Deu match!',
           `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
       }
-      // O contrato é enviado quando o prestador confirma a ida (/reparos/:id/match),
-      // ponto em que match_usuario_id é definido. Aqui ainda é nulo, então não envia.
-      return res.json({ mensagem: 'Proposta aceita! O prestador foi notificado para confirmar a ida.' })
+      // match_usuario_id já foi definido acima, então o contrato pode sair agora — mesmo
+      // ponto do fluxo em que a obra envia o dela (POST .../responder).
+      enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
+      return res.json({ mensagem: 'Proposta aceita! Contrato enviado por e-mail.' })
     }
 
     if (action === 'recusar') {
@@ -2394,9 +2465,12 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
     )
     if (interesse.rows.length === 0) return res.status(404).json({ erro: 'Interesse não encontrado' })
     if (interesse.rows[0].status !== 'contraproposta_dono') {
-      // Idempotency for accept retries: if already accepted, return success silently
+      // Idempotency for accept retries: if already accepted, return success silently.
+      // O contrato é rechamado: se já foi enviado, o claim em enviarContratoReparo sai cedo
+      // sem e-mail; se o envio anterior falhou, o claim foi liberado e esta é a retentativa.
       if (action === 'aceitar' && interesse.rows[0].status === 'aceito') {
-        return res.json({ mensagem: 'Contraproposta aceita! Confirme sua ida para gerar o contrato.' })
+        enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
+        return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
       }
       return res.status(400).json({ erro: 'Não há contraproposta pendente' })
     }
@@ -2418,13 +2492,20 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
 
     if (action === 'aceitar') {
       await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
+      // O aceite já casa o prestador com o reparo (ver POST .../responder).
+      await pool.query(
+        `UPDATE reparos SET match_usuario_id = $1, match_feito_em = NOW()
+         WHERE id = $2 AND match_usuario_id IS NULL`,
+        [req.usuario.id, reparo_id]
+      )
       if (dono.rows[0]?.push_token) {
         enviarPushNotificacao(dono.rows[0].push_token, '🎉 Deu match!',
           `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
       }
-      // Contrato é enviado quando o prestador confirma a ida (/reparos/:id/match).
-      return res.json({ mensagem: 'Contraproposta aceita! Confirme sua ida para gerar o contrato.' })
+      // match_usuario_id já foi definido acima, então o contrato pode sair agora.
+      enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
+      return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
     }
 
     if (action === 'recusar') {

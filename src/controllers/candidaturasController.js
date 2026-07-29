@@ -125,6 +125,15 @@ const aprovar = async (req, res) => {
       [req.usuario.id, id]
     )
 
+    // O aceite já casa o profissional com a obra. usuario_id/obra_id saem do RETURNING *
+    // acima, então não é preciso alargar o SELECT de `existe`. Guard match_usuario_id IS
+    // NULL: idempotente em retry e impede que um segundo aceite roube um match existente.
+    await pool.query(
+      `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW()
+       WHERE id = $2 AND match_usuario_id IS NULL`,
+      [result.rows[0].usuario_id, result.rows[0].obra_id]
+    )
+
     res.json(result.rows[0])
 
     // Envia contrato por e-mail de forma assíncrona sem bloquear a resposta

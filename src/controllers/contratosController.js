@@ -220,6 +220,11 @@ const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
 // ENVIO POR E-MAIL
 // ============================================================
 const enviarContratoReparo = async (reparoId) => {
+  // Fora do try para o catch enxergar. claimInteresseId != null só quando ESTA execução
+  // ganhou o claim; emailsEnviados marca o ponto a partir do qual liberar o claim passaria
+  // a permitir um segundo e-mail em vez de uma retentativa.
+  let claimInteresseId = null
+  let emailsEnviados = false
   try {
     const result = await pool.query(
       `SELECT r.*,
@@ -245,6 +250,30 @@ const enviarContratoReparo = async (reparoId) => {
     }
 
     const r = result.rows[0]
+
+    // Dedupe ANTES dos envios (era feito depois, então o 2º disparo reenviava os e-mails).
+    // O INSERT ... WHERE NOT EXISTS vira um CLAIM atômico: quem inserir a linha ganha o
+    // direito de enviar; quem não inserir já perdeu a corrida e sai sem enviar nada.
+    // Chave = interesse_id (por contrato), não contrato_enviado (por reparo), senão um
+    // reparo reaberto com OUTRO prestador ficaria bloqueado para sempre.
+    if (r.interesse_id) {
+      const claim = await pool.query(
+        `INSERT INTO contratos (interesse_id, status)
+         SELECT $1, 'enviado' WHERE NOT EXISTS (SELECT 1 FROM contratos WHERE interesse_id = $1)
+         RETURNING id`,
+        [r.interesse_id]
+      )
+      if (claim.rows.length === 0) {
+        console.log(`[Contrato] Reparo ${reparoId} — já existe contrato para o interesse ${r.interesse_id}, e-mail NÃO reenviado`)
+        return
+      }
+      claimInteresseId = r.interesse_id
+    } else if (r.contrato_enviado) {
+      // Sem interesse_id não há chave de dedupe por contrato; contrato_enviado é o único guard.
+      console.log(`[Contrato] Reparo ${reparoId} — contrato_enviado já marcado e sem interesse_id, e-mail NÃO reenviado`)
+      return
+    }
+
     const dono      = { nome: r.dono_nome,  email: r.dono_email,  telefone: r.dono_telefone,  cpf_cnpj: r.dono_cpf  }
     const prestador = { nome: r.prest_nome, email: r.prest_email, telefone: r.prest_telefone, cpf_cnpj: r.prest_cpf }
 
@@ -276,24 +305,34 @@ const enviarContratoReparo = async (reparoId) => {
     await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
     await enviarEmailComAnexo({ para: prestador.email, assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
     console.log(`[Contrato] Reparo ${reparoId} — enviado para ${dono.email} e ${prestador.email}`)
+    emailsEnviados = true
 
-    // Registra o contrato enviado (paridade com obra; idempotente por interesse)
-    if (r.interesse_id) {
-      await pool.query(
-        `INSERT INTO contratos (interesse_id, status)
-         SELECT $1, 'enviado' WHERE NOT EXISTS (SELECT 1 FROM contratos WHERE interesse_id = $1)`,
-        [r.interesse_id]
-      )
-    }
+    // A linha em `contratos` já foi criada pelo claim acima, antes dos envios.
 
     // Marca o reparo como tendo contrato enviado — só após todos os passos acima (Finding 3.2)
     await pool.query(`UPDATE reparos SET contrato_enviado = true WHERE id = $1`, [reparoId])
   } catch (err) {
+    // Libera o claim para o próximo disparo poder reenviar. Só antes do envio: se os e-mails
+    // já saíram, apagar a linha reabriria o caminho para um SEGUNDO e-mail, que é justamente
+    // o que o claim existe para impedir. DELETE em try próprio — falhar aqui não pode
+    // mascarar o erro original nem virar rejeição não tratada.
+    if (claimInteresseId && !emailsEnviados) {
+      try {
+        await pool.query(`DELETE FROM contratos WHERE interesse_id = $1`, [claimInteresseId])
+        console.log(`[Contrato] Reparo ${reparoId} — claim liberado após falha; envio segue retentável`)
+      } catch (delErr) {
+        console.error('[Contrato] Falha ao liberar claim do reparo:', delErr.message)
+      }
+    }
     console.error('[Contrato] Erro ao enviar contrato de reparo:', err.message)
   }
 }
 
 const enviarContratoObra = async (candidaturaId) => {
+  // Ver enviarContratoReparo: claimFeito só quando ESTA execução ganhou o claim;
+  // emailsEnviados separa "falhou antes do envio" (retentável) de "falhou depois".
+  let claimFeito = false
+  let emailsEnviados = false
   try {
     const result = await pool.query(
       `SELECT c.valor_oferta, c.mensagem_oferta, o.*,
@@ -316,6 +355,22 @@ const enviarContratoObra = async (candidaturaId) => {
     }
 
     const r = result.rows[0]
+
+    // Dedupe ANTES dos envios — mesmo claim atômico do reparo, chaveado por candidatura_id
+    // (o índice único da tabela). DO NOTHING em vez do antigo DO UPDATE: linha já existente
+    // significa contrato já enviado, então não há status a refrescar — há envio a evitar.
+    const claim = await pool.query(
+      `INSERT INTO contratos (candidatura_id, status) VALUES ($1, 'enviado')
+       ON CONFLICT (candidatura_id) DO NOTHING
+       RETURNING id`,
+      [candidaturaId]
+    )
+    if (claim.rows.length === 0) {
+      console.log(`[Contrato] Obra — já existe contrato para a candidatura ${candidaturaId}, e-mail NÃO reenviado`)
+      return
+    }
+    claimFeito = true
+
     const dono      = { nome: r.dono_nome,  email: r.dono_email,  telefone: r.dono_telefone,  cpf_cnpj: r.dono_cpf  }
     const prestador = { nome: r.prest_nome, email: r.prest_email, telefone: r.prest_telefone, cpf_cnpj: r.prest_cpf }
     const candidatura = { valor_oferta: r.valor_oferta }
@@ -348,16 +403,22 @@ const enviarContratoObra = async (candidaturaId) => {
     await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
     await enviarEmailComAnexo({ para: prestador.email, assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
     console.log(`[Contrato] Obra ${r.id} — enviado para ${dono.email} e ${prestador.email}`)
+    emailsEnviados = true
 
-    await pool.query(
-      `INSERT INTO contratos (candidatura_id, status) VALUES ($1, 'enviado')
-       ON CONFLICT (candidatura_id) DO UPDATE SET status = 'enviado', atualizado_em = NOW()`,
-      [candidaturaId]
-    )
+    // A linha em `contratos` já foi criada pelo claim acima, antes dos envios.
 
     // Marca a obra como tendo contrato enviado — só após todos os passos acima (Finding 3.2)
     await pool.query(`UPDATE obras SET contrato_enviado = true WHERE id = $1`, [r.id])
   } catch (err) {
+    // Ver enviarContratoReparo: libera o claim só quando a falha foi ANTES do envio.
+    if (claimFeito && !emailsEnviados) {
+      try {
+        await pool.query(`DELETE FROM contratos WHERE candidatura_id = $1`, [candidaturaId])
+        console.log(`[Contrato] Obra — claim da candidatura ${candidaturaId} liberado após falha; envio segue retentável`)
+      } catch (delErr) {
+        console.error('[Contrato] Falha ao liberar claim da obra:', delErr.message)
+      }
+    }
     console.error('[Contrato] Erro ao enviar contrato de obra:', err.message)
   }
 }
