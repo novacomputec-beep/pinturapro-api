@@ -472,6 +472,29 @@ const migracaoPronta = (async () => {
       )
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS avaliacoes_avaliado_idx ON avaliacoes (avaliado_id)`)
+    // Denúncias do prestador contra o dono de um contrato encerrado. Espelha avaliacoes:
+    // contrato_id é UUID solto (aponta para obras OU reparos, por isso sem FK) e o UNIQUE
+    // (contrato_tipo, contrato_id, denunciante_id) garante UMA denúncia por contrato.
+    // denunciado_id é NULLABLE com ON DELETE SET NULL de propósito: se o dono excluir a
+    // conta, a denúncia SOBREVIVE anonimizada para o histórico de moderação — ao contrário
+    // de avaliacoes, que cai por CASCADE. denunciante_id segue CASCADE (a denúncia é do
+    // autor; sem autor não há o que apurar).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS denuncias (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        contrato_tipo TEXT NOT NULL CHECK (contrato_tipo IN ('reparo', 'obra')),
+        contrato_id UUID NOT NULL,
+        denunciante_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        denunciado_id UUID REFERENCES usuarios(id) ON DELETE SET NULL,
+        categoria TEXT NOT NULL CHECK (categoria IN ('nao_pagamento','nao_compareceu','servico_diferente','assedio','local_inseguro','fraude','outro')),
+        descricao TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'aberta' CHECK (status IN ('aberta','em_analise','resolvida','arquivada')),
+        criado_em TIMESTAMP DEFAULT NOW(),
+        UNIQUE(contrato_tipo, contrato_id, denunciante_id)
+      )
+    `)
+    // Caminho de acesso do painel admin: fila por status, mais recentes primeiro.
+    await client.query(`CREATE INDEX IF NOT EXISTS denuncias_status_idx ON denuncias (status, criado_em DESC)`)
     // Visualizações de feed (proximidade): item visto no feed sem manifestar interesse.
     // notificado marca o push one-time já enviado. UNIQUE evita duplicar a mesma view.
     await client.query(`
@@ -3637,6 +3660,80 @@ router.get('/avaliacoes/recebidas', autenticar, async (req, res) => {
   }
 })
 
+// DENÚNCIAS — o prestador do match denuncia o dono de um contrato encerrado.
+// Rota estática ('/denuncias'), sem conflito com padrões /:id, mesma convenção de
+// registro dedicado usada por avaliacoes.
+const CATEGORIAS_DENUNCIA = ['nao_pagamento', 'nao_compareceu', 'servico_diferente', 'assedio', 'local_inseguro', 'fraude', 'outro']
+const DESCRICAO_DENUNCIA_MAX = 2000
+
+// POST /denuncias — UNILATERAL e espelhada em POST /avaliacoes: lá só o dono avalia o
+// prestador, aqui só o prestador do match denuncia o dono.
+router.post('/denuncias', autenticar, async (req, res) => {
+  try {
+    const { contrato_tipo, contrato_id, categoria, descricao } = req.body
+
+    if (!['reparo', 'obra'].includes(contrato_tipo)) {
+      return res.status(400).json({ erro: 'contrato_tipo deve ser reparo ou obra' })
+    }
+    if (!contrato_id) {
+      return res.status(400).json({ erro: 'contrato_id é obrigatório' })
+    }
+    if (!CATEGORIAS_DENUNCIA.includes(categoria)) {
+      return res.status(400).json({ erro: `categoria deve ser uma de: ${CATEGORIAS_DENUNCIA.join(', ')}` })
+    }
+    // Texto livre é o único campo aberto da tabela: exigir conteúdo e limitar tamanho aqui,
+    // já que o CHECK da coluna só garante NOT NULL.
+    const texto = typeof descricao === 'string' ? descricao.trim() : ''
+    if (!texto) {
+      return res.status(400).json({ erro: 'descricao é obrigatória' })
+    }
+    if (texto.length > DESCRICAO_DENUNCIA_MAX) {
+      return res.status(400).json({ erro: `descricao deve ter no máximo ${DESCRICAO_DENUNCIA_MAX} caracteres` })
+    }
+
+    // contrato_tipo já validado contra whitelist acima — interpolação de tabela é segura.
+    const tabela = contrato_tipo === 'reparo' ? 'reparos' : 'obras'
+    const contrato = await pool.query(
+      `SELECT criado_por, match_usuario_id, status FROM ${tabela} WHERE id = $1`,
+      [contrato_id]
+    )
+    if (contrato.rows.length === 0) return res.status(404).json({ erro: 'Contrato não encontrado' })
+
+    const c = contrato.rows[0]
+    if (c.status !== 'encerrada') {
+      return res.status(400).json({ erro: 'Só é possível denunciar contratos encerrados' })
+    }
+    if (!c.match_usuario_id) {
+      return res.status(400).json({ erro: 'Este contrato não teve prestador vinculado' })
+    }
+
+    // Inverso da avaliação: só o prestador do match denuncia, e o denunciado é o dono.
+    const uid = req.usuario.id
+    if (uid !== c.match_usuario_id) {
+      if (uid === c.criado_por) {
+        return res.status(403).json({ erro: 'Apenas o profissional do contrato pode denunciar' })
+      }
+      return res.status(403).json({ erro: 'Você não participou deste contrato' })
+    }
+
+    const result = await pool.query(
+      `INSERT INTO denuncias (contrato_tipo, contrato_id, denunciante_id, denunciado_id, categoria, descricao)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (contrato_tipo, contrato_id, denunciante_id) DO NOTHING
+       RETURNING id`,
+      [contrato_tipo, contrato_id, uid, c.criado_por, categoria, texto]
+    )
+    if (result.rows.length === 0) {
+      return res.status(409).json({ erro: 'Você já denunciou este contrato' })
+    }
+
+    res.status(201).json({ mensagem: 'Denúncia registrada. Nossa equipe vai analisar.', id: result.rows[0].id })
+  } catch (err) {
+    console.error('[Denuncias] Erro:', err.message)
+    res.status(500).json({ erro: 'Erro ao registrar denúncia' })
+  }
+})
+
 // FEED — visualizações de proximidade. Rota estática ('/feed/visualizacoes'), sem
 // conflito com padrões /:id, seguindo a convenção de registro dedicado como avaliacoes.
 
@@ -3873,6 +3970,78 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
     console.error('Erro ao limpar usuários:', err)
     res.status(500).json({ erro: 'Erro ao limpar usuários' })
   } finally { client.release() }
+})
+
+// GET /admin/denuncias — fila de moderação. Colunas EXPLÍCITAS (nunca SELECT *).
+// titulo do contrato sai de um LEFT JOIN por tipo: contrato_id é polimórfico (obras OU
+// reparos), então não há FK única para seguir. denunciado_nome pode vir NULL quando o
+// denunciado excluiu a conta — a denúncia sobrevive anonimizada (ON DELETE SET NULL).
+router.get('/admin/denuncias', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const page   = parseInt(req.query.page)  || 1
+    const limit  = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+
+    const STATUS_DENUNCIA = ['aberta', 'em_analise', 'resolvida', 'arquivada']
+    const { status } = req.query
+    if (status && !STATUS_DENUNCIA.includes(status)) {
+      return res.status(400).json({ erro: `status deve ser um de: ${STATUS_DENUNCIA.join(', ')}` })
+    }
+
+    const filtro = status ? `WHERE d.status = $3` : ``
+    const params = status ? [limit, offset, status] : [limit, offset]
+
+    const lista = await pool.query(
+      `SELECT d.id, d.contrato_tipo, d.contrato_id, d.categoria, d.descricao,
+              d.status, d.criado_em,
+              d.denunciante_id, ud.nome AS denunciante_nome, ud.email AS denunciante_email,
+              d.denunciado_id,  ua.nome AS denunciado_nome,  ua.email AS denunciado_email,
+              COALESCE(o.titulo, r.titulo) AS contrato_titulo
+       FROM denuncias d
+       JOIN usuarios ud ON ud.id = d.denunciante_id
+       LEFT JOIN usuarios ua ON ua.id = d.denunciado_id
+       LEFT JOIN obras   o ON d.contrato_tipo = 'obra'   AND o.id = d.contrato_id
+       LEFT JOIN reparos r ON d.contrato_tipo = 'reparo' AND r.id = d.contrato_id
+       ${filtro}
+       ORDER BY d.criado_em DESC
+       LIMIT $1 OFFSET $2`,
+      params
+    )
+
+    const totais = await pool.query(
+      `SELECT status, COUNT(*)::int AS total FROM denuncias GROUP BY status`
+    )
+
+    res.json({
+      page,
+      limit,
+      por_status: totais.rows,
+      denuncias: lista.rows
+    })
+  } catch (err) {
+    console.error('[Denuncias] Erro listagem admin:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar denúncias' })
+  }
+})
+
+// PATCH /admin/denuncias/:id — move a denúncia na fila de moderação.
+router.patch('/admin/denuncias/:id', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const STATUS_DENUNCIA = ['aberta', 'em_analise', 'resolvida', 'arquivada']
+    const { status } = req.body
+    if (!STATUS_DENUNCIA.includes(status)) {
+      return res.status(400).json({ erro: `status deve ser um de: ${STATUS_DENUNCIA.join(', ')}` })
+    }
+    const result = await pool.query(
+      `UPDATE denuncias SET status = $1 WHERE id = $2 RETURNING id, status`,
+      [status, req.params.id]
+    )
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Denúncia não encontrada' })
+    res.json(result.rows[0])
+  } catch (err) {
+    console.error('[Denuncias] Erro ao atualizar status:', err.message)
+    res.status(500).json({ erro: 'Erro ao atualizar denúncia' })
+  }
 })
 
 router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => {
