@@ -12,7 +12,11 @@ const minhas = async (req, res) => {
     const result = await pool.query(
       `SELECT c.id, c.status, c.criado_em, c.valor_contraproposta, c.valor_proposto,
               o.id as obra_id, o.titulo, o.categoria, o.valor, o.cidade, o.status as obra_status,
-              o.match_usuario_id, o.match_feito_em
+              o.match_usuario_id, o.match_feito_em,
+              -- Encerramento em duas mãos: o lado do pintor precisa saber se há solicitação
+              -- pendente e quem pediu (_por = próprio usuário → aguardando o dono; _por = dono
+              -- → cabe ao pintor confirmar). NULL = nenhuma solicitação em aberto.
+              o.encerramento_solicitado_por, o.encerramento_solicitado_em
        FROM candidaturas c
        JOIN obras o ON c.obra_id = o.id
        WHERE c.usuario_id = $1
