@@ -2132,6 +2132,10 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
              r.id as reparo_id, r.titulo, r.categoria, r.descricao, r.valor_estimado,
              r.cidade, r.bairro, r.latitude, r.longitude, r.expira_em, r.status as reparo_status, r.prazo_atendimento_horas,
              r.match_usuario_id, r.match_feito_em,
+             -- Encerramento em duas mãos: o lado do prestador precisa saber se há solicitação
+             -- pendente e quem pediu (_por = próprio usuário → aguardando o dono; _por = dono
+             -- → cabe ao prestador confirmar). NULL = nenhuma solicitação em aberto.
+             r.encerramento_solicitado_por, r.encerramento_solicitado_em,
              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM interesse_reparos ir
       JOIN reparos r ON ir.reparo_id = r.id
