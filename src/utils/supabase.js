@@ -7,9 +7,12 @@ const connectionString = rawUrl.trim().replace(/\s+(\?|$)/, '$1')
 const pool = new Pool({
   connectionString,
   ssl: { rejectUnauthorized: false },
-  max: 20,                     // máximo de conexões simultâneas
-  min: 2,                      // conexões mínimas mantidas abertas
-  idleTimeoutMillis: 30000,    // fecha conexão ociosa após 30s
+  max: 20,                      // máximo de conexões simultâneas
+  // O node-postgres não mantém um piso de conexões (não existe opção "min"), então
+  // toda conexão ociosa é fechada ao fim deste prazo e a próxima requisição paga o
+  // custo de reabrir (TCP + TLS + auth). Com 30s, uma pausa normal de tráfego já
+  // derrubava o pool inteiro. 2 min cobre esses vãos sem segurar conexões à toa.
+  idleTimeoutMillis: 120000,    // fecha conexão ociosa após 2 min
   connectionTimeoutMillis: 5000 // erro se não conectar em 5s
 })
 
