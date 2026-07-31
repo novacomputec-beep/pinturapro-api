@@ -2143,8 +2143,18 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
       ORDER BY ir.criado_em DESC
     `, [req.usuario.id])
     const agora = new Date()
+    // Arquiva por dois motivos independentes. O primeiro é o interesse em si: quem foi
+    // recusado (inclusive em massa por rejeitarConcorrentes, quando o dono fecha match
+    // com outro) não tem mais nada a fazer ali, e antes seguia vendo o reparo em ativos
+    // até o dono encerrar. O segundo é o reparo estar fora de jogo — 'cancelada' e
+    // 'expirada' contam junto com 'encerrada'; sem elas um reparo vencido voltava para
+    // ativos assim que o status saía de 'aberta'. A checagem por data continua valendo
+    // só enquanto o status ainda é 'aberta', para o vencimento que ninguém processou.
+    const INTERESSE_MORTO = ['recusado', 'expirado']
+    const REPARO_MORTO    = ['encerrada', 'cancelada', 'expirada']
     const eArquivado = item =>
-      item.reparo_status === 'encerrada' ||
+      INTERESSE_MORTO.includes(item.status) ||
+      REPARO_MORTO.includes(item.reparo_status) ||
       (item.reparo_status === 'aberta' && item.expira_em && new Date(item.expira_em) < agora)
     const ativos    = result.rows.filter(item => !eArquivado(item))
     const historico = result.rows.filter(item =>  eArquivado(item))
