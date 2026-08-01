@@ -179,6 +179,13 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_1_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_2_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_3_em TIMESTAMPTZ`)
+    // Idempotência de POST /reparos/:id/estender — o endpoint não tem client_request_id, então a
+    // chave de dedupe é a própria última extensão aplicada: (instante, horas). Um retry com o MESMO
+    // horas dentro da janela curta devolve o prazo atual em vez de somar de novo. NULL nas duas
+    // colunas = reparo que ainda não foi estendido (nenhum backfill: não há histórico de onde tirar
+    // esses valores, e NULL já significa "sem extensão recente" na guarda do UPDATE).
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS ultima_extensao_em    TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS ultima_extensao_horas NUMERIC`)
     // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o range scan lê
     // só as demandas prestes a expirar. O WHERE parcial (TIME-FREE, sem NOW()) mantém o índice
     // pequeno: exclui match, não-aprovadas (obras) e as que já enviaram os 3 marcos genéricos.
@@ -2005,6 +2012,12 @@ const FAIXA_LONGA_REPARO_HORAS = 24
 // generoso = "não gateia o menu"; NÃO é enforçado por nada.
 const ADVISORY_ESTENDER_REPARO_HORAS = 8760
 
+// Janela de dedupe do estender. Sem client_request_id no corpo, a chave é (ultima_extensao_em,
+// ultima_extensao_horas): repetir o MESMO horas dentro da janela é tratado como retry do mesmo
+// clique — devolve o prazo atual sem somar de novo. Fora da janela, ou com horas diferente, é
+// uma extensão nova e legítima (o dono pode estender duas vezes seguidas de propósito).
+const DEDUPE_ESTENDER_REPARO_MINUTOS = 5
+
 // POST /reparos/:id/estender — âncora criado_em SEM COALESCE: o reparo publica na criação,
 // então criado_em é o instante de publicação e nunca é NULL (obra precisa de
 // COALESCE(publicado_em, criado_em); reparo não). É essa mesma âncora que a carência usa.
@@ -2043,12 +2056,37 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
       return res.status(409).json({ erro: 'Aguarde 1 hora após o cadastro para estender' })
     }
 
+    // Guarda de dedupe DENTRO do UPDATE, não em um if antes dele: checar em uma query e gravar em
+    // outra deixa a janela aberta para dois cliques simultâneos passarem os dois pela checagem e
+    // somarem duas vezes. Aqui o próprio UPDATE decide — quem perder a corrida não casa mais com o
+    // predicado e volta rowCount = 0. COALESCE(..., FALSE) porque linha nunca estendida tem as duas
+    // colunas NULL: sem ele a comparação vira NULL, o NOT propaga NULL e o UPDATE não aplicaria a
+    // PRIMEIRA extensão. Fail-open é o lado certo: na dúvida, estende.
     const upd = await pool.query(
       `UPDATE reparos SET expira_em = $1,
-         marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
-       WHERE id = $2 AND criado_por = $3 RETURNING expira_em`,
-      [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id]
+         marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL,
+         ultima_extensao_em = NOW(), ultima_extensao_horas = $5::numeric
+       WHERE id = $2 AND criado_por = $3
+         AND NOT COALESCE(
+               ultima_extensao_em > NOW() - ($4::numeric * INTERVAL '1 minute')
+               AND ultima_extensao_horas = $5::numeric, FALSE)
+       RETURNING expira_em`,
+      [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id, DEDUPE_ESTENDER_REPARO_MINUTOS, horas]
     )
+
+    // rowCount = 0 → o predicado de dedupe barrou (retry do mesmo horas na janela). Não é erro: o
+    // cliente pediu um estado que o servidor já tem, então devolve o prazo ATUAL como sucesso, com
+    // o mesmo shape do caminho normal. O re-SELECT também cobre a linha ter sumido entre o SELECT
+    // inicial e o UPDATE (delete concorrente) — aí sim é 404.
+    if (upd.rowCount === 0) {
+      const atual = await pool.query(
+        `SELECT expira_em FROM reparos WHERE id = $1 AND criado_por = $2`,
+        [req.params.id, req.usuario.id]
+      )
+      if (atual.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+      return res.json({ expira_em: atual.rows[0].expira_em, extensao_maxima_horas: ADVISORY_ESTENDER_REPARO_HORAS })
+    }
+
     res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: ADVISORY_ESTENDER_REPARO_HORAS })
   } catch (err) {
     console.error('[reparos/estender]', err.message)
