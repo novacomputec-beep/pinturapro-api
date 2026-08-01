@@ -2260,6 +2260,10 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
              -- pendente e quem pediu (_por = próprio usuário → aguardando o dono; _por = dono
              -- → cabe ao prestador confirmar). NULL = nenhuma solicitação em aberto.
              r.encerramento_solicitado_por, r.encerramento_solicitado_em,
+             -- Chegada: o prestador precisa ver a janela que ele mesmo prometeu e se o dono já
+             -- confirmou a chegada (declarada por ele + confirmada = atendimento em curso).
+             r.chegada_janela, r.chegada_prevista_em, r.chegada_declarada_por,
+             r.chegada_declarada_em, r.chegada_confirmada_em,
              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM interesse_reparos ir
       JOIN reparos r ON ir.reparo_id = r.id
@@ -2863,9 +2867,17 @@ const TZ_CHEGADA = 'America/Sao_Paulo'
 // Resolvidos no Postgres com o fuso explícito, não no relógio do processo: o container do
 // Railway roda em UTC, então `new Date()` daria o dia errado entre 21:00 e 00:00 de Brasília.
 const JANELAS_CHEGADA = {
-  hoje:         { dias: 0, horas: 23, minutos: 59 },
-  amanha_manha: { dias: 1, horas: 12, minutos: 0 },
-  amanha_tarde: { dias: 1, horas: 18, minutos: 0 },
+  hoje:         { dias: 0, horas: 23, minutos: 59, rotulo: 'ainda hoje' },
+  amanha_manha: { dias: 1, horas: 12, minutos: 0,  rotulo: 'amanhã de manhã' },
+  amanha_tarde: { dias: 1, horas: 18, minutos: 0,  rotulo: 'amanhã à tarde' },
+}
+
+// Rótulos por tabela para os pushes: a chave do payload segue a convenção das notificações de
+// match (obra_id / reparo_id) e o substantivo acompanha o tier (pintor em obra, prestador em
+// reparo), como em '🚀 Pintor a caminho!' vs '🚀 Profissional a caminho!'.
+const ROTULOS_CHEGADA = {
+  obras:   { chave: 'obra_id',   profissional: 'pintor' },
+  reparos: { chave: 'reparo_id', profissional: 'prestador' },
 }
 
 const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
@@ -2879,14 +2891,17 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
         janelas_validas: Object.keys(JANELAS_CHEGADA),
       })
     }
-    const alvo = await pool.query(`SELECT match_usuario_id FROM ${tabela} WHERE id = $1`, [req.params.id])
+    const alvo = await pool.query(
+      `SELECT titulo, criado_por, match_usuario_id FROM ${tabela} WHERE id = $1`,
+      [req.params.id]
+    )
     if (alvo.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
     // Só o profissional CASADO — nem o dono, nem um profissional que apenas se candidatou.
     if (!alvo.rows[0].match_usuario_id || alvo.rows[0].match_usuario_id !== req.usuario.id) {
       return res.status(403).json({ erro: 'Apenas o profissional do match pode informar a previsão de chegada' })
     }
 
-    const { dias, horas, minutos } = JANELAS_CHEGADA[janela]
+    const { dias, horas, minutos, rotulo } = JANELAS_CHEGADA[janela]
     // Write-once DENTRO do UPDATE (chegada_prevista_em IS NULL no WHERE), não em um if antes:
     // dois toques simultâneos passariam os dois por uma checagem separada e o segundo
     // sobrescreveria a janela já prometida ao dono.
@@ -2911,7 +2926,21 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
        RETURNING chegada_janela, chegada_prevista_em`,
       [req.params.id, janela, TZ_CHEGADA, dias, horas, minutos, req.usuario.id]
     )
-    if (upd.rowCount > 0) return res.json(upd.rows[0])
+    if (upd.rowCount > 0) {
+      // Push só no write REAL: o caminho de baixo (previsão já gravada) é retry/reabertura da
+      // tela, e reavisar o dono a cada toque viraria spam de uma promessa que não mudou.
+      // Token buscado ANTES do res.json: um throw depois da resposta cairia no catch e tentaria
+      // responder duas vezes (mesmo cuidado de candidaturasController.aprovar).
+      const { chave, profissional } = ROTULOS_CHEGADA[tabela]
+      const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [alvo.rows[0].criado_por])
+      res.json(upd.rows[0])
+      if (dono.rows[0]?.push_token) {
+        enviarPushNotificacao(dono.rows[0].push_token, '📅 Previsão de chegada!',
+          `O ${profissional} informou que chega ${rotulo} para "${alvo.rows[0].titulo}"`,
+          { tipo: 'chegada_prevista', [chave]: req.params.id }).catch(() => {})
+      }
+      return
+    }
 
     // rowCount = 0 → já havia previsão gravada. Não é erro: devolve a que vale, mesmo shape.
     const atual = await pool.query(
@@ -2929,7 +2958,8 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
 const criarHandlerChegada = (tabela) => async (req, res) => {
   try {
     const alvo = await pool.query(
-      `SELECT criado_por, match_usuario_id FROM ${tabela} WHERE id = $1`,
+      `SELECT titulo, criado_por, match_usuario_id, chegada_declarada_em, chegada_confirmada_em
+         FROM ${tabela} WHERE id = $1`,
       [req.params.id]
     )
     if (alvo.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
@@ -2962,7 +2992,39 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
        RETURNING chegada_declarada_por, chegada_declarada_em, chegada_confirmada_em`,
       [req.params.id, req.usuario.id, ehDono]
     )
+    // Transições NULL → preenchido, comparando o estado lido antes com o RETURNING. Só a
+    // transição notifica: rechamar o endpoint não reenvia push, porque na segunda vez o campo
+    // já estava preenchido ANTES.
+    const declarouAgora  = !d.chegada_declarada_em  && !!upd.rows[0].chegada_declarada_em
+    const confirmouAgora = !d.chegada_confirmada_em && !!upd.rows[0].chegada_confirmada_em
+    const { chave, profissional } = ROTULOS_CHEGADA[tabela]
+
+    // Tokens buscados ANTES do res.json: um throw depois da resposta cairia no catch e tentaria
+    // responder duas vezes (mesmo cuidado de candidaturasController.aprovar).
+    const avisarDono = declarouAgora && ehProfissional
+    const avisarProf = confirmouAgora && !!d.match_usuario_id
+    const tokenDono = avisarDono
+      ? (await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [d.criado_por])).rows[0]?.push_token
+      : null
+    const tokenProf = avisarProf
+      ? (await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [d.match_usuario_id])).rows[0]?.push_token
+      : null
+
     res.json(upd.rows[0])
+
+    // Profissional declarou → o dono precisa confirmar.
+    if (tokenDono) {
+      enviarPushNotificacao(tokenDono, '📍 Chegada informada!',
+        `O ${profissional} informou que chegou em "${d.titulo}". Confirme no app.`,
+        { tipo: 'chegada_declarada', [chave]: req.params.id }).catch(() => {})
+    }
+    // Chegada confirmada → avisa o profissional. Vale tanto para o dono declarando direto
+    // quanto para o dono confirmando uma declaração anterior do profissional.
+    if (tokenProf) {
+      enviarPushNotificacao(tokenProf, '✅ Chegada confirmada!',
+        `O solicitante confirmou sua chegada em "${d.titulo}".`,
+        { tipo: 'chegada_confirmada', [chave]: req.params.id }).catch(() => {})
+    }
   } catch (err) {
     console.error(`[${tabela}/chegada]`, err.message)
     res.status(500).json({ erro: 'Erro ao registrar chegada' })
