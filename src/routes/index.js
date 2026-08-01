@@ -12,7 +12,7 @@ const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo } = require('../services/alertaService')
+const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
 const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
@@ -503,6 +503,14 @@ const migracaoPronta = (async () => {
     `)
     // Índice da contagem da janela móvel (usuario_id + criado_em > NOW() - 90 dias).
     await client.query(`CREATE INDEX IF NOT EXISTS faltas_profissional_usuario_criado_idx ON faltas_profissional (usuario_id, criado_em)`)
+    // Perdão de falta: linha perdoada continua no histórico (auditoria de quem foi liberado e
+    // quando) mas sai da contagem dos 90 dias. Sem isto, liberar uma suspensão devolveria o
+    // profissional já com 3 faltas válidas — a próxima falta o suspenderia na hora.
+    await client.query(`ALTER TABLE faltas_profissional ADD COLUMN IF NOT EXISTS perdoada_em TIMESTAMPTZ`)
+    // Quem perdoou. ON DELETE SET NULL de propósito: sem isso, apagar a conta de um admin que já
+    // liberou alguém falharia por violação de FK e derrubaria a transação inteira de exclusão
+    // (mesmo risco documentado no DELETE /usuarios/:id). A falta sobrevive com o autor anônimo.
+    await client.query(`ALTER TABLE faltas_profissional ADD COLUMN IF NOT EXISTS perdoada_por UUID REFERENCES usuarios(id) ON DELETE SET NULL`)
     // Suspensão por acúmulo de faltas. suspenso_em É a flag: NULL = ativo, preenchido =
     // suspenso (mesma convenção de encerrado_em/chegada_confirmada_em — nada de booleano
     // paralelo que possa divergir do timestamp). suspenso_motivo guarda o porquê legível.
@@ -1033,6 +1041,11 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     // o DELETE da assinatura acima e deixando uma assinatura órfã/desatualizada (B72-01).
     await client.query('DELETE FROM localizacoes_prestadores WHERE usuario_id = $1', [id])
     await client.query(`DELETE FROM prestadores_bloqueados_dono WHERE dono_id = $1 OR prestador_id = $1`, [id])
+    // faltas_profissional.usuario_id também é FK sem CASCADE — mesmo caso do
+    // localizacoes_prestadores acima: qualquer profissional que já tenha faltado uma vez
+    // derrubaria a transação inteira aqui. perdoada_por não precisa de limpeza (ON DELETE
+    // SET NULL), então um admin que já liberou alguém é apagado sem tocar nas faltas dele.
+    await client.query('DELETE FROM faltas_profissional WHERE usuario_id = $1', [id])
     await client.query('DELETE FROM usuarios WHERE id = $1', [id])
 
     await client.query('COMMIT')
@@ -1124,6 +1137,9 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
     await client.query(`DELETE FROM interesse_reparos WHERE usuario_id = $1`, [id])
     await client.query(`DELETE FROM localizacoes_prestadores WHERE usuario_id = $1`, [id])
     await client.query(`DELETE FROM prestadores_bloqueados_dono WHERE dono_id = $1 OR prestador_id = $1`, [id])
+    // FK sem CASCADE (ver o mesmo DELETE no caminho de exclusão pelo admin): sem isto, um
+    // profissional com falta registrada não consegue mais excluir a própria conta.
+    await client.query(`DELETE FROM faltas_profissional WHERE usuario_id = $1`, [id])
 
     // Conta em si (avaliacoes cai por ON DELETE CASCADE)
     await client.query(`DELETE FROM usuarios WHERE id = $1`, [id])
@@ -4436,6 +4452,119 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
     console.error('Erro ao limpar usuários:', err)
     res.status(500).json({ erro: 'Erro ao limpar usuários' })
   } finally { client.release() }
+})
+
+// ============================================================
+// SUSPENSÕES POR FALTA (admin)
+// ============================================================
+// JANELA_FALTAS e FALTAS_PARA_SUSPENDER vêm de alertaService, onde o cron as aplica — uma
+// cópia local aqui mentiria para o admin na primeira vez que o valor mudasse lá.
+//
+// GET /admin/suspensos — quem está suspenso agora, com as faltas de cada um.
+// faltas_validas = as que ainda contam (não perdoadas, dentro da janela); faltas_total inclui
+// perdoadas e antigas, para o admin ver o histórico completo antes de decidir. limite e janela
+// saem na resposta para a tela exibir "3 de 3 em 90 dias" sem hardcodar a regra no app.
+router.get('/admin/suspensos', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const page   = parseInt(req.query.page)  || 1
+    const limit  = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+
+    const lista = await pool.query(
+      `SELECT u.id, u.nome, u.email, u.telefone, u.role, u.tipo_prestador,
+              u.suspenso_em, u.suspenso_motivo,
+              (SELECT COUNT(*)::int FROM faltas_profissional f
+                WHERE f.usuario_id = u.id
+                  AND f.perdoada_em IS NULL
+                  AND f.criado_em > NOW() - INTERVAL '${JANELA_FALTAS}') AS faltas_validas,
+              (SELECT COUNT(*)::int FROM faltas_profissional f WHERE f.usuario_id = u.id) AS faltas_total,
+              COALESCE((
+                SELECT json_agg(x ORDER BY x.criado_em DESC)
+                  FROM (
+                    SELECT f.id, f.tabela, f.demanda_id, f.criado_em,
+                           f.perdoada_em, f.perdoada_por, up.nome AS perdoada_por_nome
+                      FROM faltas_profissional f
+                      LEFT JOIN usuarios up ON up.id = f.perdoada_por
+                     WHERE f.usuario_id = u.id
+                     ORDER BY f.criado_em DESC
+                     LIMIT 20
+                  ) x
+              ), '[]'::json) AS faltas
+       FROM usuarios u
+       WHERE u.suspenso_em IS NOT NULL
+       ORDER BY u.suspenso_em DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    )
+    res.json({
+      suspensos: lista.rows,
+      page,
+      limit,
+      limite_faltas: FALTAS_PARA_SUSPENDER,
+      janela_faltas: JANELA_FALTAS,
+    })
+  } catch (err) {
+    console.error('[admin/suspensos]', err.message)
+    res.status(500).json({ erro: 'Erro ao listar profissionais suspensos' })
+  }
+})
+
+// POST /admin/suspensos/:id/liberar — levanta a suspensão.
+// Transação: limpar a suspensão SEM perdoar as faltas devolveria o profissional ao feed com a
+// contagem ainda estourada, e a próxima falta o suspenderia de novo na hora. Os dois writes
+// vivem ou morrem juntos.
+router.post('/admin/suspensos/:id/liberar', autenticar, exigirAdmin, async (req, res) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    // WHERE suspenso_em IS NOT NULL: rowCount = 0 distingue "não estava suspenso" (409) de
+    // "não existe" (404), sem uma leitura extra antes.
+    const alvo = await client.query(
+      `UPDATE usuarios SET suspenso_em = NULL, suspenso_motivo = NULL
+        WHERE id = $1 AND suspenso_em IS NOT NULL
+        RETURNING id, nome, email, push_token`,
+      [req.params.id]
+    )
+    if (alvo.rowCount === 0) {
+      await client.query('ROLLBACK')
+      const existe = await pool.query(`SELECT id FROM usuarios WHERE id = $1`, [req.params.id])
+      return existe.rows.length === 0
+        ? res.status(404).json({ erro: 'Usuário não encontrado' })
+        : res.status(409).json({ erro: 'Este usuário não está suspenso' })
+    }
+    // Perdoa exatamente as faltas CONTADAS (não perdoadas, dentro da janela) — as antigas já
+    // não contavam e não precisam ser tocadas. Depois disto a contagem dele volta a zero.
+    const perdoadas = await client.query(
+      `UPDATE faltas_profissional SET perdoada_em = NOW(), perdoada_por = $2::uuid
+        WHERE usuario_id = $1
+          AND perdoada_em IS NULL
+          AND criado_em > NOW() - INTERVAL '${JANELA_FALTAS}'
+        RETURNING id`,
+      [req.params.id, req.usuario.id]
+    )
+    await client.query('COMMIT')
+
+    // Fora da transação: o cache é do processo, não do banco — derrubar antes de commitar
+    // deixaria a próxima request recarregar a linha AINDA suspensa e cachear isso de novo.
+    invalidarCacheAssinatura(req.params.id)
+
+    res.json({
+      mensagem: 'Suspensão removida',
+      usuario_id: alvo.rows[0].id,
+      faltas_perdoadas: perdoadas.rowCount,
+    })
+    if (alvo.rows[0].push_token) {
+      enviarPushNotificacao(alvo.rows[0].push_token, '✅ Conta liberada',
+        'Sua suspensão foi removida. Você já pode voltar a pegar trabalhos.',
+        { tipo: 'conta_liberada' }).catch(() => {})
+    }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    console.error('[admin/suspensos/liberar]', err.message)
+    res.status(500).json({ erro: 'Erro ao remover suspensão' })
+  } finally {
+    client.release()
+  }
 })
 
 // GET /admin/denuncias — fila de moderação. Colunas EXPLÍCITAS (nunca SELECT *).
