@@ -123,6 +123,22 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS obras_criado_por_client_request_id_uniq ON obras (criado_por, client_request_id) WHERE client_request_id IS NOT NULL`)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS reparos_criado_por_client_request_id_uniq ON reparos (criado_por, client_request_id) WHERE client_request_id IS NOT NULL`)
+    // Previsão e confirmação de CHEGADA do profissional ao local (obras e reparos, mesmas colunas).
+    //   chegada_janela        → rótulo escolhido pelo profissional ('hoje' | 'amanha_manha' | 'amanha_tarde')
+    //   chegada_prevista_em   → instante-limite da janela, resolvido em America/Sao_Paulo. Escrito UMA vez.
+    //   chegada_declarada_por → quem declarou a chegada PRIMEIRO (dono ou profissional)
+    //   chegada_declarada_em  → quando essa primeira declaração entrou
+    //   chegada_confirmada_em → chegada confirmada de fato; só o dono confirma (ver POST /:id/chegada)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS chegada_janela        TEXT`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS chegada_prevista_em   TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS chegada_declarada_por UUID`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS chegada_declarada_em  TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS chegada_confirmada_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_janela        TEXT`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_prevista_em   TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_declarada_por UUID`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_declarada_em  TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_confirmada_em TIMESTAMPTZ`)
     // Índices para o filtro por raio (feed). PostGIS/GiST não é assumido como disponível,
     // então usamos btree em (latitude, longitude) — sempre disponível no Postgres padrão.
     // Acelera a pré-seleção de linhas com coordenadas; o haversine continua sendo calculado por linha.
@@ -2803,6 +2819,140 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     res.status(500).json({ erro: 'Erro ao expirar match' })
   }
 })
+
+// ============================================================
+// CHEGADA — previsão e confirmação (obras e reparos)
+// ============================================================
+// Dois passos independentes:
+//   1) POST /:id/chegada-prevista — o profissional casado escolhe UMA janela. Write-once:
+//      a primeira escolhida vale, as seguintes devolvem a que já está gravada (o dono se
+//      programou em cima dela; deixar o profissional reescrever esvaziaria a promessa).
+//   2) POST /:id/chegada — dono OU profissional declara que a chegada aconteceu. Só a
+//      palavra do DONO confirma (chegada_confirmada_em); o profissional sozinho apenas
+//      declara e fica aguardando.
+//
+// `tabela` sai SEMPRE de literal no registro da rota (logo abaixo), nunca do request —
+// a interpolação no SQL não é superfície de injeção. Mesmo padrão de autoEncerrarPendentes.
+
+const TZ_CHEGADA = 'America/Sao_Paulo'
+
+// Offsets a partir da MEIA-NOITE local de hoje (America/Sao_Paulo):
+//   hoje         → hoje 23:59
+//   amanha_manha → amanhã 12:00
+//   amanha_tarde → amanhã 18:00
+// Resolvidos no Postgres com o fuso explícito, não no relógio do processo: o container do
+// Railway roda em UTC, então `new Date()` daria o dia errado entre 21:00 e 00:00 de Brasília.
+const JANELAS_CHEGADA = {
+  hoje:         { dias: 0, horas: 23, minutos: 59 },
+  amanha_manha: { dias: 1, horas: 12, minutos: 0 },
+  amanha_tarde: { dias: 1, horas: 18, minutos: 0 },
+}
+
+const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
+  try {
+    const { janela } = req.body || {}
+    // hasOwnProperty e não `JANELAS_CHEGADA[janela]`: 'constructor'/'toString' vêm do
+    // protótipo e passariam por um teste de truthiness.
+    if (typeof janela !== 'string' || !Object.prototype.hasOwnProperty.call(JANELAS_CHEGADA, janela)) {
+      return res.status(400).json({
+        erro: 'janela inválida',
+        janelas_validas: Object.keys(JANELAS_CHEGADA),
+      })
+    }
+    const alvo = await pool.query(`SELECT match_usuario_id FROM ${tabela} WHERE id = $1`, [req.params.id])
+    if (alvo.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
+    // Só o profissional CASADO — nem o dono, nem um profissional que apenas se candidatou.
+    if (!alvo.rows[0].match_usuario_id || alvo.rows[0].match_usuario_id !== req.usuario.id) {
+      return res.status(403).json({ erro: 'Apenas o profissional do match pode informar a previsão de chegada' })
+    }
+
+    const { dias, horas, minutos } = JANELAS_CHEGADA[janela]
+    // Write-once DENTRO do UPDATE (chegada_prevista_em IS NULL no WHERE), não em um if antes:
+    // dois toques simultâneos passariam os dois por uma checagem separada e o segundo
+    // sobrescreveria a janela já prometida ao dono.
+    //
+    // GREATEST(..., NOW() + 1 hour) = PISO da previsão. 'hoje' escolhido às 23:55 renderia
+    // 23:59 — 4 minutos, e às 23:59:30 já nasceria VENCIDA, com o dono recebendo uma promessa
+    // impossível. O piso empurra esses casos para NOW() + 1h. As janelas de amanhã ficam
+    // sempre acima do piso (>12h de distância), então na prática só 'hoje' tarde é afetado.
+    const upd = await pool.query(
+      `UPDATE ${tabela} SET
+         chegada_janela = $2,
+         chegada_prevista_em = GREATEST(
+           (
+             date_trunc('day', NOW() AT TIME ZONE $3::text)
+             + ($4::int * INTERVAL '1 day')
+             + ($5::int * INTERVAL '1 hour')
+             + ($6::int * INTERVAL '1 minute')
+           ) AT TIME ZONE $3::text,
+           NOW() + INTERVAL '1 hour'
+         )
+       WHERE id = $1 AND match_usuario_id = $7 AND chegada_prevista_em IS NULL
+       RETURNING chegada_janela, chegada_prevista_em`,
+      [req.params.id, janela, TZ_CHEGADA, dias, horas, minutos, req.usuario.id]
+    )
+    if (upd.rowCount > 0) return res.json(upd.rows[0])
+
+    // rowCount = 0 → já havia previsão gravada. Não é erro: devolve a que vale, mesmo shape.
+    const atual = await pool.query(
+      `SELECT chegada_janela, chegada_prevista_em FROM ${tabela} WHERE id = $1`,
+      [req.params.id]
+    )
+    if (atual.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
+    res.json(atual.rows[0])
+  } catch (err) {
+    console.error(`[${tabela}/chegada-prevista]`, err.message)
+    res.status(500).json({ erro: 'Erro ao registrar previsão de chegada' })
+  }
+}
+
+const criarHandlerChegada = (tabela) => async (req, res) => {
+  try {
+    const alvo = await pool.query(
+      `SELECT criado_por, match_usuario_id FROM ${tabela} WHERE id = $1`,
+      [req.params.id]
+    )
+    if (alvo.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
+    const d = alvo.rows[0]
+    const ehDono         = d.criado_por === req.usuario.id
+    const ehProfissional = !!d.match_usuario_id && d.match_usuario_id === req.usuario.id
+    if (!ehDono && !ehProfissional) {
+      return res.status(403).json({ erro: 'Apenas o dono ou o profissional do match podem declarar a chegada' })
+    }
+
+    // COALESCE em todos os campos = idempotente: rechamar não desloca timestamp já gravado,
+    // e a declaração do profissional (que veio primeiro) não é apagada pela do dono.
+    //
+    // chegada_confirmada_em:
+    //   dono         → NOW() na hora (a palavra do dono basta).
+    //   profissional → só se o DONO já tinha declarado antes. As expressões do SET leem a
+    //                  linha ANTIGA, então `chegada_declarada_por = criado_por` aqui testa
+    //                  quem declarou ANTES desta chamada, não o valor que estamos gravando.
+    const upd = await pool.query(
+      `UPDATE ${tabela} SET
+         chegada_declarada_por = COALESCE(chegada_declarada_por, $2::uuid),
+         chegada_declarada_em  = COALESCE(chegada_declarada_em, NOW()),
+         chegada_confirmada_em = CASE
+           WHEN chegada_confirmada_em IS NOT NULL THEN chegada_confirmada_em
+           WHEN $3::boolean THEN NOW()
+           WHEN chegada_declarada_por = criado_por THEN NOW()
+           ELSE NULL
+         END
+       WHERE id = $1
+       RETURNING chegada_declarada_por, chegada_declarada_em, chegada_confirmada_em`,
+      [req.params.id, req.usuario.id, ehDono]
+    )
+    res.json(upd.rows[0])
+  } catch (err) {
+    console.error(`[${tabela}/chegada]`, err.message)
+    res.status(500).json({ erro: 'Erro ao registrar chegada' })
+  }
+}
+
+router.post('/obras/:id/chegada-prevista',   autenticar, criarHandlerChegadaPrevista('obras'))
+router.post('/reparos/:id/chegada-prevista', autenticar, criarHandlerChegadaPrevista('reparos'))
+router.post('/obras/:id/chegada',            autenticar, criarHandlerChegada('obras'))
+router.post('/reparos/:id/chegada',          autenticar, criarHandlerChegada('reparos'))
 
 // Prestador solicita mais tempo — envia motivo e notifica dono
 router.post('/reparos/:id/pedir-tempo', autenticar, async (req, res) => {
