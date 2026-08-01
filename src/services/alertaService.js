@@ -655,8 +655,21 @@ const autoEncerrarPendentes = async () => {
         WHERE chegada_declarada_em IS NOT NULL
           AND chegada_confirmada_em IS NULL
           AND chegada_declarada_em <= NOW() - INTERVAL '${AUTO_CONFIRMAR_CHEGADA_APOS}'
-        RETURNING id
+        RETURNING id, titulo, match_usuario_id
       `)
+      for (const c of chegadas.rows) {
+        // Avisa o profissional, fechando a lacuna: era o ÚNICO caminho de confirmação que
+        // não notificava ninguém. tipo 'chegada_confirmada' é o mesmo do POST /:id/chegada
+        // (o app trata os dois igual); só o texto muda, porque aqui o dono NÃO confirmou —
+        // venceu o prazo. Mesma construção do aviso de encerramento automático acima.
+        if (!c.match_usuario_id) continue
+        const prof = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [c.match_usuario_id])
+        if (prof.rows[0]?.push_token) {
+          enviarPushNotificacao(prof.rows[0].push_token, '✅ Chegada confirmada!',
+            `Sem confirmação do solicitante em 6 horas, sua chegada em "${c.titulo}" foi confirmada automaticamente.`,
+            { tipo: 'chegada_confirmada', [lado.chave]: c.id }).catch(() => {})
+        }
+      }
       if (chegadas.rows.length > 0) {
         console.log(`[AutoConfirmarChegada] ${lado.tabela}: ${chegadas.rows.length} chegada(s) confirmada(s) por decurso de prazo`)
       }

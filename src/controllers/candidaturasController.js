@@ -16,7 +16,11 @@ const minhas = async (req, res) => {
               -- Encerramento em duas mãos: o lado do pintor precisa saber se há solicitação
               -- pendente e quem pediu (_por = próprio usuário → aguardando o dono; _por = dono
               -- → cabe ao pintor confirmar). NULL = nenhuma solicitação em aberto.
-              o.encerramento_solicitado_por, o.encerramento_solicitado_em
+              o.encerramento_solicitado_por, o.encerramento_solicitado_em,
+              -- Chegada: o pintor precisa ver a janela que ele mesmo prometeu e se o dono já
+              -- confirmou a chegada (declarada por ele + confirmada = atendimento em curso).
+              o.chegada_janela, o.chegada_prevista_em, o.chegada_declarada_por,
+              o.chegada_declarada_em, o.chegada_confirmada_em
        FROM candidaturas c
        JOIN obras o ON c.obra_id = o.id
        WHERE c.usuario_id = $1
