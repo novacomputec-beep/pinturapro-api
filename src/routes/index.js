@@ -642,6 +642,57 @@ const resolverCoordenadas = (cidade, uf, latitude, longitude, rotulo) => {
   return { lat: null, lng: null, origem: null }
 }
 
+// Teto de demandas SIMULTÂNEAS para dono que nunca concluiu nada. Quem já encerrou pelo menos
+// uma demanda (obra ou reparo) não tem teto — o limite existe só para conta nova que despeja
+// demandas sem nunca fechar nenhuma.
+const LIMITE_DEMANDAS_LIVE_SEM_HISTORICO = 2
+
+// "Live" = o que ocupa vaga agora:
+//   obras   → 'rascunho' (enviada, aguardando aprovação, ainda pode virar 'aberta')
+//             + 'aberta' aprovada e dentro do expira_em
+//   reparos → 'aberta' aprovada e dentro do expira_em (reparo não tem 'rascunho': nasce
+//             'aberta'/'aprovada', ver POST /reparos/dono)
+// expira_em > NOW() é obrigatório: expirada NÃO é status no banco — a linha continua 'aberta'
+// para sempre (ver comentário em /obras/admin), então contar só por status inflaria o teto e
+// travaria o dono permanentemente na primeira vez que duas demandas vencessem sem match.
+//
+// `tabela` é literal do call site ('obras' | 'reparos'), NUNCA vem do request — a interpolação
+// no SQL não é superfície de injeção.
+const limiteDemandasAtingido = async (tabela, donoId, clientRequestId) => {
+  // Retry com chave já gravada: pula o teto inteiro. Sem isso, o dono que bate no limite com a
+  // 2ª demanda e sofre timeout na resposta receberia 409 no retry — a demanda existe, mas o app
+  // mostraria erro. O ON CONFLICT do INSERT devolve a linha original; o teto não pode interferir.
+  if (clientRequestId) {
+    const jaExiste = await pool.query(
+      `SELECT 1 FROM ${tabela} WHERE criado_por = $1 AND client_request_id = $2 LIMIT 1`,
+      [donoId, clientRequestId]
+    )
+    if (jaExiste.rowCount > 0) return false
+  }
+  const c = await pool.query(
+    `SELECT
+       (SELECT COUNT(*) FROM obras   WHERE criado_por = $1 AND status = 'encerrada')
+       + (SELECT COUNT(*) FROM reparos WHERE criado_por = $1 AND status = 'encerrada') AS encerradas,
+       (SELECT COUNT(*) FROM obras WHERE criado_por = $1
+          AND (status = 'rascunho'
+               OR (status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW())))
+       + (SELECT COUNT(*) FROM reparos WHERE criado_por = $1
+            AND status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()) AS live`,
+    [donoId]
+  )
+  // COUNT() volta como string (bigint no pg) — sem Number() o >= compararia texto.
+  const encerradas = Number(c.rows[0].encerradas)
+  const live       = Number(c.rows[0].live)
+  return encerradas === 0 && live >= LIMITE_DEMANDAS_LIVE_SEM_HISTORICO
+}
+
+const ERRO_LIMITE_DEMANDAS = {
+  erro: `Você já tem ${LIMITE_DEMANDAS_LIVE_SEM_HISTORICO} demandas ativas e nenhuma concluída. `
+      + `Conclua ou aguarde o encerramento de uma delas para publicar outra.`,
+  codigo: 'LIMITE_DEMANDAS_ATIVAS',
+  limite_demandas_ativas: LIMITE_DEMANDAS_LIVE_SEM_HISTORICO,
+}
+
 // ============================================================
 // STATS PÚBLICOS (sem auth)
 // ============================================================
@@ -1142,6 +1193,10 @@ router.post('/obras/dono', autenticar, async (req, res) => {
       return res.status(403).json({ erro: 'Apenas donos de obra podem cadastrar obras' })
     }
     const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
+    // Antes de qualquer trabalho (geocoding, ufDeCidade): recusar cedo não gasta rede à toa.
+    if (await limiteDemandasAtingido('obras', req.usuario.id, client_request_id)) {
+      return res.status(409).json(ERRO_LIMITE_DEMANDAS)
+    }
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
     const { lat: latFinal, lng: lngFinal, origem: coordOrigem } = resolverCoordenadas(cidade, ufFinal, latitude, longitude, '[obras/dono]')
     // Janela original resolvida UMA vez: mesma base do expira_em e do horas_para_expirar gravado,
@@ -1960,6 +2015,11 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar reparos' })
     }
     const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
+    // Mesmo teto do POST /obras/dono e sobre a MESMA contagem (obras + reparos): o limite é por
+    // dono, não por tipo de demanda, senão 2 obras + 2 reparos passariam.
+    if (await limiteDemandasAtingido('reparos', req.usuario.id, client_request_id)) {
+      return res.status(409).json(ERRO_LIMITE_DEMANDAS)
+    }
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
     const { lat: latFinal, lng: lngFinal, origem: coordOrigem } = resolverCoordenadas(cidade, ufFinal, latitude, longitude, '[reparos/dono]')
     const horasExpiracao = prazo_atendimento_horas || 720
