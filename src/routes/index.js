@@ -487,6 +487,27 @@ const migracaoPronta = (async () => {
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS prestadores_bloqueados_dono_dono_idx ON prestadores_bloqueados_dono (dono_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS prestadores_bloqueados_dono_prestador_idx ON prestadores_bloqueados_dono (prestador_id)`)
+    // Faltas (não comparecimento) do profissional. Uma linha por match desfeito pelo CRONÔMETRO
+    // — o profissional casou, o prazo venceu e ele nunca declarou chegada. Sem UNIQUE: o mesmo
+    // par (profissional, demanda) pode faltar de novo se ele recasar com ela mais tarde, e cada
+    // falta conta. `tabela` guarda 'obras' | 'reparos' porque demanda_id não é FK (aponta para
+    // uma das duas tabelas), então não há REFERENCES nele.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS faltas_profissional (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        usuario_id UUID NOT NULL REFERENCES usuarios(id),
+        tabela TEXT NOT NULL,
+        demanda_id UUID NOT NULL,
+        criado_em TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
+    // Índice da contagem da janela móvel (usuario_id + criado_em > NOW() - 90 dias).
+    await client.query(`CREATE INDEX IF NOT EXISTS faltas_profissional_usuario_criado_idx ON faltas_profissional (usuario_id, criado_em)`)
+    // Suspensão por acúmulo de faltas. suspenso_em É a flag: NULL = ativo, preenchido =
+    // suspenso (mesma convenção de encerrado_em/chegada_confirmada_em — nada de booleano
+    // paralelo que possa divergir do timestamp). suspenso_motivo guarda o porquê legível.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS suspenso_em     TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS suspenso_motivo TEXT`)
     // Avaliações 5 estrelas no encerramento — UNILATERAL: só o dono (criado_por) avalia o
     // prestador do match; o prestador recebe 403 em POST /avaliacoes (não avalia de volta).
     // UNIQUE(contrato_tipo, contrato_id, avaliador_id): cada avaliador avalia uma única vez

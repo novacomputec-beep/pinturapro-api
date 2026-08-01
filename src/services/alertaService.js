@@ -486,6 +486,52 @@ const notificarMatchDesfeito = async (tabela, demanda) => {
   }
 }
 
+// Faltas: só o CRONÔMETRO registra. Os handlers POST /:id/expirar-match e as recusas de tempo
+// extra também desfazem match, mas ali há um humano decidindo (dono ou admin, e o próprio
+// profissional pode chamar expirar-match) — contar aquilo como falta deixaria a suspensão ao
+// alcance de quem clica. O cron é a única evidência automática de "prazo venceu, ninguém chegou".
+const FALTAS_PARA_SUSPENDER = 3
+const JANELA_FALTAS = '90 days'
+const MOTIVO_SUSPENSAO = `${FALTAS_PARA_SUSPENDER} faltas (não comparecimento) em ${JANELA_FALTAS.replace('days', 'dias')}`
+
+// Registra a falta e, ao cruzar o limite na janela móvel, suspende. `tabela` sai de literal no
+// chamador, nunca do request. Erros são engolidos: uma falha aqui não pode derrubar o cron nem
+// impedir que a demanda volte ao feed — o un-match já foi commitado quando isto roda.
+const registrarFalta = async (tabela, demanda) => {
+  if (!demanda.match_usuario_id) return
+  try {
+    await pool.query(
+      `INSERT INTO faltas_profissional (usuario_id, tabela, demanda_id) VALUES ($1, $2, $3)`,
+      [demanda.match_usuario_id, tabela, demanda.id]
+    )
+    const c = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM faltas_profissional
+        WHERE usuario_id = $1 AND criado_em > NOW() - INTERVAL '${JANELA_FALTAS}'`,
+      [demanda.match_usuario_id]
+    )
+    if (c.rows[0].n < FALTAS_PARA_SUSPENDER) return
+
+    // suspenso_em IS NULL no WHERE: suspende UMA vez. Sem isso, a 4ª, 5ª... falta reescreveria
+    // o timestamp (empurrando o início da suspensão para frente) e reenviaria o push a cada
+    // falta. rowCount = 0 significa "já estava suspenso" — nada a notificar.
+    const upd = await pool.query(
+      `UPDATE usuarios SET suspenso_em = NOW(), suspenso_motivo = $2
+        WHERE id = $1 AND suspenso_em IS NULL
+        RETURNING push_token`,
+      [demanda.match_usuario_id, MOTIVO_SUSPENSAO]
+    )
+    if (upd.rowCount === 0) return
+    console.log(`[Faltas] usuario ${demanda.match_usuario_id} suspenso — ${c.rows[0].n} faltas em ${JANELA_FALTAS}`)
+    if (upd.rows[0]?.push_token) {
+      enviarPushNotificacao(upd.rows[0].push_token, '🚫 Conta suspensa',
+        `Sua conta foi suspensa por ${MOTIVO_SUSPENSAO}. Fale com o suporte para regularizar.`,
+        { tipo: 'conta_suspensa' }).catch(() => {})
+    }
+  } catch (err) {
+    console.error(`[Faltas] Erro ao registrar falta em ${tabela}:`, err.message)
+  }
+}
+
 // Cronômetro de matches de reparos.
 // O prazo do cronômetro inicia em match_feito_em e vai até COALESCE(chegada_prevista_em,
 // expira_em): quando o prestador promete uma janela de chegada, é ELA que passa a valer como
@@ -573,11 +619,12 @@ const verificarCronometroReparos = async () => {
       `, [candidatos.rows.map(c => c.id)])
       expiradosCount = expirados.rows.length
 
-      // Só notifica quem o UPDATE realmente pegou.
+      // Só notifica e contabiliza falta para quem o UPDATE realmente pegou.
       const atualizados = new Set(expirados.rows.map(r => r.id))
       for (const c of candidatos.rows) {
         if (!atualizados.has(c.id)) continue
         await notificarMatchDesfeito('reparos', c)
+        await registrarFalta('reparos', c)
       }
     }
 
@@ -667,6 +714,7 @@ const verificarCronometroObras = async () => {
       for (const c of candidatos.rows) {
         if (!atualizados.has(c.id)) continue
         await notificarMatchDesfeito('obras', c)
+        await registrarFalta('obras', c)
       }
     }
 
