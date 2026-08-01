@@ -459,6 +459,33 @@ const verificarMarcosExpiracao = async () => {
   }
 }
 
+// Avisa OS DOIS LADOS de um match desfeito pelo cronômetro — antes o ramo (b) dos dois crons
+// devolvia a demanda ao feed em silêncio, e o profissional descobria abrindo o app. Mesmos
+// título/tipo dos handlers POST /:id/expirar-match, para o app tratar tudo por 'match_expirado'.
+// `tabela` sai de literal no chamador, nunca do request.
+const ROTULOS_MATCH_DESFEITO = {
+  obras:   { chave: 'obra_id',   profissional: 'pintor',    artigo: 'A obra',   volta: 'A obra voltou' },
+  reparos: { chave: 'reparo_id', profissional: 'prestador', artigo: 'O reparo', volta: 'O reparo voltou' },
+}
+
+const notificarMatchDesfeito = async (tabela, demanda) => {
+  const { chave, profissional, artigo, volta } = ROTULOS_MATCH_DESFEITO[tabela]
+  const alvos = [demanda.criado_por, demanda.match_usuario_id].filter(Boolean)
+  if (alvos.length === 0) return
+  const tokens = await pool.query(
+    `SELECT id, push_token FROM usuarios WHERE id = ANY($1::uuid[]) AND push_token IS NOT NULL`,
+    [alvos]
+  )
+  for (const u of tokens.rows) {
+    const paraDono = u.id === demanda.criado_por
+    enviarPushNotificacao(u.push_token, '⏰ Prazo expirado!',
+      paraDono
+        ? `O ${profissional} não chegou a tempo para "${demanda.titulo}". ${artigo} está disponível novamente.`
+        : `O prazo para chegar em "${demanda.titulo}" acabou. ${volta} para o feed.`,
+      { tipo: 'match_expirado', [chave]: demanda.id }).catch(() => {})
+  }
+}
+
 // Cronômetro de matches de reparos.
 // O prazo do cronômetro inicia em match_feito_em e vai até COALESCE(chegada_prevista_em,
 // expira_em): quando o prestador promete uma janela de chegada, é ELA que passa a valer como
@@ -505,30 +532,56 @@ const verificarCronometroReparos = async () => {
     // ENCERRADO com expira_em vencido seria ressuscitado para o feed e perderia o
     // match. Reparo casado permanece 'aberta' (/reparos/:id/match não mexe no status),
     // então o filtro não exclui nenhuma linha legítima do cronômetro.
-    const expirados = await pool.query(`
-      UPDATE reparos SET
-        status = 'aberta',
-        match_feito_em = NULL,
-        match_usuario_id = NULL,
-        notif_5min_enviada = false,
-        pedido_tempo_status = NULL,
-        pedido_tempo_motivo = NULL,
-        pedido_tempo_minutos = NULL,
-        chegada_janela = NULL,
-        chegada_prevista_em = NULL,
-        chegada_declarada_por = NULL,
-        chegada_declarada_em = NULL,
-        expira_em = NOW() + (prazo_atendimento_horas * INTERVAL '1 hour')
-      WHERE status = 'aberta'
+    // SELECT antes do UPDATE porque RETURNING devolve a linha NOVA, em que match_usuario_id já
+    // é NULL — e é justamente ele que precisamos para bloquear e notificar o prestador. O mesmo
+    // predicado vai nos dois: o UPDATE continua sendo quem decide (linha que deixar de casar
+    // entre as duas queries simplesmente não é atualizada e não gera push).
+    const PRED_EXPIRADOS_REPAROS = `
+      status = 'aberta'
         AND match_usuario_id IS NOT NULL
         AND prazo_atendimento_horas IS NOT NULL
         AND chegada_declarada_em IS NULL
         AND chegada_confirmada_em IS NULL
-        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()
-      RETURNING id
+        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()`
+
+    const candidatos = await pool.query(`
+      SELECT id, titulo, criado_por, match_usuario_id FROM reparos WHERE ${PRED_EXPIRADOS_REPAROS}
     `)
 
-    console.log(`[CronômetroReparos] 5min notificados: ${cincoMin.rows.length} | matches expirados (devolvidos ao feed): ${expirados.rows.length}`)
+    let expiradosCount = 0
+    if (candidatos.rows.length > 0) {
+      const expirados = await pool.query(`
+        UPDATE reparos SET
+          status = 'aberta',
+          match_feito_em = NULL,
+          match_usuario_id = NULL,
+          notif_5min_enviada = false,
+          pedido_tempo_status = NULL,
+          pedido_tempo_motivo = NULL,
+          pedido_tempo_minutos = NULL,
+          chegada_janela = NULL,
+          chegada_prevista_em = NULL,
+          chegada_declarada_por = NULL,
+          chegada_declarada_em = NULL,
+          prestadores_bloqueados = CASE
+            WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
+            THEN prestadores_bloqueados
+            ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), match_usuario_id) END,
+          expira_em = NOW() + (prazo_atendimento_horas * INTERVAL '1 hour')
+        WHERE id = ANY($1::uuid[]) AND ${PRED_EXPIRADOS_REPAROS}
+        RETURNING id
+      `, [candidatos.rows.map(c => c.id)])
+      expiradosCount = expirados.rows.length
+
+      // Só notifica quem o UPDATE realmente pegou.
+      const atualizados = new Set(expirados.rows.map(r => r.id))
+      for (const c of candidatos.rows) {
+        if (!atualizados.has(c.id)) continue
+        await notificarMatchDesfeito('reparos', c)
+      }
+    }
+
+    console.log(`[CronômetroReparos] 5min notificados: ${cincoMin.rows.length} | matches expirados (devolvidos ao feed): ${expiradosCount}`)
   } catch (err) {
     console.error('Erro ao verificar cronômetro de reparos:', err.message)
   }
@@ -575,26 +628,49 @@ const verificarCronometroObras = async () => {
     // com a janela original. COALESCE(horas_para_expirar, 720): horas_para_expirar pode ser NULL
     // em obras legadas; sem o COALESCE, NOW() + NULL = NULL e a obra sumiria do feed para sempre
     // (expira_em > NOW() nunca casa NULL). 720h = default de criação (mesma base de index.js:960).
-    const expirados = await pool.query(`
-      UPDATE obras SET
-        status = 'aberta',
-        match_feito_em = NULL,
-        match_usuario_id = NULL,
-        notif_5min_enviada = false,
-        chegada_janela = NULL,
-        chegada_prevista_em = NULL,
-        chegada_declarada_por = NULL,
-        chegada_declarada_em = NULL,
-        expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
-      WHERE status = 'aberta'
+    // SELECT antes do UPDATE pelo mesmo motivo do cron de reparos: RETURNING traz a linha nova,
+    // com match_usuario_id já NULL, e é ele que precisamos para bloquear e notificar o pintor.
+    const PRED_EXPIRADOS_OBRAS = `
+      status = 'aberta'
         AND match_usuario_id IS NOT NULL
         AND chegada_declarada_em IS NULL
         AND chegada_confirmada_em IS NULL
-        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()
-      RETURNING id
+        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()`
+
+    const candidatos = await pool.query(`
+      SELECT id, titulo, criado_por, match_usuario_id FROM obras WHERE ${PRED_EXPIRADOS_OBRAS}
     `)
 
-    console.log(`[CronômetroObras] 5min notificados: ${cincoMin.rows.length} | matches expirados (devolvidos ao feed): ${expirados.rows.length}`)
+    let expiradosCount = 0
+    if (candidatos.rows.length > 0) {
+      const expirados = await pool.query(`
+        UPDATE obras SET
+          status = 'aberta',
+          match_feito_em = NULL,
+          match_usuario_id = NULL,
+          notif_5min_enviada = false,
+          chegada_janela = NULL,
+          chegada_prevista_em = NULL,
+          chegada_declarada_por = NULL,
+          chegada_declarada_em = NULL,
+          prestadores_bloqueados = CASE
+            WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
+            THEN prestadores_bloqueados
+            ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), match_usuario_id) END,
+          expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
+        WHERE id = ANY($1::uuid[]) AND ${PRED_EXPIRADOS_OBRAS}
+        RETURNING id
+      `, [candidatos.rows.map(c => c.id)])
+      expiradosCount = expirados.rows.length
+
+      const atualizados = new Set(expirados.rows.map(o => o.id))
+      for (const c of candidatos.rows) {
+        if (!atualizados.has(c.id)) continue
+        await notificarMatchDesfeito('obras', c)
+      }
+    }
+
+    console.log(`[CronômetroObras] 5min notificados: ${cincoMin.rows.length} | matches expirados (devolvidos ao feed): ${expiradosCount}`)
   } catch (err) {
     console.error('Erro ao verificar cronômetro de obras:', err.message)
   }

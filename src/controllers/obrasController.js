@@ -21,6 +21,10 @@ const listar = async (req, res) => {
       AND o.status_aprovacao = 'aprovada'
       AND o.expira_em > NOW()
       AND o.match_usuario_id IS NULL
+      -- Lista negra desta obra: pintor que já teve um match desfeito aqui não vê o card de
+      -- novo. Mesma expressão do feed de reparos (index.js, GET /reparos). Fica na BASE do
+      -- WHERE, antes de qualquer filtro dinâmico, para valer em todos os modos de busca.
+      AND NOT ($1::uuid = ANY(COALESCE(o.prestadores_bloqueados, '{}')))
       AND NOT EXISTS (
         SELECT 1 FROM prestadores_bloqueados_dono pb
         WHERE pb.dono_id = o.criado_por AND pb.prestador_id = $1
