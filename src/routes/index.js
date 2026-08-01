@@ -1853,9 +1853,19 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     const ehPintor = o.match_usuario_id === req.usuario.id
     const ehAdmin = req.usuario.role === 'admin'
     if (!ehDono && !ehPintor && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão' })
+    // Chegada declarada/confirmada congela a expiração do match (mesma regra do cron): o pintor
+    // está no local, expirar aqui devolveria ao feed uma obra em atendimento.
+    if (o.chegada_declarada_em || o.chegada_confirmada_em) {
+      return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
+    }
     const pintorId = o.match_usuario_id
+    // chegada_* zeradas junto com o match: a obra volta ao feed limpa. Sem isso, a previsão do
+    // pintor ANTERIOR sobreviveria — o write-once de /chegada-prevista travaria o próximo, e o
+    // cron leria uma chegada_prevista_em já vencida, expirando o novo match em ~1 minuto.
     await pool.query(
-      `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL WHERE id = $1`,
+      `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
+              chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL
+       WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL`,
       [req.params.id]
     )
     const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
@@ -2805,13 +2815,23 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     if (!ehDono && !ehPrestador && !ehAdmin) {
       return res.status(403).json({ erro: 'Sem permissão para expirar este match' })
     }
-    // Grava o prestador na lista negra antes de limpar o match
+    // Chegada declarada/confirmada congela a expiração do match (mesma regra do cron): o
+    // prestador está no local — expirar aqui ainda o mandaria para a lista negra do reparo.
+    if (r.chegada_declarada_em || r.chegada_confirmada_em) {
+      return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
+    }
+    // Grava o prestador na lista negra antes de limpar o match.
+    // chegada_* zeradas junto: o reparo volta ao feed limpo (ver /obras/:id/expirar-match).
     await pool.query(
       `UPDATE reparos SET
         match_feito_em = NULL,
         match_usuario_id = NULL,
+        chegada_janela = NULL,
+        chegada_prevista_em = NULL,
+        chegada_declarada_por = NULL,
+        chegada_declarada_em = NULL,
         prestadores_bloqueados = array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid)
-       WHERE id = $1`,
+       WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL`,
       [req.params.id, r.match_usuario_id]
     )
     res.json({ mensagem: 'Match expirado, reparo disponível novamente' })

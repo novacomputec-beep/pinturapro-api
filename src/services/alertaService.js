@@ -460,9 +460,15 @@ const verificarMarcosExpiracao = async () => {
 }
 
 // Cronômetro de matches de reparos.
-// O prazo do cronômetro inicia em match_feito_em e dura prazo_atendimento_horas.
+// O prazo do cronômetro inicia em match_feito_em e vai até COALESCE(chegada_prevista_em,
+// expira_em): quando o prestador promete uma janela de chegada, é ELA que passa a valer como
+// prazo — inclusive quando cai depois do expira_em original (o dono aceitou esperar até lá ao
+// ver a previsão). Sem previsão, nada muda: continua o expira_em.
 // (a) A 5 minutos do fim: avisa o dono uma única vez por match.
 // (b) Quando o cronômetro zera: devolve o reparo ao feed e limpa o match.
+// Os dois ramos param assim que a chegada é DECLARADA (por qualquer lado) ou CONFIRMADA: a
+// partir daí o prestador está no local, e nem faz sentido cobrar "ainda não chegou?" nem
+// devolver ao feed um reparo em atendimento.
 const verificarCronometroReparos = async () => {
   try {
     // (a) 5 minutos restantes → notifica o dono (uma vez por match)
@@ -474,7 +480,9 @@ const verificarCronometroReparos = async () => {
         AND r.prazo_atendimento_horas IS NOT NULL
         AND r.notif_5min_enviada = false
         AND u.push_token IS NOT NULL
-        AND r.expira_em BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
+        AND r.chegada_declarada_em IS NULL
+        AND r.chegada_confirmada_em IS NULL
+        AND COALESCE(r.chegada_prevista_em, r.expira_em) BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
     `)
 
     if (cincoMin.rows.length > 0) {
@@ -506,11 +514,17 @@ const verificarCronometroReparos = async () => {
         pedido_tempo_status = NULL,
         pedido_tempo_motivo = NULL,
         pedido_tempo_minutos = NULL,
+        chegada_janela = NULL,
+        chegada_prevista_em = NULL,
+        chegada_declarada_por = NULL,
+        chegada_declarada_em = NULL,
         expira_em = NOW() + (prazo_atendimento_horas * INTERVAL '1 hour')
       WHERE status = 'aberta'
         AND match_usuario_id IS NOT NULL
         AND prazo_atendimento_horas IS NOT NULL
-        AND expira_em <= NOW()
+        AND chegada_declarada_em IS NULL
+        AND chegada_confirmada_em IS NULL
+        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()
       RETURNING id
     `)
 
@@ -521,10 +535,12 @@ const verificarCronometroReparos = async () => {
 }
 
 // Cronômetro de matches de obras — espelha verificarCronometroReparos com as colunas reais de obra.
-// Prazo único: a contagem pós-match vai até o expira_em ORIGINAL (o match não reseta expira_em).
+// Prazo pós-match: COALESCE(chegada_prevista_em, expira_em) — a janela prometida pelo pintor
+// manda quando existe; sem ela, segue o expira_em ORIGINAL (o match não reseta expira_em).
 // (a) A 5 minutos do fim: avisa o dono uma única vez por match (notif_5min_enviada).
-// (b) Quando expira_em zera: devolve a obra ao feed e limpa o match, reiniciando a janela
+// (b) Quando o prazo zera: devolve a obra ao feed e limpa o match, reiniciando a janela
 //     PRÉ-match (horas_para_expirar) para a próxima rodada de candidatos.
+// Chegada declarada ou confirmada congela os dois ramos (mesma regra do cron de reparos).
 const verificarCronometroObras = async () => {
   try {
     // (a) 5 minutos restantes → notifica o dono (uma vez por match)
@@ -536,7 +552,9 @@ const verificarCronometroObras = async () => {
         AND o.match_usuario_id IS NOT NULL
         AND o.notif_5min_enviada = false
         AND u.push_token IS NOT NULL
-        AND o.expira_em BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
+        AND o.chegada_declarada_em IS NULL
+        AND o.chegada_confirmada_em IS NULL
+        AND COALESCE(o.chegada_prevista_em, o.expira_em) BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
     `)
 
     if (cincoMin.rows.length > 0) {
@@ -563,10 +581,16 @@ const verificarCronometroObras = async () => {
         match_feito_em = NULL,
         match_usuario_id = NULL,
         notif_5min_enviada = false,
+        chegada_janela = NULL,
+        chegada_prevista_em = NULL,
+        chegada_declarada_por = NULL,
+        chegada_declarada_em = NULL,
         expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
       WHERE status = 'aberta'
         AND match_usuario_id IS NOT NULL
-        AND expira_em <= NOW()
+        AND chegada_declarada_em IS NULL
+        AND chegada_confirmada_em IS NULL
+        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()
       RETURNING id
     `)
 
@@ -581,6 +605,11 @@ const verificarCronometroObras = async () => {
 // status = 'aberta' no WHERE (mesma lição do cron de reparos): a demanda só é candidata
 // enquanto NÃO está encerrada. Notifica quem NÃO pediu — quem pediu já sabe.
 const AUTO_ENCERRAR_APOS = '2 days'
+
+// Auto-confirmação da chegada: o profissional declarou, o dono nunca respondeu. Passadas 6h a
+// declaração vale por si — sem isto a demanda fica travada em "declarada mas não confirmada"
+// para sempre (e, como chegada_declarada_em congela os dois crons, também nunca volta ao feed).
+const AUTO_CONFIRMAR_CHEGADA_APOS = '6 hours'
 
 const autoEncerrarPendentes = async () => {
   // tabela e coluna de id saem desta lista literal, nunca do request — interpolação segura.
@@ -615,6 +644,21 @@ const autoEncerrarPendentes = async () => {
       }
       if (fechados.rows.length > 0) {
         console.log(`[AutoEncerrar] ${lado.tabela}: ${fechados.rows.length} encerrad(a)s por falta de confirmação`)
+      }
+
+      // Chegada declarada há mais de 6h e nunca confirmada pelo dono → confirma sozinho.
+      // Query separada (não um SET a mais no UPDATE acima): são regras independentes —
+      // encerramento em duas mãos vs. chegada em duas mãos — com prazos e predicados
+      // próprios, e a maioria das linhas candidatas a uma não é candidata à outra.
+      const chegadas = await pool.query(`
+        UPDATE ${lado.tabela} SET chegada_confirmada_em = NOW()
+        WHERE chegada_declarada_em IS NOT NULL
+          AND chegada_confirmada_em IS NULL
+          AND chegada_declarada_em <= NOW() - INTERVAL '${AUTO_CONFIRMAR_CHEGADA_APOS}'
+        RETURNING id
+      `)
+      if (chegadas.rows.length > 0) {
+        console.log(`[AutoConfirmarChegada] ${lado.tabela}: ${chegadas.rows.length} chegada(s) confirmada(s) por decurso de prazo`)
       }
     } catch (err) {
       console.error(`[AutoEncerrar] Erro em ${lado.tabela}:`, err.message)
