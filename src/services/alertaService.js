@@ -506,9 +506,12 @@ const registrarFalta = async (tabela, demanda) => {
       `INSERT INTO faltas_profissional (usuario_id, tabela, demanda_id) VALUES ($1, $2, $3)`,
       [demanda.match_usuario_id, tabela, demanda.id]
     )
+    // perdoada_em IS NULL: falta perdoada por um admin continua no histórico mas não conta.
     const c = await pool.query(
       `SELECT COUNT(*)::int AS n FROM faltas_profissional
-        WHERE usuario_id = $1 AND criado_em > NOW() - INTERVAL '${JANELA_FALTAS}'`,
+        WHERE usuario_id = $1
+          AND perdoada_em IS NULL
+          AND criado_em > NOW() - INTERVAL '${JANELA_FALTAS}'`,
       [demanda.match_usuario_id]
     )
     if (c.rows[0].n < FALTAS_PARA_SUSPENDER) return
@@ -820,5 +823,10 @@ module.exports = {
   verificarMarcosExpiracao,
   verificarCronometroReparos,
   verificarCronometroObras,
-  autoEncerrarPendentes
+  autoEncerrarPendentes,
+  // Exportadas para o painel admin (GET /admin/suspensos e o liberar) usarem EXATAMENTE a mesma
+  // janela e o mesmo limite que o cron aplica — antes a rota tinha uma cópia '90 days' própria,
+  // que passaria a mentir na primeira vez que este valor mudasse.
+  JANELA_FALTAS,
+  FALTAS_PARA_SUSPENDER
 }
