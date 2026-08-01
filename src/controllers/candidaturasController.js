@@ -101,7 +101,9 @@ const aprovar = async (req, res) => {
   try {
     const { id } = req.params
 
-    const existe = await pool.query(`SELECT id, status, obra_id FROM candidaturas WHERE id = $1`, [id])
+    // usuario_id entra no SELECT porque a checagem de suspensão precisa dele ANTES do UPDATE
+    // (o RETURNING * lá embaixo só chega depois de o aceite já ter sido gravado).
+    const existe = await pool.query(`SELECT id, status, obra_id, usuario_id FROM candidaturas WHERE id = $1`, [id])
     if (existe.rows.length === 0) {
       return res.status(404).json({ erro: 'Candidatura não encontrada' })
     }
@@ -128,6 +130,20 @@ const aprovar = async (req, res) => {
     )
     if (jaAceito.rows.length > 0) {
       return res.status(409).json({ erro: 'Já existe um candidato aceito para esta obra' })
+    }
+
+    // Suspensão do CANDIDATO (quem chama aqui é o dono ou um admin). Terceiro caminho de
+    // aceite, junto de POST /obras/:id/candidatura/:candidaturaId/responder e o equivalente
+    // de reparo — todos casam o profissional, então todos precisam da mesma trava.
+    const suspenso = await pool.query(
+      `SELECT suspenso_em FROM usuarios WHERE id = $1`,
+      [existe.rows[0].usuario_id]
+    )
+    if (suspenso.rows[0]?.suspenso_em) {
+      return res.status(409).json({
+        erro: 'Este profissional está com a conta suspensa e não pode assumir novos trabalhos. Escolha outro candidato.',
+        codigo: 'PROFISSIONAL_SUSPENSO',
+      })
     }
 
     const result = await pool.query(

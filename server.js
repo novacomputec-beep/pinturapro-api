@@ -130,6 +130,9 @@ const verificarPrestadoresProximos = async () => {
         AND lp.atualizado_em > NOW() - INTERVAL '30 minutes'
         AND u.push_token IS NOT NULL
         AND u.role = 'prestador' AND u.tipo_prestador = 'reparador'
+        -- Suspenso por faltas não recebe isca de trabalho novo. Aqui é filtro de QUERY (não
+        -- middleware): quem dispara o cron é o servidor, não o prestador.
+        AND u.suspenso_em IS NULL
         AND NOT (ad.reparador_id = ANY(COALESCE(r.prestadores_bloqueados, '{}')))
         AND NOT EXISTS (
           SELECT 1 FROM interesse_reparos ir
