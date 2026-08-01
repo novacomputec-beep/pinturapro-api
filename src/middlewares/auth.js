@@ -61,7 +61,7 @@ const autenticar = async (req, res, next) => {
     let usuario = getCacheUsuario(decoded.id)
     if (!usuario) {
       const result = await pool.query(
-        'SELECT id, nome, email, role, ativo, tipo_prestador FROM usuarios WHERE id = $1',
+        'SELECT id, nome, email, role, ativo, tipo_prestador, suspenso_em, suspenso_motivo FROM usuarios WHERE id = $1',
         [decoded.id]
       )
       if (result.rows.length === 0) {
@@ -112,6 +112,31 @@ const exigirAssinaturaAtiva = async (req, res, next) => {
   }
 }
 
+// Suspensão por faltas (ver registrarFalta em alertaService). Fecha só a porta de ENTRADA em
+// trabalho novo: feeds, proximidade e criação/aceite de proposta. Tudo que já está em
+// andamento — match, chegada, encerramento, avaliação, denúncia, perfil, login — segue aberto,
+// porque suspender alguém no meio de um serviço puniria o dono junto.
+// admin/aprovador nunca são barrados (moderação não pode se autotrancar).
+// suspenso_em vem de req.usuario, populado por autenticar — atenção ao cache de 5 min de lá.
+// Corpo do 403 de conta suspensa, exportado para os pontos que checam a suspensão FORA do
+// middleware (aceites, onde a decisão depende da action) não reescreverem o texto por conta
+// própria e acabarem divergindo dele.
+const corpoContaSuspensa = ({ suspenso_em, suspenso_motivo }) => ({
+  erro: suspenso_motivo
+    ? `Conta suspensa por ${suspenso_motivo}. Você não pode pegar novos trabalhos. Fale com o suporte para regularizar.`
+    : 'Conta suspensa. Você não pode pegar novos trabalhos. Fale com o suporte para regularizar.',
+  codigo: 'CONTA_SUSPENSA',
+  suspenso_em,
+})
+
+const exigirNaoSuspenso = (req, res, next) => {
+  if (req.usuario.role === 'admin' || req.usuario.role === 'aprovador') return next()
+  if (req.usuario.suspenso_em) {
+    return res.status(403).json(corpoContaSuspensa(req.usuario))
+  }
+  next()
+}
+
 const exigirAdmin = (req, res, next) => {
   if (!['admin', 'aprovador'].includes(req.usuario.role)) {
     return res.status(403).json({ erro: 'Acesso negado' })
@@ -126,4 +151,4 @@ const exigirSuperAdmin = (req, res, next) => {
   next()
 }
 
-module.exports = { autenticar, exigirAssinaturaAtiva, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura }
+module.exports = { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura }

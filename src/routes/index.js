@@ -1,7 +1,7 @@
 require('dotenv').config()
 const express = require('express')
 const router = express.Router()
-const { autenticar, exigirAssinaturaAtiva, exigirAdmin, invalidarCacheAssinatura } = require('../middlewares/auth')
+const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, invalidarCacheAssinatura } = require('../middlewares/auth')
 const { pool } = require('../utils/supabase')
 const { marcaPorTipo } = require('../utils/marca')
 const authCtrl         = require('../controllers/authController')
@@ -688,6 +688,23 @@ const resolverCoordenadas = (cidade, uf, latitude, longitude, rotulo) => {
   return { lat: null, lng: null, origem: null }
 }
 
+// Suspensão do OUTRO lado: nos aceites quem chama é o dono, então o middleware
+// exigirNaoSuspenso (que olha req.usuario) não serve — é preciso consultar o profissional
+// pelo id. Vai direto ao banco, sem o cache de 5 min de autenticar, porque um aceite é
+// irreversível: casa o profissional e dispara contrato.
+// Devolve a LINHA de suspensão (para compor a mensagem com o motivo) ou null. Truthy/falsy,
+// então serve tanto para `if (await estaSuspenso(x))` quanto para quem precisa do motivo.
+const estaSuspenso = async (usuarioId) => {
+  if (!usuarioId) return null
+  const r = await pool.query(`SELECT suspenso_em, suspenso_motivo FROM usuarios WHERE id = $1`, [usuarioId])
+  return r.rows[0]?.suspenso_em ? r.rows[0] : null
+}
+
+const ERRO_ACEITE_SUSPENSO = {
+  erro: 'Este profissional está com a conta suspensa e não pode assumir novos trabalhos. Escolha outro candidato.',
+  codigo: 'PROFISSIONAL_SUSPENSO',
+}
+
 // Teto de demandas SIMULTÂNEAS para dono que nunca concluiu nada. Quem já encerrou pelo menos
 // uma demanda (obra ou reparo) não tem teto — o limite existe só para conta nova que despeja
 // demandas sem nunca fechar nenhuma.
@@ -1363,7 +1380,7 @@ router.post('/obras-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req,
   }
 })
 
-router.get('/obras', autenticar, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
+router.get('/obras', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
   try {
     const page  = parseInt(req.query.page)  || 1
     const limit = parseInt(req.query.limit) || 20
@@ -1576,7 +1593,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
 })
 
 // POST /obras/:id/candidatura — pintor se candidata a uma obra
-router.post('/obras/:id/candidatura', autenticar, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
+router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
   try {
     const { mensagem, valor_proposto } = req.body
     const existente = await pool.query(
@@ -1634,6 +1651,11 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
       )
       if (jaAceito.rows.length > 0) {
         return res.status(409).json({ erro: 'Já existe um candidato aceito para esta obra' })
+      }
+      // Suspensão do CANDIDATO (não de quem chama — aqui quem chama é o dono). O aceite já casa
+      // o profissional, então deixar passar entregaria trabalho novo a um suspenso.
+      if (await estaSuspenso(cand.usuario_id)) {
+        return res.status(409).json(ERRO_ACEITE_SUSPENSO)
       }
       await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
       // O aceite já casa o profissional com a obra. Guard match_usuario_id IS NULL: torna o
@@ -1718,6 +1740,13 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
       return res.json({ mensagem: 'Contraproposta enviada!' })
     }
     if (action === 'aceitar') {
+      // Aceitar a contraproposta CASA o pintor — é entrada em trabalho novo, então a suspensão
+      // vale aqui. Não é middleware porque só 'aceitar' entra: 'recusar' e 'contraproposta'
+      // seguem liberados, senão o suspenso ficaria preso numa negociação sem poder encerrá-la.
+      // Lê do banco, não de req.usuario: o cache de 5 min de autenticar não pode liberar um
+      // aceite, que é irreversível (casa e dispara contrato).
+      const suspensao = await estaSuspenso(req.usuario.id)
+      if (suspensao) return res.status(403).json(corpoContaSuspensa(suspensao))
       await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
       // O aceite já casa o profissional com a obra (ver POST .../responder).
       await pool.query(
@@ -2408,7 +2437,7 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
   }
 })
 
-router.get('/reparos', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
+router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, async (req, res) => {
   try {
     const page  = parseInt(req.query.page)  || 1
     const limit = parseInt(req.query.limit) || 20
@@ -2507,7 +2536,7 @@ router.get('/reparos', autenticar, exigirPrestador, exigirReparador, async (req,
   }
 })
 
-router.post('/reparos/:id/interesse', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
+router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, async (req, res) => {
   try {
     const { mensagem, valor_proposto } = req.body
     const existente = await pool.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
@@ -2675,6 +2704,10 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
       if (jaAceito.rows.length > 0) {
         return res.status(409).json({ erro: 'Já existe um prestador aceito para este reparo' })
       }
+      // Suspensão do INTERESSADO (quem chama aqui é o dono) — ver POST .../responder de obra.
+      if (await estaSuspenso(int.usuario_id)) {
+        return res.status(409).json(ERRO_ACEITE_SUSPENSO)
+      }
       await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
       // O aceite já casa o prestador com o reparo. Guard match_usuario_id IS NULL: torna o
       // write idempotente em retry e impede que um segundo aceite roube um match existente.
@@ -2766,6 +2799,10 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
     }
 
     if (action === 'aceitar') {
+      // Mesma trava do pintor-responder de obra: só 'aceitar' é barrado; 'recusar' e
+      // 'contraproposta' continuam liberados para o suspenso encerrar a negociação.
+      const suspensao = await estaSuspenso(req.usuario.id)
+      if (suspensao) return res.status(403).json(corpoContaSuspensa(suspensao))
       await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
       // O aceite já casa o prestador com o reparo (ver POST .../responder).
       await pool.query(
@@ -4202,7 +4239,7 @@ router.post('/feed/visualizacoes', autenticar, async (req, res) => {
 // reparos apenas (gate exigirReparador, estrito tipo_prestador='reparador'). Quando a posição
 // ao vivo chega a <5km de um reparo armado, envia UM push (o mais próximo) e marca notificado
 // via CLAIM ATÔMICO. One-time por reparo, para sempre.
-router.post('/feed/checar-proximidade', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
+router.post('/feed/checar-proximidade', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, async (req, res) => {
   try {
     const { latitude, longitude } = req.body
     const lat = parseFloat(latitude)
