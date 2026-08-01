@@ -139,6 +139,15 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_declarada_por UUID`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_declarada_em  TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_confirmada_em TIMESTAMPTZ`)
+    // Lista negra POR OBRA, espelho de reparos.prestadores_bloqueados (que nasceu fora deste
+    // arquivo — não há ALTER dele aqui). Mesmo nome de coluna nas duas tabelas de propósito: as
+    // queries de feed ficam idênticas. Guarda os profissionais que já furaram ESTA demanda; é
+    // por linha, não global (a lista global do dono é a tabela prestadores_bloqueados_dono).
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS prestadores_bloqueados UUID[]`)
+    // O de reparos existe em produção desde antes deste arquivo, mas nunca teve ALTER aqui —
+    // um banco novo (dev/staging) subia sem a coluna e quebrava feed e un-match. IF NOT EXISTS
+    // torna isto no-op em produção e obrigatório em qualquer base limpa.
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS prestadores_bloqueados UUID[]`)
     // Índices para o filtro por raio (feed). PostGIS/GiST não é assumido como disponível,
     // então usamos btree em (latitude, longitude) — sempre disponível no Postgres padrão.
     // Acelera a pré-seleção de linhas com coordenadas; o haversine continua sendo calculado por linha.
@@ -1862,19 +1871,37 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     // chegada_* zeradas junto com o match: a obra volta ao feed limpa. Sem isso, a previsão do
     // pintor ANTERIOR sobreviveria — o write-once de /chegada-prevista travaria o próximo, e o
     // cron leria uma chegada_prevista_em já vencida, expirando o novo match em ~1 minuto.
+    // prestadores_bloqueados: o pintor que furou não volta a ver ESTA obra no feed. O CASE é
+    // NULL-safe (match já desfeito → $2 NULL → array_append gravaria um NULL no array) e
+    // idempotente (rechamada não duplica o mesmo uuid).
     await pool.query(
       `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
-              chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL
+              chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
+              prestadores_bloqueados = CASE
+                WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
+                THEN prestadores_bloqueados
+                ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
        WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL`,
-      [req.params.id]
+      [req.params.id, pintorId]
     )
     const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
+    // Os dois lados são avisados: o dono porque a obra voltou ao feed, o pintor porque perdeu
+    // o match E o acesso a esta obra. Antes só o dono sabia.
+    const pintor = pintorId
+      ? await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [pintorId])
+      : { rows: [] }
+    res.json({ mensagem: 'Match expirado, obra disponível novamente' })
     if (dono.rows[0]?.push_token) {
       enviarPushNotificacao(dono.rows[0].push_token, '⏰ Prazo expirado!',
         `O pintor não chegou a tempo para "${o.titulo}". A obra está disponível novamente.`,
         { tipo: 'match_expirado', obra_id: req.params.id }).catch(() => {})
     }
-    res.json({ mensagem: 'Match expirado, obra disponível novamente' })
+    if (pintor.rows[0]?.push_token) {
+      enviarPushNotificacao(pintor.rows[0].push_token, '⏰ Prazo expirado!',
+        `O prazo para chegar em "${o.titulo}" acabou. A obra voltou para o feed.`,
+        { tipo: 'match_expirado', obra_id: req.params.id }).catch(() => {})
+    }
+    return
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao expirar match' })
   }
@@ -1972,9 +1999,18 @@ router.post('/obras/:id/responder-tempo', autenticar, async (req, res) => {
       res.json({ mensagem: 'Tempo extra concedido!', novo_match_feito_em: novoMatchFeitoEm })
     } else {
       const pintorId = o.match_usuario_id
+      // Recusar o tempo extra desfaz o match, então é caminho de un-match como os outros: o
+      // pintor entra na lista negra DESTA obra e não vê mais o card no feed. Paridade com
+      // POST /reparos/:id/responder-tempo, que já bloqueava. Mesmo CASE NULL-safe/idempotente
+      // dos demais un-matches (ver POST /obras/:id/expirar-match).
       await pool.query(
-        `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL WHERE id = $1`,
-        [req.params.id]
+        `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
+                prestadores_bloqueados = CASE
+                  WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
+                  THEN prestadores_bloqueados
+                  ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
+         WHERE id = $1`,
+        [req.params.id, pintorId]
       )
       const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [pintorId])
       if (pintor.rows[0]?.push_token) {
@@ -2826,6 +2862,9 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     }
     // Grava o prestador na lista negra antes de limpar o match.
     // chegada_* zeradas junto: o reparo volta ao feed limpo (ver /obras/:id/expirar-match).
+    // O CASE substitui o array_append cru: é NULL-safe (match já desfeito gravaria um NULL no
+    // array) e idempotente (rechamada não duplica o mesmo uuid).
+    const prestadorId = r.match_usuario_id
     await pool.query(
       `UPDATE reparos SET
         match_feito_em = NULL,
@@ -2834,11 +2873,30 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
         chegada_prevista_em = NULL,
         chegada_declarada_por = NULL,
         chegada_declarada_em = NULL,
-        prestadores_bloqueados = array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid)
+        prestadores_bloqueados = CASE
+          WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
+          THEN prestadores_bloqueados
+          ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
        WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL`,
-      [req.params.id, r.match_usuario_id]
+      [req.params.id, prestadorId]
     )
+    // Este endpoint não notificava NINGUÉM. Agora avisa os dois lados, como o de obra.
+    const donoR = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.criado_por])
+    const prestadorR = prestadorId
+      ? await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [prestadorId])
+      : { rows: [] }
     res.json({ mensagem: 'Match expirado, reparo disponível novamente' })
+    if (donoR.rows[0]?.push_token) {
+      enviarPushNotificacao(donoR.rows[0].push_token, '⏰ Prazo expirado!',
+        `O prestador não chegou a tempo para "${r.titulo}". O reparo está disponível novamente.`,
+        { tipo: 'match_expirado', reparo_id: req.params.id }).catch(() => {})
+    }
+    if (prestadorR.rows[0]?.push_token) {
+      enviarPushNotificacao(prestadorR.rows[0].push_token, '⏰ Prazo expirado!',
+        `O prazo para chegar em "${r.titulo}" acabou. O reparo voltou para o feed.`,
+        { tipo: 'match_expirado', reparo_id: req.params.id }).catch(() => {})
+    }
+    return
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao expirar match' })
   }
@@ -3172,7 +3230,10 @@ router.post('/reparos/:id/responder-tempo', autenticar, async (req, res) => {
 
       res.json({ mensagem: 'Tempo extra concedido!', novo_match_feito_em: novoMatchFeitoEm })
     } else {
-      // Recusou — bloqueia prestador e volta reparo para disponível
+      // Recusou — bloqueia prestador e volta reparo para disponível.
+      // Mesmo CASE NULL-safe/idempotente dos outros quatro pontos de append (ver
+      // POST /obras/:id/expirar-match): array_append cru gravaria um NULL no array se o match
+      // já tivesse sido desfeito, e duplicaria o uuid numa rechamada.
       await pool.query(
         `UPDATE reparos SET
           match_feito_em = NULL,
@@ -3180,7 +3241,10 @@ router.post('/reparos/:id/responder-tempo', autenticar, async (req, res) => {
           pedido_tempo_status = NULL,
           pedido_tempo_motivo = NULL,
           pedido_tempo_minutos = NULL,
-          prestadores_bloqueados = array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid)
+          prestadores_bloqueados = CASE
+            WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
+            THEN prestadores_bloqueados
+            ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
          WHERE id = $1`,
         [req.params.id, r.match_usuario_id]
       )
