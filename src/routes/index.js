@@ -2392,6 +2392,10 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
              -- confirmou a chegada (declarada por ele + confirmada = atendimento em curso).
              r.chegada_janela, r.chegada_prevista_em, r.chegada_declarada_por,
              r.chegada_declarada_em, r.chegada_confirmada_em,
+             -- "Expirado" não é status no banco: é um reparo NÃO encerrado cujo expira_em já
+             -- passou. Mesma expressão de GET /reparos/minhas e GET /reparos/:id, calculada no
+             -- SQL (relógio do servidor) para o app não depender do relógio do aparelho.
+             (r.status <> 'encerrada' AND r.expira_em <= NOW()) AS reparo_expirada,
              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM interesse_reparos ir
       JOIN reparos r ON ir.reparo_id = r.id
