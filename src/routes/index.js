@@ -1957,10 +1957,12 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
               chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
               chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
               prestadores_bloqueados = CASE
-                -- Isenção por recusa, igual à do cron: o dono recusou a janela oferecida e
-                -- nenhuma outra chegou a valer. As expressões do SET leem a linha ANTIGA, então
-                -- estas duas colunas ainda têm o valor de antes, apesar de irem a NULL acima.
-                WHEN chegada_recusada_em IS NOT NULL AND chegada_prevista_em IS NULL
+                -- Isenção igual à do cron: janela oferecida que nunca virou compromisso —
+                -- recusada pelo dono OU pendente sem resposta — e nenhuma outra valendo. As
+                -- expressões do SET leem a linha ANTIGA, então estas três colunas ainda têm o
+                -- valor de antes, apesar de irem a NULL acima.
+                WHEN chegada_prevista_em IS NULL
+                     AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
                 THEN prestadores_bloqueados
                 WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
                 THEN prestadores_bloqueados
@@ -2981,8 +2983,10 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
         chegada_pendente_em = NULL,
         chegada_recusada_em = NULL,
         prestadores_bloqueados = CASE
-          -- Isenção por recusa (ver POST /obras/:id/expirar-match e o CASE dos crons).
-          WHEN chegada_recusada_em IS NOT NULL AND chegada_prevista_em IS NULL
+          -- Isenção por janela não honrada pelo dono (ver POST /obras/:id/expirar-match e o
+          -- CASE dos crons): recusada OU pendente sem resposta, e nenhuma outra valendo.
+          WHEN chegada_prevista_em IS NULL
+               AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
           THEN prestadores_bloqueados
           WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
           THEN prestadores_bloqueados
