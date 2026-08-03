@@ -21,6 +21,11 @@ const minhas = async (req, res) => {
               -- confirmou a chegada (declarada por ele + confirmada = atendimento em curso).
               o.chegada_janela, o.chegada_prevista_em, o.chegada_declarada_por,
               o.chegada_declarada_em, o.chegada_confirmada_em,
+              -- Janela que estourou o prazo e aguarda o dono, e a marca de recusa. Sem estas o
+              -- pintor via a lista sem janela nenhuma (na pendência, chegada_janela/_prevista_em
+              -- seguem NULL) e ainda era barrado de propor outra pelo write-once — sem nada na
+              -- tela explicando por quê.
+              o.chegada_pendente_janela, o.chegada_pendente_em, o.chegada_recusada_em,
               -- "Expirada" não é status no banco: é uma obra NÃO encerrada cujo expira_em já
               -- passou. Mesma expressão de GET /obras/minhas e GET /obras/:id, calculada no SQL
               -- (relógio do servidor) para o app não comparar expira_em com o relógio do aparelho.

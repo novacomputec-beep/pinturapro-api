@@ -1952,7 +1952,7 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     // prestadores_bloqueados: o pintor que furou não volta a ver ESTA obra no feed. O CASE é
     // NULL-safe (match já desfeito → $2 NULL → array_append gravaria um NULL no array) e
     // idempotente (rechamada não duplica o mesmo uuid).
-    await pool.query(
+    const upd = await pool.query(
       `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
               chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
               chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
@@ -1970,6 +1970,12 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
        WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL`,
       [req.params.id, pintorId]
     )
+    // rowCount = 0 → a chegada foi declarada entre o SELECT e o UPDATE. Nada mudou no banco;
+    // responder sucesso aqui avisaria os dois lados de uma expiração que não aconteceu, e o
+    // pintor receberia "perdeu a obra" seguindo com o match na mão. Mesmo 409 do guard acima.
+    if (upd.rowCount === 0) {
+      return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
+    }
     const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
     // Os dois lados são avisados: o dono porque a obra voltou ao feed, o pintor porque perdeu
     // o match E o acesso a esta obra. Antes só o dono sabia.
@@ -2394,6 +2400,9 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
              -- confirmou a chegada (declarada por ele + confirmada = atendimento em curso).
              r.chegada_janela, r.chegada_prevista_em, r.chegada_declarada_por,
              r.chegada_declarada_em, r.chegada_confirmada_em,
+             -- Janela pendente de resposta do dono e marca de recusa (ver o mesmo bloco em
+             -- GET /candidaturas/minhas): sem elas o prestador não enxerga a proposta que fez.
+             r.chegada_pendente_janela, r.chegada_pendente_em, r.chegada_recusada_em,
              -- "Expirado" não é status no banco: é um reparo NÃO encerrado cujo expira_em já
              -- passou. Mesma expressão de GET /reparos/minhas e GET /reparos/:id, calculada no
              -- SQL (relógio do servidor) para o app não depender do relógio do aparelho.
@@ -2971,7 +2980,7 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     // O CASE substitui o array_append cru: é NULL-safe (match já desfeito gravaria um NULL no
     // array) e idempotente (rechamada não duplica o mesmo uuid).
     const prestadorId = r.match_usuario_id
-    await pool.query(
+    const upd = await pool.query(
       `UPDATE reparos SET
         match_feito_em = NULL,
         match_usuario_id = NULL,
@@ -2994,6 +3003,11 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
        WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL`,
       [req.params.id, prestadorId]
     )
+    // rowCount = 0 → chegada declarada entre o SELECT e o UPDATE (ver /obras/:id/expirar-match).
+    // Sai antes de qualquer push: nada expirou, e o prestador segue com o match.
+    if (upd.rowCount === 0) {
+      return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
+    }
     // Este endpoint não notificava NINGUÉM. Agora avisa os dois lados, como o de obra.
     const donoR = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.criado_por])
     const prestadorR = prestadorId
