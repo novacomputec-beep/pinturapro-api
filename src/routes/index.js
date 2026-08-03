@@ -139,6 +139,18 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_declarada_por UUID`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_declarada_em  TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_confirmada_em TIMESTAMPTZ`)
+    // Janela de chegada que estoura o expira_em: fica PENDENTE aqui até o dono responder, em vez
+    // de virar chegada_prevista_em direto. Sem este par, prometer "amanhã à tarde" numa demanda
+    // que vence hoje ou estenderia o prazo sem o dono saber, ou seria recusado sem negociação.
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS chegada_pendente_janela TEXT`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS chegada_pendente_em     TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_pendente_janela TEXT`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_pendente_em     TIMESTAMPTZ`)
+    // Marca que o DONO recusou uma janela. Isenta o profissional de falta e de bloqueio quando o
+    // match morre sem nenhuma janela valendo: ele ofereceu um horário, o dono disse não, e a
+    // demanda venceu no prazo antigo — o no-show aí é da negociação, não dele.
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS chegada_recusada_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_recusada_em TIMESTAMPTZ`)
     // Lista negra POR OBRA, espelho de reparos.prestadores_bloqueados (que nasceu fora deste
     // arquivo — não há ALTER dele aqui). Mesmo nome de coluna nas duas tabelas de propósito: as
     // queries de feed ficam idênticas. Guarda os profissionais que já furaram ESTA demanda; é
@@ -1943,7 +1955,13 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     await pool.query(
       `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
               chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
+              chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
               prestadores_bloqueados = CASE
+                -- Isenção por recusa, igual à do cron: o dono recusou a janela oferecida e
+                -- nenhuma outra chegou a valer. As expressões do SET leem a linha ANTIGA, então
+                -- estas duas colunas ainda têm o valor de antes, apesar de irem a NULL acima.
+                WHEN chegada_recusada_em IS NOT NULL AND chegada_prevista_em IS NULL
+                THEN prestadores_bloqueados
                 WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
                 THEN prestadores_bloqueados
                 ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
@@ -2069,8 +2087,16 @@ router.post('/obras/:id/responder-tempo', autenticar, async (req, res) => {
       // pintor entra na lista negra DESTA obra e não vê mais o card no feed. Paridade com
       // POST /reparos/:id/responder-tempo, que já bloqueava. Mesmo CASE NULL-safe/idempotente
       // dos demais un-matches (ver POST /obras/:id/expirar-match).
+      // chegada_* zeradas como nos outros un-matches: a obra volta ao feed limpa.
+      // chegada_confirmada_em entra na lista AQUI, ao contrário dos quatro outros pontos, e de
+      // propósito: lá o próprio WHERE já impede a linha de ser tocada depois da confirmação,
+      // aqui não há esse guard. Deixá-la preenchida devolveria ao feed uma obra que o cron
+      // nunca mais conseguiria expirar (o job pula linhas com chegada_confirmada_em).
       await pool.query(
         `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
+                chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
+                chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
+                chegada_confirmada_em = NULL,
                 prestadores_bloqueados = CASE
                   WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
                   THEN prestadores_bloqueados
@@ -2947,7 +2973,13 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
         chegada_prevista_em = NULL,
         chegada_declarada_por = NULL,
         chegada_declarada_em = NULL,
+        chegada_pendente_janela = NULL,
+        chegada_pendente_em = NULL,
+        chegada_recusada_em = NULL,
         prestadores_bloqueados = CASE
+          -- Isenção por recusa (ver POST /obras/:id/expirar-match e o CASE dos crons).
+          WHEN chegada_recusada_em IS NOT NULL AND chegada_prevista_em IS NULL
+          THEN prestadores_bloqueados
           WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
           THEN prestadores_bloqueados
           ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
@@ -3034,18 +3066,26 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
     }
 
     const { dias, horas, minutos, rotulo } = JANELAS_CHEGADA[janela]
-    // Write-once DENTRO do UPDATE (chegada_prevista_em IS NULL no WHERE), não em um if antes:
-    // dois toques simultâneos passariam os dois por uma checagem separada e o segundo
-    // sobrescreveria a janela já prometida ao dono.
+    // Write-once DENTRO do UPDATE (os dois _em NULL no WHERE), não em um if antes: dois toques
+    // simultâneos passariam os dois por uma checagem separada e o segundo sobrescreveria a
+    // janela já prometida ao dono. O par PENDENTE entra no guard junto — enquanto uma proposta
+    // aguarda resposta do dono, o profissional não troca a aposta por baixo dela.
     //
     // GREATEST(..., NOW() + 1 hour) = PISO da previsão. 'hoje' escolhido às 23:55 renderia
     // 23:59 — 4 minutos, e às 23:59:30 já nasceria VENCIDA, com o dono recebendo uma promessa
-    // impossível. O piso empurra esses casos para NOW() + 1h. As janelas de amanhã ficam
-    // sempre acima do piso (>12h de distância), então na prática só 'hoje' tarde é afetado.
+    // impossível. O piso empurra esses casos para NOW() + 1h.
+    //
+    // A previsão calculada cai em UM dos dois pares, decidido no próprio SQL (CTE `calc` para
+    // não repetir a expressão quatro vezes):
+    //   cabe no expira_em  → chegada_janela/chegada_prevista_em, como antes.
+    //   estoura o expira_em → chegada_pendente_*, aguardando o dono. NÃO mexe no prazo aqui:
+    //      esticar a demanda por decisão unilateral do profissional é exatamente o que o
+    //      fluxo de aprovação existe para evitar.
+    // COALESCE(expira_em, 'infinity'): demanda sem prazo não tem o que estourar — cabe sempre.
+    // Os dois CASE são mutuamente exclusivos, então nunca gravam nos dois pares.
     const upd = await pool.query(
-      `UPDATE ${tabela} SET
-         chegada_janela = $2,
-         chegada_prevista_em = GREATEST(
+      `WITH calc AS (
+         SELECT GREATEST(
            (
              date_trunc('day', NOW() AT TIME ZONE $3::text)
              + ($4::int * INTERVAL '1 day')
@@ -3053,9 +3093,26 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
              + ($6::int * INTERVAL '1 minute')
            ) AT TIME ZONE $3::text,
            NOW() + INTERVAL '1 hour'
-         )
-       WHERE id = $1 AND match_usuario_id = $7 AND chegada_prevista_em IS NULL
-       RETURNING chegada_janela, chegada_prevista_em`,
+         ) AS prevista
+       )
+       UPDATE ${tabela} d SET
+         chegada_janela = CASE
+           WHEN c.prevista <= COALESCE(d.expira_em, 'infinity'::timestamptz) THEN $2::text
+           ELSE d.chegada_janela END,
+         chegada_prevista_em = CASE
+           WHEN c.prevista <= COALESCE(d.expira_em, 'infinity'::timestamptz) THEN c.prevista
+           ELSE d.chegada_prevista_em END,
+         chegada_pendente_janela = CASE
+           WHEN c.prevista > COALESCE(d.expira_em, 'infinity'::timestamptz) THEN $2::text
+           ELSE d.chegada_pendente_janela END,
+         chegada_pendente_em = CASE
+           WHEN c.prevista > COALESCE(d.expira_em, 'infinity'::timestamptz) THEN c.prevista
+           ELSE d.chegada_pendente_em END
+       FROM calc c
+       WHERE d.id = $1 AND d.match_usuario_id = $7
+         AND d.chegada_prevista_em IS NULL AND d.chegada_pendente_em IS NULL
+       RETURNING d.chegada_janela, d.chegada_prevista_em,
+                 d.chegada_pendente_janela, d.chegada_pendente_em`,
       [req.params.id, janela, TZ_CHEGADA, dias, horas, minutos, req.usuario.id]
     )
     if (upd.rowCount > 0) {
@@ -3064,19 +3121,27 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
       // Token buscado ANTES do res.json: um throw depois da resposta cairia no catch e tentaria
       // responder duas vezes (mesmo cuidado de candidaturasController.aprovar).
       const { chave, profissional } = ROTULOS_CHEGADA[tabela]
+      const pendente = !!upd.rows[0].chegada_pendente_em
       const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [alvo.rows[0].criado_por])
       res.json(upd.rows[0])
       if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '📅 Previsão de chegada!',
-          `O ${profissional} informou que chega ${rotulo} para "${alvo.rows[0].titulo}"`,
-          { tipo: 'chegada_prevista', [chave]: req.params.id }).catch(() => {})
+        // Dois textos porque são duas perguntas diferentes: um informa, o outro PEDE resposta.
+        enviarPushNotificacao(
+          dono.rows[0].push_token,
+          pendente ? '📅 Chegada depois do prazo' : '📅 Previsão de chegada!',
+          pendente
+            ? `O ${profissional} só consegue chegar ${rotulo} em "${alvo.rows[0].titulo}", depois do prazo. Aceitar ou recusar?`
+            : `O ${profissional} informou que chega ${rotulo} para "${alvo.rows[0].titulo}"`,
+          { tipo: pendente ? 'chegada_prevista_pendente' : 'chegada_prevista', [chave]: req.params.id }
+        ).catch(() => {})
       }
       return
     }
 
-    // rowCount = 0 → já havia previsão gravada. Não é erro: devolve a que vale, mesmo shape.
+    // rowCount = 0 → já havia previsão (gravada ou pendente). Não é erro: devolve o que vale.
     const atual = await pool.query(
-      `SELECT chegada_janela, chegada_prevista_em FROM ${tabela} WHERE id = $1`,
+      `SELECT chegada_janela, chegada_prevista_em, chegada_pendente_janela, chegada_pendente_em
+         FROM ${tabela} WHERE id = $1`,
       [req.params.id]
     )
     if (atual.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
@@ -3163,8 +3228,89 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
   }
 }
 
+// POST /:id/chegada-prevista/responder — o dono responde à janela que estourou o prazo.
+// aceito=true  → a pendente vira a valer e o expira_em ESTICA até ela (senão o cron mataria o
+//                match no prazo velho, um minuto depois de o dono ter dito sim).
+// aceito=false → limpa só a pendente. O profissional NÃO é bloqueado, NÃO perde o match e volta
+//                a poder escolher outra janela (o guard write-once do outro handler olha os dois
+//                _em, e ambos ficam NULL de novo).
+const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
+  try {
+    const { aceito } = req.body || {}
+    if (typeof aceito !== 'boolean') {
+      return res.status(400).json({ erro: 'aceito é obrigatório e deve ser booleano' })
+    }
+    const alvo = await pool.query(
+      `SELECT titulo, criado_por, match_usuario_id, chegada_pendente_janela, chegada_pendente_em
+         FROM ${tabela} WHERE id = $1`,
+      [req.params.id]
+    )
+    if (alvo.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
+    const d = alvo.rows[0]
+    // Só o DONO responde: é o prazo dele que está sendo esticado.
+    if (d.criado_por !== req.usuario.id) {
+      return res.status(403).json({ erro: 'Apenas o dono pode responder à previsão de chegada' })
+    }
+    if (!d.chegada_pendente_em) {
+      return res.status(409).json({ erro: 'Não há previsão de chegada aguardando resposta' })
+    }
+
+    // chegada_pendente_em IS NOT NULL repetido no WHERE: duas respostas simultâneas não aplicam
+    // o aceite duas vezes (a segunda volta rowCount = 0 e cai no 409 acima na próxima tentativa).
+    // GREATEST no expira_em em vez de atribuição direta: se o dono tiver estendido o prazo para
+    // além da janela nesse meio-tempo, aceitar não pode ENCURTAR a demanda.
+    // match_usuario_id não é tocado em nenhum dos dois ramos — responder nunca desfaz o match.
+    const upd = aceito
+      ? await pool.query(
+          `UPDATE ${tabela} SET
+             chegada_janela = chegada_pendente_janela,
+             chegada_prevista_em = chegada_pendente_em,
+             expira_em = GREATEST(expira_em, chegada_pendente_em),
+             chegada_pendente_janela = NULL,
+             chegada_pendente_em = NULL
+           WHERE id = $1 AND chegada_pendente_em IS NOT NULL
+           RETURNING chegada_janela, chegada_prevista_em, expira_em`,
+          [req.params.id]
+        )
+      : await pool.query(
+          // chegada_recusada_em marca a recusa para o cron não cobrar falta de quem ofereceu
+          // horário e ouviu não. Só o ramo da recusa grava — aceitar não deixa marca.
+          `UPDATE ${tabela} SET chegada_pendente_janela = NULL, chegada_pendente_em = NULL,
+                                chegada_recusada_em = NOW()
+           WHERE id = $1 AND chegada_pendente_em IS NOT NULL
+           RETURNING chegada_janela, chegada_prevista_em, expira_em`,
+          [req.params.id]
+        )
+    if (upd.rowCount === 0) {
+      return res.status(409).json({ erro: 'Não há previsão de chegada aguardando resposta' })
+    }
+
+    const { chave, profissional } = ROTULOS_CHEGADA[tabela]
+    const rotuloPendente = JANELAS_CHEGADA[d.chegada_pendente_janela]?.rotulo || d.chegada_pendente_janela
+    const prof = d.match_usuario_id
+      ? await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [d.match_usuario_id])
+      : { rows: [] }
+    res.json(upd.rows[0])
+    if (prof.rows[0]?.push_token) {
+      enviarPushNotificacao(
+        prof.rows[0].push_token,
+        aceito ? '✅ Janela aprovada!' : '❌ Janela recusada',
+        aceito
+          ? `O solicitante aceitou sua chegada ${rotuloPendente} em "${d.titulo}". O prazo foi estendido.`
+          : `O solicitante não pode esperar até ${rotuloPendente} em "${d.titulo}". Escolha outra janela no app.`,
+        { tipo: aceito ? 'chegada_prevista_aceita' : 'chegada_prevista_recusada', [chave]: req.params.id }
+      ).catch(() => {})
+    }
+  } catch (err) {
+    console.error(`[${tabela}/chegada-prevista/responder]`, err.message)
+    res.status(500).json({ erro: 'Erro ao responder previsão de chegada' })
+  }
+}
+
 router.post('/obras/:id/chegada-prevista',   autenticar, criarHandlerChegadaPrevista('obras'))
 router.post('/reparos/:id/chegada-prevista', autenticar, criarHandlerChegadaPrevista('reparos'))
+router.post('/obras/:id/chegada-prevista/responder',   autenticar, criarHandlerChegadaPrevistaResponder('obras'))
+router.post('/reparos/:id/chegada-prevista/responder', autenticar, criarHandlerChegadaPrevistaResponder('reparos'))
 router.post('/obras/:id/chegada',            autenticar, criarHandlerChegada('obras'))
 router.post('/reparos/:id/chegada',          autenticar, criarHandlerChegada('reparos'))
 
@@ -3308,6 +3454,8 @@ router.post('/reparos/:id/responder-tempo', autenticar, async (req, res) => {
       // Mesmo CASE NULL-safe/idempotente dos outros quatro pontos de append (ver
       // POST /obras/:id/expirar-match): array_append cru gravaria um NULL no array se o match
       // já tivesse sido desfeito, e duplicaria o uuid numa rechamada.
+      // chegada_* zeradas — incluindo chegada_confirmada_em, pelo mesmo motivo explicado em
+      // POST /obras/:id/responder-tempo (este caminho não tem o guard que os outros têm).
       await pool.query(
         `UPDATE reparos SET
           match_feito_em = NULL,
@@ -3315,6 +3463,14 @@ router.post('/reparos/:id/responder-tempo', autenticar, async (req, res) => {
           pedido_tempo_status = NULL,
           pedido_tempo_motivo = NULL,
           pedido_tempo_minutos = NULL,
+          chegada_janela = NULL,
+          chegada_prevista_em = NULL,
+          chegada_declarada_por = NULL,
+          chegada_declarada_em = NULL,
+          chegada_pendente_janela = NULL,
+          chegada_pendente_em = NULL,
+          chegada_recusada_em = NULL,
+          chegada_confirmada_em = NULL,
           prestadores_bloqueados = CASE
             WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
             THEN prestadores_bloqueados
