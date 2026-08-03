@@ -20,7 +20,11 @@ const minhas = async (req, res) => {
               -- Chegada: o pintor precisa ver a janela que ele mesmo prometeu e se o dono já
               -- confirmou a chegada (declarada por ele + confirmada = atendimento em curso).
               o.chegada_janela, o.chegada_prevista_em, o.chegada_declarada_por,
-              o.chegada_declarada_em, o.chegada_confirmada_em
+              o.chegada_declarada_em, o.chegada_confirmada_em,
+              -- "Expirada" não é status no banco: é uma obra NÃO encerrada cujo expira_em já
+              -- passou. Mesma expressão de GET /obras/minhas e GET /obras/:id, calculada no SQL
+              -- (relógio do servidor) para o app não comparar expira_em com o relógio do aparelho.
+              (o.status <> 'encerrada' AND o.expira_em <= NOW()) AS obra_expirada
        FROM candidaturas c
        JOIN obras o ON c.obra_id = o.id
        WHERE c.usuario_id = $1
