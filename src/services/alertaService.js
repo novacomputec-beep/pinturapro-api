@@ -496,13 +496,18 @@ const FALTAS_PARA_SUSPENDER = 3
 const JANELA_FALTAS = '90 days'
 const MOTIVO_SUSPENSAO = `${FALTAS_PARA_SUSPENDER} faltas (não comparecimento) em ${JANELA_FALTAS.replace('days', 'dias')}`
 
-// Isenção por recusa: o dono recusou a janela oferecida (chegada_recusada_em) e nenhuma outra
-// chegou a valer (chegada_prevista_em NULL). O profissional se ofereceu, ouviu não e ficou sem
-// horário possível dentro do prazo — cobrar falta disso puniria quem negociou de boa-fé.
-// Se ele chegou a ter uma janela VALENDO depois da recusa, a isenção cai: aí havia compromisso.
-// Espelhada no CASE de prestadores_bloqueados dos dois crons — as duas punições andam juntas.
+// Isenção: o profissional ofereceu uma janela e ela NUNCA virou compromisso — porque o dono
+// recusou (chegada_recusada_em) ou porque simplesmente não respondeu e a proposta morreu
+// pendente (chegada_pendente_em). Nos dois casos chegada_prevista_em segue NULL: não houve
+// horário acordado para ele furar. Cobrar falta aí puniria quem se ofereceu e ficou esperando —
+// e, no caso do silêncio, puniria o profissional por inação do DONO.
+// Se alguma janela chegou a VALER (chegada_prevista_em preenchida), a isenção cai: havia
+// compromisso firmado, e não comparecer é falta.
+// Espelhada no CASE de prestadores_bloqueados dos dois crons e dos dois expirar-match — as
+// duas punições (falta e bloqueio) andam sempre juntas.
 const isentoPorRecusa = (demanda) =>
-  !!demanda.chegada_recusada_em && !demanda.chegada_prevista_em
+  !demanda.chegada_prevista_em &&
+  (!!demanda.chegada_recusada_em || !!demanda.chegada_pendente_em)
 
 // Registra a falta e, ao cruzar o limite na janela móvel, suspende. `tabela` sai de literal no
 // chamador, nunca do request. Erros são engolidos: uma falha aqui não pode derrubar o cron nem
@@ -611,7 +616,8 @@ const verificarCronometroReparos = async () => {
     // chegada_recusada_em/chegada_prevista_em entram no SELECT para a ISENÇÃO: match que morre
     // depois de o dono recusar a janela, e sem nenhuma outra valendo, não gera falta nem bloqueio.
     const candidatos = await pool.query(`
-      SELECT id, titulo, criado_por, match_usuario_id, chegada_recusada_em, chegada_prevista_em
+      SELECT id, titulo, criado_por, match_usuario_id,
+             chegada_recusada_em, chegada_pendente_em, chegada_prevista_em
         FROM reparos WHERE ${PRED_EXPIRADOS_REPAROS}
     `)
 
@@ -634,8 +640,10 @@ const verificarCronometroReparos = async () => {
           chegada_pendente_em = NULL,
           chegada_recusada_em = NULL,
           prestadores_bloqueados = CASE
-            -- Isenção: janela recusada pelo dono e nenhuma valendo → não bloqueia.
-            WHEN chegada_recusada_em IS NOT NULL AND chegada_prevista_em IS NULL
+            -- Isenção: janela oferecida que nunca virou compromisso — recusada pelo dono OU
+            -- morta pendente sem resposta — e nenhuma outra valendo. Não bloqueia.
+            WHEN chegada_prevista_em IS NULL
+                 AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
             THEN prestadores_bloqueados
             WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
             THEN prestadores_bloqueados
@@ -648,10 +656,17 @@ const verificarCronometroReparos = async () => {
 
       // Só notifica e contabiliza falta para quem o UPDATE realmente pegou. Os dois lados
       // continuam sendo avisados do fim do match mesmo na isenção — o que muda é só a punição.
+      // try/catch POR LINHA: notificarMatchDesfeito faz query de token e pode estourar. Sem o
+      // guard, uma linha ruim jogava para o catch da função e as SEGUINTES ficavam sem aviso e
+      // sem falta, com o un-match já commitado para todas. registrarFalta já se protege sozinha.
       const atualizados = new Set(expirados.rows.map(r => r.id))
       for (const c of candidatos.rows) {
         if (!atualizados.has(c.id)) continue
-        await notificarMatchDesfeito('reparos', c)
+        try {
+          await notificarMatchDesfeito('reparos', c)
+        } catch (err) {
+          console.error(`[CronômetroReparos] falha ao notificar match desfeito ${c.id}:`, err.message)
+        }
         if (!isentoPorRecusa(c)) await registrarFalta('reparos', c)
       }
     }
@@ -714,7 +729,8 @@ const verificarCronometroObras = async () => {
 
     // Mesma isenção do cron de reparos (ver isentoPorRecusa).
     const candidatos = await pool.query(`
-      SELECT id, titulo, criado_por, match_usuario_id, chegada_recusada_em, chegada_prevista_em
+      SELECT id, titulo, criado_por, match_usuario_id,
+             chegada_recusada_em, chegada_pendente_em, chegada_prevista_em
         FROM obras WHERE ${PRED_EXPIRADOS_OBRAS}
     `)
 
@@ -734,8 +750,10 @@ const verificarCronometroObras = async () => {
           chegada_pendente_em = NULL,
           chegada_recusada_em = NULL,
           prestadores_bloqueados = CASE
-            -- Isenção: janela recusada pelo dono e nenhuma valendo → não bloqueia.
-            WHEN chegada_recusada_em IS NOT NULL AND chegada_prevista_em IS NULL
+            -- Isenção: janela oferecida que nunca virou compromisso — recusada pelo dono OU
+            -- morta pendente sem resposta — e nenhuma outra valendo. Não bloqueia.
+            WHEN chegada_prevista_em IS NULL
+                 AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
             THEN prestadores_bloqueados
             WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
             THEN prestadores_bloqueados
@@ -746,10 +764,15 @@ const verificarCronometroObras = async () => {
       `, [candidatos.rows.map(c => c.id)])
       expiradosCount = expirados.rows.length
 
+      // try/catch por linha pelo mesmo motivo do cron de reparos.
       const atualizados = new Set(expirados.rows.map(o => o.id))
       for (const c of candidatos.rows) {
         if (!atualizados.has(c.id)) continue
-        await notificarMatchDesfeito('obras', c)
+        try {
+          await notificarMatchDesfeito('obras', c)
+        } catch (err) {
+          console.error(`[CronômetroObras] falha ao notificar match desfeito ${c.id}:`, err.message)
+        }
         if (!isentoPorRecusa(c)) await registrarFalta('obras', c)
       }
     }
