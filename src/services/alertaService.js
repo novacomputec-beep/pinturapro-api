@@ -293,12 +293,14 @@ const verificarObrasComBaixoEngajamento = async () => {
       JOIN usuarios u ON o.criado_por = u.id
       WHERE o.status = 'aberta'
         AND o.status_aprovacao = 'aprovada'
+        AND o.match_usuario_id IS NULL
         AND o.total_visitas >= 10
         AND o.criado_em < NOW() - INTERVAL '1 day'
+        AND o.expira_em > NOW()
         AND (o.alerta_enviado_em IS NULL OR o.alerta_enviado_em < NOW() - INTERVAL '24 hours')
         AND NOT EXISTS (
           SELECT 1 FROM candidaturas c
-          WHERE c.obra_id = o.id AND c.status = 'pendente'
+          WHERE c.obra_id = o.id AND c.status IS DISTINCT FROM 'recusado'
         )
         AND u.push_token IS NOT NULL
     `)
@@ -324,12 +326,14 @@ const verificarObrasComBaixoEngajamento = async () => {
       JOIN usuarios u ON r.criado_por = u.id
       WHERE r.status = 'aberta'
         AND r.status_aprovacao = 'aprovada'
+        AND r.match_usuario_id IS NULL
         AND r.total_visitas >= 10
         AND r.criado_em < NOW() - INTERVAL '1 day'
+        AND r.expira_em > NOW()
         AND (r.alerta_enviado_em IS NULL OR r.alerta_enviado_em < NOW() - INTERVAL '8 hours')
         AND NOT EXISTS (
           SELECT 1 FROM interesse_reparos ir
-          WHERE ir.reparo_id = r.id AND ir.status = 'pendente'
+          WHERE ir.reparo_id = r.id AND ir.status IS DISTINCT FROM 'recusado'
         )
         AND u.push_token IS NOT NULL
     `)
