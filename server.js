@@ -282,6 +282,7 @@ const iniciarAgendador = () => {
   const INTERVALO_EXPIRACAO    = 60 * 60 * 1000
   const INTERVALO_PROXIMIDADE  = 10 * 60 * 1000
   const INTERVALO_CRONOMETRO   = 60 * 1000
+  const INTERVALO_AUTO_ENCERRAR = 5 * 60 * 1000
 
   setTimeout(() => {
     verificarObrasComBaixoEngajamento()
@@ -305,8 +306,14 @@ const iniciarAgendador = () => {
   setInterval(() => { verificarCronometroObras() }, INTERVALO_CRONOMETRO)
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
   setInterval(() => { expirarAssinaturasVencidas() }, 60 * 60 * 1000)
-  // De hora em hora: prazo é de 2 dias, então não há motivo para entrar no bloco de 1min.
-  setInterval(() => { autoEncerrarPendentes() }, 60 * 60 * 1000)
+  // De 5 em 5 minutos. Era de hora em hora, justificado pelo prazo de 2 dias do encerramento
+  // em duas mãos — mas a MESMA função também auto-confirma chegada, e esse prazo passou a ser
+  // de 30 min nos reparos. Uma varredura horária é mais grossa que a própria janela: o reparo
+  // ficava elegível aos 30 min e só era pego no tique seguinte (30–90 min reais, ~60 em média),
+  // então o valor configurado virava um piso, não o comportamento. A 5 min a folga cai para
+  // 30–35 min. O encerramento de 2 dias não se importa com a cadência mais fina; o custo é
+  // apenas o SELECT/UPDATE dos dois lados, indexado e quase sempre vazio.
+  setInterval(() => { autoEncerrarPendentes() }, INTERVALO_AUTO_ENCERRAR)
   setInterval(() => { notificarAssinaturasProximasVencimento() }, 24 * 60 * 60 * 1000)
 
   setInterval(async () => {
