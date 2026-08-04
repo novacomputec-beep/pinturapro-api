@@ -793,16 +793,21 @@ const verificarCronometroObras = async () => {
 // enquanto NÃO está encerrada. Notifica quem NÃO pediu — quem pediu já sabe.
 const AUTO_ENCERRAR_APOS = '2 days'
 
-// Auto-confirmação da chegada: o profissional declarou, o dono nunca respondeu. Passadas 6h a
-// declaração vale por si — sem isto a demanda fica travada em "declarada mas não confirmada"
-// para sempre (e, como chegada_declarada_em congela os dois crons, também nunca volta ao feed).
-const AUTO_CONFIRMAR_CHEGADA_APOS = '6 hours'
+// Auto-confirmação da chegada: o profissional declarou, o dono nunca respondeu. Vencido o
+// prazo a declaração vale por si — sem isto a demanda fica travada em "declarada mas não
+// confirmada" para sempre (e, como chegada_declarada_em congela os dois crons, também nunca
+// volta ao feed). O prazo é POR TABELA (chegadaApos): um reparo é uma visita curta, e 6h de
+// limbo cobriam o serviço inteiro; uma obra se mede em horas e mantém as 6h de antes.
+// chegadaRotulo anda junto do intervalo porque o mesmo prazo aparece no texto do push — se
+// só um dos dois mudasse, o profissional seria avisado de um prazo que não é o aplicado.
 
 const autoEncerrarPendentes = async () => {
-  // tabela e coluna de id saem desta lista literal, nunca do request — interpolação segura.
+  // tabela, coluna de id e prazos saem desta lista literal, nunca do request — interpolação segura.
   const lados = [
-    { tabela: 'obras',   chave: 'obra_id',   tipoPush: 'obra_encerrada',    rotulo: 'a obra' },
-    { tabela: 'reparos', chave: 'reparo_id', tipoPush: 'reparo_encerrado',  rotulo: 'o reparo' }
+    { tabela: 'obras',   chave: 'obra_id',   tipoPush: 'obra_encerrada',    rotulo: 'a obra',
+      chegadaApos: '6 hours',   chegadaRotulo: '6 horas' },
+    { tabela: 'reparos', chave: 'reparo_id', tipoPush: 'reparo_encerrado',  rotulo: 'o reparo',
+      chegadaApos: '30 minutes', chegadaRotulo: '30 minutos' }
   ]
   for (const lado of lados) {
     try {
@@ -833,15 +838,15 @@ const autoEncerrarPendentes = async () => {
         console.log(`[AutoEncerrar] ${lado.tabela}: ${fechados.rows.length} encerrad(a)s por falta de confirmação`)
       }
 
-      // Chegada declarada há mais de 6h e nunca confirmada pelo dono → confirma sozinho.
-      // Query separada (não um SET a mais no UPDATE acima): são regras independentes —
-      // encerramento em duas mãos vs. chegada em duas mãos — com prazos e predicados
-      // próprios, e a maioria das linhas candidatas a uma não é candidata à outra.
+      // Chegada declarada há mais do que o prazo da tabela e nunca confirmada pelo dono →
+      // confirma sozinho. Query separada (não um SET a mais no UPDATE acima): são regras
+      // independentes — encerramento em duas mãos vs. chegada em duas mãos — com prazos e
+      // predicados próprios, e a maioria das linhas candidatas a uma não é candidata à outra.
       const chegadas = await pool.query(`
         UPDATE ${lado.tabela} SET chegada_confirmada_em = NOW()
         WHERE chegada_declarada_em IS NOT NULL
           AND chegada_confirmada_em IS NULL
-          AND chegada_declarada_em <= NOW() - INTERVAL '${AUTO_CONFIRMAR_CHEGADA_APOS}'
+          AND chegada_declarada_em <= NOW() - INTERVAL '${lado.chegadaApos}'
         RETURNING id, titulo, match_usuario_id
       `)
       for (const c of chegadas.rows) {
@@ -853,7 +858,7 @@ const autoEncerrarPendentes = async () => {
         const prof = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [c.match_usuario_id])
         if (prof.rows[0]?.push_token) {
           enviarPushNotificacao(prof.rows[0].push_token, '✅ Chegada confirmada!',
-            `Sem confirmação do solicitante em 6 horas, sua chegada em "${c.titulo}" foi confirmada automaticamente.`,
+            `Sem confirmação do solicitante em ${lado.chegadaRotulo}, sua chegada em "${c.titulo}" foi confirmada automaticamente.`,
             { tipo: 'chegada_confirmada', [lado.chave]: c.id }).catch(() => {})
         }
       }
