@@ -653,7 +653,7 @@ const exigirPrestador = async (req, res, next) => {
 
     const cached = cachePrestadores.get(req.usuario.id)
     if (cached !== null && cached !== undefined && Date.now() - cached.timestamp < CACHE_TTL) {
-      if (!cached.ativa) return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os reparos.' })
+      if (!cached.ativa) return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os serviços.' })
       return next()
     }
 
@@ -664,7 +664,7 @@ const exigirPrestador = async (req, res, next) => {
     const ativa = assinatura.rows.length > 0
     cachePrestadores.set(req.usuario.id, { ativa, timestamp: Date.now() })
 
-    if (!ativa) return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os reparos.' })
+    if (!ativa) return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os serviços.' })
     next()
   } catch (err) {
     res.status(500).json({ erro: 'Erro de autenticação' })
@@ -687,7 +687,7 @@ const exigirTipoPrestador = (tipoEsperado, msg) => (req, res, next) => {
 }
 // Verificar cada tier explicitamente (regra do projeto: um não replica o outro).
 const exigirPintor    = exigirTipoPrestador('pintor',    'Este recurso é exclusivo para prestadores de construção/pintura (obras).')
-const exigirReparador = exigirTipoPrestador('reparador', 'Este recurso é exclusivo para prestadores de reparos domésticos.')
+const exigirReparador = exigirTipoPrestador('reparador', 'Este recurso é exclusivo para prestadores de serviços domésticos.')
 
 // Rede de segurança de coordenadas na criação — simétrica ao `uf || ufDeCidade(cidade)`.
 // O app geocodifica no cliente (ViaCEP -> Nominatim) e isso falha em silêncio: CEP sem
@@ -2167,14 +2167,14 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
     const historico = result.rows.filter(r =>  eArquivado(r))
     res.json({ reparos, historico, page, limit })
   } catch (err) {
-    res.status(500).json({ erro: 'Erro ao buscar reparos' })
+    res.status(500).json({ erro: 'Erro ao buscar serviços' })
   }
 })
 
 router.post('/reparos/dono', autenticar, async (req, res) => {
   try {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
-      return res.status(403).json({ erro: 'Apenas donos podem cadastrar reparos' })
+      return res.status(403).json({ erro: 'Apenas donos podem cadastrar serviços' })
     }
     const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
     // Mesmo teto do POST /obras/dono e sobre a MESMA contagem (obras + reparos): o limite é por
@@ -2200,7 +2200,7 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
   } catch (err) {
     console.error('[reparos/dono]', err.message)
-    res.status(500).json({ erro: 'Erro ao cadastrar reparo' })
+    res.status(500).json({ erro: 'Erro ao cadastrar serviço' })
   }
 })
 
@@ -2210,15 +2210,15 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
       `SELECT id, match_usuario_id FROM reparos WHERE id = $1 AND criado_por = $2`,
       [req.params.id, req.usuario.id]
     )
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
-    if (reparo.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Não é possível excluir um reparo com prestador a caminho' })
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
+    if (reparo.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Não é possível excluir um serviço com prestador a caminho' })
     await pool.query(`DELETE FROM midias_reparos WHERE reparo_id = $1`, [req.params.id])
     await pool.query(`DELETE FROM interesse_reparos WHERE reparo_id = $1`, [req.params.id])
     await pool.query(`DELETE FROM reparos WHERE id = $1`, [req.params.id])
-    res.json({ mensagem: 'Reparo excluído com sucesso' })
+    res.json({ mensagem: 'Serviço excluído com sucesso' })
   } catch (err) {
     console.error('Erro ao deletar reparo:', err)
-    res.status(500).json({ erro: 'Erro ao excluir reparo' })
+    res.status(500).json({ erro: 'Erro ao excluir serviço' })
   }
 })
 
@@ -2253,10 +2253,10 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
        FROM reparos WHERE id = $1 AND criado_por = $2`,
       [req.params.id, req.usuario.id]
     )
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     const r = reparo.rows[0]
-    if (r.status !== 'aberta') return res.status(409).json({ erro: 'Só é possível estender um reparo aberto' })
-    if (r.match_usuario_id) return res.status(409).json({ erro: 'Não é possível estender um reparo com prestador a caminho' })
+    if (r.status !== 'aberta') return res.status(409).json({ erro: 'Só é possível estender um serviço aberto' })
+    if (r.match_usuario_id) return res.status(409).json({ erro: 'Não é possível estender um serviço com prestador a caminho' })
 
     const horas = Number(req.body?.horas)
     if (!Number.isFinite(horas) || horas < 1) return res.status(400).json({ erro: 'horas inválido: informe um número >= 1' })
@@ -2305,14 +2305,14 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
         `SELECT expira_em FROM reparos WHERE id = $1 AND criado_por = $2`,
         [req.params.id, req.usuario.id]
       )
-      if (atual.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+      if (atual.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
       return res.json({ expira_em: atual.rows[0].expira_em, extensao_maxima_horas: ADVISORY_ESTENDER_REPARO_HORAS })
     }
 
     res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: ADVISORY_ESTENDER_REPARO_HORAS })
   } catch (err) {
     console.error('[reparos/estender]', err.message)
-    res.status(500).json({ erro: 'Erro ao estender prazo do reparo' })
+    res.status(500).json({ erro: 'Erro ao estender prazo do serviço' })
   }
 })
 
@@ -2589,7 +2589,7 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
     res.json({ reparos: result.rows, page, limit, filtro: filtroMeta, escopo, ancora })
   } catch (err) {
     console.error('Erro ao buscar reparos:', err)
-    res.status(500).json({ erro: 'Erro ao buscar reparos' })
+    res.status(500).json({ erro: 'Erro ao buscar serviços' })
   }
 })
 
@@ -2597,7 +2597,7 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
   try {
     const { mensagem, valor_proposto } = req.body
     const existente = await pool.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
-    if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse neste reparo' })
+    if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse neste serviço' })
     const result = await pool.query(
       `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem, valor_proposto, rodada) VALUES ($1, $2, $3, $4, 1) RETURNING *`,
       [req.params.id, req.usuario.id, mensagem, valor_proposto || null]
@@ -2609,7 +2609,7 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
     )
     if (donoInfo.rows[0]?.push_token) {
       enviarPushNotificacao(donoInfo.rows[0].push_token, '🔧 Novo interesse!',
-        `Um prestador demonstrou interesse no reparo "${donoInfo.rows[0].titulo}"`,
+        `Um prestador demonstrou interesse no serviço "${donoInfo.rows[0].titulo}"`,
         { tipo: 'novo_interesse', reparo_id: req.params.id }).catch(() => {})
     }
     res.status(201).json(result.rows[0])
@@ -2679,7 +2679,7 @@ router.post('/reparos/:id/abertura', autenticar, exigirPrestador, exigirReparado
 router.post('/reparos/:id/match', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     // Idempotente: o aceite já casa o prestador (POST .../responder), então o app que ainda
     // chama /match reencontra o PRÓPRIO match. Devolve 200 sem reescrever match_feito_em
     // (não reinicia a contagem) e sem reenviar o contrato. 409 fica só para match de outro.
@@ -2690,13 +2690,13 @@ router.post('/reparos/:id/match', autenticar, exigirPrestador, exigirReparador, 
           match_feito_em: reparo.rows[0].match_feito_em
         })
       }
-      return res.status(409).json({ erro: 'Este reparo já tem um prestador a caminho' })
+      return res.status(409).json({ erro: 'Este serviço já tem um prestador a caminho' })
     }
     const interesseAceito = await pool.query(
       `SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2 AND status = 'aceito'`,
       [req.params.id, req.usuario.id]
     )
-    if (interesseAceito.rows.length === 0) return res.status(403).json({ erro: 'Sua proposta ainda não foi aceita para este reparo.' })
+    if (interesseAceito.rows.length === 0) return res.status(403).json({ erro: 'Sua proposta ainda não foi aceita para este serviço.' })
     await pool.query(
       `UPDATE reparos SET match_feito_em = NOW(), match_usuario_id = $1 WHERE id = $2`,
       [req.usuario.id, req.params.id]
@@ -2734,7 +2734,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
     const { id: reparo_id, interesse_id } = req.params
 
     const reparo = await pool.query(`SELECT criado_por, titulo FROM reparos WHERE id = $1`, [reparo_id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     if (reparo.rows[0].criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
 
     const interesse = await pool.query(
@@ -2759,7 +2759,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
         [req.params.id, interesse_id]
       )
       if (jaAceito.rows.length > 0) {
-        return res.status(409).json({ erro: 'Já existe um prestador aceito para este reparo' })
+        return res.status(409).json({ erro: 'Já existe um prestador aceito para este serviço' })
       }
       // Suspensão do INTERESSADO (quem chama aqui é o dono) — ver POST .../responder de obra.
       if (await estaSuspenso(int.usuario_id)) {
@@ -2900,16 +2900,16 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
 router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     const r = reparo.rows[0]
     const ehDono      = r.criado_por === req.usuario.id
     const ehPrestador = r.match_usuario_id === req.usuario.id
     const ehAdmin     = req.usuario.role === 'admin'
-    if (!ehDono && !ehPrestador && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar este reparo' })
+    if (!ehDono && !ehPrestador && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar este serviço' })
 
     // Já encerrado → no-op idempotente (não reescreve encerrado_em).
     if (r.status === 'encerrada') {
-      return res.json({ mensagem: 'Reparo já encerrado.', encerramento: 'concluido' })
+      return res.json({ mensagem: 'Serviço já encerrado.', encerramento: 'concluido' })
     }
 
     const semContraparte = !r.match_usuario_id
@@ -2923,7 +2923,7 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
         const outro = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [outroId])
         if (outro.rows[0]?.push_token) {
           enviarPushNotificacao(outro.rows[0].push_token, '🔔 Encerramento solicitado',
-            `A outra parte pediu para encerrar o reparo "${r.titulo}". Confirme no app.`,
+            `A outra parte pediu para encerrar o serviço "${r.titulo}". Confirme no app.`,
             { tipo: 'encerramento_solicitado', reparo_id: req.params.id }).catch(() => {})
         }
         return res.json({ mensagem: 'Encerramento solicitado. Aguardando confirmação da outra parte.', encerramento: 'pendente' })
@@ -2942,27 +2942,27 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
     if (ehDono && r.match_usuario_id) {
       const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
       if (prestador.rows[0]?.push_token) {
-        enviarPushNotificacao(prestador.rows[0].push_token, '✅ Reparo encerrado!',
-          `O solicitante encerrou o reparo "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id }).catch(() => {})
+        enviarPushNotificacao(prestador.rows[0].push_token, '✅ Serviço encerrado!',
+          `O solicitante encerrou o serviço "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id }).catch(() => {})
       }
     } else if (ehPrestador) {
       const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.criado_por])
       if (dono.rows[0]?.push_token) {
         enviarPushNotificacao(dono.rows[0].push_token, '✅ Serviço concluído!',
-          `O prestador concluiu o reparo "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id }).catch(() => {})
+          `O prestador concluiu o serviço "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id }).catch(() => {})
       }
     }
-    res.json({ mensagem: 'Reparo encerrado com sucesso!', encerramento: 'concluido' })
+    res.json({ mensagem: 'Serviço encerrado com sucesso!', encerramento: 'concluido' })
   } catch (err) {
     console.error('[reparos/encerrar]', err.message)
-    res.status(500).json({ erro: 'Erro ao encerrar reparo' })
+    res.status(500).json({ erro: 'Erro ao encerrar serviço' })
   }
 })
 
 router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     const r = reparo.rows[0]
     const ehDono      = r.criado_por === req.usuario.id
     const ehPrestador = r.match_usuario_id === req.usuario.id
@@ -3013,15 +3013,15 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     const prestadorR = prestadorId
       ? await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [prestadorId])
       : { rows: [] }
-    res.json({ mensagem: 'Match expirado, reparo disponível novamente' })
+    res.json({ mensagem: 'Match expirado, serviço disponível novamente' })
     if (donoR.rows[0]?.push_token) {
       enviarPushNotificacao(donoR.rows[0].push_token, '⏰ Prazo expirado!',
-        `O prestador não chegou a tempo para "${r.titulo}". O reparo está disponível novamente.`,
+        `O prestador não chegou a tempo para "${r.titulo}". O serviço está disponível novamente.`,
         { tipo: 'match_expirado', reparo_id: req.params.id }).catch(() => {})
     }
     if (prestadorR.rows[0]?.push_token) {
       enviarPushNotificacao(prestadorR.rows[0].push_token, '⏰ Prazo expirado!',
-        `O prazo para chegar em "${r.titulo}" acabou. O reparo voltou para o feed.`,
+        `O prazo para chegar em "${r.titulo}" acabou. O serviço voltou para o feed.`,
         { tipo: 'match_expirado', reparo_id: req.params.id }).catch(() => {})
     }
     return
@@ -3341,7 +3341,7 @@ router.post('/reparos/:id/pedir-tempo', autenticar, async (req, res) => {
   try {
     const { motivo } = req.body
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     const r = reparo.rows[0]
 
     if (r.match_usuario_id !== req.usuario.id) {
@@ -3374,7 +3374,7 @@ router.post('/reparos/:id/pedir-tempo', autenticar, async (req, res) => {
 router.post('/reparos/:id/perguntar-tempo', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     const r = reparo.rows[0]
 
     if (r.criado_por !== req.usuario.id) {
@@ -3410,7 +3410,7 @@ router.post('/reparos/:id/informar-tempo', autenticar, async (req, res) => {
     if (!minutos || minutos <= 0) return res.status(400).json({ erro: 'Informe um tempo válido em minutos' })
 
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     const r = reparo.rows[0]
 
     if (r.match_usuario_id !== req.usuario.id) {
@@ -3444,7 +3444,7 @@ router.post('/reparos/:id/responder-tempo', autenticar, async (req, res) => {
   try {
     const { aceito } = req.body
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     const r = reparo.rows[0]
 
     if (r.criado_por !== req.usuario.id) {
@@ -3507,12 +3507,12 @@ router.post('/reparos/:id/responder-tempo', autenticar, async (req, res) => {
         await enviarPushNotificacao(
           prestador.rows[0].push_token,
           '❌ Tempo extra recusado',
-          'O solicitante não aceitou. O reparo voltou para disponível.',
+          'O solicitante não aceitou. O serviço voltou para disponível.',
           { tipo: 'tempo_recusado', reparo_id: req.params.id }
         )
       }
 
-      res.json({ mensagem: 'Tempo recusado. Reparo disponível novamente.' })
+      res.json({ mensagem: 'Tempo recusado. Serviço disponível novamente.' })
     }
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao responder pedido de tempo' })
@@ -3537,7 +3537,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
          FROM reparos WHERE id = $1`,
       [req.params.id, FAIXA_LONGA_REPARO_HORAS, CARENCIA_ESTENDER_REPARO_HORAS]
     )
-    if (result.rows.length === 0) return res.status(404).json({ erro: 'Reparo não encontrado' })
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
 
     const reparo = result.rows[0]
     const ehDono           = reparo.criado_por === req.usuario.id
@@ -3549,14 +3549,14 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // Prestador comum precisa de assinatura ativa
     if (!ehDono && !ehPrestadorDoMatch && req.usuario.role !== 'admin') {
       if (req.usuario.role !== 'prestador') {
-        return res.status(403).json({ erro: 'Sem permissão para ver este reparo' })
+        return res.status(403).json({ erro: 'Sem permissão para ver este serviço' })
       }
       const assinatura = await pool.query(
         `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' AND (proximo_vencimento IS NULL OR proximo_vencimento > NOW()) LIMIT 1`,
         [req.usuario.id]
       )
       if (assinatura.rows.length === 0) {
-        return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os reparos.' })
+        return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os serviços.' })
       }
     }
 
@@ -3627,7 +3627,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     })
   } catch (err) {
     console.error('Erro ao buscar reparo:', err)
-    res.status(500).json({ erro: 'Erro ao buscar reparo' })
+    res.status(500).json({ erro: 'Erro ao buscar serviço' })
   }
 })
 
