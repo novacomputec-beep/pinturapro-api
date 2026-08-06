@@ -21,7 +21,7 @@ const CONFIG = {
   reparo: {
     tabela:       'interesse_reparos',
     coluna:       'reparo_id',
-    mensagem:     'O solicitante escolheu outro prestador para este reparo.',
+    mensagem:     'O solicitante escolheu outro prestador para este serviço.',
     tipo:         'interesse_recusado',
     chavePayload: 'reparo_id'
   }

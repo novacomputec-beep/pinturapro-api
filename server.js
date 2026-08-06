@@ -162,7 +162,7 @@ const verificarPrestadoresProximos = async () => {
       await enviarPushNotificacao(
         par.push_token,
         '📍 Serviço próximo a você!',
-        textoProximidade('um reparo', par.titulo, par.cidade, par.coordenadas_origem, distanciaKm),
+        textoProximidade('um serviço', par.titulo, par.cidade, par.coordenadas_origem, distanciaKm),
         { tipo: 'reparo_proximo', reparo_id: par.reparo_id }
       ).catch(err => console.error('Erro push proximidade reparo:', err))
       notifReparos++

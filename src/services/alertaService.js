@@ -150,9 +150,9 @@ const enviarBoasVindas = async (usuarioId) => {
     if (role === 'assinante') {
       mensagem = 'Explore obras de pintura disponíveis na sua região agora mesmo!'
     } else if (role === 'prestador') {
-      mensagem = 'Explore reparos e serviços disponíveis na sua região agora mesmo!'
+      mensagem = 'Explore serviços disponíveis na sua região agora mesmo!'
     } else if (role === 'dono_obra') {
-      mensagem = 'Cadastre sua primeira obra ou reparo e encontre profissionais qualificados!'
+      mensagem = 'Cadastre sua primeira obra ou serviço e encontre profissionais qualificados!'
     }
 
     await enviarPushNotificacao(
@@ -216,7 +216,7 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
 
     const total = await enviarPushEmLote(
       prestadores.rows,
-      '🔧 Novo reparo disponível!',
+      '🔧 Novo serviço disponível!',
       `"${reparo.titulo}" em ${reparo.cidade} — categoria: ${reparo.categoria}`,
       { tipo: 'novo_reparo', reparo_id: reparoId }
     )
@@ -271,8 +271,8 @@ const verificarObrasExpirando = async () => {
       )
       await enviarPushEmLote(
         reparos.rows,
-        '⏰ Seu reparo expira em 24 horas!',
-        'Seu reparo será encerrado em breve.',
+        '⏰ Seu serviço expira em 24 horas!',
+        'Seu serviço será encerrado em breve.',
         { tipo: 'reparo_expirando' }
       )
     }
@@ -346,7 +346,7 @@ const verificarObrasComBaixoEngajamento = async () => {
         await enviarPushNotificacao(
           reparo.push_token,
           '💡 Considere aumentar sua oferta',
-          `Seu reparo "${reparo.titulo}" teve ${reparo.total_visitas} visitas e nenhum interessado ainda.`,
+          `Seu serviço "${reparo.titulo}" teve ${reparo.total_visitas} visitas e nenhum interessado ainda.`,
           { tipo: 'baixo_engajamento_reparo', reparo_id: reparo.id }
         )
       }
@@ -398,7 +398,7 @@ const verificarMarcosExpiracao = async () => {
   const lados = [
     { tabela: 'obras',   idKey: 'obra_id',   janelaCol: 'horas_para_expirar',      substantivo: 'Sua obra',   verbo: 'Estenda o prazo',
       tipoPrefixo: 'obra_expirando',   statusAprovacao: `AND d.status_aprovacao = 'aprovada'`, interesse: `SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id AND c.status IS DISTINCT FROM 'recusado'` },
-    { tabela: 'reparos', idKey: 'reparo_id', janelaCol: 'prazo_atendimento_horas', substantivo: 'Seu reparo', verbo: 'Aumente o prazo',
+    { tabela: 'reparos', idKey: 'reparo_id', janelaCol: 'prazo_atendimento_horas', substantivo: 'Seu serviço', verbo: 'Aumente o prazo',
       tipoPrefixo: 'reparo_expirando', statusAprovacao: '',                          interesse: `SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = d.id AND ir.status IS DISTINCT FROM 'recusado'` },
   ]
 
@@ -471,7 +471,7 @@ const verificarMarcosExpiracao = async () => {
 // `tabela` sai de literal no chamador, nunca do request.
 const ROTULOS_MATCH_DESFEITO = {
   obras:   { chave: 'obra_id',   profissional: 'pintor',    artigo: 'A obra',   volta: 'A obra voltou' },
-  reparos: { chave: 'reparo_id', profissional: 'prestador', artigo: 'O reparo', volta: 'O reparo voltou' },
+  reparos: { chave: 'reparo_id', profissional: 'prestador', artigo: 'O serviço', volta: 'O serviço voltou' },
 }
 
 const notificarMatchDesfeito = async (tabela, demanda) => {
@@ -806,7 +806,7 @@ const autoEncerrarPendentes = async () => {
   const lados = [
     { tabela: 'obras',   chave: 'obra_id',   tipoPush: 'obra_encerrada',    rotulo: 'a obra',
       chegadaApos: '6 hours',   chegadaRotulo: '6 horas' },
-    { tabela: 'reparos', chave: 'reparo_id', tipoPush: 'reparo_encerrado',  rotulo: 'o reparo',
+    { tabela: 'reparos', chave: 'reparo_id', tipoPush: 'reparo_encerrado',  rotulo: 'o serviço',
       chegadaApos: '30 minutes', chegadaRotulo: '30 minutos' }
   ]
   for (const lado of lados) {

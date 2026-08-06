@@ -76,7 +76,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
 
   <h2>Cláusula 1 — Do Objeto</h2>
   <p>O presente contrato tem como objeto a prestação do seguinte serviço: <strong>${reparo.titulo}</strong>${reparo.descricao ? ` — ${reparo.descricao}` : ''}.</p>
-  <p>Categoria: <strong>${reparo.categoria || 'Reparo geral'}</strong>.</p>
+  <p>Categoria: <strong>${reparo.categoria || 'Serviço geral'}</strong>.</p>
 
   <h2>Cláusula 2 — Da Execução dos Serviços</h2>
   <p>Os serviços serão executados no endereço indicado pela Contratante, conforme agendamento realizado através do aplicativo ${marca}.</p>
@@ -285,7 +285,7 @@ const enviarContratoReparo = async (reparoId) => {
       contratante: { ...dono, cidade: r.dono_cidade || r.cidade },
       contratado:  { ...prestador, cidade: r.prest_cidade || r.cidade },
       servico: {
-        tipo:       r.categoria || 'reparo',
+        tipo:       r.categoria || 'serviço',
         descricao:  r.titulo + (r.descricao ? ` — ${r.descricao}` : ''),
         endereco:   r.endereco_obra || `${r.cidade}${r.bairro ? ', ' + r.bairro : ''}`,
         valor:      r.valor_estimado,
@@ -299,7 +299,7 @@ const enviarContratoReparo = async (reparoId) => {
 
     const pdfBuffer    = await gerarContratoPDF(dadosPDF)
     const assunto      = `PinturaPro - ArrumaPro — Contrato de Serviço: ${r.titulo}`
-    const nomeArquivo  = `contrato_reparo_${String(reparoId).substring(0, 8)}.pdf`
+    const nomeArquivo  = `contrato_servico_${String(reparoId).substring(0, 8)}.pdf`
     const remetenteNome = 'PinturaPro - ArrumaPro'
 
     await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
