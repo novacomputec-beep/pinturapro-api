@@ -2184,6 +2184,10 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     }
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
     const { lat: latFinal, lng: lngFinal, origem: coordOrigem } = resolverCoordenadas(cidade, ufFinal, latitude, longitude, '[reparos/dono]')
+    // Janela original resolvida UMA vez: mesma base do expira_em e do prazo_atendimento_horas
+    // gravado, sem risco de os dois divergirem (mesmo padrão de POST /obras/dono). Antes a
+    // coluna recebia NULL quando o cliente não mandava prazo, enquanto o expira_em ia a 720h —
+    // a demanda ficava sem faixa e o job de marcos a pulava, sem alerta nenhum de expiração.
     const horasExpiracao = prazo_atendimento_horas || 720
     const expira_em = new Date(Date.now() + horasExpiracao * 3600 * 1000)
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
@@ -2194,7 +2198,7 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), prazo_atendimento_horas || null, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null]
+      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null]
     )
     res.status(201).json(result.rows[0])
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))

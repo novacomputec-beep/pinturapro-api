@@ -407,8 +407,11 @@ const verificarMarcosExpiracao = async () => {
     for (const lado of lados) {
       // Candidatos elegíveis com algum marco pendente e expira_em dentro do MAIOR offset possível
       // (1440min = 24h, faixa 168) — demandas mais distantes que isso não entram em banda nenhuma.
+      // COALESCE(janela, 720): linhas ANTIGAS gravadas com prazo NULL viravam Number(null)=0 no
+      // getFaixa, caíam no `faixa desconhecida` e nunca recebiam marco. 720 é o mesmo default que
+      // o create usa para o expira_em dessas linhas (e o que os dois crons já usam nas obras).
       const candidatos = await pool.query(`
-        SELECT d.id, d.titulo, d.${lado.janelaCol} AS janela, d.expira_em,
+        SELECT d.id, d.titulo, COALESCE(d.${lado.janelaCol}, 720) AS janela, d.expira_em,
                d.marco_1_em, d.marco_2_em, d.marco_3_em, u.push_token
         FROM ${lado.tabela} d
         JOIN usuarios u ON d.criado_por = u.id
