@@ -70,9 +70,25 @@ const FAIXAS = {
   },
 }
 
-// getFaixa(windowHours) → entrada da faixa para MATCH EXATO em {1,2,4,8,24,168}.
-// Retorna null para qualquer outro valor (legado fora de faixa, NULL, float, string não-numérica).
-// Os chamadores tratam o null (fallback definido em passo posterior — ex.: maior faixa <= janela).
-const getFaixa = (windowHours) => FAIXAS[windowHours] || null
+// Chaves em ordem crescente, derivadas de FAIXAS (não uma segunda lista a manter em sincronia).
+const CHAVES_ORDENADAS = Object.keys(FAIXAS).map(Number).sort((a, b) => a - b)
+
+// getFaixa(windowHours) → entrada da faixa para a janela dada.
+// Match exato em {1,2,4,8,24,168}; fora disso, cai na MAIOR faixa que não excede a janela —
+// 72 → 24, 720/1440/2160 → 168, e o mesmo para as horas arbitrárias que o estender aceita.
+// Antes o match era exato e todo o resto voltava null, então demanda fora de faixa (inclusive
+// o default de 720h de quem cadastra sem prazo) nunca recebia marco nenhum.
+// Continua null quando não há faixa aplicável: janela < 1 (0 vem de NULL/'' via Number),
+// negativa, NaN, Infinity ou string não-numérica. O chamador já trata esse null com log.
+const getFaixa = (windowHours) => {
+  const horas = Number(windowHours)
+  if (!Number.isFinite(horas)) return null
+  let escolhida = null
+  for (const chave of CHAVES_ORDENADAS) {
+    if (chave > horas) break
+    escolhida = FAIXAS[chave]
+  }
+  return escolhida
+}
 
 module.exports = { FAIXAS, getFaixa }
