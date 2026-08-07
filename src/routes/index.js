@@ -2233,9 +2233,11 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
 const CARENCIA_ESTENDER_REPARO_HORAS = 1
 const FAIXA_LONGA_REPARO_HORAS = 24
 
-// Advisory de extensão do reparo. Não há mais teto no servidor (o de 2x saiu), mas o campo
-// continua na resposta porque o app filtra as opções por ele (ModalEstenderPrazo). Valor
-// generoso = "não gateia o menu"; NÃO é enforçado por nada.
+// Teto de extensão do reparo — o de 2x saiu e por um tempo isto foi só advisory; hoje o
+// endpoint TAMBÉM o enforça (400 quando horas > este valor), espelhando TETO_ESTENDER_OBRA_HORAS.
+// Segue na resposta porque o app filtra as opções por ele (ModalEstenderPrazo). Valor generoso
+// = "não gateia o menu": a maior opção do app é 168h, então isto só barra valor absurdo
+// (ex.: um dígito a mais por engano). O nome ADVISORY_ ficou do período em que não era enforçado.
 const ADVISORY_ESTENDER_REPARO_HORAS = 8760
 
 // Janela de dedupe do estender. Sem client_request_id no corpo, a chave é (ultima_extensao_em,
@@ -2264,6 +2266,13 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
 
     const horas = Number(req.body?.horas)
     if (!Number.isFinite(horas) || horas < 1) return res.status(400).json({ erro: 'horas inválido: informe um número >= 1' })
+    // Teto plano, espelhando POST /obras/:id/estender: mesma posição (antes da query de
+    // carência e do UPDATE), mesmo `>` estrito (8760 exato passa), mesmo 400 e o mesmo
+    // extensao_maxima_horas no corpo do erro, p/ o cliente aprender o limite pela recusa.
+    // Validação POR REQUISIÇÃO, sem somar extensões anteriores — igual à obra.
+    if (horas > ADVISORY_ESTENDER_REPARO_HORAS) {
+      return res.status(400).json({ erro: `horas inválido: máximo de ${ADVISORY_ESTENDER_REPARO_HORAS} (365 dias)`, extensao_maxima_horas: ADVISORY_ESTENDER_REPARO_HORAS })
+    }
 
     // Carência e novo prazo na MESMA query: as duas comparações precisam do relógio do banco
     // (NOW()), não do relógio do processo, senão skew de container decide quem pode estender.
