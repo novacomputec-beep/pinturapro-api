@@ -4965,3 +4965,6 @@ router.post('/admin/2fa/login-verificar', async (req, res) => {
 
 module.exports = router
 module.exports.migracaoPronta = migracaoPronta
+// Exportado para os jobs de server.js: cachePrestadores vive NESTE módulo, então
+// invalidarCacheAssinatura sozinho (middlewares/auth) limpa só metade dos caches.
+module.exports.invalidarCachesUsuario = invalidarCachesUsuario
