@@ -6,7 +6,7 @@ const rateLimit = require('express-rate-limit')
 const rotasApp = require('./src/routes')
 const { pool } = require('./src/utils/supabase')
 const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes } = require('./src/services/alertaService')
-const { invalidarCacheAssinatura } = require('./src/middlewares/auth')
+const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary } = require('./src/services/uploadService')
 
 const app = express()
@@ -221,7 +221,7 @@ const deletarMidiasAntigas = async () => {
 const expirarAssinaturasVencidas = async () => {
   try {
     const vencidas = await pool.query(`
-      SELECT a.usuario_id, u.push_token, u.nome
+      SELECT a.id AS assinatura_id, a.usuario_id, u.push_token, u.nome
       FROM assinaturas a
       JOIN usuarios u ON u.id = a.usuario_id
       WHERE a.status = 'ativa' AND a.proximo_vencimento < NOW()
@@ -229,11 +229,16 @@ const expirarAssinaturasVencidas = async () => {
     if (vencidas.rows.length === 0) return
 
     for (const sub of vencidas.rows) {
+      // Chaveado no id da LINHA, não no usuario_id: o SELECT acima já escolheu exatamente
+      // as assinaturas vencidas, e um usuário com mais de uma linha tinha todas marcadas
+      // 'expirada' junto — inclusive as que ainda não venceram.
       await pool.query(
-        `UPDATE assinaturas SET status = 'expirada', atualizado_em = NOW() WHERE usuario_id = $1`,
-        [sub.usuario_id]
+        `UPDATE assinaturas SET status = 'expirada', atualizado_em = NOW() WHERE id = $1`,
+        [sub.assinatura_id]
       )
-      invalidarCacheAssinatura(sub.usuario_id)
+      // Os dois caches (middlewares/auth + cachePrestadores em routes) — só o primeiro
+      // era limpo, então /reparos seguia servindo 'ativa' até o TTL de 5 min vencer.
+      invalidarCachesUsuario(sub.usuario_id)
       if (sub.push_token) {
         enviarPushNotificacao(
           sub.push_token,
@@ -341,8 +346,10 @@ const iniciarAgendador = () => {
             WHEN plano = 'anual'   THEN NOW() + INTERVAL '365 days'
             ELSE NOW() + INTERVAL '30 days' END
          WHERE usuario_id = $1`, [p.id])
-        // Assinatura recém-ativada: limpa o cache p/ o app não cair na tela de pagamento (B72-07)
-        invalidarCacheAssinatura(p.id)
+        // Assinatura recém-ativada: limpa os DOIS caches p/ o app não cair na tela de
+        // pagamento (B72-07). Só o de middlewares/auth era limpo, então /reparos seguia
+        // barrando o prestador recém-aprovado até o TTL de 5 min de cachePrestadores vencer.
+        invalidarCachesUsuario(p.id)
         if (p.push_token) {
           await enviarPushNotificacao(p.push_token, '✅ Cadastro aprovado!', 'Bem-vindo ao PinturaPro! Seu acesso está liberado.', { tipo: 'verificacao_aprovada' }).catch(() => {})
         }
