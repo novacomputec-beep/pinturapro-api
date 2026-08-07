@@ -1875,6 +1875,13 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
       return res.json({ mensagem: 'Obra já encerrada.', encerramento: 'concluido' })
     }
 
+    // Mesmo pré-requisito de chegada de POST /reparos/:id/encerrar — ver o comentário longo lá.
+    // Sem NENHUMA declaração, bloqueia; declarada e não confirmada segue passando; sem match e
+    // admin ficam de fora.
+    if (!ehAdmin && o.match_usuario_id && !o.chegada_declarada_em) {
+      return res.status(409).json({ erro: 'Antes de encerrar a obra, confirme se o profissional chegou ao local.' })
+    }
+
     // Fecha na hora quando não há contraparte para confirmar: admin agindo por fora das
     // partes, ou obra que nunca teve pintor casado.
     const semContraparte = !o.match_usuario_id
@@ -2923,6 +2930,17 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
     // Já encerrado → no-op idempotente (não reescreve encerrado_em).
     if (r.status === 'encerrada') {
       return res.json({ mensagem: 'Serviço já encerrado.', encerramento: 'concluido' })
+    }
+
+    // Chegada é pré-requisito do encerramento. Sem NENHUMA declaração não há registro de que o
+    // profissional esteve no local, e encerrar apagaria a única evidência que sustenta falta e
+    // reputação. DECLARADA e ainda não confirmada passa de propósito: esse caso já tem fluxo
+    // próprio (o dono confirma, ou autoEncerrarPendentes auto-confirma vencido o prazo), e
+    // travá-lo puniria o profissional pelo silêncio do dono.
+    // Só vale com contraparte casada — demanda que nunca teve match não teve quem chegasse, e
+    // bloquear deixaria o dono sem como encerrar. Admin mantém a saída de emergência de sempre.
+    if (!ehAdmin && r.match_usuario_id && !r.chegada_declarada_em) {
+      return res.status(409).json({ erro: 'Antes de encerrar o serviço, confirme se o profissional chegou ao local.' })
     }
 
     const semContraparte = !r.match_usuario_id
