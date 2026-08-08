@@ -1949,7 +1949,17 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     if (!ehDono && !ehPintor && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão' })
     // Chegada declarada/confirmada congela a expiração do match (mesma regra do cron): o pintor
     // está no local, expirar aqui devolveria ao feed uma obra em atendimento.
-    if (o.chegada_declarada_em || o.chegada_confirmada_em) {
+    //
+    // EXCEÇÃO — o dono contesta uma chegada que NÃO foi ele quem declarou. Sem ela, uma chegada
+    // declarada pelo pintor trancava a obra: o dono via "pintor presente" sem ter visto ninguém e
+    // não tinha saída. Vale SÓ para o dono (pintor e admin seguem barrados em todos os casos), e
+    // só enquanto a declaração é de outro e a obra não encerrou.
+    // chegada_declarada_por NULL conta como "não é o dono" (!== já dá isso), liberando a
+    // contestação em linha inconsistente em vez de trancá-la.
+    const donoContesta = ehDono
+      && o.chegada_declarada_por !== req.usuario.id
+      && o.status !== 'encerrada'
+    if ((o.chegada_declarada_em || o.chegada_confirmada_em) && !donoContesta) {
       return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
     }
     const pintorId = o.match_usuario_id
@@ -1964,6 +1974,7 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
          UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
                 chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
                 chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
+                chegada_confirmada_em = NULL,
                 prestadores_bloqueados = CASE
                   -- Isenção igual à do cron: janela oferecida que nunca virou compromisso —
                   -- recusada pelo dono OU pendente sem resposta — e nenhuma outra valendo. As
@@ -1975,7 +1986,16 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
                   WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
                   THEN prestadores_bloqueados
                   ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
-          WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL
+          WHERE id = $1
+            AND (
+              (chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL)
+              -- Espelha o donoContesta do JS relendo a linha VIVA: $3 é ehDono, e as outras duas
+              -- condições são reavaliadas aqui. Se a obra encerrar ou o próprio dono declarar a
+              -- chegada entre o SELECT e este UPDATE, o bypass morre e volta o 409 de sempre.
+              OR ($3::boolean
+                  AND chegada_declarada_por IS DISTINCT FROM criado_por
+                  AND status IS DISTINCT FROM 'encerrada')
+            )
           RETURNING id
        ), proposta AS (
          -- A candidatura vencedora morre JUNTO com o match, no mesmo statement. Sem isto ela
@@ -1988,7 +2008,7 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
           RETURNING id
        )
        SELECT id FROM desfeito`,
-      [req.params.id, pintorId]
+      [req.params.id, pintorId, ehDono]
     )
     // rowCount = 0 (o SELECT final não devolveu linha) → a chegada foi declarada entre o SELECT e o UPDATE. Nada mudou no banco;
     // responder sucesso aqui avisaria os dois lados de uma expiração que não aconteceu, e o
@@ -2116,10 +2136,15 @@ router.post('/obras/:id/responder-tempo', autenticar, async (req, res) => {
       // POST /reparos/:id/responder-tempo, que já bloqueava. Mesmo CASE NULL-safe/idempotente
       // dos demais un-matches (ver POST /obras/:id/expirar-match).
       // chegada_* zeradas como nos outros un-matches: a obra volta ao feed limpa.
-      // chegada_confirmada_em entra na lista AQUI, ao contrário dos quatro outros pontos, e de
-      // propósito: lá o próprio WHERE já impede a linha de ser tocada depois da confirmação,
-      // aqui não há esse guard. Deixá-la preenchida devolveria ao feed uma obra que o cron
-      // nunca mais conseguiria expirar (o job pula linhas com chegada_confirmada_em).
+      // chegada_confirmada_em entra na lista aqui E nos dois expirar-match — os três pontos que
+      // conseguem tocar uma linha JÁ confirmada. Aqui nunca houve guard; lá o dono passou a furar
+      // o 409 para contestar chegada declarada por outro, e com isso o WHERE deixou de proteger
+      // a coluna (era esse o motivo de eles não precisarem dela). Deixá-la preenchida devolveria
+      // ao feed uma demanda que o cron nunca mais conseguiria expirar (o job pula linhas com
+      // chegada_confirmada_em) e cuja PRÓXIMA chegada já nasceria confirmada, porque o CASE de
+      // POST /:id/chegada devolve o valor antigo quando a coluna não está NULL.
+      // Os dois crons seguem sem precisar: o predicado deles exige chegada_confirmada_em IS NULL,
+      // então a coluna nunca está preenchida nas linhas que eles pegam.
       await pool.query(
         `WITH desfeito AS (
            UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
@@ -3024,7 +3049,13 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     }
     // Chegada declarada/confirmada congela a expiração do match (mesma regra do cron): o
     // prestador está no local — expirar aqui ainda o mandaria para a lista negra do reparo.
-    if (r.chegada_declarada_em || r.chegada_confirmada_em) {
+    //
+    // EXCEÇÃO — o dono contesta chegada declarada por outro (ver POST /obras/:id/expirar-match
+    // para o racional completo). Só o dono passa; prestador e admin seguem barrados.
+    const donoContesta = ehDono
+      && r.chegada_declarada_por !== req.usuario.id
+      && r.status !== 'encerrada'
+    if ((r.chegada_declarada_em || r.chegada_confirmada_em) && !donoContesta) {
       return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
     }
     // Grava o prestador na lista negra antes de limpar o match.
@@ -3044,6 +3075,7 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
            chegada_pendente_janela = NULL,
            chegada_pendente_em = NULL,
            chegada_recusada_em = NULL,
+           chegada_confirmada_em = NULL,
            prestadores_bloqueados = CASE
              -- Isenção por janela não honrada pelo dono (ver POST /obras/:id/expirar-match e o
              -- CASE dos crons): recusada OU pendente sem resposta, e nenhuma outra valendo.
@@ -3053,7 +3085,14 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
              WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
              THEN prestadores_bloqueados
              ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
-          WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL
+          WHERE id = $1
+            AND (
+              (chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL)
+              -- Espelha o donoContesta relendo a linha VIVA (ver /obras/:id/expirar-match).
+              OR ($3::boolean
+                  AND chegada_declarada_por IS DISTINCT FROM criado_por
+                  AND status IS DISTINCT FROM 'encerrada')
+            )
           RETURNING id
        ), proposta AS (
          -- A proposta vencedora expira junto com o match, no mesmo statement — senão ela seguia
@@ -3064,7 +3103,7 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
           RETURNING id
        )
        SELECT id FROM desfeito`,
-      [req.params.id, prestadorId]
+      [req.params.id, prestadorId, ehDono]
     )
     // rowCount = 0 (o SELECT final não devolveu linha) → chegada declarada entre o SELECT e o UPDATE (ver /obras/:id/expirar-match).
     // Sai antes de qualquer push: nada expirou, e o prestador segue com o match.
