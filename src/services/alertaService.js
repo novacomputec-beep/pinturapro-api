@@ -631,34 +631,50 @@ const verificarCronometroReparos = async () => {
     let expiradosCount = 0
     if (candidatos.rows.length > 0) {
       const expirados = await pool.query(`
-        UPDATE reparos SET
-          status = 'aberta',
-          match_feito_em = NULL,
-          match_usuario_id = NULL,
-          notif_5min_enviada = false,
-          pedido_tempo_status = NULL,
-          pedido_tempo_motivo = NULL,
-          pedido_tempo_minutos = NULL,
-          chegada_janela = NULL,
-          chegada_prevista_em = NULL,
-          chegada_declarada_por = NULL,
-          chegada_declarada_em = NULL,
-          chegada_pendente_janela = NULL,
-          chegada_pendente_em = NULL,
-          chegada_recusada_em = NULL,
-          prestadores_bloqueados = CASE
-            -- Isenção: janela oferecida que nunca virou compromisso — recusada pelo dono OU
-            -- morta pendente sem resposta — e nenhuma outra valendo. Não bloqueia.
-            WHEN chegada_prevista_em IS NULL
-                 AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
-            THEN prestadores_bloqueados
-            WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
-            THEN prestadores_bloqueados
-            ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), match_usuario_id) END,
-          expira_em = NOW() + (prazo_atendimento_horas * INTERVAL '1 hour')
-        WHERE id = ANY($1::uuid[]) AND ${PRED_EXPIRADOS_REPAROS}
-        RETURNING id
-      `, [candidatos.rows.map(c => c.id)])
+        WITH desfeitos AS (
+          UPDATE reparos SET
+            status = 'aberta',
+            match_feito_em = NULL,
+            match_usuario_id = NULL,
+            notif_5min_enviada = false,
+            pedido_tempo_status = NULL,
+            pedido_tempo_motivo = NULL,
+            pedido_tempo_minutos = NULL,
+            chegada_janela = NULL,
+            chegada_prevista_em = NULL,
+            chegada_declarada_por = NULL,
+            chegada_declarada_em = NULL,
+            chegada_pendente_janela = NULL,
+            chegada_pendente_em = NULL,
+            chegada_recusada_em = NULL,
+            prestadores_bloqueados = CASE
+              -- Isenção: janela oferecida que nunca virou compromisso — recusada pelo dono OU
+              -- morta pendente sem resposta — e nenhuma outra valendo. Não bloqueia.
+              WHEN chegada_prevista_em IS NULL
+                   AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
+              THEN prestadores_bloqueados
+              WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
+              THEN prestadores_bloqueados
+              ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), match_usuario_id) END,
+            expira_em = NOW() + (prazo_atendimento_horas * INTERVAL '1 hour')
+          WHERE id = ANY($1::uuid[]) AND ${PRED_EXPIRADOS_REPAROS}
+          RETURNING id
+        ), propostas AS (
+          -- A proposta vencedora expira JUNTO com o match, no mesmo statement: enquanto ela
+          -- ficava 'aceito' o serviço voltava ao feed mas nenhum aceite novo passava
+          -- (interesse_reparos_aceito_unico_idx ocupado + guard jaAceito → 409).
+          -- O par (reparo, prestador) vem dos dois arrays paralelos porque o RETURNING acima já
+          -- traz match_usuario_id NULL; o IN no CTE desfeitos limita aos reparos que o UPDATE
+          -- realmente pegou, então quem escapou do predicado na corrida não é tocado.
+          UPDATE interesse_reparos ir SET status = 'expirado'
+            FROM unnest($1::uuid[], $2::uuid[]) AS alvo(reparo_id, usuario_id)
+           WHERE ir.reparo_id = alvo.reparo_id AND ir.usuario_id = alvo.usuario_id
+             AND ir.status = 'aceito'
+             AND alvo.reparo_id IN (SELECT id FROM desfeitos)
+          RETURNING ir.id
+        )
+        SELECT id FROM desfeitos
+      `, [candidatos.rows.map(c => c.id), candidatos.rows.map(c => c.match_usuario_id)])
       expiradosCount = expirados.rows.length
 
       // Só notifica e contabiliza falta para quem o UPDATE realmente pegou. Os dois lados
@@ -744,31 +760,43 @@ const verificarCronometroObras = async () => {
     let expiradosCount = 0
     if (candidatos.rows.length > 0) {
       const expirados = await pool.query(`
-        UPDATE obras SET
-          status = 'aberta',
-          match_feito_em = NULL,
-          match_usuario_id = NULL,
-          notif_5min_enviada = false,
-          chegada_janela = NULL,
-          chegada_prevista_em = NULL,
-          chegada_declarada_por = NULL,
-          chegada_declarada_em = NULL,
-          chegada_pendente_janela = NULL,
-          chegada_pendente_em = NULL,
-          chegada_recusada_em = NULL,
-          prestadores_bloqueados = CASE
-            -- Isenção: janela oferecida que nunca virou compromisso — recusada pelo dono OU
-            -- morta pendente sem resposta — e nenhuma outra valendo. Não bloqueia.
-            WHEN chegada_prevista_em IS NULL
-                 AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
-            THEN prestadores_bloqueados
-            WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
-            THEN prestadores_bloqueados
-            ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), match_usuario_id) END,
-          expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
-        WHERE id = ANY($1::uuid[]) AND ${PRED_EXPIRADOS_OBRAS}
-        RETURNING id
-      `, [candidatos.rows.map(c => c.id)])
+        WITH desfeitos AS (
+          UPDATE obras SET
+            status = 'aberta',
+            match_feito_em = NULL,
+            match_usuario_id = NULL,
+            notif_5min_enviada = false,
+            chegada_janela = NULL,
+            chegada_prevista_em = NULL,
+            chegada_declarada_por = NULL,
+            chegada_declarada_em = NULL,
+            chegada_pendente_janela = NULL,
+            chegada_pendente_em = NULL,
+            chegada_recusada_em = NULL,
+            prestadores_bloqueados = CASE
+              -- Isenção: janela oferecida que nunca virou compromisso — recusada pelo dono OU
+              -- morta pendente sem resposta — e nenhuma outra valendo. Não bloqueia.
+              WHEN chegada_prevista_em IS NULL
+                   AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
+              THEN prestadores_bloqueados
+              WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
+              THEN prestadores_bloqueados
+              ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), match_usuario_id) END,
+            expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
+          WHERE id = ANY($1::uuid[]) AND ${PRED_EXPIRADOS_OBRAS}
+          RETURNING id
+        ), propostas AS (
+          -- Candidatura vencedora expira junto com o match (ver o cron de reparos para o
+          -- porquê dos dois arrays paralelos e do IN no CTE desfeitos).
+          UPDATE candidaturas c SET status = 'expirado'
+            FROM unnest($1::uuid[], $2::uuid[]) AS alvo(obra_id, usuario_id)
+           WHERE c.obra_id = alvo.obra_id AND c.usuario_id = alvo.usuario_id
+             AND c.status = 'aceito'
+             AND alvo.obra_id IN (SELECT id FROM desfeitos)
+          RETURNING c.id
+        )
+        SELECT id FROM desfeitos
+      `, [candidatos.rows.map(c => c.id), candidatos.rows.map(c => c.match_usuario_id)])
       expiradosCount = expirados.rows.length
 
       // try/catch por linha pelo mesmo motivo do cron de reparos.

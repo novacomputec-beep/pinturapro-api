@@ -1960,24 +1960,37 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     // NULL-safe (match já desfeito → $2 NULL → array_append gravaria um NULL no array) e
     // idempotente (rechamada não duplica o mesmo uuid).
     const upd = await pool.query(
-      `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
-              chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
-              chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
-              prestadores_bloqueados = CASE
-                -- Isenção igual à do cron: janela oferecida que nunca virou compromisso —
-                -- recusada pelo dono OU pendente sem resposta — e nenhuma outra valendo. As
-                -- expressões do SET leem a linha ANTIGA, então estas três colunas ainda têm o
-                -- valor de antes, apesar de irem a NULL acima.
-                WHEN chegada_prevista_em IS NULL
-                     AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
-                THEN prestadores_bloqueados
-                WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
-                THEN prestadores_bloqueados
-                ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
-       WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL`,
+      `WITH desfeito AS (
+         UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
+                chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
+                chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
+                prestadores_bloqueados = CASE
+                  -- Isenção igual à do cron: janela oferecida que nunca virou compromisso —
+                  -- recusada pelo dono OU pendente sem resposta — e nenhuma outra valendo. As
+                  -- expressões do SET leem a linha ANTIGA, então estas três colunas ainda têm o
+                  -- valor de antes, apesar de irem a NULL acima.
+                  WHEN chegada_prevista_em IS NULL
+                       AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
+                  THEN prestadores_bloqueados
+                  WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
+                  THEN prestadores_bloqueados
+                  ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
+          WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL
+          RETURNING id
+       ), proposta AS (
+         -- A candidatura vencedora morre JUNTO com o match, no mesmo statement. Sem isto ela
+         -- continuava 'aceito' e ocupando candidaturas_aceito_unica_idx: a obra voltava ao feed
+         -- mas nenhum aceite novo passava (guard jaAceito → 409, e o índice único barraria).
+         -- Depende do CTE desfeito: se o UPDATE acima não pegou a linha (chegada declarada na
+         -- corrida), o IN não casa nada e a candidatura fica intacta.
+         UPDATE candidaturas SET status = 'expirado'
+          WHERE obra_id IN (SELECT id FROM desfeito) AND usuario_id = $2::uuid AND status = 'aceito'
+          RETURNING id
+       )
+       SELECT id FROM desfeito`,
       [req.params.id, pintorId]
     )
-    // rowCount = 0 → a chegada foi declarada entre o SELECT e o UPDATE. Nada mudou no banco;
+    // rowCount = 0 (o SELECT final não devolveu linha) → a chegada foi declarada entre o SELECT e o UPDATE. Nada mudou no banco;
     // responder sucesso aqui avisaria os dois lados de uma expiração que não aconteceu, e o
     // pintor receberia "perdeu a obra" seguindo com o match na mão. Mesmo 409 do guard acima.
     if (upd.rowCount === 0) {
@@ -2108,15 +2121,23 @@ router.post('/obras/:id/responder-tempo', autenticar, async (req, res) => {
       // aqui não há esse guard. Deixá-la preenchida devolveria ao feed uma obra que o cron
       // nunca mais conseguiria expirar (o job pula linhas com chegada_confirmada_em).
       await pool.query(
-        `UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
-                chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
-                chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
-                chegada_confirmada_em = NULL,
-                prestadores_bloqueados = CASE
-                  WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
-                  THEN prestadores_bloqueados
-                  ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
-         WHERE id = $1`,
+        `WITH desfeito AS (
+           UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
+                  chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
+                  chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
+                  chegada_confirmada_em = NULL,
+                  prestadores_bloqueados = CASE
+                    WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
+                    THEN prestadores_bloqueados
+                    ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
+            WHERE id = $1
+            RETURNING id
+         )
+         -- Candidatura vencedora expira junto (ver POST /obras/:id/expirar-match): recusar o
+         -- tempo extra é un-match como os outros, e sem isto a obra voltava ao feed com o
+         -- índice de aceite ainda ocupado, sem poder ser fechada de novo.
+         UPDATE candidaturas SET status = 'expirado'
+          WHERE obra_id IN (SELECT id FROM desfeito) AND usuario_id = $2::uuid AND status = 'aceito'`,
         [req.params.id, pintorId]
       )
       const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [pintorId])
@@ -3012,29 +3033,40 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     // array) e idempotente (rechamada não duplica o mesmo uuid).
     const prestadorId = r.match_usuario_id
     const upd = await pool.query(
-      `UPDATE reparos SET
-        match_feito_em = NULL,
-        match_usuario_id = NULL,
-        chegada_janela = NULL,
-        chegada_prevista_em = NULL,
-        chegada_declarada_por = NULL,
-        chegada_declarada_em = NULL,
-        chegada_pendente_janela = NULL,
-        chegada_pendente_em = NULL,
-        chegada_recusada_em = NULL,
-        prestadores_bloqueados = CASE
-          -- Isenção por janela não honrada pelo dono (ver POST /obras/:id/expirar-match e o
-          -- CASE dos crons): recusada OU pendente sem resposta, e nenhuma outra valendo.
-          WHEN chegada_prevista_em IS NULL
-               AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
-          THEN prestadores_bloqueados
-          WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
-          THEN prestadores_bloqueados
-          ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
-       WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL`,
+      `WITH desfeito AS (
+         UPDATE reparos SET
+           match_feito_em = NULL,
+           match_usuario_id = NULL,
+           chegada_janela = NULL,
+           chegada_prevista_em = NULL,
+           chegada_declarada_por = NULL,
+           chegada_declarada_em = NULL,
+           chegada_pendente_janela = NULL,
+           chegada_pendente_em = NULL,
+           chegada_recusada_em = NULL,
+           prestadores_bloqueados = CASE
+             -- Isenção por janela não honrada pelo dono (ver POST /obras/:id/expirar-match e o
+             -- CASE dos crons): recusada OU pendente sem resposta, e nenhuma outra valendo.
+             WHEN chegada_prevista_em IS NULL
+                  AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
+             THEN prestadores_bloqueados
+             WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
+             THEN prestadores_bloqueados
+             ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
+          WHERE id = $1 AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL
+          RETURNING id
+       ), proposta AS (
+         -- A proposta vencedora expira junto com o match, no mesmo statement — senão ela seguia
+         -- 'aceito' ocupando interesse_reparos_aceito_unico_idx e o serviço voltava ao feed sem
+         -- poder ser aceito de novo (ver POST /obras/:id/expirar-match).
+         UPDATE interesse_reparos SET status = 'expirado'
+          WHERE reparo_id IN (SELECT id FROM desfeito) AND usuario_id = $2::uuid AND status = 'aceito'
+          RETURNING id
+       )
+       SELECT id FROM desfeito`,
       [req.params.id, prestadorId]
     )
-    // rowCount = 0 → chegada declarada entre o SELECT e o UPDATE (ver /obras/:id/expirar-match).
+    // rowCount = 0 (o SELECT final não devolveu linha) → chegada declarada entre o SELECT e o UPDATE (ver /obras/:id/expirar-match).
     // Sai antes de qualquer push: nada expirou, e o prestador segue com o match.
     if (upd.rowCount === 0) {
       return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
