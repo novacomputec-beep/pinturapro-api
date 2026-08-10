@@ -152,11 +152,12 @@ async function main() {
         PARAMS)
 
       // 0) CONTRATOS primeiro — `contratos` não referencia `usuarios`, e sim a
-      //    candidatura (fluxo obra) ou o interesse (fluxo reparo). Apagar
-      //    candidaturas/interesse_reparos sem apagar os contratos que os apontam
-      //    estourava FK (23503) e fazia ROLLBACK de TUDO (nada era apagado, e a conta
-      //    + cpf_cnpj sobreviviam). Cobre o usuário como PRESTADOR (usuario_id) e como
-      //    DONO (via obras.criado_por / reparos.criado_por), nos dois fluxos.
+      //    candidatura (fluxo obra) ou o interesse (fluxo reparo). Não é questão de FK:
+      //    candidatura_id é FK com ON DELETE CASCADE (o contrato cai junto sozinho) e
+      //    interesse_id não tem constraint nenhuma. Apagar os contratos aqui evita que
+      //    os do fluxo reparo fiquem ÓRFÃOS quando os interesse_reparos somem.
+      //    Cobre o usuário como PRESTADOR (usuario_id) e como DONO (via
+      //    obras.criado_por / reparos.criado_por), nos dois fluxos.
       await del('contratos',                        `DELETE FROM contratos
                                                       WHERE candidatura_id IN (
                                                               SELECT c.id FROM candidaturas c

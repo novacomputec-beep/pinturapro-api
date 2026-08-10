@@ -969,15 +969,19 @@ router.post('/auth/boas-vindas-confirmada', autenticar, async (req, res) => {
 // Contratos do usuário — PRIMEIRO passo de toda exclusão de conta.
 //
 // `contratos` não aponta para `usuarios`: o vínculo é INDIRETO, pela candidatura
-// (fluxo obra, contratos.candidatura_id → candidaturas.id) ou pelo interesse
-// (fluxo reparo, contratos.interesse_id → interesse_reparos.id). Como as cascatas
-// de exclusão apagavam candidaturas/interesse_reparos SEM apagar os contratos que
-// os referenciam, um usuário COM contrato podia derrubar a transação inteira por
-// violação de FK (23503) → ROLLBACK → a conta (e o cpf_cnpj dela) SOBREVIVIA, e o
-// app só mostrava "Erro ao excluir conta". Apagando os contratos antes dos pais, a
-// FK deixa de bloquear. Onde a FK não existir, isto ainda é necessário: sem ele
-// ficam linhas ÓRFÃS em contratos apontando para candidaturas/interesses que não
-// existem mais (mesma sujeira que a limpeza de assinaturas órfãs acima resolve).
+// (fluxo obra, contratos.candidatura_id) ou pelo interesse (fluxo reparo,
+// contratos.interesse_id).
+//
+// Os dois lados se comportam DIFERENTE, e nenhum deles bloqueia por FK:
+//   • candidatura_id É uma FK → candidaturas, com ON DELETE CASCADE: apagar a
+//     candidatura já leva o contrato junto. Nunca estourou 23503.
+//   • interesse_id NÃO é FK — não existe constraint nenhuma nessa coluna
+//     (verificado no pg_catalog). Apagar o interesse deixa o contrato apontando
+//     para uma linha inexistente, em silêncio.
+// Ou seja, este DELETE não existe para destravar FK: existe para não deixar
+// linhas ÓRFÃS em contratos no fluxo reparo (mesma sujeira que a limpeza de
+// assinaturas órfãs acima resolve). No fluxo obra ele é redundante com o CASCADE,
+// e inofensivo.
 //
 // Cobre os DOIS lados do contrato, nos dois fluxos:
 //   • usuário como PRESTADOR → candidaturas.usuario_id / interesse_reparos.usuario_id
@@ -1012,7 +1016,7 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     await client.query('BEGIN')
 
     // Contratos ANTES de candidaturas/interesse_reparos/obras/reparos (ver comentário
-    // em SQL_DELETE_CONTRATOS_DO_USUARIO): a FK indireta bloqueava a exclusão.
+    // em SQL_DELETE_CONTRATOS_DO_USUARIO): evita contratos órfãos no fluxo reparo.
     await client.query(SQL_DELETE_CONTRATOS_DO_USUARIO, [id])
 
     // Cascade obras criadas por este usuário (dono_obra)
@@ -1120,8 +1124,7 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
     await client.query('BEGIN')
 
     // Contratos ANTES de candidaturas/interesse_reparos/obras/reparos (ver comentário
-    // em SQL_DELETE_CONTRATOS_DO_USUARIO): a FK indireta bloqueava a exclusão e fazia
-    // esta transação inteira sofrer ROLLBACK, deixando a conta e o cpf_cnpj no banco.
+    // em SQL_DELETE_CONTRATOS_DO_USUARIO): evita contratos órfãos no fluxo reparo.
     await client.query(SQL_DELETE_CONTRATOS_DO_USUARIO, [id])
 
     // Cascade obras criadas por este usuário (colunas idênticas ao DELETE /usuarios/:id)
@@ -3903,10 +3906,10 @@ router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) =>
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    // CONTRATOS primeiro: contratos.candidatura_id → candidaturas.id e
-    // contratos.interesse_id → interesse_reparos.id. Sem isso a transação faz
-    // rollback na FK ao apagar candidaturas/interesse_reparos. Wipe total é
-    // correto aqui — esta rotina apaga todos os dados não-admin.
+    // CONTRATOS primeiro — não por FK: candidatura_id é CASCADE (cai sozinho) e
+    // interesse_id não tem constraint nenhuma. É para não deixar contratos do fluxo
+    // reparo órfãos ao apagar interesse_reparos. Wipe total é correto aqui — esta
+    // rotina apaga todos os dados não-admin.
     await client.query(`DELETE FROM contratos`)
     await client.query(`DELETE FROM interesse_reparos`)
     await client.query(`DELETE FROM midias_reparos`)
@@ -4704,9 +4707,9 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
     // antes de obras por causa da FK mensagens.obra_id)
     await client.query(`DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
     await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
-    // CONTRATOS primeiro: contratos.candidatura_id → candidaturas.id e
-    // contratos.interesse_id → interesse_reparos.id. Sem isso a transação faz
-    // rollback na FK ao apagar candidaturas/interesse_reparos.
+    // CONTRATOS primeiro — não por FK: candidatura_id é CASCADE e interesse_id não tem
+    // constraint. É para não deixar contratos do fluxo reparo órfãos ao apagar os
+    // interesse_reparos logo abaixo.
     // Escopado aos usuários alvo (mesma cobertura do passo 0 de limpar-teste.js):
     // prestador (candidaturas/interesse_reparos.usuario_id) e dono (via
     // obras.criado_por / reparos.criado_por). Contratos entre admins não são tocados.
