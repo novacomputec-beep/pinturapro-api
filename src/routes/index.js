@@ -4967,6 +4967,14 @@ router.post('/admin/limpar-reparos', autenticar, exigirAdmin, async (req, res) =
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    // contratos.interesse_id NÃO tem FK (ao contrário do que dizem os comentários antigos —
+    // só contratos.candidatura_id → candidaturas é constraint de verdade). Sem esta linha o
+    // DELETE abaixo não falhava: apagava os interesse_reparos e deixava os contratos do fluxo
+    // reparo apontando para linhas inexistentes, em silêncio.
+    // `interesse_id IS NOT NULL` (e não `IN (SELECT id FROM interesse_reparos)`) de propósito:
+    // varre também os órfãos que execuções anteriores já deixaram para trás. Contratos do
+    // fluxo obra (candidatura_id) não são tocados — quem os apaga é limpar-obras, via CASCADE.
+    await client.query(`DELETE FROM contratos WHERE interesse_id IS NOT NULL`)
     await client.query(`DELETE FROM interesse_reparos`)
     await client.query(`DELETE FROM midias_reparos`)
     await client.query(`DELETE FROM reparos`)
@@ -4981,12 +4989,19 @@ router.post('/admin/limpar-reparos', autenticar, exigirAdmin, async (req, res) =
 })
 
 router.post('/admin/limpar-mensagens', autenticar, exigirAdmin, async (req, res) => {
+  const client = await pool.connect()
   try {
-    await pool.query(`DELETE FROM mensagens`)
+    await client.query('BEGIN')
+    await client.query(`DELETE FROM mensagens`)
+    await client.query('COMMIT')
     res.json({ mensagem: 'Mensagens removidas com sucesso' })
   } catch (err) {
+    // Transação + log alinhados com os outros /admin/limpar-*: antes o erro era engolido
+    // sem nenhum rastro e o admin recebia só o 500 genérico, sem nada para diagnosticar.
+    await client.query('ROLLBACK').catch(() => {})
+    console.error('Erro ao limpar mensagens:', err)
     res.status(500).json({ erro: 'Erro ao limpar mensagens' })
-  }
+  } finally { client.release() }
 })
 
 // ============================================================
