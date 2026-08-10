@@ -3913,16 +3913,27 @@ router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) =>
     await client.query(`DELETE FROM reparos`)
     await client.query(`DELETE FROM candidaturas`)
     await client.query(`DELETE FROM midias`)
-    await client.query(`DELETE FROM obras`)
+    // mensagens ANTES de obras (mesma ordem do DELETE /usuarios/:id e de limpar-usuarios).
+    // Hoje mensagens.obra_id é ON DELETE CASCADE, então a ordem inversa não quebrava; a
+    // ordem explícita não depende disso — filho antes do pai vale para as duas FKs.
     await client.query(`DELETE FROM mensagens`)
+    await client.query(`DELETE FROM obras`)
     await client.query(`DELETE FROM assinaturas WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
     await client.query(`DELETE FROM localizacoes_prestadores WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
     await client.query(`DELETE FROM prestadores_bloqueados_dono WHERE dono_id IN (SELECT id FROM usuarios WHERE role != 'admin') OR prestador_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
+    // faltas_profissional.usuario_id é FK SEM CASCADE (ver DDL) — todo profissional que já
+    // faltou uma vez estourava 23503 aqui e derrubava a transação inteira, que é o erro real
+    // por trás do 500 "Erro ao limpar dados de teste". Escopado a role != 'admin' igual aos
+    // DELETEs vizinhos: as faltas de um admin não são dado de teste.
+    // perdoada_por não precisa de limpeza (ON DELETE SET NULL).
+    await client.query(`DELETE FROM faltas_profissional WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
     await client.query(`DELETE FROM usuarios WHERE role != 'admin'`)
     await client.query('COMMIT')
     res.json({ mensagem: 'Dados de teste removidos com sucesso!' })
   } catch (err) {
-    await client.query('ROLLBACK')
+    // .catch: se a conexão morreu, o próprio ROLLBACK lança e a resposta 500 nunca sai —
+    // o cliente fica pendurado em vez de receber o erro.
+    await client.query('ROLLBACK').catch(() => {})
     console.error('Erro ao limpar testes:', err)
     res.status(500).json({ erro: 'Erro ao limpar dados de teste' })
   } finally {
@@ -4724,11 +4735,26 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
     await client.query(`DELETE FROM interesse_reparos WHERE usuario_id = ANY($1)`, [ids])
     await client.query(`DELETE FROM mensagens WHERE autor_id = ANY($1)`, [ids])
     await client.query(`DELETE FROM prestadores_bloqueados_dono WHERE dono_id IN (SELECT id FROM usuarios WHERE role != 'admin') OR prestador_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
+    // Ponteiros de obras/reparos SOBREVIVENTES (de admins) para usuários que vão sumir.
+    // As quatro colunas são FK para usuarios SEM CASCADE: um match em aberto ou uma
+    // solicitação de encerramento pendente de um usuário alvo estoura 23503 no DELETE
+    // abaixo. Mesmo tratamento do DELETE /usuarios/:id e do passo 2 de limpar-teste.js.
+    await client.query(`UPDATE obras   SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = ANY($1)`, [ids])
+    await client.query(`UPDATE reparos SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = ANY($1)`, [ids])
+    await client.query(`UPDATE obras   SET encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL WHERE encerramento_solicitado_por = ANY($1)`, [ids])
+    await client.query(`UPDATE reparos SET encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL WHERE encerramento_solicitado_por = ANY($1)`, [ids])
+    // candidaturas.aprovado_por: FK sem CASCADE e nullable. Sobrevivem aqui as candidaturas
+    // de admins em obras de admins — se um usuário alvo tiver aprovado alguma, o DELETE
+    // abaixo estoura 23503. Anular preserva a candidatura e perde só quem aprovou.
+    await client.query(`UPDATE candidaturas SET aprovado_por = NULL WHERE aprovado_por = ANY($1)`, [ids])
+    // faltas_profissional.usuario_id: FK sem CASCADE, mesmo 23503 documentado em
+    // /admin/limpar-testes e no DELETE /usuarios/:id. perdoada_por é ON DELETE SET NULL.
+    await client.query(`DELETE FROM faltas_profissional WHERE usuario_id = ANY($1)`, [ids])
     await client.query(`DELETE FROM usuarios WHERE role != 'admin'`)
     await client.query('COMMIT')
     res.json({ mensagem: 'Usuários removidos com sucesso' })
   } catch (err) {
-    await client.query('ROLLBACK')
+    await client.query('ROLLBACK').catch(() => {})
     console.error('Erro ao limpar usuários:', err)
     res.status(500).json({ erro: 'Erro ao limpar usuários' })
   } finally { client.release() }
@@ -4929,7 +4955,9 @@ router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => 
     await client.query('COMMIT')
     res.json({ mensagem: 'Obras removidas com sucesso' })
   } catch (err) {
-    await client.query('ROLLBACK')
+    // .catch: sem isso, uma conexão morta faz o próprio ROLLBACK lançar dentro do catch
+    // e a resposta 500 nunca é enviada — o cliente fica pendurado.
+    await client.query('ROLLBACK').catch(() => {})
     console.error('Erro ao limpar obras:', err)
     res.status(500).json({ erro: 'Erro ao limpar obras' })
   } finally { client.release() }
@@ -4945,7 +4973,8 @@ router.post('/admin/limpar-reparos', autenticar, exigirAdmin, async (req, res) =
     await client.query('COMMIT')
     res.json({ mensagem: 'Reparos removidos com sucesso' })
   } catch (err) {
-    await client.query('ROLLBACK')
+    // .catch: mesmo motivo de limpar-obras — ROLLBACK que lança engole o 500.
+    await client.query('ROLLBACK').catch(() => {})
     console.error('Erro ao limpar reparos:', err)
     res.status(500).json({ erro: 'Erro ao limpar reparos' })
   } finally { client.release() }
