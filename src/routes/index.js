@@ -859,9 +859,6 @@ router.patch('/auth/foto-perfil', autenticar, async (req, res) => {
 })
 
 router.post('/auth/push-token', autenticar, async (req, res) => {
-  console.log('[PushDebug] POST /auth/push-token | usuario_id:', req.usuario?.id,
-    '| token presente:', !!req.body?.token,
-    '| prefixo:', req.body?.token ? String(req.body.token).substring(0, 12) : '(n/a)')
   try {
     const { token } = req.body
     await pool.query('UPDATE usuarios SET push_token = $1 WHERE id = $2', [token, req.usuario.id])
@@ -889,8 +886,6 @@ router.post('/auth/push-token/clear', autenticar, async (req, res) => {
 // e não deve ser tocado. Os estados são mutuamente exclusivos (ou o app obteve token, ou
 // falhou), então o app chama um endpoint ou o outro, nunca os dois.
 router.post('/auth/push-status', autenticar, async (req, res) => {
-  console.log('[PushDebug] POST /auth/push-status | usuario_id:', req.usuario?.id,
-    '| status:', req.body?.status)
   try {
     const { status } = req.body
     const permitidos = ['concedida', 'negada', 'bloqueada', 'erro_registro']

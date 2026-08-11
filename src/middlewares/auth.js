@@ -48,14 +48,12 @@ const autenticar = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.log('[PushDebug] auth rejeitado |', req.method, req.originalUrl, '| motivo: header Authorization ausente ou sem Bearer')
       return res.status(401).json({ erro: 'Token não fornecido' })
     }
     const token = authHeader.split(' ')[1]
     const decoded = jwt.verify(token, process.env.JWT_SECRET)
 
     if (decoded.tipo === '2fa_pendente') {
-      console.log('[PushDebug] auth rejeitado |', req.method, req.originalUrl, '| motivo: token 2fa_pendente | usuario_id:', decoded.id)
       return res.status(401).json({ erro: 'Autenticação incompleta — código 2FA necessário' })
     }
 
@@ -67,7 +65,6 @@ const autenticar = async (req, res, next) => {
         [decoded.id]
       )
       if (result.rows.length === 0) {
-        console.log('[PushDebug] auth rejeitado |', req.method, req.originalUrl, '| motivo: usuario do token nao existe no banco | usuario_id:', decoded.id)
         return res.status(401).json({ erro: 'Usuário não encontrado' })
       }
       usuario = result.rows[0]
@@ -75,14 +72,12 @@ const autenticar = async (req, res, next) => {
     }
 
     if (!usuario.ativo) {
-      console.log('[PushDebug] auth rejeitado |', req.method, req.originalUrl, '| motivo: conta desativada (ativo=false) | usuario_id:', usuario.id)
       return res.status(403).json({ erro: 'Conta desativada' })
     }
 
     req.usuario = usuario
     next()
   } catch (err) {
-    console.log('[PushDebug] auth rejeitado |', req.method, req.originalUrl, '| motivo: excecao na verificacao do token:', err.message)
     console.error('Erro auth:', err.message)
     return res.status(401).json({ erro: 'Token inválido ou expirado' })
   }
