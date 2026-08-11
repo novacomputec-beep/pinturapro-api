@@ -116,6 +116,12 @@ const migracaoPronta = (async () => {
     await client.query(`INSERT INTO configuracoes (chave, valor)
                         SELECT 'lancamento_data_fim', ''
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'lancamento_data_fim')`)
+    // Flag global "Aprovação automática de OBRAS" — ligada, a obra enviada pelo dono é
+    // publicada na hora, sem passar pela fila do admin. Default 'false' = OFF: mantém a
+    // revisão manual de hoje. Mesma convenção das duas chaves acima (valor TEXT 'true'/'false').
+    await client.query(`INSERT INTO configuracoes (chave, valor)
+                        SELECT 'aprovacao_automatica_obras', 'false'
+                        WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'aprovacao_automatica_obras')`)
     // Contratos de reparo: referência ao interesse aceito (paridade com candidatura_id de obra)
     await client.query(`ALTER TABLE contratos ADD COLUMN IF NOT EXISTS interesse_id uuid`)
     // Idempotência de criação de obra/reparo — evita duplicatas em retries após timeout/ERR_NETWORK
@@ -1308,7 +1314,23 @@ router.post('/obras/dono', autenticar, async (req, res) => {
        RETURNING *`,
       [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao]
     )
-    res.status(201).json(result.rows[0])
+    let obra = result.rows[0]
+    // Aprovação automática de obras (flag global em configuracoes, default 'false' = OFF).
+    // Ligada, publica na hora pela MESMA função da rota de aprovação do admin — mesmo UPDATE,
+    // mesmo reinício de relógio, mesmos avisos. Responde com a linha já publicada para o app
+    // não exibir "em análise" uma obra que acabou de ir ao ar.
+    // try/catch local de propósito: a obra JÁ existe: uma falha na publicação automática não
+    // pode virar 500 e mascarar a criação. Degrada para 'pendente' — a fila manual de hoje.
+    try {
+      const cfgAuto = await pool.query(`SELECT valor FROM configuracoes WHERE chave = 'aprovacao_automatica_obras'`)
+      if (cfgAuto.rows[0]?.valor === 'true') {
+        const publicada = await aprovarEPublicarObra(obra.id)
+        if (publicada) obra = publicada
+      }
+    } catch (err) {
+      console.error('[obras/dono] aprovacao automatica falhou:', err.message)
+    }
+    res.status(201).json(obra)
   } catch (err) {
     console.error('[obras/dono]', err.message)
     res.status(500).json({ erro: 'Erro ao cadastrar obra' })
@@ -1359,35 +1381,47 @@ const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
   )
 }
 
+// Aprova e PUBLICA uma obra — fonte ÚNICA do efeito de aprovação. Tudo o que "publicar"
+// significa mora aqui: o UPDATE das duas colunas de status, o reinício de publicado_em/
+// expira_em e os dois avisos (broadcast aos pintores + desfecho ao dono). Quem aprova por
+// qualquer caminho (painel do admin ou flag de aprovação automática) chama esta função, para
+// que os caminhos não possam divergir.
+//
+// Aprovação PUBLICA a obra e reinicia o relógio a partir de agora: o expira_em setado na
+// criação correu durante a fila de aprovação, então uma obra podia ir ao ar já expirada.
+// publicado_em = NOW() é a âncora do ciclo de vida. COALESCE(..., 720) é obrigatório:
+// NOW() + NULL = NULL, e um expira_em NULL sumiria do feed e quebraria os classificadores
+// de histórico em JS (new Date(null)). Backfill garante que linhas antigas têm a coluna.
+// Guarda de idempotência (status_aprovacao <> 'aprovada'): o relógio só reinicia na
+// TRANSIÇÃO para aprovada. Sem ela, re-aprovar (duplo clique do admin) reiniciaria
+// publicado_em/expira_em — extensão grátis e backdoor no teto de vida 2x do PR2, cuja
+// âncora é publicado_em. Admite pendente E recusada (reaprovar rejeitada é fluxo válido);
+// bloqueia só quem já está aprovada. Como status e status_aprovacao são setados no mesmo
+// UPDATE, é impossível ficar aprovada com status ainda 'rascunho'.
+//
+// Devolve a linha atualizada na TRANSIÇÃO, ou null quando o UPDATE não mudou nada (já estava
+// aprovada — duplo clique do admin — ou o id não existe).
+const aprovarEPublicarObra = async (obraId) => {
+  const atualizada = await pool.query(
+    `UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta',
+       publicado_em = NOW(),
+       expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
+     WHERE id = $1 AND status_aprovacao <> 'aprovada'
+     RETURNING *`, [obraId])
+  // Os DOIS avisos só na TRANSIÇÃO pendente/recusada → aprovada. rowCount 0 significa que o
+  // UPDATE não mudou nada: reavisar o dono seria ruído, e rebroadcastar aos pintores
+  // anunciaria como "nova" uma obra publicada dias atrás, para até 500 pessoas de uma vez.
+  if (atualizada.rowCount === 0) return null
+  notificarPintoresSobreNovaObra(obraId).catch(err => console.error('Erro notificar pintores:', err))
+  notificarDonoSobreAnaliseObra(obraId, true)
+    .catch(err => console.error('Erro notificar dono (obra aprovada):', err.message))
+  return atualizada.rows[0]
+}
+
 router.post('/obras-aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
   try {
-    // Aprovação PUBLICA a obra e reinicia o relógio a partir de agora: o expira_em setado na
-    // criação correu durante a fila de aprovação, então uma obra podia ir ao ar já expirada.
-    // publicado_em = NOW() é a âncora do ciclo de vida. COALESCE(..., 720) é obrigatório:
-    // NOW() + NULL = NULL, e um expira_em NULL sumiria do feed e quebraria os classificadores
-    // de histórico em JS (new Date(null)). Backfill garante que linhas antigas têm a coluna.
-    // Guarda de idempotência (status_aprovacao <> 'aprovada'): o relógio só reinicia na
-    // TRANSIÇÃO para aprovada. Sem ela, re-aprovar (duplo clique do admin) reiniciaria
-    // publicado_em/expira_em — extensão grátis e backdoor no teto de vida 2x do PR2, cuja
-    // âncora é publicado_em. Admite pendente E recusada (reaprovar rejeitada é fluxo válido);
-    // bloqueia só quem já está aprovada. Como status e status_aprovacao são setados no mesmo
-    // UPDATE, é impossível ficar aprovada com status ainda 'rascunho'.
-    const atualizada = await pool.query(
-      `UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta',
-         publicado_em = NOW(),
-         expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
-       WHERE id = $1 AND status_aprovacao <> 'aprovada'
-       RETURNING id`, [req.params.id])
+    await aprovarEPublicarObra(req.params.id)
     res.json({ mensagem: 'Obra aprovada e publicada!' })
-    // Os DOIS avisos só na TRANSIÇÃO pendente/recusada → aprovada. rowCount 0 significa que o
-    // UPDATE não mudou nada (já estava aprovada — duplo clique do admin — ou o id não existe):
-    // reavisar o dono seria ruído, e rebroadcastar aos pintores anunciaria como "nova" uma obra
-    // publicada dias atrás, para até 500 pessoas de uma vez.
-    if (atualizada.rowCount > 0) {
-      notificarPintoresSobreNovaObra(req.params.id).catch(err => console.error('Erro notificar pintores:', err))
-      notificarDonoSobreAnaliseObra(req.params.id, true)
-        .catch(err => console.error('Erro notificar dono (obra aprovada):', err.message))
-    }
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao aprovar obra' })
   }
@@ -4186,6 +4220,33 @@ router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req,
     }
 
     res.json({ mensagem: ativo ? 'Modo automático ativado' : 'Modo automático desativado', ativo })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao atualizar configuração' })
+  }
+})
+
+// Aprovação automática de OBRAS — liga/desliga. Espelha o par acima (mesma forma de leitura
+// 'true', mesmo corpo { ativo }, mesma resposta). Não colide com /obras-aprovacao/:id/aprovar:
+// aquele tem dois segmentos após o prefixo, este tem um.
+router.get('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT valor FROM configuracoes WHERE chave = 'aprovacao_automatica_obras'`
+    )
+    res.json({ ativo: result.rows[0]?.valor === 'true' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar configuração' })
+  }
+})
+
+router.post('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { ativo } = req.body
+    await pool.query(
+      `UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'aprovacao_automatica_obras'`,
+      [ativo ? 'true' : 'false']
+    )
+    res.json({ mensagem: ativo ? 'Aprovação automática de obras ativada' : 'Aprovação automática de obras desativada', ativo })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar configuração' })
   }
