@@ -122,6 +122,11 @@ const migracaoPronta = (async () => {
     await client.query(`INSERT INTO configuracoes (chave, valor)
                         SELECT 'aprovacao_automatica_obras', 'false'
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'aprovacao_automatica_obras')`)
+    // Teto de demandas simultâneas para dono sem histórico (ver limiteDemandasAtingido).
+    // valor = inteiro positivo em TEXT, como as demais chaves. Admin ajusta pelo painel.
+    await client.query(`INSERT INTO configuracoes (chave, valor)
+                        SELECT 'limite_demandas_live_sem_historico', '5'
+                        WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'limite_demandas_live_sem_historico')`)
     // Contratos de reparo: referência ao interesse aceito (paridade com candidatura_id de obra)
     await client.query(`ALTER TABLE contratos ADD COLUMN IF NOT EXISTS interesse_id uuid`)
     // Idempotência de criação de obra/reparo — evita duplicatas em retries após timeout/ERR_NETWORK
@@ -734,7 +739,19 @@ const ERRO_ACEITE_SUSPENSO = {
 // Teto de demandas SIMULTÂNEAS para dono que nunca concluiu nada. Quem já encerrou pelo menos
 // uma demanda (obra ou reparo) não tem teto — o limite existe só para conta nova que despeja
 // demandas sem nunca fechar nenhuma.
-const LIMITE_DEMANDAS_LIVE_SEM_HISTORICO = 2
+// O teto EFETIVO vem de configuracoes ('limite_demandas_live_sem_historico', ver
+// lerLimiteDemandas); esta constante é só o padrão de fallback.
+const LIMITE_DEMANDAS_LIVE_SEM_HISTORICO = 5
+
+// Teto efetivo, lido da tabela configuracoes a cada checagem (sem cache, como as demais
+// chaves). Cai no padrão quando a linha não existe ou o valor não é inteiro positivo
+// ('', 'abc', '0', '2.5', NULL): um teto NaN nunca dispararia (toda comparação com NaN é
+// falsa, liberando cadastro sem limite) e um teto 0 travaria qualquer dono sem histórico.
+const lerLimiteDemandas = async () => {
+  const r = await pool.query(`SELECT valor FROM configuracoes WHERE chave = 'limite_demandas_live_sem_historico'`)
+  const n = Number(r.rows[0]?.valor)
+  return Number.isInteger(n) && n > 0 ? n : LIMITE_DEMANDAS_LIVE_SEM_HISTORICO
+}
 
 // "Live" = o que ocupa vaga agora:
 //   obras   → 'rascunho' (enviada, aguardando aprovação, ainda pode virar 'aberta')
@@ -747,7 +764,10 @@ const LIMITE_DEMANDAS_LIVE_SEM_HISTORICO = 2
 //
 // `tabela` é literal do call site ('obras' | 'reparos'), NUNCA vem do request — a interpolação
 // no SQL não é superfície de injeção.
+// Devolve { atingido, limite }: o teto efetivo acompanha a resposta para o 409 poder ecoá-lo
+// sem reler a configuração.
 const limiteDemandasAtingido = async (tabela, donoId, clientRequestId) => {
+  const limite = await lerLimiteDemandas()
   // Retry com chave já gravada: pula o teto inteiro. Sem isso, o dono que bate no limite com a
   // 2ª demanda e sofre timeout na resposta receberia 409 no retry — a demanda existe, mas o app
   // mostraria erro. O ON CONFLICT do INSERT devolve a linha original; o teto não pode interferir.
@@ -756,7 +776,7 @@ const limiteDemandasAtingido = async (tabela, donoId, clientRequestId) => {
       `SELECT 1 FROM ${tabela} WHERE criado_por = $1 AND client_request_id = $2 LIMIT 1`,
       [donoId, clientRequestId]
     )
-    if (jaExiste.rowCount > 0) return false
+    if (jaExiste.rowCount > 0) return { atingido: false, limite }
   }
   const c = await pool.query(
     `SELECT
@@ -772,15 +792,17 @@ const limiteDemandasAtingido = async (tabela, donoId, clientRequestId) => {
   // COUNT() volta como string (bigint no pg) — sem Number() o >= compararia texto.
   const encerradas = Number(c.rows[0].encerradas)
   const live       = Number(c.rows[0].live)
-  return encerradas === 0 && live >= LIMITE_DEMANDAS_LIVE_SEM_HISTORICO
+  return { atingido: encerradas === 0 && live >= limite, limite }
 }
 
-const ERRO_LIMITE_DEMANDAS = {
-  erro: `Você já tem ${LIMITE_DEMANDAS_LIVE_SEM_HISTORICO} demandas ativas e nenhuma concluída. `
+// Payload do 409 — montado com o teto EFETIVO da checagem (antes era um objeto fixo, possível
+// só enquanto o teto era constante).
+const erroLimiteDemandas = (limite) => ({
+  erro: `Você já tem ${limite} demandas ativas e nenhuma concluída. `
       + `Conclua ou aguarde o encerramento de uma delas para publicar outra.`,
   codigo: 'LIMITE_DEMANDAS_ATIVAS',
-  limite_demandas_ativas: LIMITE_DEMANDAS_LIVE_SEM_HISTORICO,
-}
+  limite_demandas_ativas: limite,
+})
 
 // ============================================================
 // STATS PÚBLICOS (sem auth)
@@ -1294,8 +1316,9 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     }
     const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
     // Antes de qualquer trabalho (geocoding, ufDeCidade): recusar cedo não gasta rede à toa.
-    if (await limiteDemandasAtingido('obras', req.usuario.id, client_request_id)) {
-      return res.status(409).json(ERRO_LIMITE_DEMANDAS)
+    const limiteObras = await limiteDemandasAtingido('obras', req.usuario.id, client_request_id)
+    if (limiteObras.atingido) {
+      return res.status(409).json(erroLimiteDemandas(limiteObras.limite))
     }
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
     const { lat: latFinal, lng: lngFinal, origem: coordOrigem } = resolverCoordenadas(cidade, ufFinal, latitude, longitude, '[obras/dono]')
@@ -2269,8 +2292,9 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
     // Mesmo teto do POST /obras/dono e sobre a MESMA contagem (obras + reparos): o limite é por
     // dono, não por tipo de demanda, senão 2 obras + 2 reparos passariam.
-    if (await limiteDemandasAtingido('reparos', req.usuario.id, client_request_id)) {
-      return res.status(409).json(ERRO_LIMITE_DEMANDAS)
+    const limiteReparos = await limiteDemandasAtingido('reparos', req.usuario.id, client_request_id)
+    if (limiteReparos.atingido) {
+      return res.status(409).json(erroLimiteDemandas(limiteReparos.limite))
     }
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
     const { lat: latFinal, lng: lngFinal, origem: coordOrigem } = resolverCoordenadas(cidade, ufFinal, latitude, longitude, '[reparos/dono]')
@@ -4287,6 +4311,35 @@ router.post('/config/lancamento', autenticar, exigirAdmin, async (req, res) => {
     res.json({ data_fim: valor || null, gratis: !!valor && new Date(valor) > new Date() })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar janela de lançamento' })
+  }
+})
+
+// Teto de demandas simultâneas para dono sem histórico. Espelha os demais pares de config
+// (admin, leitura direta da chave). O GET devolve o teto EFETIVO — passa pelo mesmo
+// lerLimiteDemandas da checagem, então painel e regra nunca divergem.
+router.get('/config/limite-demandas', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    res.json({ limite: await lerLimiteDemandas() })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar limite de demandas' })
+  }
+})
+
+// Admin ajusta o teto. Só inteiro positivo: os demais valores cairiam no padrão em silêncio.
+router.post('/config/limite-demandas', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { limite } = req.body
+    const n = Number(limite)
+    if (!Number.isInteger(n) || n <= 0) {
+      return res.status(400).json({ erro: 'limite inválido — use um número inteiro positivo' })
+    }
+    await pool.query(
+      `UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'limite_demandas_live_sem_historico'`,
+      [String(n)]
+    )
+    res.json({ mensagem: 'Limite de demandas atualizado', limite: n })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao atualizar limite de demandas' })
   }
 })
 
