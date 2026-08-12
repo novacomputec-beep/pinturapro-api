@@ -4895,19 +4895,31 @@ router.post('/feed/visualizacoes', autenticar, async (req, res) => {
       return res.status(400).json({ erro: 'Máximo de 50 itens por chamada' })
     }
 
-    let registrados = 0
+    // Filtra ANTES de montar o lote: item inválido é ignorado em silêncio (era o `continue`
+    // do laço), nunca vira erro. Dois arrays paralelos para o unnest lá embaixo.
+    const tipos = []
+    const ids = []
     for (const item of itens) {
       if (!item || !['reparo', 'obra'].includes(item.tipo) || !item.id) continue
-      const result = await pool.query(
-        `INSERT INTO feed_visualizacoes (usuario_id, item_tipo, item_id)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (usuario_id, item_tipo, item_id) DO NOTHING`,
-        [req.usuario.id, item.tipo, item.id]
-      )
-      registrados += result.rowCount
+      tipos.push(item.tipo)
+      ids.push(item.id)
     }
+    if (tipos.length === 0) return res.json({ registrados: 0 })
 
-    res.json({ registrados })
+    // UM statement no lugar de um INSERT por item — eram até 50 round trips por chamada.
+    // unnest() casa os dois arrays em linhas; rowCount conta só o que ENTROU de fato, então
+    // `registrados` mantém exatamente o significado do laço (visualizações novas, sem as
+    // repetidas). ON CONFLICT DO NOTHING também absorve duplicata DENTRO do mesmo lote:
+    // a primeira entra e as repetidas são ignoradas, igual ao laço item a item.
+    const result = await pool.query(
+      `INSERT INTO feed_visualizacoes (usuario_id, item_tipo, item_id)
+       SELECT $1, t.tipo, t.id
+         FROM unnest($2::text[], $3::uuid[]) AS t(tipo, id)
+       ON CONFLICT (usuario_id, item_tipo, item_id) DO NOTHING`,
+      [req.usuario.id, tipos, ids]
+    )
+
+    res.json({ registrados: result.rowCount })
   } catch (err) {
     console.error('[FeedVisualizacoes] Erro:', err.message)
     res.status(500).json({ erro: 'Erro ao registrar visualizações' })
