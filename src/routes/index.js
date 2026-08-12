@@ -127,6 +127,12 @@ const migracaoPronta = (async () => {
     await client.query(`INSERT INTO configuracoes (chave, valor)
                         SELECT 'limite_demandas_live_sem_historico', '5'
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'limite_demandas_live_sem_historico')`)
+    // Resposta da equipe às dúvidas (mensagens): quem respondeu e quando. As DUAS colunas já
+    // eram escritas por mensagensController.responder e lidas por porObra, mas nunca existiram
+    // na tabela — as duas rotas estouravam 42703 e devolviam 500. Tipos batendo com o que o
+    // controller grava: respondido_por = req.usuario.id (uuid), respondido_em = NOW() (timestamptz).
+    await client.query(`ALTER TABLE mensagens ADD COLUMN IF NOT EXISTS respondido_por UUID`)
+    await client.query(`ALTER TABLE mensagens ADD COLUMN IF NOT EXISTS respondido_em  TIMESTAMPTZ`)
     // Contratos de reparo: referência ao interesse aceito (paridade com candidatura_id de obra)
     await client.query(`ALTER TABLE contratos ADD COLUMN IF NOT EXISTS interesse_id uuid`)
     // Idempotência de criação de obra/reparo — evita duplicatas em retries após timeout/ERR_NETWORK
