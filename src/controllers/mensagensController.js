@@ -11,13 +11,27 @@ const enviar = async (req, res) => {
     }
 
     const obraResult = await pool.query(
-      `SELECT id, titulo FROM obras WHERE id = $1`,
+      `SELECT id, titulo, criado_por FROM obras WHERE id = $1`,
       [obra_id]
     )
     if (obraResult.rows.length === 0) {
       return res.status(404).json({ erro: 'Obra não encontrada' })
     }
     const obra = obraResult.rows[0]
+
+    // Só quem tem relação com a obra escreve no thread: o DONO, ou o profissional que já se
+    // candidatou nela. Antes bastava a obra existir — qualquer assinante podia inserir
+    // mensagem em qualquer obra_id. Vale QUALQUER status de candidatura (inclusive recusada):
+    // quem participou da disputa continua podendo perguntar sobre o desfecho.
+    if (obra.criado_por !== req.usuario.id) {
+      const candidatura = await pool.query(
+        `SELECT 1 FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2 LIMIT 1`,
+        [obra_id, req.usuario.id]
+      )
+      if (candidatura.rowCount === 0) {
+        return res.status(403).json({ erro: 'Sem permissão para enviar mensagem nesta obra' })
+      }
+    }
 
     const result = await pool.query(
       `INSERT INTO mensagens (obra_id, autor_id, conteudo) VALUES ($1, $2, $3) RETURNING *`,
@@ -61,18 +75,14 @@ const porObra = async (req, res) => {
     let query
     let params
 
-    // Pintor só vê suas próprias mensagens
-    if (req.usuario.role === 'assinante') {
-      query = `
-        SELECT m.id, m.conteudo, m.resposta, m.respondido, m.criado_em, m.respondido_em,
-               u.id as usuario_id, u.nome as usuario_nome
-        FROM mensagens m
-        JOIN usuarios u ON m.autor_id = u.id
-        WHERE m.obra_id = $1 AND m.autor_id = $2
-        ORDER BY m.criado_em ASC
-        LIMIT $3 OFFSET $4`
-      params = [req.params.obra_id, req.usuario.id, limit, offset]
-    } else {
+    // Admin vê o thread inteiro da obra; qualquer outro usuário vê SOMENTE as mensagens que
+    // ele mesmo escreveu (autor_id = req.usuario.id).
+    // O recorte antes dependia de role === 'assinante' — valor que nenhum usuário real tem
+    // (o cadastro grava 'dono_obra', 'prestador' ou 'admin'; 'assinante' é só o inicializador
+    // sobrescrito em authController). Com isso TODO usuário autenticado caía no ramo aberto e
+    // lia o thread alheio de qualquer obra_id. Agora o ramo restrito é o default e só admin
+    // escapa dele.
+    if (req.usuario.role === 'admin') {
       query = `
         SELECT m.id, m.conteudo, m.resposta, m.respondido, m.criado_em, m.respondido_em,
                u.id as usuario_id, u.nome as usuario_nome
@@ -82,6 +92,16 @@ const porObra = async (req, res) => {
         ORDER BY m.criado_em ASC
         LIMIT $2 OFFSET $3`
       params = [req.params.obra_id, limit, offset]
+    } else {
+      query = `
+        SELECT m.id, m.conteudo, m.resposta, m.respondido, m.criado_em, m.respondido_em,
+               u.id as usuario_id, u.nome as usuario_nome
+        FROM mensagens m
+        JOIN usuarios u ON m.autor_id = u.id
+        WHERE m.obra_id = $1 AND m.autor_id = $2
+        ORDER BY m.criado_em ASC
+        LIMIT $3 OFFSET $4`
+      params = [req.params.obra_id, req.usuario.id, limit, offset]
     }
 
     const result = await pool.query(query, params)
