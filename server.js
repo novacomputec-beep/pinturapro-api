@@ -27,6 +27,43 @@ app.use(cors({
   credentials: true
 }))
 
+// ============================================================
+// SHEDDING DE CARGA — rejeita NA PORTA quando o pool satura
+// ============================================================
+// Antes: com as 20 conexões ocupadas, a requisição entrava na FILA do pool, esperava o
+// connectionTimeoutMillis e virava um 500 genérico — que o comRetry do app tentava de novo,
+// somando carga justamente durante a saturação. Agora a fila tem teto e o excesso leva 503
+// na hora, em microssegundos, sem consumir slot.
+//
+// Sinal: pool.waitingCount = requisições JÁ enfileiradas esperando conexão. É a medida direta
+// da fila; idleCount === 0 apenas diz que o pool está momentaneamente ocupado, o que é normal.
+// Teto 10 = metade de max(20): waitingCount > 0 acontece em rajada e drena em milissegundos;
+// chegar a 10 e ficar significa que a chegada supera o atendimento.
+const POOL_FILA_MAX = 10
+// Isenções — as duas precisam passar mesmo saturado:
+//   '/' e '/api/health' → se o health check da plataforma levar 503, o container é reiniciado
+//     no pico e derruba tudo que estava em voo, piorando o incidente.
+//   webhook do PagBank → o handler sempre responde 200, então o PagBank NUNCA reenvia:
+//     recusar uma entrega perde o evento de pagamento em definitivo.
+const ROTAS_SEM_SHEDDING = new Set(['/', '/api/health', '/api/pagamentos/webhook-pagbank'])
+
+// Posição no pipeline é deliberada: DEPOIS de helmet/cors (sem os headers de CORS o app não
+// consegue ler o corpo nem o status do 503 — vira "erro de rede" e é retentado às cegas) e
+// ANTES dos rate limiters e dos parsers de corpo (não faz sentido parsear até 100MB de body
+// de uma requisição que já vai ser recusada).
+app.use((req, res, next) => {
+  if (ROTAS_SEM_SHEDDING.has(req.path)) return next()
+  if (pool.waitingCount < POOL_FILA_MAX) return next()
+  // Log com a fila e o total: é o que separa "pool pequeno demais" de "um endpoint ficou
+  // lento" na hora do incidente.
+  console.warn(`[Shedding] 503 | ${req.method} ${req.originalUrl} | waitingCount=${pool.waitingCount} totalCount=${pool.totalCount} idleCount=${pool.idleCount}`)
+  res.set('Retry-After', '1')
+  return res.status(503).json({
+    erro: 'Servidor ocupado. Tente novamente em instantes.',
+    codigo: 'SOBRECARGA',
+  })
+})
+
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 300,
