@@ -313,14 +313,76 @@ const migracaoPronta = (async () => {
     await client.query(`CREATE INDEX IF NOT EXISTS midias_obra_id_idx ON midias (obra_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS midias_reparos_reparo_id_idx ON midias_reparos (reparo_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS reparos_criado_por_idx ON reparos (criado_por)`)
-    await client.query(`CREATE INDEX IF NOT EXISTS reparos_feed_idx ON reparos (status, status_aprovacao, expira_em)`)
+    // reparos_feed_idx: match_usuario_id incluído p/ paridade com obras_feed_idx — GET /reparos
+    // também filtra match_usuario_id IS NULL, e a definição de 3 colunas parava antes disso.
+    // DROP antes do CREATE porque IF NOT EXISTS casa por NOME: sem o drop a definição antiga
+    // sobreviveria (mesmo padrão do obras_feed_idx logo abaixo).
+    await client.query(`DROP INDEX IF EXISTS reparos_feed_idx`)
+    await client.query(`CREATE INDEX IF NOT EXISTS reparos_feed_idx ON reparos (status, status_aprovacao, expira_em, match_usuario_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS obras_criado_por_idx ON obras (criado_por)`)
-    // obras_feed_idx: inclui status_aprovacao e match_usuario_id p/ paridade com reparos_feed_idx.
+    // obras_feed_idx: inclui status_aprovacao e match_usuario_id p/ paridade com reparos_feed_idx,
+    // e `valor DESC NULLS LAST` como coluna final — é a SEGUNDA chave do ORDER BY do feed
+    // (`o.expira_em ASC, o.valor DESC NULLS LAST`). Um índice separado só em valor não serve a
+    // uma ordenação de duas chaves; ela só é coberta pelo composto, na ordem das chaves.
+    // DESC NULLS LAST explícito: em btree, DESC assume NULLS FIRST, que não é a ordem pedida.
     // Drop do índice antigo (mais estreito) antes de recriar com as colunas corretas.
     await client.query(`DROP INDEX IF EXISTS obras_feed_idx`)
-    await client.query(`CREATE INDEX IF NOT EXISTS obras_feed_idx ON obras (status, status_aprovacao, expira_em, match_usuario_id)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS obras_feed_idx ON obras (status, status_aprovacao, expira_em, match_usuario_id, valor DESC NULLS LAST)`)
     // Filtro quente do cron de proximidade (15min): lp.atualizado_em > NOW() - 30min.
     await client.query(`CREATE INDEX IF NOT EXISTS localizacoes_prestadores_atualizado_em_idx ON localizacoes_prestadores (atualizado_em)`)
+
+    // ---- Índices da auditoria de escala: cada um nomeia a query/job que serve ----
+    // GET /obras (obrasController.listar): filtro `o.categoria = $n`. reparos já tinha
+    // idx_reparos_categoria; obras não tinha equivalente.
+    await client.query(`CREATE INDEX IF NOT EXISTS obras_categoria_idx ON obras (categoria)`)
+    // GET /obras com raio_km='estado': filtro `o.uf = $n`.
+    await client.query(`CREATE INDEX IF NOT EXISTS obras_uf_idx ON obras (uf)`)
+    // GET /obras: `NOT ($1 = ANY(COALESCE(o.prestadores_bloqueados,'{}')))` — sem GIN a lista
+    // negra é avaliada linha a linha. GIN é o método para busca de pertencimento em array.
+    await client.query(`CREATE INDEX IF NOT EXISTS obras_prestadores_bloqueados_gin_idx ON obras USING GIN (prestadores_bloqueados)`)
+    // (A segunda chave do ORDER BY do feed, `o.valor DESC NULLS LAST`, entra como coluna final
+    // do obras_feed_idx acima — índice avulso em valor não cobriria ordenação de duas chaves.)
+    // GET /obras/minhas: WHERE criado_por = $1 ... ORDER BY criado_em DESC — o índice só de
+    // criado_por cobria o filtro e deixava a ordenação para um sort a cada chamada.
+    await client.query(`CREATE INDEX IF NOT EXISTS obras_criado_por_criado_em_idx ON obras (criado_por, criado_em DESC)`)
+    // GET /reparos/minhas: idem.
+    await client.query(`CREATE INDEX IF NOT EXISTS reparos_criado_por_criado_em_idx ON reparos (criado_por, criado_em DESC)`)
+    // Cron verificarCronometroReparos (60s): espelha obras_matches_pendentes_idx, que só
+    // existia do lado obra — o lado reparo varria sem índice de apoio a cada minuto.
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS reparos_matches_pendentes_idx ON reparos (expira_em)
+      WHERE status = 'aberta' AND match_usuario_id IS NOT NULL
+    `)
+    // Cron autoEncerrarPendentes (5min), 1º predicado — encerramento em duas mãos vencido:
+    // status='aberta' AND encerramento_solicitado_por IS NOT NULL AND encerramento_solicitado_em <= NOW()-prazo.
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS obras_encerramento_pendente_idx ON obras (encerramento_solicitado_em)
+      WHERE status = 'aberta' AND encerramento_solicitado_por IS NOT NULL
+    `)
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS reparos_encerramento_pendente_idx ON reparos (encerramento_solicitado_em)
+      WHERE status = 'aberta' AND encerramento_solicitado_por IS NOT NULL
+    `)
+    // Cron autoEncerrarPendentes (5min), 2º predicado — auto-confirmação de chegada:
+    // chegada_declarada_em IS NOT NULL AND chegada_confirmada_em IS NULL AND chegada_declarada_em <= NOW()-prazo.
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS obras_chegada_a_confirmar_idx ON obras (chegada_declarada_em)
+      WHERE chegada_declarada_em IS NOT NULL AND chegada_confirmada_em IS NULL
+    `)
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS reparos_chegada_a_confirmar_idx ON reparos (chegada_declarada_em)
+      WHERE chegada_declarada_em IS NOT NULL AND chegada_confirmada_em IS NULL
+    `)
+    // Cron deletarMidiasAntigas (24h): varre encerrado_em das DEMANDAS (não das mídias) —
+    // status='encerrada' AND encerrado_em IS NOT NULL AND encerrado_em < NOW()-7 dias.
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS obras_encerrado_em_idx ON obras (encerrado_em)
+      WHERE status = 'encerrada' AND encerrado_em IS NOT NULL
+    `)
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS reparos_encerrado_em_idx ON reparos (encerrado_em)
+      WHERE status = 'encerrada' AND encerrado_em IS NOT NULL
+    `)
     // No máximo um aceito por reparo/obra — enforce no nível do banco (Finding 2.1).
     // Dedup ANTES dos índices únicos: mantém o 'aceito' mais recente por job e rebaixa
     // os demais para 'recusado', senão o CREATE UNIQUE INDEX falha em dados legados.
