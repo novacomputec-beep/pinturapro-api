@@ -245,7 +245,36 @@ const webhookPagbank = async (req, res) => {
     if (!reference_id || !charges?.length) return
 
     const charge = charges[0]
-    if (charge.status !== 'PAID') return
+
+    // CLAIM atômico de idempotência — quem INSERE a linha ganha o direito de processar
+    // (mesmo idioma do claim de contratosController). Entrega repetida do MESMO
+    // (charge_id, status) não grava nada, não devolve linha e sai aqui: nenhum e-mail
+    // reenviado, nenhum Telegram, nenhum proximo_vencimento empurrado de graça.
+    // Fica ANTES do filtro de PAID de propósito, para o livro registrar TODO desfecho.
+    // reference_id vai cru: o split continua onde estava, logo abaixo.
+    if (charge.id) {
+      const claim = await pool.query(
+        `INSERT INTO webhook_eventos_pagbank (charge_id, status, reference_id, valor_centavos)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (charge_id, status) DO NOTHING
+         RETURNING charge_id`,
+        [charge.id, charge.status || '(sem status)', reference_id, charge.amount?.value ?? null]
+      )
+      if (claim.rowCount === 0) {
+        console.log(`[webhook-pagbank] entrega duplicada ignorada | charge=${charge.id} | status=${charge.status}`)
+        return
+      }
+    } else {
+      // FALHA ABERTO: sem charge.id não existe chave de dedupe. Processar mesmo assim é
+      // menos ruim que barrar um pagamento real por uma suposição errada sobre o payload —
+      // este log denuncia que a suposição caiu.
+      console.warn('[webhook-pagbank] charge.id ausente — sem chave de dedupe, seguindo SEM claim')
+    }
+
+    if (charge.status !== 'PAID') {
+      console.log(`[webhook-pagbank] evento nao-PAID registrado | status=${charge.status} | nenhuma acao tomada`)
+      return
+    }
 
     const partes = reference_id.split('|')
     if (partes.length !== 2) return

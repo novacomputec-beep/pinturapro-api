@@ -638,6 +638,26 @@ const migracaoPronta = (async () => {
       )
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS aberturas_detalhe_reparador_notif_idx ON aberturas_detalhe (reparador_id, notificado)`)
+    // Livro-caixa de eventos do webhook PagBank. Serve a DOIS propósitos:
+    //   1) idempotência — o INSERT ... ON CONFLICT DO NOTHING vira CLAIM atômico (mesmo
+    //      idioma de contratosController): quem grava a linha processa o evento.
+    //   2) registro dos desfechos NÃO-PAID (DECLINED, CANCELED, REFUNDED, WAITING), que
+    //      hoje são descartados sem log nem estado.
+    // PK (charge_id, status) e não charge_id sozinho: uma cobrança transita de verdade
+    // (WAITING → PAID), e a chave simples faria a 1ª entrega bloquear o PAID seguinte.
+    // Renovação legítima traz charge_id novo → linha nova → processa.
+    // Sem FK para usuarios: reference_id é gravado CRU ("{usuario_id}|{plano}"), e o livro
+    // não pode perder o registro de um evento por causa de um usuário apagado depois.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS webhook_eventos_pagbank (
+        charge_id      TEXT NOT NULL,
+        status         TEXT NOT NULL,
+        reference_id   TEXT,
+        valor_centavos INT,
+        recebido_em    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (charge_id, status)
+      )
+    `)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
