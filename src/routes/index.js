@@ -937,6 +937,10 @@ const lerLimiteDemandas = async () => {
 // expira_em > NOW() é obrigatório: expirada NÃO é status no banco — a linha continua 'aberta'
 // para sempre (ver comentário em /obras/admin), então contar só por status inflaria o teto e
 // travaria o dono permanentemente na primeira vez que duas demandas vencessem sem match.
+// O guard vale para os DOIS braços de obra: 'rascunho' também fica nesse status para sempre
+// (nenhum job mexe em obra pendente de aprovação), então sem ele uma obra enviada e nunca
+// analisada ocupava uma vaga do dono INDEFINIDAMENTE. Por isso ele saiu de dentro do braço
+// 'aberta' e subiu para o WHERE — mesma condição, agora aplicada aos dois casos.
 //
 // `tabela` é literal do call site ('obras' | 'reparos'), NUNCA vem do request — a interpolação
 // no SQL não é superfície de injeção.
@@ -959,8 +963,9 @@ const limiteDemandasAtingido = async (tabela, donoId, clientRequestId) => {
        (SELECT COUNT(*) FROM obras   WHERE criado_por = $1 AND status = 'encerrada')
        + (SELECT COUNT(*) FROM reparos WHERE criado_por = $1 AND status = 'encerrada') AS encerradas,
        (SELECT COUNT(*) FROM obras WHERE criado_por = $1
+          AND expira_em > NOW()
           AND (status = 'rascunho'
-               OR (status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW())))
+               OR (status = 'aberta' AND status_aprovacao = 'aprovada')))
        + (SELECT COUNT(*) FROM reparos WHERE criado_por = $1
             AND status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()) AS live`,
     [donoId]
@@ -973,9 +978,14 @@ const limiteDemandasAtingido = async (tabela, donoId, clientRequestId) => {
 
 // Payload do 409 — montado com o teto EFETIVO da checagem (antes era um objeto fixo, possível
 // só enquanto o teto era constante).
+// A saída pelo cancelamento entra no texto porque ela JÁ existe (DELETE /obras/dono/:id e
+// DELETE /reparos/dono/:id não exigem status nenhum, então valem inclusive para obra ainda
+// aguardando aprovação) — só não estava em lugar nenhum que o dono pudesse ler. Sem isso ele
+// via "você já tem N ativas" sem saber quais nem como liberar vaga.
 const erroLimiteDemandas = (limite) => ({
   erro: `Você já tem ${limite} demandas ativas e nenhuma concluída. `
-      + `Conclua ou aguarde o encerramento de uma delas para publicar outra.`,
+      + `Conclua ou aguarde o encerramento de uma delas para publicar outra. `
+      + `Obras aguardando aprovação também ocupam vaga: cancelar uma delas em "Minhas obras" libera a vaga na hora.`,
   codigo: 'LIMITE_DEMANDAS_ATIVAS',
   limite_demandas_ativas: limite,
 })
