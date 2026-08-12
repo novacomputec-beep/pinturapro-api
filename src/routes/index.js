@@ -4328,6 +4328,46 @@ router.post('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (
 // JANELA DE LANÇAMENTO GRÁTIS (config em banco — sem Railway)
 // ============================================================
 
+// Contas com acesso especial permanente — mesma leitura de EMAILS_ESPECIAIS do cadastro
+// (authController). NUNCA entram no backfill: seguem tipo='gratuito' para sempre.
+// Env ausente → lista vazia → `<> ALL('{}')` é verdadeiro para todos, ou seja, ninguém é
+// excluído, que é o default correto.
+const emailsEspeciais = () => (process.env.EMAILS_ESPECIAIS || '')
+  .split(',').map(e => e.trim().toLowerCase()).filter(Boolean)
+
+// Fim do mês CORRENTE às 23:59:59.999999 em America/Sao_Paulo, como timestamptz.
+// Os dois AT TIME ZONE fazem coisas OPOSTAS e é isso que faz a conta fechar num banco UTC:
+//   1º (timestamptz → timestamp) TIRA o fuso e devolve o relógio de parede de SP, para o
+//      date_trunc contar o mês BRASILEIRO;
+//   2º (timestamp → timestamptz) RECOLOCA o fuso e devolve o instante UTC a gravar.
+// Sem isso, 31/08 22:00 em SP já é 01/09 01:00 em UTC e o truncamento cairia um mês adiante.
+const SQL_FIM_DO_MES_SP = `(
+        date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))
+        + INTERVAL '1 month' - INTERVAL '1 microsecond'
+      ) AT TIME ZONE 'America/Sao_Paulo'`
+
+// Backfill do desligamento da janela: a coorte que entrou grátis passa a ter vencimento real.
+// Alvo = tipo='gratuito' COM valor_mensal > 0, que isola os prestadores do lançamento —
+// dono_obra e darAcessoGratuito gravam valor_mensal = 0 e seguem grátis para sempre.
+// tipo = NULL (e não 'pago'): linha paga nasce com tipo NULL, e é o que faz os três CASE de
+// aprovação pararem de forçar proximo_vencimento = NULL. marco_* zerados para os avisos de
+// vencimento dispararem para esta coorte.
+// Idempotente por construção: depois de rodar, as linhas não casam mais tipo='gratuito'.
+const SQL_BACKFILL_LANCAMENTO = `
+  UPDATE assinaturas a
+     SET proximo_vencimento = ${SQL_FIM_DO_MES_SP},
+         tipo          = NULL,
+         marco_1_em    = NULL,
+         marco_2_em    = NULL,
+         marco_3_em    = NULL,
+         atualizado_em = NOW()
+    FROM usuarios u
+   WHERE u.id = a.usuario_id
+     AND a.tipo = 'gratuito'
+     AND a.valor_mensal > 0
+     AND LOWER(u.email) <> ALL($1::text[])
+  RETURNING a.usuario_id`
+
 // Status público — a tela de cadastro roda PRÉ-LOGIN, então NÃO exige token.
 // Só expõe se a promoção está ativa e até quando (não-sensível).
 router.get('/config/lancamento', async (req, res) => {
@@ -4341,7 +4381,12 @@ router.get('/config/lancamento', async (req, res) => {
 })
 
 // Admin liga/estende/desliga a janela. data_fim = ISO futuro liga/estende; null desliga.
+// DESLIGAR é porta de mão única: roda o backfill da coorte na MESMA transação do flag —
+// ou os dois entram, ou nenhum. Sem isso a janela desligava e a coorte seguia grátis para
+// sempre, que é o defeito que este endpoint fecha. GET /config/lancamento/previa devolve a
+// contagem antes, para o painel confirmar com o número na tela.
 router.post('/config/lancamento', autenticar, exigirAdmin, async (req, res) => {
+  const client = await pool.connect()
   try {
     const { data_fim } = req.body
     // valor é NOT NULL na tabela: usar '' (não null) como estado "desligado" para
@@ -4352,13 +4397,56 @@ router.post('/config/lancamento', autenticar, exigirAdmin, async (req, res) => {
       if (isNaN(d.getTime())) return res.status(400).json({ erro: 'data_fim inválida — use uma data ISO válida ou null para desligar' })
       valor = d.toISOString()
     }
-    await pool.query(
+    const desligando = valor === ''
+
+    await client.query('BEGIN')
+    await client.query(
       `UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'lancamento_data_fim'`,
       [valor]
     )
-    res.json({ data_fim: valor || null, gratis: !!valor && new Date(valor) > new Date() })
+
+    let afetados = 0
+    if (desligando) {
+      const backfill = await client.query(SQL_BACKFILL_LANCAMENTO, [emailsEspeciais()])
+      afetados = backfill.rowCount
+      // Trilha de auditoria em UMA linha: porta de mão única, então os ids afetados precisam
+      // ficar registrados. Só usuario_id (nada de e-mail/CPF).
+      console.log(`[Lancamento] janela DESLIGADA | backfill afetou ${afetados} assinatura(s) | usuario_ids: ${backfill.rows.map(r => r.usuario_id).join(',') || '(nenhum)'}`)
+    }
+
+    await client.query('COMMIT')
+    res.json({ data_fim: valor || null, gratis: !!valor && new Date(valor) > new Date(), afetados })
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    console.error('[Lancamento] Erro ao atualizar janela:', err.message)
     res.status(500).json({ erro: 'Erro ao atualizar janela de lançamento' })
+  } finally {
+    client.release()
+  }
+})
+
+// Prévia do desligamento — MESMO predicado do backfill, para o número da tela bater com o
+// que o POST vai fazer. Admin-only de propósito: o GET público acima expõe só se a promo
+// está ativa; tamanho de coorte é dado de negócio.
+router.get('/config/lancamento/previa', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const especiais = emailsEspeciais()
+    const r = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE a.tipo = 'gratuito' AND a.valor_mensal > 0
+                           AND LOWER(u.email) <> ALL($1::text[]))::int AS afetados,
+        COUNT(*) FILTER (WHERE a.tipo = 'gratuito' AND a.valor_mensal > 0
+                           AND LOWER(u.email) = ANY($1::text[]))::int  AS especiais_preservados,
+        COUNT(*) FILTER (WHERE a.tipo = 'gratuito'
+                           AND COALESCE(a.valor_mensal, 0) = 0)::int   AS gratuitos_permanentes,
+        ${SQL_FIM_DO_MES_SP} AS data_alvo
+      FROM assinaturas a
+      JOIN usuarios u ON u.id = a.usuario_id
+    `, [especiais])
+    res.json(r.rows[0])
+  } catch (err) {
+    console.error('[Lancamento] Erro na prévia:', err.message)
+    res.status(500).json({ erro: 'Erro ao calcular prévia do desligamento' })
   }
 })
 
