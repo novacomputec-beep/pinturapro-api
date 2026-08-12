@@ -546,10 +546,10 @@ const registrarFalta = async (tabela, demanda) => {
       [demanda.match_usuario_id, MOTIVO_SUSPENSAO]
     )
     if (upd.rowCount === 0) return
-    // Derruba o usuário do cache de 5 min de autenticar. Sem isto, quem estivesse com sessão
-    // quente continuaria passando por exigirNaoSuspenso (que lê req.usuario) por até 5 minutos
-    // depois de suspenso — tempo de sobra para pegar mais um trabalho. Os aceites já consultam
-    // o banco direto, mas os feeds e a criação de proposta dependem do cache.
+    // Derruba o usuário do cache de 30s de autenticar. Sem isto, quem estivesse com sessão
+    // quente continuaria passando por exigirNaoSuspenso (que lê req.usuario) por até 30
+    // segundos depois de suspenso — janela para pegar mais um trabalho. Os aceites já
+    // consultam o banco direto, mas os feeds e a criação de proposta dependem do cache.
     invalidarCacheAssinatura(demanda.match_usuario_id)
     console.log(`[Faltas] usuario ${demanda.match_usuario_id} suspenso — ${c.rows[0].n} faltas em ${JANELA_FALTAS}`)
     if (upd.rows[0]?.push_token) {
