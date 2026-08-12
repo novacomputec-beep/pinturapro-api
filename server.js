@@ -52,9 +52,10 @@ app.use('/api/auth/cadastro', rateLimit({
 // app.use('/api', rotasApp), senão não interceptam nada) e mesmo corpo de erro do global.
 // Sem limiter no webhook do PagBank de propósito: as retentativas do gateway não podem
 // ser estranguladas — um 429 lá vira pagamento não confirmado.
-// 5/h — não autenticada e dispara e-mail de saída a cada chamada.
+// 20/h (era 5/h) — não autenticada e dispara e-mail de saída a cada chamada.
+// 20 e não 5 pelo mesmo CGNAT do cadastro acima: 5/h barrava aparelhos legítimos no mesmo IP.
 app.use('/api/auth/esqueci-senha', rateLimit({
-  windowMs: 60 * 60 * 1000, max: 5,
+  windowMs: 60 * 60 * 1000, max: 20,
   message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
 }))
 // 20/h — não autenticada e aceita upload de arquivo (documentos de verificação).
