@@ -4091,8 +4091,8 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
       `UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
         proximo_vencimento = CASE
           WHEN tipo = 'gratuito' THEN NULL
-          WHEN plano = 'anual'   THEN NOW() + INTERVAL '365 days'
-          ELSE NOW() + INTERVAL '30 days' END
+          WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
+          ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END
        WHERE usuario_id = $1`, [id]
     )
 
@@ -4267,8 +4267,8 @@ router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req,
         await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
           proximo_vencimento = CASE
             WHEN tipo = 'gratuito' THEN NULL
-            WHEN plano = 'anual'   THEN NOW() + INTERVAL '365 days'
-            ELSE NOW() + INTERVAL '30 days' END
+            WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
+            ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END
          WHERE usuario_id = $1`, [p.id])
       }
       console.log(`[Modo automático] ${pendentes.rows.length} prestadores aprovados automaticamente`)
