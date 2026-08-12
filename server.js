@@ -35,11 +35,43 @@ app.use(rateLimit({
   message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
 }))
 
-app.use('/api/auth/login',    rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }))
+app.use('/api/auth/login',    rateLimit({
+  windowMs: 15 * 60 * 1000, max: 10,
+  message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
+}))
 // 20/h (era 5/h): usuários de celular saem por CGNAT do carrier — muitos aparelhos
 // reais compartilham o mesmo IP público, então 5/h bloqueava gente legítima. O limite
 // também era consumido pelos próprios retries que os timeouts de cadastro provocavam.
-app.use('/api/auth/cadastro', rateLimit({ windowMs: 60 * 60 * 1000, max: 20 }))
+app.use('/api/auth/cadastro', rateLimit({
+  windowMs: 60 * 60 * 1000, max: 20,
+  message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
+}))
+
+// Rotas sensíveis que até aqui só tinham o balde global de 300/15min — teto alto demais
+// para o que cada uma faz. Mesmo formato dos dois limiters acima (montados ANTES de
+// app.use('/api', rotasApp), senão não interceptam nada) e mesmo corpo de erro do global.
+// Sem limiter no webhook do PagBank de propósito: as retentativas do gateway não podem
+// ser estranguladas — um 429 lá vira pagamento não confirmado.
+// 5/h — não autenticada e dispara e-mail de saída a cada chamada.
+app.use('/api/auth/esqueci-senha', rateLimit({
+  windowMs: 60 * 60 * 1000, max: 5,
+  message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
+}))
+// 20/h — não autenticada e aceita upload de arquivo (documentos de verificação).
+app.use('/api/auth/upload-verificacao', rateLimit({
+  windowMs: 60 * 60 * 1000, max: 20,
+  message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
+}))
+// 60/h — não autenticada e emite assinatura de upload do Cloudinary.
+app.use('/api/upload/assinatura-publica', rateLimit({
+  windowMs: 60 * 60 * 1000, max: 60,
+  message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
+}))
+// 20/h — autenticada, mas abre cobrança no gateway a cada chamada.
+app.use('/api/pagamentos/criar-assinatura', rateLimit({
+  windowMs: 60 * 60 * 1000, max: 20,
+  message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
+}))
 
 // Webhook PagBank precisa do corpo cru (bytes exatos) p/ validar a assinatura
 // SHA-256. Escopado só a esta rota — não retém buffers crus no resto da API.
