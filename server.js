@@ -8,6 +8,7 @@ const { pool } = require('./src/utils/supabase')
 const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary } = require('./src/services/uploadService')
+const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -425,6 +426,9 @@ const iniciarAgendador = () => {
   // De hora em hora como o job de expiração: as bandas de 12h e 6h não existem numa cadência
   // diária — um tick por dia pularia as duas mais urgentes.
   setInterval(() => { notificarAssinaturasProximasVencimento() }, 60 * 60 * 1000)
+  // Descarga do buffer de visitas (src/utils/visitas.js): agrupa as visitas da janela num
+  // UPDATE por tabela, em vez de um UPDATE por visualização no caminho de leitura.
+  iniciarFlushVisitas()
 
   setInterval(async () => {
     try {
@@ -466,7 +470,7 @@ const iniciarAgendador = () => {
     }
   }, 10 * 60 * 1000)
 
-  console.log('Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 10min | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 24h')
+  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 10min | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
 }
 
 rotasApp.migracaoPronta
@@ -494,6 +498,22 @@ rotasApp.migracaoPronta
     // grandes (express.json/urlencoded aceitam 100mb).
     server.keepAliveTimeout = 65000
     server.headersTimeout   = 70000
+
+    // Desligamento gracioso — existe por UM motivo: descarregar o buffer de visitas antes
+    // de sair, para um redeploy normal não perder a janela de até 30s acumulada em memória.
+    //
+    // ATENÇÃO: registrar handler de SIGTERM SUBSTITUI o default do Node (que encerra o
+    // processo na hora). Se este caminho não terminar em process.exit, o redeploy fica
+    // pendurado até a plataforma mandar SIGKILL — por isso o exit vai no `finally`, que roda
+    // mesmo se o flush falhar. `once`: um segundo sinal não reentra no handler.
+    const encerrarGraciosamente = (sinal) => {
+      console.log(`[Shutdown] ${sinal} recebido — descarregando visitas pendentes`)
+      flushVisitas()
+        .catch(err => console.error('[Shutdown] flush de visitas falhou:', err.message))
+        .finally(() => process.exit(0))
+    }
+    process.once('SIGTERM', () => encerrarGraciosamente('SIGTERM'))
+    process.once('SIGINT',  () => encerrarGraciosamente('SIGINT'))
   })
   .catch((err) => {
     console.error('Falha na migração de boot — servidor não iniciado:', err)
