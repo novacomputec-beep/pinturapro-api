@@ -14,6 +14,10 @@ const limparCpfCnpj = (str) => {
 
 const ativarAssinatura = async (usuarioId, plano) => {
   // Upsert atômico (Finding 4.1): evita check-then-insert race que duplicava assinaturas.
+  // proximo_vencimento SOMA o período a partir de GREATEST(vencimento_atual, NOW()) — é uma
+  // COMPRA, então renovar antes do vencimento empilha em vez de zerar (pagar no dia 20 de 30
+  // dá 40 dias, não 30). GREATEST também impede o retrocesso: o valor nunca anda para trás.
+  // Em PostgreSQL GREATEST IGNORA NULL, então linha sem vencimento cai em NOW() + período.
   await pool.query(
     `INSERT INTO assinaturas (usuario_id, plano, status, atualizado_em, proximo_vencimento)
      VALUES ($1, $2, 'ativa', NOW(),
@@ -22,7 +26,8 @@ const ativarAssinatura = async (usuarioId, plano) => {
        status = 'ativa',
        plano = EXCLUDED.plano,
        atualizado_em = NOW(),
-       proximo_vencimento = EXCLUDED.proximo_vencimento`,
+       proximo_vencimento = GREATEST(assinaturas.proximo_vencimento, NOW())
+         + CASE WHEN EXCLUDED.plano = 'anual' THEN INTERVAL '365 days' ELSE INTERVAL '30 days' END`,
     [usuarioId, plano || 'mensal']
   )
 }
@@ -329,9 +334,13 @@ const darAcessoGratuito = async (req, res) => {
 
     const assinaturaExiste = await pool.query(`SELECT id FROM assinaturas WHERE usuario_id = $1`, [usuario_id])
     if (assinaturaExiste.rows.length > 0) {
+      // GREATEST: conceder acesso grátis nunca ENCURTA um vencimento já mais distante — sem
+      // isto, um anual com 300 dias restantes caía para 30. (O overwrite de tipo='gratuito'
+      // sobre linha paga é defeito SEPARADO, tratado à parte.)
       await pool.query(
         `UPDATE assinaturas SET status = 'ativa', tipo = 'gratuito', atualizado_em = NOW(),
-          proximo_vencimento = NOW() + INTERVAL '30 days' WHERE usuario_id = $1`,
+          proximo_vencimento = GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days')
+         WHERE usuario_id = $1`,
         [usuario_id]
       )
     } else {
