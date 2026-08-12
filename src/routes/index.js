@@ -2,6 +2,7 @@ require('dotenv').config()
 const express = require('express')
 const router = express.Router()
 const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, invalidarCacheAssinatura } = require('../middlewares/auth')
+const { registrarVisita } = require('../utils/visitas')
 const { pool } = require('../utils/supabase')
 const { marcaPorTipo } = require('../utils/marca')
 const authCtrl         = require('../controllers/authController')
@@ -1838,16 +1839,10 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     const extensao_maxima_horas = Math.max(0, TETO_ESTENDER_OBRA_HORAS - horasUsadasObra)
     res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, extensao_maxima_horas })
 
-    // Contador de visitas — DEPOIS da resposta e SEM await: é a única ESCRITA no caminho de
-    // leitura mais quente da API, e travava a resposta atrás de um lock de linha que os
-    // visitantes simultâneos da mesma obra disputam entre si. Único consumidor é o cron de
-    // baixo engajamento (8h, limiar >= 10), então perder um incremento aqui não muda nada.
-    // .catch obrigatório: sem ele a promise rejeitada viraria unhandled rejection, e cair no
-    // catch do handler tentaria responder 500 com os headers já enviados.
-    if (!ehDono) {
-      pool.query(`UPDATE obras SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
-        .catch(err => console.error('[obras/:id] total_visitas:', err.message))
-    }
+    // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
+    // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
+    // conexão do pool no caminho de leitura mais quente da API.
+    if (!ehDono) registrarVisita('obras', req.params.id)
   } catch (err) {
     console.error('Erro ao buscar obra:', err)
     res.status(500).json({ erro: 'Erro ao buscar obra' })
@@ -3958,12 +3953,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       pode_estender_em: reparo.pode_estender_em,
     })
 
-    // Contador de visitas — DEPOIS da resposta e SEM await (mesmo racional do GET /obras/:id).
+    // Contador de visitas em memória (mesmo racional do GET /obras/:id).
     // Só conta visita se for prestador (não dono consultando o próprio reparo).
-    if (!ehDono) {
-      pool.query(`UPDATE reparos SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
-        .catch(err => console.error('[reparos/:id] total_visitas:', err.message))
-    }
+    if (!ehDono) registrarVisita('reparos', req.params.id)
   } catch (err) {
     console.error('Erro ao buscar reparo:', err)
     res.status(500).json({ erro: 'Erro ao buscar serviço' })
