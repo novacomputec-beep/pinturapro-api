@@ -58,11 +58,14 @@ const porObra = async (req, res) => {
     }
 
     const result = await pool.query(
-      // telefone é sempre NULL aqui de propósito: o contato do pintor só é revelado
-      // ao dono APÓS o match, nunca no aceite (regra de negócio — ver GET /obras/:id).
-      // Não ligar esta coluna a c.status: reintroduziria o vazamento corrigido em 4fbdab1.
+      // telefone e email são sempre NULL aqui de propósito: o contato do pintor só é
+      // revelado ao dono APÓS o match, nunca no aceite (regra de negócio — ver GET /obras/:id).
+      // Não ligar estas colunas a c.status: reintroduziria o vazamento corrigido em 4fbdab1.
+      // email seguia saindo em claro para TODOS os candidatos enquanto o telefone ao lado já
+      // era mascarado — mesmo dado de contato, mesma regra, agora com o mesmo tratamento.
       `SELECT c.id, c.status, c.referencias, c.valor_oferta, c.mensagem_oferta, c.criado_em,
-              u.id as usuario_id, u.nome, u.email,
+              u.id as usuario_id, u.nome,
+              NULL as email,
               NULL as telefone,
               u.cidade, u.anos_experiencia, u.tamanho_equipe, u.especialidades,
               (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_total,
