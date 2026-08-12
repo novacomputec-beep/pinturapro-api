@@ -1776,10 +1776,6 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       }
     }
 
-    if (!ehDono) {
-      await pool.query(`UPDATE obras SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
-    }
-
     const midias = await pool.query(`SELECT * FROM midias WHERE obra_id = $1 ORDER BY ordem`, [req.params.id])
     const minhaCandidaturaResult = await pool.query(
       `SELECT id, status, valor_oferta, mensagem_oferta, valor_proposto, mensagem, valor_contraproposta FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
@@ -1841,6 +1837,17 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     const horasUsadasObra = Math.max(0, (new Date(obra.expira_em).getTime() - expiraOriginalObraMs) / 3600000)
     const extensao_maxima_horas = Math.max(0, TETO_ESTENDER_OBRA_HORAS - horasUsadasObra)
     res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, extensao_maxima_horas })
+
+    // Contador de visitas — DEPOIS da resposta e SEM await: é a única ESCRITA no caminho de
+    // leitura mais quente da API, e travava a resposta atrás de um lock de linha que os
+    // visitantes simultâneos da mesma obra disputam entre si. Único consumidor é o cron de
+    // baixo engajamento (8h, limiar >= 10), então perder um incremento aqui não muda nada.
+    // .catch obrigatório: sem ele a promise rejeitada viraria unhandled rejection, e cair no
+    // catch do handler tentaria responder 500 com os headers já enviados.
+    if (!ehDono) {
+      pool.query(`UPDATE obras SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
+        .catch(err => console.error('[obras/:id] total_visitas:', err.message))
+    }
   } catch (err) {
     console.error('Erro ao buscar obra:', err)
     res.status(500).json({ erro: 'Erro ao buscar obra' })
@@ -3890,11 +3897,6 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       }
     }
 
-    // Só conta visita se for prestador (não dono consultando o próprio reparo)
-    if (!ehDono) {
-      await pool.query(`UPDATE reparos SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
-    }
-
     const midias    = await pool.query(`SELECT * FROM midias_reparos WHERE reparo_id = $1 ORDER BY ordem`, [req.params.id])
     const interesse = await pool.query(
       `SELECT id, status, valor_proposto, valor_contraproposta, rodada FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`,
@@ -3955,6 +3957,13 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       extensao_maxima_horas,
       pode_estender_em: reparo.pode_estender_em,
     })
+
+    // Contador de visitas — DEPOIS da resposta e SEM await (mesmo racional do GET /obras/:id).
+    // Só conta visita se for prestador (não dono consultando o próprio reparo).
+    if (!ehDono) {
+      pool.query(`UPDATE reparos SET total_visitas = COALESCE(total_visitas, 0) + 1 WHERE id = $1`, [req.params.id])
+        .catch(err => console.error('[reparos/:id] total_visitas:', err.message))
+    }
   } catch (err) {
     console.error('Erro ao buscar reparo:', err)
     res.status(500).json({ erro: 'Erro ao buscar serviço' })
