@@ -1134,14 +1134,19 @@ router.get('/usuarios/prestadores-bloqueados', autenticar, async (req, res) => {
   try {
     if (req.usuario.role !== 'dono_obra') return res.status(403).json({ erro: 'Apenas donos podem ver esta lista' })
     const result = await pool.query(
-      `SELECT pb.prestador_id, pb.criado_em, u.nome, u.foto_url
+      `SELECT pb.prestador_id, pb.criado_em, u.nome, u.foto_url,
+              COUNT(*) OVER()::int AS _total
        FROM prestadores_bloqueados_dono pb
        JOIN usuarios u ON u.id = pb.prestador_id
        WHERE pb.dono_id = $1
-       ORDER BY pb.criado_em DESC`,
+       ORDER BY pb.criado_em DESC, pb.prestador_id DESC
+       LIMIT 200`,
       [req.usuario.id]
     )
-    res.json({ bloqueados: result.rows })
+    const bloqueados = result.rows
+    const total = bloqueados.length > 0 ? bloqueados[0]._total : 0
+    bloqueados.forEach(b => delete b._total)
+    res.json({ bloqueados, total })
   } catch (err) {
     console.error('Erro ao listar prestadores bloqueados:', err)
     res.status(500).json({ erro: 'Erro ao listar prestadores bloqueados' })
@@ -1432,15 +1437,26 @@ router.get('/obras/meus-contratos', autenticar, async (req, res) => {
               EXISTS (
                 SELECT 1 FROM avaliacoes a
                 WHERE a.contrato_tipo = 'obra' AND a.contrato_id = o.id AND a.avaliador_id = $1
-              ) AS ja_avaliei
+              ) AS ja_avaliei,
+              -- Total ANTES do LIMIT, no mesmo statement: evita uma segunda query repetindo
+              -- o WHERE — duplicar predicado é exatamente onde os dois lados divergem depois.
+              COUNT(*) OVER()::int AS _total
        FROM obras o
        JOIN usuarios u ON o.criado_por = u.id
        LEFT JOIN candidaturas c ON c.obra_id = o.id AND c.usuario_id = $1
        WHERE o.match_usuario_id = $1 AND o.status = 'encerrada'
-       ORDER BY o.match_feito_em DESC NULLS LAST`,
+       -- o.id como desempate: match_feito_em sozinho não é determinístico, e com LIMIT um
+       -- empate na borda faria a mesma linha aparecer duas vezes (ou sumir) num load-more.
+       ORDER BY o.match_feito_em DESC NULLS LAST, o.id DESC
+       LIMIT 200`,
       [req.usuario.id]
     )
-    res.json({ contratos: result.rows })
+    // _total sai de cada linha: os campos de cada item ficam EXATAMENTE como eram e `total`
+    // entra AO LADO de `contratos`, sem aninhar nem renomear — o app não precisa mudar.
+    const contratos = result.rows
+    const total = contratos.length > 0 ? contratos[0]._total : 0
+    contratos.forEach(c => delete c._total)
+    res.json({ contratos, total })
   } catch (err) {
     console.error('[obras/meus-contratos]', err.message)
     res.status(500).json({ erro: 'Erro ao buscar contratos finalizados' })
@@ -1462,15 +1478,20 @@ router.get('/obras/meus-contratos-dono', autenticar, async (req, res) => {
               EXISTS (
                 SELECT 1 FROM avaliacoes a
                 WHERE a.contrato_tipo = 'obra' AND a.contrato_id = o.id AND a.avaliador_id = $1
-              ) AS ja_avaliei
+              ) AS ja_avaliei,
+              COUNT(*) OVER()::int AS _total
        FROM obras o
        LEFT JOIN usuarios u ON o.match_usuario_id = u.id
        LEFT JOIN candidaturas c ON c.obra_id = o.id AND c.usuario_id = o.match_usuario_id
        WHERE o.criado_por = $1 AND o.status = 'encerrada'
-       ORDER BY o.match_feito_em DESC NULLS LAST`,
+       ORDER BY o.match_feito_em DESC NULLS LAST, o.id DESC
+       LIMIT 200`,
       [req.usuario.id]
     )
-    res.json({ contratos: result.rows })
+    const contratos = result.rows
+    const total = contratos.length > 0 ? contratos[0]._total : 0
+    contratos.forEach(c => delete c._total)
+    res.json({ contratos, total })
   } catch (err) {
     console.error('[obras/meus-contratos-dono]', err.message)
     res.status(500).json({ erro: 'Erro ao buscar contratos finalizados' })
@@ -2745,15 +2766,20 @@ router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
               EXISTS (
                 SELECT 1 FROM avaliacoes a
                 WHERE a.contrato_tipo = 'reparo' AND a.contrato_id = r.id AND a.avaliador_id = $1
-              ) AS ja_avaliei
+              ) AS ja_avaliei,
+              COUNT(*) OVER()::int AS _total
        FROM reparos r
        JOIN usuarios u ON r.criado_por = u.id
        LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.usuario_id = $1
        WHERE r.match_usuario_id = $1 AND r.status = 'encerrada'
-       ORDER BY r.match_feito_em DESC NULLS LAST`,
+       ORDER BY r.match_feito_em DESC NULLS LAST, r.id DESC
+       LIMIT 200`,
       [req.usuario.id]
     )
-    res.json({ contratos: result.rows })
+    const contratos = result.rows
+    const total = contratos.length > 0 ? contratos[0]._total : 0
+    contratos.forEach(c => delete c._total)
+    res.json({ contratos, total })
   } catch (err) {
     console.error('[reparos/meus-contratos]', err.message)
     res.status(500).json({ erro: 'Erro ao buscar contratos finalizados' })
@@ -2775,15 +2801,20 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
               EXISTS (
                 SELECT 1 FROM avaliacoes a
                 WHERE a.contrato_tipo = 'reparo' AND a.contrato_id = r.id AND a.avaliador_id = $1
-              ) AS ja_avaliei
+              ) AS ja_avaliei,
+              COUNT(*) OVER()::int AS _total
        FROM reparos r
        LEFT JOIN usuarios u ON r.match_usuario_id = u.id
        LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
        WHERE r.criado_por = $1 AND r.status = 'encerrada'
-       ORDER BY r.match_feito_em DESC NULLS LAST`,
+       ORDER BY r.match_feito_em DESC NULLS LAST, r.id DESC
+       LIMIT 200`,
       [req.usuario.id]
     )
-    res.json({ contratos: result.rows })
+    const contratos = result.rows
+    const total = contratos.length > 0 ? contratos[0]._total : 0
+    contratos.forEach(c => delete c._total)
+    res.json({ contratos, total })
   } catch (err) {
     console.error('[reparos/meus-contratos-dono]', err.message)
     res.status(500).json({ erro: 'Erro ao buscar contratos finalizados' })
