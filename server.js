@@ -291,22 +291,25 @@ const deletarMidiasAntigas = async () => {
 
 const expirarAssinaturasVencidas = async () => {
   try {
+    // O próprio UPDATE é o CLAIM: a linha só sai de 'ativa' UMA vez, então numa segunda
+    // réplica (ou numa reexecução) o mesmo id não volta no RETURNING e ninguém recebe push
+    // repetido. Substitui o SELECT + um UPDATE por linha — era N+1.
+    // Filtro por LINHA, não por usuario_id: usuário com mais de uma assinatura não pode ter
+    // as que ainda não venceram marcadas junto.
+    // `FROM usuarios u` só para o RETURNING alcançar o push_token; é o mesmo inner join que
+    // o SELECT anterior fazia, então assinatura sem usuário segue de fora, como antes.
     const vencidas = await pool.query(`
-      SELECT a.id AS assinatura_id, a.usuario_id, u.push_token, u.nome
-      FROM assinaturas a
-      JOIN usuarios u ON u.id = a.usuario_id
-      WHERE a.status = 'ativa' AND a.proximo_vencimento < NOW()
+      UPDATE assinaturas a
+         SET status = 'expirada', atualizado_em = NOW()
+        FROM usuarios u
+       WHERE u.id = a.usuario_id
+         AND a.status = 'ativa'
+         AND a.proximo_vencimento < NOW()
+      RETURNING a.usuario_id, u.push_token
     `)
-    if (vencidas.rows.length === 0) return
+    if (vencidas.rowCount === 0) return
 
     for (const sub of vencidas.rows) {
-      // Chaveado no id da LINHA, não no usuario_id: o SELECT acima já escolheu exatamente
-      // as assinaturas vencidas, e um usuário com mais de uma linha tinha todas marcadas
-      // 'expirada' junto — inclusive as que ainda não venceram.
-      await pool.query(
-        `UPDATE assinaturas SET status = 'expirada', atualizado_em = NOW() WHERE id = $1`,
-        [sub.assinatura_id]
-      )
       // Os dois caches (middlewares/auth + cachePrestadores em routes) — só o primeiro
       // era limpo, então /reparos seguia servindo 'ativa' até o TTL de 5 min vencer.
       invalidarCachesUsuario(sub.usuario_id)
@@ -319,7 +322,7 @@ const expirarAssinaturasVencidas = async () => {
         ).catch(() => {})
       }
     }
-    console.log(`[ExpirarAssinaturas] ${vencidas.rows.length} assinatura(s) expirada(s)`)
+    console.log(`[ExpirarAssinaturas] ${vencidas.rowCount} assinatura(s) expirada(s)`)
   } catch (err) {
     console.error('[ExpirarAssinaturas] Erro:', err.message)
   }
@@ -446,16 +449,24 @@ const iniciarAgendador = () => {
           AND a.atualizado_em < NOW() - INTERVAL '1 hour'
       `)
       if (pendentes.rows.length === 0) return
+      let aprovados = 0
       for (const p of pendentes.rows) {
-        // aprovado_automaticamente = true → idoneidade ainda não revisada (auditável no painel)
-        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
-        await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
+        // CLAIM primeiro: `AND status = 'pendente_verificacao'` faz a transição acontecer UMA
+        // vez só. Quem perder a corrida (outra réplica, ou este mesmo tique reexecutado) leva
+        // rowCount 0 e sai — por isso o UPDATE de usuarios, os caches e o push ficam TODOS
+        // atrás dele. Antes o push saía de novo a cada passagem.
+        const claim = await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
           proximo_vencimento = CASE
             WHEN tipo = 'gratuito' THEN NULL
             WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
             ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END,
           marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
-         WHERE usuario_id = $1`, [p.id])
+         WHERE usuario_id = $1 AND status = 'pendente_verificacao'
+         RETURNING id`, [p.id])
+        if (claim.rowCount === 0) continue
+
+        // aprovado_automaticamente = true → idoneidade ainda não revisada (auditável no painel)
+        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
         // Assinatura recém-ativada: limpa os DOIS caches p/ o app não cair na tela de
         // pagamento (B72-07). Só o de middlewares/auth era limpo, então /reparos seguia
         // barrando o prestador recém-aprovado até o TTL de 5 min de cachePrestadores vencer.
@@ -463,8 +474,9 @@ const iniciarAgendador = () => {
         if (p.push_token) {
           await enviarPushNotificacao(p.push_token, '✅ Cadastro aprovado!', 'Bem-vindo ao PinturaPro! Seu acesso está liberado.', { tipo: 'verificacao_aprovada' }).catch(() => {})
         }
+        aprovados++
       }
-      console.log(`[Timeout] ${pendentes.rows.length} prestadores auto-aprovados por timeout de 1h (Modo Auto ON)`)
+      console.log(`[Timeout] ${aprovados} prestadores auto-aprovados por timeout de 1h (Modo Auto ON)`)
     } catch (err) {
       console.error('[Timeout verificação] Erro:', err.message)
     }
