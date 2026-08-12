@@ -424,14 +424,20 @@ const migracaoPronta = (async () => {
       WHERE chegada_declarada_em IS NOT NULL AND chegada_confirmada_em IS NULL
     `)
     // Cron deletarMidiasAntigas (24h): varre encerrado_em das DEMANDAS (não das mídias) —
-    // status='encerrada' AND encerrado_em IS NOT NULL AND encerrado_em < NOW()-7 dias.
+    // status IN ('encerrada','cancelada') AND encerrado_em IS NOT NULL AND < NOW()-7 dias.
+    // O predicado inclui 'cancelada' junto com o job: demanda cancelada também guarda mídia
+    // para sempre, e um índice mais estreito que a consulta deixaria de ser usado por ela.
+    // DROP antes do CREATE porque IF NOT EXISTS casa por NOME — sem o drop a definição antiga
+    // (só 'encerrada') sobreviveria (mesmo padrão do obras_feed_idx).
+    await client.query(`DROP INDEX IF EXISTS obras_encerrado_em_idx`)
     await client.query(`
       CREATE INDEX IF NOT EXISTS obras_encerrado_em_idx ON obras (encerrado_em)
-      WHERE status = 'encerrada' AND encerrado_em IS NOT NULL
+      WHERE status IN ('encerrada', 'cancelada') AND encerrado_em IS NOT NULL
     `)
+    await client.query(`DROP INDEX IF EXISTS reparos_encerrado_em_idx`)
     await client.query(`
       CREATE INDEX IF NOT EXISTS reparos_encerrado_em_idx ON reparos (encerrado_em)
-      WHERE status = 'encerrada' AND encerrado_em IS NOT NULL
+      WHERE status IN ('encerrada', 'cancelada') AND encerrado_em IS NOT NULL
     `)
     // No máximo um aceito por reparo/obra — enforce no nível do banco (Finding 2.1).
     // Dedup ANTES dos índices únicos: mantém o 'aceito' mais recente por job e rebaixa
@@ -1662,7 +1668,11 @@ router.post('/obras-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req,
     // Guarda de idempotência espelhando a da aprovação: sem ela, reprocessar uma recusa
     // (duplo clique do admin) reavisaria o dono de uma decisão que ele já recebeu.
     const atualizada = await pool.query(
-      `UPDATE obras SET status_aprovacao = 'recusada', status = 'cancelada'
+      // encerrado_em marca o início dos 7 dias de retenção de mídia (ver deletarMidiasAntigas):
+      // obra recusada também carrega mídia, e sem esta coluna o job nunca a enxerga.
+      // COALESCE preserva a data de um encerramento anterior em vez de reiniciar a contagem.
+      `UPDATE obras SET status_aprovacao = 'recusada', status = 'cancelada',
+              encerrado_em = COALESCE(encerrado_em, NOW())
         WHERE id = $1 AND status_aprovacao <> 'recusada'
         RETURNING id`, [req.params.id])
     res.json({ mensagem: 'Obra recusada' })
@@ -1731,7 +1741,10 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
   try {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-    await pool.query(`UPDATE obras SET status = 'cancelada', status_aprovacao = 'cancelada' WHERE id = $1`, [req.params.id])
+    // encerrado_em: mesmo motivo do recusar acima — libera a obra cancelada para a limpeza
+    // de mídia depois de 7 dias. COALESCE não reinicia contagem já iniciada.
+    await pool.query(`UPDATE obras SET status = 'cancelada', status_aprovacao = 'cancelada',
+      encerrado_em = COALESCE(encerrado_em, NOW()) WHERE id = $1`, [req.params.id])
     res.json({ mensagem: 'Obra removida com sucesso' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao remover obra' })
@@ -2682,7 +2695,10 @@ router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (re
 
 router.post('/reparos/aprovacao/:id/recusar', autenticar, exigirAdmin, async (req, res) => {
   try {
-    await pool.query(`UPDATE reparos SET status_aprovacao = 'recusada', status = 'cancelada' WHERE id = $1`, [req.params.id])
+    // encerrado_em: idem ao lado obra — reparo recusado guarda mídia e sem esta coluna o
+    // deletarMidiasAntigas nunca o alcança.
+    await pool.query(`UPDATE reparos SET status_aprovacao = 'recusada', status = 'cancelada',
+      encerrado_em = COALESCE(encerrado_em, NOW()) WHERE id = $1`, [req.params.id])
     res.json({ mensagem: 'Reparo recusado' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao recusar reparo' })

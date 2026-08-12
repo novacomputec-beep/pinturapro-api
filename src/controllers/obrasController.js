@@ -234,8 +234,15 @@ const encerrar = async (req, res) => {
       return res.status(404).json({ erro: 'Obra não encontrada' })
     }
 
+    // encerrado_em é o relógio de que deletarMidiasAntigas depende (o job exige
+    // encerrado_em IS NOT NULL): sem ele, obra encerrada por aqui guardava as mídias no
+    // Cloudinary para sempre, ao contrário das encerradas pelo fluxo de duas mãos e pelo
+    // cron de auto-encerramento, que já o preenchem.
+    // COALESCE e não NOW() puro: este UPDATE não tem guarda de status, então reencerrar uma
+    // obra já encerrada reiniciaria a contagem de 7 dias do zero.
     const result = await pool.query(
-      `UPDATE obras SET status='encerrada' WHERE id=$1 RETURNING id, titulo, status`,
+      `UPDATE obras SET status='encerrada', encerrado_em = COALESCE(encerrado_em, NOW())
+        WHERE id=$1 RETURNING id, titulo, status`,
       [req.params.id]
     )
     res.json(result.rows[0])
