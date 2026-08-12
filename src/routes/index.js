@@ -138,6 +138,9 @@ const migracaoPronta = (async () => {
     // criado_em porque a listagem ordena por ela — o índice serve a contagem e à página.
     // Parcial de propósito: a fila é a minoria das linhas, e respondidas não entram no índice.
     await client.query(`CREATE INDEX IF NOT EXISTS mensagens_pendentes_idx ON mensagens (criado_em) WHERE respondido = false`)
+    // Redundante: mesmo predicado parcial do mensagens_pendentes_idx acima e, dentro dele,
+    // `respondido` é constante — a chave efetiva dos dois é (criado_em).
+    await client.query(`DROP INDEX IF EXISTS idx_mensagens_respondido`)
     // Contratos de reparo: referência ao interesse aceito (paridade com candidatura_id de obra)
     await client.query(`ALTER TABLE contratos ADD COLUMN IF NOT EXISTS interesse_id uuid`)
     // Idempotência de criação de obra/reparo — evita duplicatas em retries após timeout/ERR_NETWORK
@@ -306,20 +309,32 @@ const migracaoPronta = (async () => {
     `)
     // Índices para FKs e filtros quentes (feed + ownership). Sem eles, as subqueries
     // correlacionadas do feed e os lookups por usuário/obra/reparo fazem seq scan.
-    await client.query(`CREATE INDEX IF NOT EXISTS interesse_reparos_reparo_id_idx ON interesse_reparos (reparo_id)`)
+    // interesse_reparos_reparo_id_idx (reparo_id) NÃO é mais criado: é prefixo à esquerda do
+    // idx_interesse_reparo_usuario (reparo_id, usuario_id), que já existe.
     await client.query(`CREATE INDEX IF NOT EXISTS interesse_reparos_usuario_id_idx ON interesse_reparos (usuario_id)`)
-    await client.query(`CREATE INDEX IF NOT EXISTS candidaturas_obra_id_idx ON candidaturas (obra_id)`)
+    // Redundante: duplicata exata do interesse_reparos_usuario_id_idx acima.
+    await client.query(`DROP INDEX IF EXISTS idx_interesse_usuario_id`)
+    // candidaturas_obra_id_idx (obra_id) NÃO é mais criado: é prefixo à esquerda do UNIQUE
+    // candidaturas_obra_id_usuario_id_key (obra_id, usuario_id).
     await client.query(`CREATE INDEX IF NOT EXISTS candidaturas_usuario_id_idx ON candidaturas (usuario_id)`)
+    // Redundante: duplicata exata do candidaturas_usuario_id_idx acima.
+    await client.query(`DROP INDEX IF EXISTS idx_candidaturas_usuario_id`)
     await client.query(`CREATE INDEX IF NOT EXISTS midias_obra_id_idx ON midias (obra_id)`)
+    // Redundante: duplicata exata do midias_obra_id_idx acima.
+    await client.query(`DROP INDEX IF EXISTS idx_midias_obra_id`)
     await client.query(`CREATE INDEX IF NOT EXISTS midias_reparos_reparo_id_idx ON midias_reparos (reparo_id)`)
-    await client.query(`CREATE INDEX IF NOT EXISTS reparos_criado_por_idx ON reparos (criado_por)`)
+    // Redundante: duplicata exata do midias_reparos_reparo_id_idx acima.
+    await client.query(`DROP INDEX IF EXISTS idx_midias_reparos_reparo_id`)
     // reparos_feed_idx: match_usuario_id incluído p/ paridade com obras_feed_idx — GET /reparos
     // também filtra match_usuario_id IS NULL, e a definição de 3 colunas parava antes disso.
     // DROP antes do CREATE porque IF NOT EXISTS casa por NOME: sem o drop a definição antiga
     // sobreviveria (mesmo padrão do obras_feed_idx logo abaixo).
     await client.query(`DROP INDEX IF EXISTS reparos_feed_idx`)
     await client.query(`CREATE INDEX IF NOT EXISTS reparos_feed_idx ON reparos (status, status_aprovacao, expira_em, match_usuario_id)`)
-    await client.query(`CREATE INDEX IF NOT EXISTS obras_criado_por_idx ON obras (criado_por)`)
+    // Redundantes: (status) e (status, status_aprovacao, expira_em) são prefixos à esquerda
+    // do reparos_feed_idx acima.
+    await client.query(`DROP INDEX IF EXISTS idx_reparos_status`)
+    await client.query(`DROP INDEX IF EXISTS idx_reparos_status_expira`)
     // obras_feed_idx: inclui status_aprovacao e match_usuario_id p/ paridade com reparos_feed_idx,
     // e `valor DESC NULLS LAST` como coluna final — é a SEGUNDA chave do ORDER BY do feed
     // (`o.expira_em ASC, o.valor DESC NULLS LAST`). Um índice separado só em valor não serve a
@@ -328,6 +343,10 @@ const migracaoPronta = (async () => {
     // Drop do índice antigo (mais estreito) antes de recriar com as colunas corretas.
     await client.query(`DROP INDEX IF EXISTS obras_feed_idx`)
     await client.query(`CREATE INDEX IF NOT EXISTS obras_feed_idx ON obras (status, status_aprovacao, expira_em, match_usuario_id, valor DESC NULLS LAST)`)
+    // Redundante: (status) é prefixo à esquerda do obras_feed_idx acima.
+    // idx_obras_status_expira NÃO cai: é (status, expira_em), e no feed status_aprovacao
+    // fica ENTRE as duas colunas — não é prefixo deste índice.
+    await client.query(`DROP INDEX IF EXISTS idx_obras_status`)
     // Filtro quente do cron de proximidade (15min): lp.atualizado_em > NOW() - 30min.
     await client.query(`CREATE INDEX IF NOT EXISTS localizacoes_prestadores_atualizado_em_idx ON localizacoes_prestadores (atualizado_em)`)
 
@@ -345,8 +364,28 @@ const migracaoPronta = (async () => {
     // GET /obras/minhas: WHERE criado_por = $1 ... ORDER BY criado_em DESC — o índice só de
     // criado_por cobria o filtro e deixava a ordenação para um sort a cada chamada.
     await client.query(`CREATE INDEX IF NOT EXISTS obras_criado_por_criado_em_idx ON obras (criado_por, criado_em DESC)`)
+    // Redundantes: ambos são só (criado_por), prefixo à esquerda do composto acima. Os CREATEs
+    // deles foram removidos deste bloco — criar e derrubar a cada boot é trabalho jogado fora.
+    await client.query(`DROP INDEX IF EXISTS obras_criado_por_idx`)
+    await client.query(`DROP INDEX IF EXISTS idx_obras_criado_por`)
     // GET /reparos/minhas: idem.
     await client.query(`CREATE INDEX IF NOT EXISTS reparos_criado_por_criado_em_idx ON reparos (criado_por, criado_em DESC)`)
+    // Redundantes: ambos são só (criado_por), prefixo à esquerda do composto acima. Os CREATEs
+    // deles foram removidos deste bloco (mesmo motivo do lado obra).
+    await client.query(`DROP INDEX IF EXISTS reparos_criado_por_idx`)
+    await client.query(`DROP INDEX IF EXISTS idx_reparos_criado_por`)
+
+    // ---- Redundantes cujo índice supersedente NÃO é criado por este bloco ----
+    // (são índices de CONSTRAINT, nascidos com a tabela, ou índices legados já existentes —
+    // então sempre existem antes destes drops, e a ordem "drop depois do create" é atendida.)
+    // usuarios_email_key (UNIQUE em email) supersede — e ainda enforça a constraint.
+    await client.query(`DROP INDEX IF EXISTS idx_usuarios_email`)
+    // candidaturas_obra_id_usuario_id_key (UNIQUE em (obra_id, usuario_id)) supersede as duas:
+    // uma é o prefixo (obra_id), a outra é a mesma dupla de colunas.
+    await client.query(`DROP INDEX IF EXISTS idx_candidaturas_obra_id`)
+    await client.query(`DROP INDEX IF EXISTS idx_candidaturas_obra_usuario`)
+    // idx_interesse_reparo_usuario (reparo_id, usuario_id), legado, supersede o prefixo (reparo_id).
+    await client.query(`DROP INDEX IF EXISTS idx_interesse_reparo_id`)
     // Cron verificarCronometroReparos (60s): espelha obras_matches_pendentes_idx, que só
     // existia do lado obra — o lado reparo varria sem índice de apoio a cada minuto.
     await client.query(`
@@ -421,8 +460,15 @@ const migracaoPronta = (async () => {
       )
     `)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS assinaturas_usuario_id_unico_idx ON assinaturas (usuario_id)`)
+    // Redundantes sob o UNIQUE acima: (usuario_id) é a mesma coluna, e (usuario_id, status)
+    // não acrescenta nada — sendo usuario_id único, no máximo uma linha casa por usuário.
+    // O UNIQUE é alvo do ON CONFLICT (usuario_id) de ativarAssinatura e nunca pode cair.
+    await client.query(`DROP INDEX IF EXISTS idx_assinaturas_usuario_id`)
+    await client.query(`DROP INDEX IF EXISTS idx_assinaturas_usuario_status`)
     // Cron de expiração (1h) e aviso de vencimento (1h): WHERE status='ativa' AND proximo_vencimento < NOW().
     await client.query(`CREATE INDEX IF NOT EXISTS assinaturas_status_vencimento_idx ON assinaturas (status, proximo_vencimento)`)
+    // Redundante: (status) é prefixo à esquerda do assinaturas_status_vencimento_idx acima.
+    await client.query(`DROP INDEX IF EXISTS idx_assinaturas_status`)
     // Marcos do aviso de vencimento da ASSINATURA — mesmo padrão dos marcos de demanda
     // (obras/reparos.marco_1_em/2_em/3_em): a coluna é o CLAIM, preenchida no mesmo UPDATE
     // que reivindica o envio, então re-run ou segunda réplica nunca manda duas vezes.
@@ -596,7 +642,10 @@ const migracaoPronta = (async () => {
         UNIQUE(dono_id, prestador_id)
       )
     `)
-    await client.query(`CREATE INDEX IF NOT EXISTS prestadores_bloqueados_dono_dono_idx ON prestadores_bloqueados_dono (dono_id)`)
+    // Redundante: (dono_id) é prefixo à esquerda de prestadores_bloqueados_dono_dono_id_prestador_id_key
+    // (UNIQUE), que também é o alvo do ON CONFLICT (dono_id, prestador_id) e nunca pode cair.
+    // O CREATE foi removido: criar e derrubar o mesmo índice a cada boot é trabalho jogado fora.
+    await client.query(`DROP INDEX IF EXISTS prestadores_bloqueados_dono_dono_idx`)
     await client.query(`CREATE INDEX IF NOT EXISTS prestadores_bloqueados_dono_prestador_idx ON prestadores_bloqueados_dono (prestador_id)`)
     // Faltas (não comparecimento) do profissional. Uma linha por match desfeito pelo CRONÔMETRO
     // — o profissional casou, o prazo venceu e ele nunca declarou chegada. Sem UNIQUE: o mesmo
