@@ -4430,18 +4430,27 @@ router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req,
          WHERE u.verificacao_status = 'pendente'
            AND a.status = 'pendente_verificacao'`
       )
+      let aprovados = 0
       for (const p of pendentes.rows) {
-        // Aprovação em lote ao ligar o Modo Auto: também é não-revisada → marca automática
-        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
-        await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
+        // CLAIM primeiro (mesmo padrão do cron de timeout em server.js): o
+        // `AND status = 'pendente_verificacao'` garante a transição UMA vez só, e o UPDATE de
+        // usuarios fica atrás do rowCount. Sem isso, dois toggles simultâneos (ou duas
+        // réplicas) reaprovariam o mesmo prestador.
+        const claim = await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
           proximo_vencimento = CASE
             WHEN tipo = 'gratuito' THEN NULL
             WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
             ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END,
           marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
-         WHERE usuario_id = $1`, [p.id])
+         WHERE usuario_id = $1 AND status = 'pendente_verificacao'
+         RETURNING id`, [p.id])
+        if (claim.rowCount === 0) continue
+
+        // Aprovação em lote ao ligar o Modo Auto: também é não-revisada → marca automática
+        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
+        aprovados++
       }
-      console.log(`[Modo automático] ${pendentes.rows.length} prestadores aprovados automaticamente`)
+      console.log(`[Modo automático] ${aprovados} prestadores aprovados automaticamente`)
     }
 
     res.json({ mensagem: ativo ? 'Modo automático ativado' : 'Modo automático desativado', ativo })
