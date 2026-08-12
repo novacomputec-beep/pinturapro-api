@@ -359,8 +359,23 @@ const migracaoPronta = (async () => {
       )
     `)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS assinaturas_usuario_id_unico_idx ON assinaturas (usuario_id)`)
-    // Cron de expiração (1h) e aviso de vencimento (24h): WHERE status='ativa' AND proximo_vencimento < NOW().
+    // Cron de expiração (1h) e aviso de vencimento (1h): WHERE status='ativa' AND proximo_vencimento < NOW().
     await client.query(`CREATE INDEX IF NOT EXISTS assinaturas_status_vencimento_idx ON assinaturas (status, proximo_vencimento)`)
+    // Marcos do aviso de vencimento da ASSINATURA — mesmo padrão dos marcos de demanda
+    // (obras/reparos.marco_1_em/2_em/3_em): a coluna é o CLAIM, preenchida no mesmo UPDATE
+    // que reivindica o envio, então re-run ou segunda réplica nunca manda duas vezes.
+    //   marco_1_em → faltando <= 24h  |  marco_2_em → <= 12h  |  marco_3_em → <= 6h
+    // NULL = ainda não avisado. Todo caminho que empurra proximo_vencimento para frente
+    // zera as três (senão o ciclo seguinte nunca mais avisaria).
+    await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS marco_1_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS marco_2_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS marco_3_em TIMESTAMPTZ`)
+    // Índice PARCIAL do predicado do job: só linhas ativas com algum marco pendente entram,
+    // que é a minoria — as já avisadas nas três bandas saem do índice sozinhas.
+    await client.query(`CREATE INDEX IF NOT EXISTS assinaturas_marcos_vencimento_idx
+                        ON assinaturas (proximo_vencimento)
+                        WHERE status = 'ativa'
+                          AND (marco_1_em IS NULL OR marco_2_em IS NULL OR marco_3_em IS NULL)`)
     // Backfill do uf: linhas antigas têm cidade preenchida mas uf NULL, então sumiam do
     // filtro "Estado" (o.uf/r.uf) mesmo aparecendo em "Cidade". Cidades conhecidas e
     // inequívocas (todas em MG). Idempotente via WHERE uf IS NULL.
@@ -4092,7 +4107,8 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
         proximo_vencimento = CASE
           WHEN tipo = 'gratuito' THEN NULL
           WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
-          ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END
+          ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END,
+        marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
        WHERE usuario_id = $1`, [id]
     )
 
@@ -4268,7 +4284,8 @@ router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req,
           proximo_vencimento = CASE
             WHEN tipo = 'gratuito' THEN NULL
             WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
-            ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END
+            ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END,
+          marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
          WHERE usuario_id = $1`, [p.id])
       }
       console.log(`[Modo automático] ${pendentes.rows.length} prestadores aprovados automaticamente`)

@@ -287,29 +287,62 @@ const expirarAssinaturasVencidas = async () => {
   }
 }
 
+// Três avisos de vencimento (24h / 12h / 6h), espelhando verificarMarcosExpiracao das
+// demandas: bandas DISJUNTAS (no máximo um aviso por run e por assinatura) e claim-then-send.
+// Compara TIMESTAMP, não DATE: o DATE() antigo tratava 00:30 e 23:50 do mesmo dia como iguais,
+// então a antecedência real variava de minutos a quase 48h.
+// tipo do payload segue 'assinatura_vence_amanha' nos TRÊS — o roteamento do app não muda;
+// só título e corpo dizem quanto falta.
+const MARCOS_VENCIMENTO = [
+  { n: 1, col: 'marco_1_em', horas: 24, titulo: '⏰ Sua assinatura vence amanhã',
+    corpo: 'Renove sua assinatura para não perder o acesso aos serviços disponíveis.' },
+  { n: 2, col: 'marco_2_em', horas: 12, titulo: '⏰ Sua assinatura vence em 12 horas',
+    corpo: 'Faltam menos de 12 horas. Renove para não perder o acesso aos serviços.' },
+  { n: 3, col: 'marco_3_em', horas: 6,  titulo: '⚠️ Sua assinatura vence em 6 horas',
+    corpo: 'Última chance: menos de 6 horas para renovar antes de perder o acesso.' },
+]
+
 const notificarAssinaturasProximasVencimento = async () => {
   try {
-    const amanha = await pool.query(`
-      SELECT a.usuario_id, u.push_token, u.nome, a.plano
+    // Candidatas: ativas, com vencimento AINDA no futuro dentro da maior banda (24h) e com
+    // pelo menos um marco pendente. push_token vazio/nulo já sai daqui — não há o que enviar.
+    const candidatos = await pool.query(`
+      SELECT a.id, a.proximo_vencimento, a.marco_1_em, a.marco_2_em, a.marco_3_em, u.push_token
       FROM assinaturas a
       JOIN usuarios u ON u.id = a.usuario_id
       WHERE a.status = 'ativa'
         AND a.proximo_vencimento IS NOT NULL
-        AND DATE(a.proximo_vencimento) = DATE(NOW() + INTERVAL '1 day')
+        AND a.proximo_vencimento > NOW()
+        AND a.proximo_vencimento <= NOW() + INTERVAL '24 hours'
+        AND (a.marco_1_em IS NULL OR a.marco_2_em IS NULL OR a.marco_3_em IS NULL)
+        AND u.push_token IS NOT NULL AND u.push_token <> ''
     `)
-    if (amanha.rows.length === 0) return
+    if (candidatos.rows.length === 0) return
 
-    for (const sub of amanha.rows) {
-      if (sub.push_token) {
-        enviarPushNotificacao(
-          sub.push_token,
-          '⏰ Sua assinatura vence amanhã',
-          'Renove sua assinatura para não perder o acesso aos serviços disponíveis.',
-          { tipo: 'assinatura_vence_amanha' }
-        ).catch(() => {})
-      }
+    let totalEnviados = 0
+    for (const sub of candidatos.rows) {
+      const restanteHoras = (new Date(sub.proximo_vencimento).getTime() - Date.now()) / 3600000
+
+      // Banda disjunta — no máximo um marco por run (mesma lógica de verificarMarcosExpiracao).
+      const alvo = MARCOS_VENCIMENTO.find((m, i) => {
+        const piso = MARCOS_VENCIMENTO[i + 1]?.horas ?? 0
+        return sub[m.col] === null && restanteHoras <= m.horas && restanteHoras > piso
+      })
+      if (!alvo) continue
+
+      // Claim-then-send: reivindica a coluna no MESMO UPDATE. Linha já reivindicada por outra
+      // réplica (ou por um run anterior) não volta no RETURNING e não gera segundo envio.
+      const claim = await pool.query(
+        `UPDATE assinaturas SET ${alvo.col} = NOW() WHERE id = $1 AND ${alvo.col} IS NULL RETURNING id`,
+        [sub.id]
+      )
+      if (claim.rows.length === 0) continue
+
+      enviarPushNotificacao(sub.push_token, alvo.titulo, alvo.corpo, { tipo: 'assinatura_vence_amanha' })
+        .catch(() => {})
+      totalEnviados++
     }
-    console.log(`[NotificarVencimento] ${amanha.rows.length} usuário(s) notificado(s) sobre vencimento amanhã`)
+    console.log(`[NotificarVencimento] ${totalEnviados} aviso(s) de vencimento enviado(s)`)
   } catch (err) {
     console.error('[NotificarVencimento] Erro:', err.message)
   }
@@ -352,7 +385,9 @@ const iniciarAgendador = () => {
   // 30–35 min. O encerramento de 2 dias não se importa com a cadência mais fina; o custo é
   // apenas o SELECT/UPDATE dos dois lados, indexado e quase sempre vazio.
   setInterval(() => { autoEncerrarPendentes() }, INTERVALO_AUTO_ENCERRAR)
-  setInterval(() => { notificarAssinaturasProximasVencimento() }, 24 * 60 * 60 * 1000)
+  // De hora em hora como o job de expiração: as bandas de 12h e 6h não existem numa cadência
+  // diária — um tick por dia pularia as duas mais urgentes.
+  setInterval(() => { notificarAssinaturasProximasVencimento() }, 60 * 60 * 1000)
 
   setInterval(async () => {
     try {
@@ -377,7 +412,8 @@ const iniciarAgendador = () => {
           proximo_vencimento = CASE
             WHEN tipo = 'gratuito' THEN NULL
             WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
-            ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END
+            ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END,
+          marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
          WHERE usuario_id = $1`, [p.id])
         // Assinatura recém-ativada: limpa os DOIS caches p/ o app não cair na tela de
         // pagamento (B72-07). Só o de middlewares/auth era limpo, então /reparos seguia

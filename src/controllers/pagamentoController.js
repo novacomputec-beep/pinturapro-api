@@ -27,7 +27,8 @@ const ativarAssinatura = async (usuarioId, plano) => {
        plano = EXCLUDED.plano,
        atualizado_em = NOW(),
        proximo_vencimento = GREATEST(assinaturas.proximo_vencimento, NOW())
-         + CASE WHEN EXCLUDED.plano = 'anual' THEN INTERVAL '365 days' ELSE INTERVAL '30 days' END`,
+         + CASE WHEN EXCLUDED.plano = 'anual' THEN INTERVAL '365 days' ELSE INTERVAL '30 days' END,
+       marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL`,
     [usuarioId, plano || 'mensal']
   )
 }
@@ -352,7 +353,8 @@ const darAcessoGratuito = async (req, res) => {
       // isto, um gratuito anual com 300 dias restantes caía para 30.
       await pool.query(
         `UPDATE assinaturas SET status = 'ativa', tipo = 'gratuito', atualizado_em = NOW(),
-          proximo_vencimento = GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days')
+          proximo_vencimento = GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days'),
+          marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
          WHERE usuario_id = $1`,
         [usuario_id]
       )
