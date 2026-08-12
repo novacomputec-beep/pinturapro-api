@@ -256,14 +256,19 @@ const deletarMidiasAntigas = async () => {
         AND r.encerrado_em IS NOT NULL
         AND r.encerrado_em < NOW() - INTERVAL '7 days'
     `)
+    // As chamadas ao Cloudinary seguem UMA POR MÍDIA — é trabalho de rede por arquivo, não
+    // há o que agrupar. O que sai do laço é só o DELETE: junta os ids que de fato saíram do
+    // Cloudinary e apaga tudo num statement, em vez de um DELETE por mídia.
+    const removidosReparos = []
     for (const m of reparosAntigos.rows) {
       const sucesso = await deletarDoCloudinary(m.url, m.tipo)
-      if (sucesso) {
-        await pool.query(`DELETE FROM midias_reparos WHERE id = $1`, [m.midia_id])
-      }
+      if (sucesso) removidosReparos.push(m.midia_id)
+    }
+    if (removidosReparos.length > 0) {
+      await pool.query(`DELETE FROM midias_reparos WHERE id = ANY($1::uuid[])`, [removidosReparos])
     }
     if (reparosAntigos.rows.length > 0) {
-      console.log(`[MidiasAntigas] ${reparosAntigos.rows.length} mídias de reparos processadas`)
+      console.log(`[MidiasAntigas] ${reparosAntigos.rows.length} mídias de reparos processadas, ${removidosReparos.length} removida(s)`)
     }
 
     // Obras encerradas há mais de 7 dias com mídias ainda não removidas
@@ -275,14 +280,16 @@ const deletarMidiasAntigas = async () => {
         AND o.encerrado_em IS NOT NULL
         AND o.encerrado_em < NOW() - INTERVAL '7 days'
     `)
+    const removidosObras = []
     for (const m of obrasAntigas.rows) {
       const sucesso = await deletarDoCloudinary(m.url, m.tipo)
-      if (sucesso) {
-        await pool.query(`DELETE FROM midias WHERE id = $1`, [m.midia_id])
-      }
+      if (sucesso) removidosObras.push(m.midia_id)
+    }
+    if (removidosObras.length > 0) {
+      await pool.query(`DELETE FROM midias WHERE id = ANY($1::uuid[])`, [removidosObras])
     }
     if (obrasAntigas.rows.length > 0) {
-      console.log(`[MidiasAntigas] ${obrasAntigas.rows.length} mídias de obras processadas`)
+      console.log(`[MidiasAntigas] ${obrasAntigas.rows.length} mídias de obras processadas, ${removidosObras.length} removida(s)`)
     }
   } catch (err) {
     console.error('[MidiasAntigas] Erro:', err.message)
@@ -407,6 +414,10 @@ const iniciarAgendador = () => {
     verificarMarcosExpiracao()
     verificarCronometroReparos()
     verificarCronometroObras()
+    // Entra no warm-up porque o intervalo dele é de 24h e CADA deploy reinicia o timer:
+    // com redeploys mais frequentes que um dia, o primeiro tique nunca chegava e a limpeza
+    // simplesmente não acontecia. Aqui roda ao menos uma vez por deploy.
+    deletarMidiasAntigas()
   }, 60 * 1000)
 
   setInterval(() => { verificarObrasComBaixoEngajamento() }, INTERVALO_ENGAJAMENTO)
