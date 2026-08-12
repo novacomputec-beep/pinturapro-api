@@ -4,7 +4,12 @@ const { pool } = require('../utils/supabase')
 // Cache simples em memória
 const cacheUsuarios = new Map()
 const cacheAssinaturas = new Map()
-const CACHE_TTL = 5 * 60 * 1000 // 5 minutos
+// 30s (era 5 min): o cache é POR PROCESSO, então invalidarCacheAssinatura só limpa a réplica
+// que atendeu a requisição — com mais de uma, um prestador recém-aprovado seguiria barrado
+// nas outras até o TTL vencer. 30s limita essa janela sem largar o cache. As duas consultas
+// por trás dele são de uma linha por índice (usuarios_pkey e assinaturas_usuario_id_unico_idx),
+// então o custo dos misses extras é baixo.
+const CACHE_TTL = 30 * 1000
 
 const getCacheUsuario = (id) => {
   const entry = cacheUsuarios.get(id)
@@ -42,6 +47,26 @@ const setCacheAssinatura = (id, data) => {
 const invalidarCacheAssinatura = (id) => {
   cacheUsuarios.delete(id)
   cacheAssinaturas.delete(id)
+}
+
+// Fonte ÚNICA da resposta "este usuário tem assinatura ativa?", com o cache por trás.
+// Existia uma segunda cópia em routes/index.js (cachePrestadores) com a MESMA consulta e o
+// MESMO predicado: dois mapas guardando a mesma resposta, e por isso a invalidação precisava
+// lembrar de limpar os dois — que foi exatamente o esquecimento do B72-07. Agora exigirPrestador
+// (routes) e exigirAssinaturaAtiva (aqui) passam os dois por esta função.
+const assinaturaAtivaCacheada = async (usuarioId) => {
+  // getCacheAssinatura devolve null quando não há entrada ou ela expirou; `false` cacheado é
+  // resposta legítima e NÃO pode ir ao banco de novo.
+  let ativa = getCacheAssinatura(usuarioId)
+  if (ativa === null || ativa === undefined) {
+    const result = await pool.query(
+      `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' AND (proximo_vencimento IS NULL OR proximo_vencimento > NOW()) LIMIT 1`,
+      [usuarioId]
+    )
+    ativa = result.rows.length > 0
+    setCacheAssinatura(usuarioId, ativa)
+  }
+  return ativa
 }
 
 const autenticar = async (req, res, next) => {
@@ -88,17 +113,7 @@ const exigirAssinaturaAtiva = async (req, res, next) => {
     return next()
   }
   try {
-    // Correção: usar null como sentinela de "não está no cache"
-    // false significa "está no cache e assinatura é inativa" — não deve ir ao banco
-    let assinaturaAtiva = getCacheAssinatura(req.usuario.id)
-    if (assinaturaAtiva === null || assinaturaAtiva === undefined) {
-      const result = await pool.query(
-        `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' AND (proximo_vencimento IS NULL OR proximo_vencimento > NOW()) LIMIT 1`,
-        [req.usuario.id]
-      )
-      assinaturaAtiva = result.rows.length > 0
-      setCacheAssinatura(req.usuario.id, assinaturaAtiva)
-    }
+    const assinaturaAtiva = await assinaturaAtivaCacheada(req.usuario.id)
 
     if (!assinaturaAtiva) {
       return res.status(403).json({
@@ -151,4 +166,4 @@ const exigirSuperAdmin = (req, res, next) => {
   next()
 }
 
-module.exports = { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura }
+module.exports = { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada }

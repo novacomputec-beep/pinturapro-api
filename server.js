@@ -317,8 +317,9 @@ const expirarAssinaturasVencidas = async () => {
     if (vencidas.rowCount === 0) return
 
     for (const sub of vencidas.rows) {
-      // Os dois caches (middlewares/auth + cachePrestadores em routes) — só o primeiro
-      // era limpo, então /reparos seguia servindo 'ativa' até o TTL de 5 min vencer.
+      // Sem isto, o cache de assinatura (middlewares/auth, TTL 30s) seguiria servindo
+      // 'ativa' para quem acabou de expirar. Havia um segundo mapa em routes que ficava
+      // para trás na invalidação; hoje é um só.
       invalidarCachesUsuario(sub.usuario_id)
       if (sub.push_token) {
         enviarPushNotificacao(
@@ -478,9 +479,9 @@ const iniciarAgendador = () => {
 
         // aprovado_automaticamente = true → idoneidade ainda não revisada (auditável no painel)
         await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
-        // Assinatura recém-ativada: limpa os DOIS caches p/ o app não cair na tela de
-        // pagamento (B72-07). Só o de middlewares/auth era limpo, então /reparos seguia
-        // barrando o prestador recém-aprovado até o TTL de 5 min de cachePrestadores vencer.
+        // Assinatura recém-ativada: limpa o cache de assinatura (middlewares/auth, TTL 30s)
+        // p/ o app não cair na tela de pagamento com um `false` ainda cacheado (B72-07).
+        // O bug original vinha de haver DOIS mapas e a invalidação limpar só um; hoje é um só.
         invalidarCachesUsuario(p.id)
         if (p.push_token) {
           await enviarPushNotificacao(p.push_token, '✅ Cadastro aprovado!', 'Bem-vindo ao PinturaPro! Seu acesso está liberado.', { tipo: 'verificacao_aprovada' }).catch(() => {})

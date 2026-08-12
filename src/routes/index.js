@@ -1,7 +1,7 @@
 require('dotenv').config()
 const express = require('express')
 const router = express.Router()
-const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, invalidarCacheAssinatura } = require('../middlewares/auth')
+const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada } = require('../middlewares/auth')
 const { registrarVisita } = require('../utils/visitas')
 const { pool } = require('../utils/supabase')
 const { marcaPorTipo } = require('../utils/marca')
@@ -806,15 +806,12 @@ const migracaoPronta = (async () => {
   }
 })()
 
-// Cache de assinatura para prestadores
-const cachePrestadores = new Map()
-const CACHE_TTL = 5 * 60 * 1000 // 5 minutos
-
-// Limpa TODOS os caches em memória de um usuário (deste módulo + middleware de auth).
-// Usar sempre que a assinatura do usuário for ativada, para o app ver o status novo
-// na hora em vez de esperar o TTL de 5 min — evita o redirect indevido para o PagBank.
+// Limpa os caches em memória de um usuário. cachePrestadores, que vivia AQUI e guardava a
+// mesma resposta de cacheAssinaturas (mesma consulta, mesmo predicado), foi removido — havia
+// dois mapas para um dado só, e a invalidação precisava lembrar de limpar os dois. Restou um
+// único ponto: invalidarCacheAssinatura, em middlewares/auth, que limpa usuários e assinaturas.
+// A função continua exportada porque server.js e várias rotas já a chamam por este nome.
 const invalidarCachesUsuario = (id) => {
-  cachePrestadores.delete(id)
   invalidarCacheAssinatura(id)
 }
 
@@ -830,19 +827,10 @@ const exigirPrestador = async (req, res, next) => {
     }
     if (req.usuario.role === 'admin') return next()
 
-    const cached = cachePrestadores.get(req.usuario.id)
-    if (cached !== null && cached !== undefined && Date.now() - cached.timestamp < CACHE_TTL) {
-      if (!cached.ativa) return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os serviços.' })
-      return next()
-    }
-
-    const assinatura = await pool.query(
-      `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' AND (proximo_vencimento IS NULL OR proximo_vencimento > NOW()) LIMIT 1`,
-      [req.usuario.id]
-    )
-    const ativa = assinatura.rows.length > 0
-    cachePrestadores.set(req.usuario.id, { ativa, timestamp: Date.now() })
-
+    // Lê pelo cache COMPARTILHADO de middlewares/auth: é a mesma consulta e o mesmo predicado
+    // que exigirAssinaturaAtiva usa. A mensagem do 403 segue a daqui ("serviços"), diferente
+    // da de lá ("obras") — só a fonte da resposta foi unificada.
+    const ativa = await assinaturaAtivaCacheada(req.usuario.id)
     if (!ativa) return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os serviços.' })
     next()
   } catch (err) {
@@ -5540,6 +5528,6 @@ router.post('/admin/2fa/login-verificar', async (req, res) => {
 
 module.exports = router
 module.exports.migracaoPronta = migracaoPronta
-// Exportado para os jobs de server.js: cachePrestadores vive NESTE módulo, então
-// invalidarCacheAssinatura sozinho (middlewares/auth) limpa só metade dos caches.
+// Exportado para os jobs de server.js. Hoje é um repasse para invalidarCacheAssinatura —
+// mantido como nome estável porque server.js e várias rotas já chamam assim.
 module.exports.invalidarCachesUsuario = invalidarCachesUsuario
