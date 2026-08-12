@@ -133,6 +133,11 @@ const migracaoPronta = (async () => {
     // controller grava: respondido_por = req.usuario.id (uuid), respondido_em = NOW() (timestamptz).
     await client.query(`ALTER TABLE mensagens ADD COLUMN IF NOT EXISTS respondido_por UUID`)
     await client.query(`ALTER TABLE mensagens ADD COLUMN IF NOT EXISTS respondido_em  TIMESTAMPTZ`)
+    // Fila de dúvidas sem resposta: índice PARCIAL sobre o mesmo predicado que GET
+    // /mensagens/pendentes e o contador do /dashboard usam (respondido = false). Chave
+    // criado_em porque a listagem ordena por ela — o índice serve a contagem e à página.
+    // Parcial de propósito: a fila é a minoria das linhas, e respondidas não entram no índice.
+    await client.query(`CREATE INDEX IF NOT EXISTS mensagens_pendentes_idx ON mensagens (criado_em) WHERE respondido = false`)
     // Contratos de reparo: referência ao interesse aceito (paridade com candidatura_id de obra)
     await client.query(`ALTER TABLE contratos ADD COLUMN IF NOT EXISTS interesse_id uuid`)
     // Idempotência de criação de obra/reparo — evita duplicatas em retries após timeout/ERR_NETWORK
@@ -4772,7 +4777,7 @@ router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamento
 // ============================================================
 router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const [obras, assinaturas, candidaturas, obrasAprovacao, reparosAprovacao, reparos] = await Promise.all([
+    const [obras, assinaturas, candidaturas, obrasAprovacao, reparosAprovacao, reparos, mensagensPendentes] = await Promise.all([
       pool.query(`SELECT COUNT(*) FROM obras WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()`),
       // Métricas de assinaturas em uma única passagem:
       // - ativos: todas as assinaturas ativas
@@ -4790,7 +4795,8 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
       pool.query(`SELECT COUNT(*) FROM candidaturas WHERE status = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM obras WHERE enviada_por_dono = true AND status_aprovacao = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM reparos WHERE status_aprovacao = 'pendente'`),
-      pool.query(`SELECT COUNT(*) FROM reparos WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()`)
+      pool.query(`SELECT COUNT(*) FROM reparos WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()`),
+      pool.query(`SELECT COUNT(*) FROM mensagens WHERE respondido = false`)
     ])
     const assinRow = assinaturas.rows[0]
     res.json({
@@ -4801,7 +4807,8 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
       receita_mensal: parseFloat(assinRow.receita),
       candidaturas_pendentes: parseInt(candidaturas.rows[0].count),
       obras_para_aprovar: parseInt(obrasAprovacao.rows[0].count),
-      reparos_para_aprovar: parseInt(reparosAprovacao.rows[0].count)
+      reparos_para_aprovar: parseInt(reparosAprovacao.rows[0].count),
+      mensagens_pendentes: parseInt(mensagensPendentes.rows[0].count)
     })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar métricas' })
