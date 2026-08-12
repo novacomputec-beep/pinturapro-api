@@ -5,6 +5,12 @@ const { registrarTentativa, limparTentativas } = require('../utils/tentativasAut
 const nodemailer = require('nodemailer')
 const crypto = require('crypto')
 
+// Hash de comparação para e-mail SEM conta no login — nivela o tempo de resposta dos dois
+// caminhos (ver o uso em `login`). Gerado uma única vez a partir de 32 bytes aleatórios, com
+// custo 10 (o mesmo de bcrypt.hash(senha, 10) do cadastro). Não é segredo: é um hash de valor
+// descartado, nenhuma senha real se compara a ele e nada além do TEMPO depende dele.
+const HASH_FICTICIO = '$2b$10$TurXFLIbHVFyg7b3h/.ame16E9jSv4PmsB5G47xyqYPM1rXeqDSda'
+
 const gerarToken = (usuario) => jwt.sign(
   { id: usuario.id, role: usuario.role },
   process.env.JWT_SECRET,
@@ -284,6 +290,14 @@ const login = async (req, res) => {
     )
 
     if (result.rows.length === 0) {
+      // E-mail sem conta: compara contra um hash FICTÍCIO em vez de sair na hora. O retorno
+      // antecipado fazia o caminho "não existe" responder em ~1ms e o "existe" em ~65ms (custo
+      // do bcrypt), e essa diferença sozinha já dizia quais e-mails estão cadastrados.
+      // Agora os dois pagam o mesmo trabalho. O resultado é descartado de propósito — sempre
+      // false, porque o hash vem de 32 bytes aleatórios que nenhuma senha submetida reproduz.
+      // Custo 10, o mesmo de bcrypt.hash(senha, 10) usado no cadastro: com custo menor a
+      // diferença de tempo voltaria.
+      await bcrypt.compare(senha, HASH_FICTICIO)
       return res.status(401).json({ erro: 'E-mail ou senha incorretos' })
     }
 
