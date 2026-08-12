@@ -221,6 +221,17 @@ const webhookPagbank = async (req, res) => {
     const enforce = process.env.WEBHOOK_ENFORCE_SIGNATURE === 'true'
     console.log(`[webhook-pagbank] assinatura match=${assinaturaValida} | modo=${enforce ? 'enforce' : 'monitor'} | content-type=${req.headers['content-type'] || '(none)'}`)
 
+    // Diagnóstico do ESQUEMA de assinatura, para a primeira entrega real revelar o que o
+    // PagBank manda de fato. Só NOMES de header e TAMANHOS — nenhum valor de header, nenhum
+    // trecho de payload, nunca o token. Puramente observacional: roda antes do early-return
+    // de enforce (para aparecer também quando o evento é rejeitado) e não altera o fluxo.
+    const tamAuthenticity = req.headers['x-authenticity-token'] != null
+      ? String(req.headers['x-authenticity-token']).length : null
+    const tamPayloadSignature = req.headers['x-payload-signature'] != null
+      ? String(req.headers['x-payload-signature']).length : null
+    console.log(`[webhook-pagbank] headers recebidos (apenas nomes): ${Object.keys(req.headers).join(', ') || '(nenhum)'}`)
+    console.log(`[webhook-pagbank] tamanhos | x-authenticity-token=${tamAuthenticity ?? '(ausente)'} | x-payload-signature=${tamPayloadSignature ?? '(ausente)'} | sha256_hex_esperado=${assinaturaEsperada.length}`)
+
     if (!assinaturaValida && enforce) {
       console.warn('[webhook-pagbank] assinatura inválida ou ausente — evento ignorado (enforce)')
       return res.sendStatus(200)
