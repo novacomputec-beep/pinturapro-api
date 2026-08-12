@@ -30,6 +30,12 @@ const migracaoPronta = (async () => {
   try {
     client = await pool.connect()
     await client.query('BEGIN')
+    // Isenta ESTA transação do statement_timeout global de 10s do pool (utils/supabase.js).
+    // A migração roda ANTES do app.listen (server.js aguarda migracaoPronta), e um CREATE
+    // INDEX não-concorrente numa obras/reparos grande passa fácil dos 10s: o timeout mataria
+    // o statement, a migração lançaria e o servidor NUNCA subiria. SET LOCAL só vale até o
+    // COMMIT — a conexão volta ao pool com o teto normal.
+    await client.query('SET LOCAL statement_timeout = 0')
     await client.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_proposto NUMERIC`)
     await client.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS valor_contraproposta NUMERIC`)
     await client.query(`ALTER TABLE interesse_reparos ADD COLUMN IF NOT EXISTS rodada INTEGER DEFAULT 1`)
