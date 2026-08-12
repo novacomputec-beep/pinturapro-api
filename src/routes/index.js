@@ -380,12 +380,16 @@ const migracaoPronta = (async () => {
     // então sempre existem antes destes drops, e a ordem "drop depois do create" é atendida.)
     // usuarios_email_key (UNIQUE em email) supersede — e ainda enforça a constraint.
     await client.query(`DROP INDEX IF EXISTS idx_usuarios_email`)
-    // candidaturas_obra_id_usuario_id_key (UNIQUE em (obra_id, usuario_id)) supersede as duas:
-    // uma é o prefixo (obra_id), a outra é a mesma dupla de colunas.
+    // candidaturas_obra_id_usuario_id_key (UNIQUE em (obra_id, usuario_id)) supersede as três:
+    // duas são o prefixo (obra_id), a outra é a mesma dupla de colunas. candidaturas_obra_id_idx
+    // teve o CREATE removido daqui, mas segue no banco de deploys anteriores — só o drop o tira.
     await client.query(`DROP INDEX IF EXISTS idx_candidaturas_obra_id`)
     await client.query(`DROP INDEX IF EXISTS idx_candidaturas_obra_usuario`)
+    await client.query(`DROP INDEX IF EXISTS candidaturas_obra_id_idx`)
     // idx_interesse_reparo_usuario (reparo_id, usuario_id), legado, supersede o prefixo (reparo_id).
+    // interesse_reparos_reparo_id_idx idem: CREATE removido, mas a linha antiga persiste no banco.
     await client.query(`DROP INDEX IF EXISTS idx_interesse_reparo_id`)
+    await client.query(`DROP INDEX IF EXISTS interesse_reparos_reparo_id_idx`)
     // Cron verificarCronometroReparos (60s): espelha obras_matches_pendentes_idx, que só
     // existia do lado obra — o lado reparo varria sem índice de apoio a cada minuto.
     await client.query(`
