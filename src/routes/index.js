@@ -795,6 +795,26 @@ const migracaoPronta = (async () => {
         PRIMARY KEY (charge_id, status)
       )
     `)
+    // Tentativas de login / redefinição POR IDENTIDADE (ver src/utils/tentativasAuth.js).
+    // Guarda interna ao lado dos limiters por IP: o de IP não vê ataque dirigido a UMA conta
+    // e, nesta base, é enfraquecido pelo CGNAT das operadoras.
+    // Chave é o e-mail SUBMETIDO (não usuario_id) e conta até para endereço sem conta — é o
+    // que permite devolver 429 no login sem virar oráculo de existência.
+    // Sem `bloqueado_ate`: "bloqueado" é tentativas >= limite dentro da janela, então o fim da
+    // janela JÁ é o desbloqueio — um estado a menos para manter coerente.
+    // Sem FK para usuarios: o identificador pode não ter conta e a linha deve sobreviver à
+    // exclusão dela.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS tentativas_auth (
+        acao          TEXT NOT NULL CHECK (acao IN ('login', 'reset')),
+        identificador TEXT NOT NULL,
+        tentativas    INT NOT NULL DEFAULT 0,
+        janela_em     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (acao, identificador)
+      )
+    `)
+    // A PK atende as buscas; este índice serve só à varredura diária por idade.
+    await client.query(`CREATE INDEX IF NOT EXISTS tentativas_auth_janela_idx ON tentativas_auth (janela_em)`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
