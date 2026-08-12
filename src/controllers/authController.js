@@ -31,7 +31,10 @@ const cadastrar = async (req, res) => {
             rg, rg_orgao, rg_estado, cep, latitude, longitude,
             logradouro, numero, complemento, bairro } = req.body
 
-    console.log(`[CADASTRO][${ts}] ▶ inicio | tipo_conta=${tipo_conta} email=${email} cpf_cnpj=${cpf_cnpj} plano=${plano} tem_doc_frente=${!!verificacao_doc_frente_url} tem_doc_verso=${!!verificacao_doc_verso_url} tem_selfie=${!!verificacao_selfie_url}`)
+    // PRESENÇA, nunca o valor: email e cpf_cnpj saíam em claro para o stdout e ficavam
+    // retidos no log da Railway. Mesmo estilo booleano já usado no log de campos obrigatórios
+    // logo abaixo — o diagnóstico ("veio email?", "veio documento?") é preservado.
+    console.log(`[CADASTRO][${ts}] ▶ inicio | tipo_conta=${tipo_conta} tem_email=${!!email} tem_cpf_cnpj=${!!cpf_cnpj} plano=${plano} tem_doc_frente=${!!verificacao_doc_frente_url} tem_doc_verso=${!!verificacao_doc_verso_url} tem_selfie=${!!verificacao_selfie_url}`)
 
     if (!nome || !email || !senha) {
       console.log(`[CADASTRO][${ts}] ✗ 400 campos obrigatorios ausentes | nome=${!!nome} email=${!!email} senha=${!!senha}`)
@@ -42,7 +45,7 @@ const cadastrar = async (req, res) => {
       return res.status(400).json({ erro: 'A senha deve ter pelo menos 8 caracteres' })
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      console.log(`[CADASTRO][${ts}] ✗ 400 email invalido | email=${email}`)
+      console.log(`[CADASTRO][${ts}] ✗ 400 email invalido | tem_email=${!!email}`)
       return res.status(400).json({ erro: 'E-mail inválido' })
     }
 
@@ -107,14 +110,15 @@ const cadastrar = async (req, res) => {
 
     if (cpf_cnpj) {
       const cpfLimpo = cpf_cnpj.replace(/\D/g, '')
-      console.log(`[CADASTRO][${ts}] ▶ verificando cpf_cnpj no banco | cpfLimpo=${cpfLimpo}`)
+      // cpfLimpo NÃO entra no log: é CPF/CNPJ em claro. O marcador de etapa basta.
+      console.log(`[CADASTRO][${ts}] ▶ verificando cpf_cnpj no banco`)
       const cpfExistente = await client.query(
         `SELECT id FROM usuarios WHERE regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') = $1`,
         [cpfLimpo]
       )
       if (cpfExistente.rows.length > 0) {
         await client.query('ROLLBACK')
-        console.log(`[CADASTRO][${ts}] ✗ 409 cpf_cnpj duplicado | cpfLimpo=${cpfLimpo}`)
+        console.log(`[CADASTRO][${ts}] ✗ 409 cpf_cnpj duplicado`)
         return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.', codigo: 'cpf_duplicado' })
       }
       console.log(`[CADASTRO][${ts}] ✓ cpf_cnpj disponivel`)
