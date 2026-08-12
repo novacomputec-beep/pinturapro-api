@@ -332,11 +332,24 @@ const darAcessoGratuito = async (req, res) => {
     const usuarioExiste = await pool.query(`SELECT id FROM usuarios WHERE id = $1`, [usuario_id])
     if (usuarioExiste.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
 
-    const assinaturaExiste = await pool.query(`SELECT id FROM assinaturas WHERE usuario_id = $1`, [usuario_id])
+    const assinaturaExiste = await pool.query(`SELECT id, status, tipo FROM assinaturas WHERE usuario_id = $1`, [usuario_id])
     if (assinaturaExiste.rows.length > 0) {
+      // RECUSA em vez de converter: sobre uma assinatura PAGA ativa, este endpoint apagava o
+      // caráter pago da linha (tipo='gratuito') sem registro nenhum, e a partir daí todo
+      // caminho de aprovação leria tipo='gratuito' → proximo_vencimento = NULL, tornando o
+      // usuário grátis para sempre. Acesso gratuito é para quem NÃO tem assinatura paga.
+      // tipo NULL conta como "não gratuito" (linha paga nasce sem tipo) — !== já dá isso.
+      const atual = assinaturaExiste.rows[0]
+      if (atual.status === 'ativa' && atual.tipo !== 'gratuito') {
+        return res.status(409).json({
+          erro: 'Este usuário já tem uma assinatura paga ativa. Conceder acesso gratuito apagaria o registro pago — cancele ou aguarde o vencimento antes de conceder.',
+          codigo: 'ASSINATURA_PAGA_ATIVA',
+        })
+      }
+      // Aqui a linha ou já é gratuita, ou não está ativa (pendente/cancelada/expirada) — o
+      // guard acima barrou a paga ativa, então tipo='gratuito' abaixo não apaga nada pago.
       // GREATEST: conceder acesso grátis nunca ENCURTA um vencimento já mais distante — sem
-      // isto, um anual com 300 dias restantes caía para 30. (O overwrite de tipo='gratuito'
-      // sobre linha paga é defeito SEPARADO, tratado à parte.)
+      // isto, um gratuito anual com 300 dias restantes caía para 30.
       await pool.query(
         `UPDATE assinaturas SET status = 'ativa', tipo = 'gratuito', atualizado_em = NOW(),
           proximo_vencimento = GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days')
