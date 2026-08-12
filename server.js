@@ -248,12 +248,15 @@ const verificarPrestadoresProximos = async () => {
 
 const deletarMidiasAntigas = async () => {
   try {
-    // Reparos encerrados há mais de 7 dias com mídias ainda não removidas
+    // Reparos MORTOS (encerrados ou cancelados) há mais de 7 dias com mídias ainda não
+    // removidas. 'cancelada' entra junto porque demanda cancelada retém mídia igual à
+    // encerrada — só 'encerrada' deixava a de recusado/cancelado no Cloudinary para sempre.
+    // Janela de 7 dias inalterada.
     const reparosAntigos = await pool.query(`
       SELECT r.id, mr.id as midia_id, mr.url, mr.tipo
       FROM reparos r
       JOIN midias_reparos mr ON mr.reparo_id = r.id
-      WHERE r.status = 'encerrada'
+      WHERE r.status IN ('encerrada', 'cancelada')
         AND r.encerrado_em IS NOT NULL
         AND r.encerrado_em < NOW() - INTERVAL '7 days'
     `)
@@ -272,12 +275,12 @@ const deletarMidiasAntigas = async () => {
       console.log(`[MidiasAntigas] ${reparosAntigos.rows.length} mídias de reparos processadas, ${removidosReparos.length} removida(s)`)
     }
 
-    // Obras encerradas há mais de 7 dias com mídias ainda não removidas
+    // Obras MORTAS (encerradas ou canceladas) há mais de 7 dias — mesmo racional do lado reparo.
     const obrasAntigas = await pool.query(`
       SELECT o.id, m.id as midia_id, m.url, m.tipo
       FROM obras o
       JOIN midias m ON m.obra_id = o.id
-      WHERE o.status = 'encerrada'
+      WHERE o.status IN ('encerrada', 'cancelada')
         AND o.encerrado_em IS NOT NULL
         AND o.encerrado_em < NOW() - INTERVAL '7 days'
     `)
