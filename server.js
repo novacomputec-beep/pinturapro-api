@@ -9,6 +9,7 @@ const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNo
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
+const { limparTentativasAntigas } = require('./src/utils/tentativasAuth')
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -415,10 +416,11 @@ const iniciarAgendador = () => {
     verificarMarcosExpiracao()
     verificarCronometroReparos()
     verificarCronometroObras()
-    // Entra no warm-up porque o intervalo dele é de 24h e CADA deploy reinicia o timer:
+    // Entram no warm-up porque o intervalo deles é de 24h e CADA deploy reinicia o timer:
     // com redeploys mais frequentes que um dia, o primeiro tique nunca chegava e a limpeza
-    // simplesmente não acontecia. Aqui roda ao menos uma vez por deploy.
+    // simplesmente não acontecia. Aqui rodam ao menos uma vez por deploy.
     deletarMidiasAntigas()
+    limparTentativasAntigas()
   }, 60 * 1000)
 
   setInterval(() => { verificarObrasComBaixoEngajamento() }, INTERVALO_ENGAJAMENTO)
@@ -429,6 +431,9 @@ const iniciarAgendador = () => {
   setInterval(() => { verificarCronometroReparos() }, INTERVALO_CRONOMETRO)
   setInterval(() => { verificarCronometroObras() }, INTERVALO_CRONOMETRO)
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
+  // Poda das tentativas de auth: a tabela acumula linhas de e-mails inexistentes, que é o
+  // preço de contar TODOS (o que fecha o oráculo de existência de conta).
+  setInterval(() => { limparTentativasAntigas() }, 24 * 60 * 60 * 1000)
   setInterval(() => { expirarAssinaturasVencidas() }, 60 * 60 * 1000)
   // De 5 em 5 minutos. Era de hora em hora, justificado pelo prazo de 2 dias do encerramento
   // em duas mãos — mas a MESMA função também auto-confirma chegada, e esse prazo passou a ser

@@ -1,6 +1,7 @@
 const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
 const { pool } = require('../utils/supabase')
+const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const nodemailer = require('nodemailer')
 const crypto = require('crypto')
 
@@ -265,6 +266,18 @@ const login = async (req, res) => {
 
     const emailNormalizado = email.toLowerCase().trim()
 
+    // Contador por identidade ANTES de qualquer consulta e ANTES do bcrypt: identidade
+    // trancada nem chega a queimar ~100ms de hash. Vale para e-mail inexistente também —
+    // é isso que faz o 429 explícito não denunciar quais contas existem.
+    const tentativa = await registrarTentativa('login', emailNormalizado)
+    if (tentativa.excedeu) {
+      return res.status(429).json({
+        erro: `Muitas tentativas de login. Tente novamente em ${Math.ceil(tentativa.segundosRestantes / 60)} minuto(s), ou redefina sua senha.`,
+        codigo: 'MUITAS_TENTATIVAS',
+        retry_apos_segundos: tentativa.segundosRestantes,
+      })
+    }
+
     const result = await pool.query(
       'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida FROM usuarios WHERE email = $1',
       [emailNormalizado]
@@ -284,6 +297,11 @@ const login = async (req, res) => {
     if (!senhaValida) {
       return res.status(401).json({ erro: 'E-mail ou senha incorretos' })
     }
+
+    // Senha conferiu: apaga a linha (some, não zera — mantém a tabela pequena). Limpa ANTES
+    // do 2FA de propósito: este contador defende a SENHA, e ela acabou de ser provada. Um
+    // eventual contador de 2FA seria um controle à parte.
+    await limparTentativas('login', emailNormalizado)
 
     if (usuario.role === 'admin') {
       const tfaResult = await pool.query(
@@ -413,6 +431,16 @@ const esqueciSenha = async (req, res) => {
     const emailNormalizado = email.toLowerCase().trim()
 
     res.json({ mensagem: 'Se este e-mail estiver cadastrado, você receberá as instruções em breve.' })
+
+    // NUNCA 429 aqui — a resposta genérica acima já saiu e é sempre a mesma. O contrato deste
+    // endpoint é não revelar se o endereço está cadastrado, e um status diferente no caminho
+    // estourado seria exatamente esse oráculo. Estourou o teto: só não manda o e-mail.
+    // Abuso de VOLUME continua sendo trabalho do limiter por IP (20/h em server.js).
+    const tentativa = await registrarTentativa('reset', emailNormalizado)
+    if (tentativa.excedeu) {
+      console.warn(`[EsqueciSenha] teto por identidade atingido — e-mail não enviado (${tentativa.tentativas} pedidos na janela)`)
+      return
+    }
 
     const result = await pool.query('SELECT id, nome, email FROM usuarios WHERE email = $1', [emailNormalizado])
     if (result.rows.length === 0) return
