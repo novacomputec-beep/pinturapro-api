@@ -15,6 +15,53 @@ const app = express()
 const PORT = process.env.PORT || 3000
 
 app.set('trust proxy', 1)
+
+// ============================================================
+// LOG DE REQUISIÇÕES — uma linha por requisição, ao terminar
+// ============================================================
+// Registrado ANTES de todo o resto (helmet, cors, shedding, rate limiters) de propósito: o
+// listener de 'finish' passa a existir desde o primeiro instante da requisição, então a linha
+// sai com o status FINAL mesmo quando quem responde é o shedding (503) ou um limiter (429) e
+// a requisição nunca chega a uma rota. Registrado depois deles, esses casos não apareceriam.
+//
+// O QUE ENTRA: método, caminho, status, duração e o id do usuário autenticado quando houver.
+// O QUE FICA DE FORA, por decisão: query string, corpo, headers, e-mail, CPF — nada de dado
+// pessoal. É o mesmo cuidado que os logs de cadastro precisaram receber hoje.
+// Por isso req.path e NÃO req.originalUrl: originalUrl carrega a query string junto.
+//
+// O IP é a ÚNICA exceção, e só fora do 2xx: num 429/503/5xx ele é o que permite dizer se a
+// pressão vem de um cliente só ou de muitos — sem ele o log não responde a pergunta que se
+// faz durante um incidente. No tráfego bem-sucedido não acrescenta nada, então não é
+// registrado: endereço não fica gravado no caminho feliz. req.ip é o IP real do cliente
+// porque `trust proxy` está ligado acima (senão seria o do proxy da Railway).
+const ROTAS_SEM_LOG = new Set(['/', '/api/health'])
+const LIMITE_LENTO_MS = 1000
+
+app.use((req, res, next) => {
+  const inicio = process.hrtime.bigint()
+  // Capturado na ENTRADA: os routers reescrevem req.url durante o dispatch, e ler o caminho
+  // só no 'finish' arriscaria registrar algo diferente do que o cliente pediu.
+  const caminho = req.path
+  // Health check da plataforma bate a cada poucos segundos — sem esta exceção ele afogaria
+  // o log e esconderia o resto.
+  if (ROTAS_SEM_LOG.has(caminho)) return next()
+
+  res.on('finish', () => {
+    const ms = Number(process.hrtime.bigint() - inicio) / 1e6
+    // Prefixo distinto acima de 1s: dá um grep próprio para o que está lento, sem precisar
+    // filtrar por duração no meio da linha.
+    const prefixo = ms >= LIMITE_LENTO_MS ? '[HTTP-LENTO]' : '[HTTP]'
+    // req.usuario é populado por `autenticar`, que roda POR ROTA — no 'finish' já está lá se
+    // a rota autenticou. Só o id: nome e e-mail continuam fora do log.
+    const usuario = req.usuario?.id ? ` user=${req.usuario.id}` : ''
+    // IP só quando algo deu errado (ver o bloco acima). 2xx sai sem endereço nenhum.
+    const ok2xx = res.statusCode >= 200 && res.statusCode < 300
+    const ip = ok2xx ? '' : ` ip=${req.ip || 'desconhecido'}`
+    console.log(`${prefixo} ${req.method} ${caminho} ${res.statusCode} ${ms.toFixed(0)}ms${usuario}${ip}`)
+  })
+  next()
+})
+
 app.use(helmet())
 
 app.use(cors({
