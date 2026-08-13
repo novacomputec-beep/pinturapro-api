@@ -54,9 +54,12 @@ app.use((req, res, next) => {
     // req.usuario é populado por `autenticar`, que roda POR ROTA — no 'finish' já está lá se
     // a rota autenticou. Só o id: nome e e-mail continuam fora do log.
     const usuario = req.usuario?.id ? ` user=${req.usuario.id}` : ''
-    // IP só quando algo deu errado (ver o bloco acima). 2xx sai sem endereço nenhum.
-    const ok2xx = res.statusCode >= 200 && res.statusCode < 300
-    const ip = ok2xx ? '' : ` ip=${req.ip || 'desconhecido'}`
+    // IP só quando algo deu errado (ver o bloco acima). 2xx e 3xx saem sem endereço: um 304
+    // é um GET condicional BEM-SUCEDIDO (o cliente já tinha a versão), não uma falha — pôr IP
+    // nele seria gravar endereço no caminho feliz, justamente o que se quis evitar.
+    // Ou seja: só 4xx e 5xx carregam ip.
+    const semFalha = res.statusCode < 400
+    const ip = semFalha ? '' : ` ip=${req.ip || 'desconhecido'}`
     console.log(`${prefixo} ${req.method} ${caminho} ${res.statusCode} ${ms.toFixed(0)}ms${usuario}${ip}`)
   })
   next()
