@@ -2578,13 +2578,26 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
     )
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     if (reparo.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Não é possível excluir um serviço com prestador a caminho' })
-    await pool.query(enfileirarOrfas(`DELETE FROM midias_reparos WHERE reparo_id = $1 RETURNING url, tipo`), [req.params.id])
-    await pool.query(`DELETE FROM interesse_reparos WHERE reparo_id = $1`, [req.params.id])
-    await pool.query(`DELETE FROM reparos WHERE id = $1`, [req.params.id])
-    res.json({ mensagem: 'Serviço excluído com sucesso' })
+    // CANCELA em vez de apagar, alinhando com DELETE /obras/dono/:id. Apagar a linha custava
+    // duas coisas:
+    //   - a mídia saía do banco antes de o cron poder limpá-la, então o arquivo ficava no
+    //     Cloudinary sem nada apontando para ele (o ledger de órfãs cobre o caso, mas aqui
+    //     não há motivo para apagar: basta deixar a linha e o cron recolhe no prazo);
+    //   - apagava os interesse_reparos junto, deixando contratos (contratos.interesse_id não
+    //     tem FK) e avaliações (contrato_id polimórfico) apontando para o vazio.
+    // Com o cancelamento a linha permanece: deletarMidiasAntigas recolhe a mídia aos 7 dias
+    // pelo braço 'cancelada', e contratos/avaliações continuam com referente.
+    // encerrado_em é o relógio desses 7 dias; COALESCE não reinicia contagem já iniciada.
+    await pool.query(
+      `UPDATE reparos SET status = 'cancelada', status_aprovacao = 'cancelada',
+              encerrado_em = COALESCE(encerrado_em, NOW())
+        WHERE id = $1`,
+      [req.params.id]
+    )
+    res.json({ mensagem: 'Serviço cancelado com sucesso' })
   } catch (err) {
-    console.error('Erro ao deletar reparo:', err)
-    res.status(500).json({ erro: 'Erro ao excluir serviço' })
+    console.error('Erro ao cancelar reparo:', err)
+    res.status(500).json({ erro: 'Erro ao cancelar serviço' })
   }
 })
 
