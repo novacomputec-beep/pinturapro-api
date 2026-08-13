@@ -295,6 +295,27 @@ const deletarMidiasAntigas = async () => {
     if (obrasAntigas.rows.length > 0) {
       console.log(`[MidiasAntigas] ${obrasAntigas.rows.length} mídias de obras processadas, ${removidosObras.length} removida(s)`)
     }
+
+    // Terceiro braço: fila de ÓRFÃS — mídias cuja linha já sumiu (exclusão de conta, limpezas
+    // do admin, troca de slot no upload). Os dois braços acima só enxergam mídia através da
+    // demanda; sem esta fila, arquivo de linha apagada nunca mais era alcançado.
+    // Sem janela de 7 dias aqui de propósito: a linha já não existe, não há o que reter.
+    // LIMIT 200 porque uma exclusão de conta pode enfileirar muita coisa de uma vez — o resto
+    // sai nas rodadas seguintes, já que a linha da fila só some quando o Cloudinary confirma.
+    const orfas = await pool.query(`SELECT url, tipo FROM midias_orfas ORDER BY criado_em LIMIT 200`)
+    if (orfas.rows.length > 0) {
+      const urlsRemovidas = []
+      for (const m of orfas.rows) {
+        const sucesso = await deletarDoCloudinary(m.url, m.tipo)
+        if (sucesso) urlsRemovidas.push(m.url)
+      }
+      // Só sai da fila o que o Cloudinary confirmou (o helper trata 'not found' como sucesso,
+      // então arquivo já apagado também limpa a fila em vez de ficar preso para sempre).
+      if (urlsRemovidas.length > 0) {
+        await pool.query(`DELETE FROM midias_orfas WHERE url = ANY($1::text[])`, [urlsRemovidas])
+      }
+      console.log(`[MidiasAntigas] fila de órfãs: ${orfas.rows.length} processada(s), ${urlsRemovidas.length} removida(s)`)
+    }
   } catch (err) {
     console.error('[MidiasAntigas] Erro:', err.message)
   }
