@@ -4549,12 +4549,37 @@ router.get('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (r
 
 router.post('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const { ativo } = req.body
+    const { ativo, aprovar_pendentes } = req.body
     await pool.query(
       `UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'aprovacao_automatica_obras'`,
       [ativo ? 'true' : 'false']
     )
-    res.json({ mensagem: ativo ? 'Aprovação automática de obras ativada' : 'Aprovação automática de obras desativada', ativo })
+
+    // Ligar o modo automático só governa obras FUTURAS. A varredura retroativa da fila é
+    // OPT-IN por aprovar_pendentes: sem a flag nada é aprovado para trás, que é o
+    // comportamento de hoje. Espelha o toggle de prestadores, que aprova os pendentes na
+    // ativação — a diferença é que lá a varredura é implícita e aqui é pedida.
+    let aprovados = 0
+    if (ativo && aprovar_pendentes) {
+      const pendentes = await pool.query(
+        `SELECT id FROM obras WHERE enviada_por_dono = true AND status_aprovacao = 'pendente'`
+      )
+      for (const o of pendentes.rows) {
+        // aprovarEPublicarObra é a MESMA função da rota de aprovação do admin: mesmo UPDATE,
+        // mesmo reinício de publicado_em/expira_em e os mesmos dois avisos. Ela já traz a
+        // guarda de idempotência (status_aprovacao <> 'aprovada') e devolve null quando não
+        // houve transição, então contar as não-nulas dá o número REAL de aprovações.
+        const publicada = await aprovarEPublicarObra(o.id)
+        if (publicada) aprovados++
+      }
+      console.log(`[Modo automático obras] ${aprovados} obra(s) da fila aprovada(s) na ativação`)
+    }
+
+    res.json({
+      mensagem: ativo ? 'Aprovação automática de obras ativada' : 'Aprovação automática de obras desativada',
+      ativo,
+      aprovados,
+    })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar configuração' })
   }
