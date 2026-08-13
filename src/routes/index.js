@@ -20,6 +20,17 @@ const { enviarContratoReparo, enviarContratoObra } = require('../controllers/con
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 const { enviarEmail } = require('../services/emailService')
 const bcrypt = require('bcrypt')
+
+// Envolve um DELETE de mídia para que, NO MESMO statement, as urls apagadas caiam na fila
+// midias_orfas — de onde deletarMidiasAntigas as remove do Cloudinary. Um só comando: se o
+// DELETE entra, o registro da órfã entra junto; não há janela em que a linha some sem deixar
+// rastro do arquivo.
+// O argumento é o DELETE COMPLETO, com `RETURNING url, tipo` — cada call site continua
+// mostrando o próprio WHERE, que é o que varia entre eles.
+// ON CONFLICT (url): a mesma url enfileirada de novo é a mesma exclusão.
+const enfileirarOrfas = (deleteComReturning) => `
+  WITH del AS (${deleteComReturning})
+  INSERT INTO midias_orfas (url, tipo) SELECT url, tipo FROM del ON CONFLICT (url) DO NOTHING`
 const jwt = require('jsonwebtoken')
 const speakeasy = require('speakeasy')
 
@@ -821,6 +832,22 @@ const migracaoPronta = (async () => {
     `)
     // A PK atende as buscas; este índice serve só à varredura diária por idade.
     await client.query(`CREATE INDEX IF NOT EXISTS tentativas_auth_janela_idx ON tentativas_auth (janela_em)`)
+    // Fila de mídias cujo ARQUIVO ainda está no Cloudinary mas cuja LINHA já foi apagada.
+    // deletarMidiasAntigas só enxerga mídia através da demanda; quando a linha some (exclusão
+    // de conta, limpezas do admin, troca de slot no upload), o arquivo ficava órfão para
+    // sempre — não havia mais nada apontando para ele. Todo DELETE de mídia agora enfileira
+    // aqui NO MESMO statement, e o cron esvazia a fila.
+    // PK na url: a mesma url enfileirada duas vezes é a mesma exclusão, não duas.
+    // Sem FK: o ponto da tabela é justamente sobreviver ao sumiço da linha de origem.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS midias_orfas (
+        url       TEXT PRIMARY KEY,
+        tipo      TEXT,
+        criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+    // O cron varre em ordem de chegada com LIMIT — este índice serve a esse ORDER BY.
+    await client.query(`CREATE INDEX IF NOT EXISTS midias_orfas_criado_em_idx ON midias_orfas (criado_em)`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -1250,7 +1277,7 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
       const obraIds = obrasRes.rows.map(r => r.id)
       await client.query('DELETE FROM mensagens WHERE obra_id = ANY($1::uuid[])', [obraIds])
       await client.query('DELETE FROM candidaturas WHERE obra_id = ANY($1::uuid[])', [obraIds])
-      await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
+      await client.query(enfileirarOrfas(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1) RETURNING url, tipo`), [id])
       await client.query('DELETE FROM obras WHERE criado_por = $1', [id])
     }
 
@@ -1259,7 +1286,7 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     if (reparosRes.rows.length > 0) {
       const reparoIds = reparosRes.rows.map(r => r.id)
       await client.query('DELETE FROM interesse_reparos WHERE reparo_id = ANY($1::uuid[])', [reparoIds])
-      await client.query(`DELETE FROM midias_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1)`, [id])
+      await client.query(enfileirarOrfas(`DELETE FROM midias_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1) RETURNING url, tipo`), [id])
       await client.query('DELETE FROM reparos WHERE criado_por = $1', [id])
     }
 
@@ -1355,12 +1382,12 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
     // Cascade obras criadas por este usuário (colunas idênticas ao DELETE /usuarios/:id)
     await client.query(`DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
     await client.query(`DELETE FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
-    await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
+    await client.query(enfileirarOrfas(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1) RETURNING url, tipo`), [id])
     await client.query(`DELETE FROM obras WHERE criado_por = $1`, [id])
 
     // Cascade reparos criados por este usuário
     await client.query(`DELETE FROM interesse_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1)`, [id])
-    await client.query(`DELETE FROM midias_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1)`, [id])
+    await client.query(enfileirarOrfas(`DELETE FROM midias_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1) RETURNING url, tipo`), [id])
     await client.query(`DELETE FROM reparos WHERE criado_por = $1`, [id])
 
     // NULL out match_usuario_id caso o usuário estivesse em atendimento
@@ -2551,7 +2578,7 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
     )
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     if (reparo.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Não é possível excluir um serviço com prestador a caminho' })
-    await pool.query(`DELETE FROM midias_reparos WHERE reparo_id = $1`, [req.params.id])
+    await pool.query(enfileirarOrfas(`DELETE FROM midias_reparos WHERE reparo_id = $1 RETURNING url, tipo`), [req.params.id])
     await pool.query(`DELETE FROM interesse_reparos WHERE reparo_id = $1`, [req.params.id])
     await pool.query(`DELETE FROM reparos WHERE id = $1`, [req.params.id])
     res.json({ mensagem: 'Serviço excluído com sucesso' })
@@ -4145,7 +4172,15 @@ router.post('/upload/reparo-url', autenticar, async (req, res) => {
     // Idempotente por slot (reparo_id, ordem): um retry após resposta perdida
     // (ex.: Wi-Fi + dados móveis trocando a rota) substitui a mídia em vez de duplicar.
     const result = await pool.query(
-      `WITH del AS (DELETE FROM midias_reparos WHERE reparo_id = $1 AND ordem = $4)
+      // A mídia SUBSTITUÍDA vai para a fila de órfãs: sem isso, trocar a foto de um slot
+      // deixava o arquivo antigo no Cloudinary para sempre — vazamento na edição comum, não
+      // só na exclusão. `url IS DISTINCT FROM $3` é obrigatório: reenviar a MESMA url para o
+      // mesmo slot apaga e reinsere a linha, e sem o guard enfileiraríamos um arquivo que
+      // continua em uso — o cron o apagaria por baixo da mídia viva.
+      `WITH del AS (DELETE FROM midias_reparos WHERE reparo_id = $1 AND ordem = $4 RETURNING url, tipo),
+            orfas AS (INSERT INTO midias_orfas (url, tipo)
+                      SELECT url, tipo FROM del WHERE url IS DISTINCT FROM $3
+                      ON CONFLICT (url) DO NOTHING)
        INSERT INTO midias_reparos (reparo_id, tipo, url, ordem) VALUES ($1, $2, $3, $4) RETURNING *`,
       [reparo_id, tipo, url, ordem]
     )
@@ -4166,7 +4201,12 @@ router.post('/upload/obra-url', autenticar, async (req, res) => {
     }
     // Idempotente por slot (obra_id, ordem): retry após resposta perdida substitui em vez de duplicar.
     const result = await pool.query(
-      `WITH del AS (DELETE FROM midias WHERE obra_id = $1 AND ordem = $4)
+      // Mesmo racional do /upload/reparo-url: mídia substituída vai para a fila de órfãs, e
+      // `url IS DISTINCT FROM $3` evita enfileirar um arquivo que está sendo reinserido.
+      `WITH del AS (DELETE FROM midias WHERE obra_id = $1 AND ordem = $4 RETURNING url, tipo),
+            orfas AS (INSERT INTO midias_orfas (url, tipo)
+                      SELECT url, tipo FROM del WHERE url IS DISTINCT FROM $3
+                      ON CONFLICT (url) DO NOTHING)
        INSERT INTO midias (obra_id, tipo, url, ordem) VALUES ($1, $2, $3, $4) RETURNING *`,
       [obra_id, tipo, url, ordem]
     )
@@ -4203,10 +4243,10 @@ router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) =>
     // rotina apaga todos os dados não-admin.
     await client.query(`DELETE FROM contratos`)
     await client.query(`DELETE FROM interesse_reparos`)
-    await client.query(`DELETE FROM midias_reparos`)
+    await client.query(enfileirarOrfas(`DELETE FROM midias_reparos RETURNING url, tipo`))
     await client.query(`DELETE FROM reparos`)
     await client.query(`DELETE FROM candidaturas`)
-    await client.query(`DELETE FROM midias`)
+    await client.query(enfileirarOrfas(`DELETE FROM midias RETURNING url, tipo`))
     // mensagens ANTES de obras (mesma ordem do DELETE /usuarios/:id e de limpar-usuarios).
     // Hoje mensagens.obra_id é ON DELETE CASCADE, então a ordem inversa não quebrava; a
     // ordem explícita não depende disso — filho antes do pai vale para as duas FKs.
@@ -5166,7 +5206,7 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
     // Cascade das obras criadas pelos usuários alvo (filho antes do pai; mensagens
     // antes de obras por causa da FK mensagens.obra_id)
     await client.query(`DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
-    await client.query(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
+    await client.query(enfileirarOrfas(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1)) RETURNING url, tipo`), [ids])
     // CONTRATOS primeiro — não por FK: candidatura_id é CASCADE e interesse_id não tem
     // constraint. É para não deixar contratos do fluxo reparo órfãos ao apagar os
     // interesse_reparos logo abaixo.
@@ -5189,7 +5229,7 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
     await client.query(`DELETE FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = ANY($1))`, [ids])
     await client.query(`DELETE FROM obras WHERE criado_por = ANY($1)`, [ids])
     // Cascade dos reparos criados pelos usuários alvo
-    await client.query(`DELETE FROM midias_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = ANY($1))`, [ids])
+    await client.query(enfileirarOrfas(`DELETE FROM midias_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = ANY($1)) RETURNING url, tipo`), [ids])
     await client.query(`DELETE FROM interesse_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = ANY($1))`, [ids])
     await client.query(`DELETE FROM reparos WHERE criado_por = ANY($1)`, [ids])
     // Registros dos usuários alvo como participantes (candidato/interessado/autor) em
@@ -5413,7 +5453,7 @@ router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => 
   try {
     await client.query('BEGIN')
     await client.query(`DELETE FROM candidaturas`)
-    await client.query(`DELETE FROM midias`)
+    await client.query(enfileirarOrfas(`DELETE FROM midias RETURNING url, tipo`))
     await client.query(`DELETE FROM obras`)
     await client.query('COMMIT')
     res.json({ mensagem: 'Obras removidas com sucesso' })
@@ -5439,7 +5479,7 @@ router.post('/admin/limpar-reparos', autenticar, exigirAdmin, async (req, res) =
     // fluxo obra (candidatura_id) não são tocados — quem os apaga é limpar-obras, via CASCADE.
     await client.query(`DELETE FROM contratos WHERE interesse_id IS NOT NULL`)
     await client.query(`DELETE FROM interesse_reparos`)
-    await client.query(`DELETE FROM midias_reparos`)
+    await client.query(enfileirarOrfas(`DELETE FROM midias_reparos RETURNING url, tipo`))
     await client.query(`DELETE FROM reparos`)
     await client.query('COMMIT')
     res.json({ mensagem: 'Reparos removidos com sucesso' })
