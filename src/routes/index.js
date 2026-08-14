@@ -1778,6 +1778,57 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
   }
 })
 
+// Ponto de referência — a ÚNICA edição de demanda aberta ao dono. Até aqui o campo era
+// write-once no create (nem o PUT /obras/:id do admin o aceita), e é o que o profissional lê
+// para achar o lugar ("portão azul ao lado da padaria").
+//
+// Regras compartilhadas pelas duas verticais numa função só, de propósito: obra e reparo
+// divergirem em validação é um erro recorrente neste código.
+//   ausente   -> 400. Corpo vazio por engano não pode APAGAR a referência.
+//   null / '' -> NULL, que é o "limpar" explícito.
+//   > 200     -> 400. Referência maior que isso não é referência; também limita o campo como
+//                canal de texto livre para o profissional casado.
+const LIMITE_PONTO_REFERENCIA = 200
+const normalizarPontoReferencia = (bruto) => {
+  if (bruto === undefined) return { erro: 'Informe ponto_referencia' }
+  if (bruto !== null && typeof bruto !== 'string') return { erro: 'ponto_referencia deve ser texto' }
+  const texto = (bruto ?? '').trim()
+  if (texto.length > LIMITE_PONTO_REFERENCIA) {
+    return { erro: `ponto_referencia deve ter no máximo ${LIMITE_PONTO_REFERENCIA} caracteres` }
+  }
+  return { valor: texto === '' ? null : texto }
+}
+
+// PATCH /obras/dono/:id/ponto-referencia
+// Segue permitido DEPOIS do match de propósito: o campo serve para o profissional chegar ao
+// local, então é justamente na ida dele que corrigir a referência importa. É seguro porque o
+// contrato NÃO carrega ponto_referencia (contratosController renderiza endereco_obra), então
+// editar aqui não mexe em nada já acordado — e o campo só é revelado a dono, casado, aceito e
+// admin, então a edição chega exatamente a quem precisa dela.
+// SÓ ponto_referencia entra: o corpo nunca é espalhado. valor, endereço, coordenadas, status e
+// prazos têm caminhos próprios (estender, aprovar, encerrar) e não podem virar editáveis aqui.
+router.patch('/obras/dono/:id/ponto-referencia', autenticar, async (req, res) => {
+  try {
+    const { ponto_referencia } = req.body
+    const { erro, valor } = normalizarPontoReferencia(ponto_referencia)
+    if (erro) return res.status(400).json({ erro })
+
+    // Posse DENTRO do UPDATE (mesmo padrão de DELETE /obras/dono/:id e do estender): sem
+    // SELECT antes, sem janela entre checar e escrever. rowCount 0 = não é dele OU não existe,
+    // e os dois viram 404 — 403 confirmaria que a obra existe para quem não é o dono.
+    const upd = await pool.query(
+      `UPDATE obras SET ponto_referencia = $2 WHERE id = $1 AND criado_por = $3
+       RETURNING ponto_referencia`,
+      [req.params.id, valor, req.usuario.id]
+    )
+    if (upd.rowCount === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    res.json({ ponto_referencia: upd.rows[0].ponto_referencia })
+  } catch (err) {
+    console.error('[obras/ponto-referencia]', err.message)
+    res.status(500).json({ erro: 'Erro ao atualizar ponto de referência' })
+  }
+})
+
 // Teto de segurança PLANO da extensão de obra: 365 dias. Substitui o antigo teto de 2x a
 // janela original — não há mais orçamento derivado de publicado_em/horas_para_expirar; o
 // único limite é absoluto, para barrar valor absurdo (ex.: um dígito a mais por engano).
@@ -2598,6 +2649,29 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
   } catch (err) {
     console.error('Erro ao cancelar reparo:', err)
     res.status(500).json({ erro: 'Erro ao cancelar serviço' })
+  }
+})
+
+// PATCH /reparos/dono/:id/ponto-referencia — espelho exato do lado obra: mesma validação
+// (normalizarPontoReferencia), mesma posse dentro do UPDATE, mesmo 404 em rowCount 0, e
+// segue liberado depois do match pelo mesmo motivo (o contrato de reparo também renderiza
+// endereco_obra, nunca ponto_referencia).
+router.patch('/reparos/dono/:id/ponto-referencia', autenticar, async (req, res) => {
+  try {
+    const { ponto_referencia } = req.body
+    const { erro, valor } = normalizarPontoReferencia(ponto_referencia)
+    if (erro) return res.status(400).json({ erro })
+
+    const upd = await pool.query(
+      `UPDATE reparos SET ponto_referencia = $2 WHERE id = $1 AND criado_por = $3
+       RETURNING ponto_referencia`,
+      [req.params.id, valor, req.usuario.id]
+    )
+    if (upd.rowCount === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
+    res.json({ ponto_referencia: upd.rows[0].ponto_referencia })
+  } catch (err) {
+    console.error('[reparos/ponto-referencia]', err.message)
+    res.status(500).json({ erro: 'Erro ao atualizar ponto de referência' })
   }
 })
 
