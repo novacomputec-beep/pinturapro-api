@@ -1,6 +1,7 @@
 const { pool } = require('../utils/supabase')
 const { gerarContratoPDF } = require('../services/contratoService')
 const { enviarEmailComAnexo } = require('../services/brevoService')
+const { MARCA } = require('../utils/marca')
 
 const formatarData = (data) =>
   new Date(data).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
@@ -23,7 +24,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
     ? Math.ceil(reparo.prazo_atendimento_horas * 1.2)
     : null
   const valor = reparo.valor_estimado
-  const marca = 'PinturaPro - ArrumaPro'
+  const marca = MARCA
 
   return `
 <!DOCTYPE html>
@@ -137,7 +138,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
 const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
   const prazoContrato = Math.ceil((obra.prazo_execucao_dias || 7) * 1.2)
   const valor = candidatura.valor_oferta || obra.valor
-  const marca = 'PinturaPro'
+  const marca = MARCA
 
   return `
 <!DOCTYPE html>
@@ -292,15 +293,15 @@ const enviarContratoReparo = async (reparoId) => {
         prazo_dias: r.prazo_atendimento_horas ? Math.max(1, Math.ceil(r.prazo_atendimento_horas / 24)) : 1,
         metragem:   null
       },
-      marca: 'PinturaPro - ArrumaPro',
+      marca: MARCA,
       cidade: r.cidade || 'Patos de Minas',
       data:   new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })
     }
 
     const pdfBuffer    = await gerarContratoPDF(dadosPDF)
-    const assunto      = `PinturaPro - ArrumaPro — Contrato de Serviço: ${r.titulo}`
+    const assunto      = `${MARCA} — Contrato de Serviço: ${r.titulo}`
     const nomeArquivo  = `contrato_servico_${String(reparoId).substring(0, 8)}.pdf`
-    const remetenteNome = 'PinturaPro - ArrumaPro'
+    const remetenteNome = MARCA
 
     await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
     await enviarEmailComAnexo({ para: prestador.email, assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
@@ -390,15 +391,15 @@ const enviarContratoObra = async (candidaturaId) => {
         prazo_dias: r.prazo_execucao_dias || 7,
         metragem:   r.metragem
       },
-      marca: 'PinturaPro',
+      marca: MARCA,
       cidade: r.cidade || 'Patos de Minas',
       data:   new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })
     }
 
     const pdfBuffer   = await gerarContratoPDF(dadosPDF)
-    const assunto     = `PinturaPro — Contrato de Prestação de Serviços: ${r.titulo}`
+    const assunto     = `${MARCA} — Contrato de Prestação de Serviços: ${r.titulo}`
     const nomeArquivo = `contrato_obra_${String(r.id).substring(0, 8)}.pdf`
-    const remetenteNome = 'PinturaPro'
+    const remetenteNome = MARCA
 
     await enviarEmailComAnexo({ para: dono.email,      assunto, html, pdfBuffer, nomeArquivo, remetenteNome })
     await enviarEmailComAnexo({ para: prestador.email, assunto, html, pdfBuffer, nomeArquivo, remetenteNome })

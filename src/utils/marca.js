@@ -1,10 +1,23 @@
-// Marca exibida em e-mails conforme o tipo de usuário / fluxo:
-//   - reparos  (tipo_prestador 'reparador' ou tipo_dono 'reparo')  → "PinturaPro - ArrumaPro"
-//   - pintura  (pintor/construtor / dono_obra e demais)            → "PinturaPro"
-const MARCA_REPARO  = 'PinturaPro - ArrumaPro'
-const MARCA_PINTURA = 'PinturaPro'
+// Marca ÚNICA da plataforma, exibida em tudo que uma pessoa lê: pushes, e-mails, contrato
+// em PDF, checkout dos gateways e o rótulo do 2FA.
+//
+// Antes havia DUAS marcas e uma regra que escolhia entre elas pelo tipo de usuário
+// ("PinturaPro - ArrumaPro" para reparo, "PinturaPro" para pintura). A regra acabou: tudo é
+// ProLar. MARCA_REPARO e MARCA_PINTURA continuam exportados apontando para a mesma string,
+// para não quebrar nenhum import — código novo deve usar MARCA.
+const MARCA = 'ProLar'
 
-const marcaPorTipo = ({ tipo_prestador, tipo_dono } = {}) =>
-  (tipo_prestador === 'reparador' || tipo_dono === 'reparo') ? MARCA_REPARO : MARCA_PINTURA
+// Site institucional exibido em copy (hoje, o rodapé do contrato em PDF). Fica aqui junto da
+// marca para os dois nunca divergirem. NÃO é host de infraestrutura: os endereços do Railway
+// são reais e continuam onde estão.
+const SITE = 'www.prolar.pro.br'
 
-module.exports = { MARCA_REPARO, MARCA_PINTURA, marcaPorTipo }
+// Aliases da regra antiga. Idênticos a MARCA de propósito: nada mais varia por tipo.
+const MARCA_REPARO  = MARCA
+const MARCA_PINTURA = MARCA
+
+// Shim da regra antiga: ignora o usuário e devolve sempre a marca única. Mantido para os
+// chamadores que ainda passam a linha de usuarios; não há mais o que decidir aqui.
+const marcaPorTipo = () => MARCA
+
+module.exports = { MARCA, SITE, MARCA_REPARO, MARCA_PINTURA, marcaPorTipo }

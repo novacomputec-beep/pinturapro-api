@@ -2,6 +2,7 @@ const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
 const { pool } = require('../utils/supabase')
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
+const { MARCA } = require('../utils/marca')
 const nodemailer = require('nodemailer')
 const crypto = require('crypto')
 
@@ -470,13 +471,13 @@ const esqueciSenha = async (req, res) => {
     )
 
     await transporter.sendMail({
-      from: `ArrumaPro <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
+      from: `${MARCA} <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
       to: emailNormalizado,
-      subject: 'ArrumaPro — Redefinição de senha',
+      subject: `${MARCA} — Redefinição de senha`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-            <h1 style="color: #0a0a0a; margin: 0;">ArrumaPro</h1>
+            <h1 style="color: #0a0a0a; margin: 0;">${MARCA}</h1>
           </div>
           <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
             <h2>Olá, ${usuario.nome}!</h2>
@@ -485,7 +486,7 @@ const esqueciSenha = async (req, res) => {
               ${codigoExibido}
             </div>
             <p style="color: #666; font-size: 13px;">Este código expira em 1 hora.</p>
-            <p><strong>Equipe ArrumaPro</strong></p>
+            <p><strong>Equipe ${MARCA}</strong></p>
           </div>
         </div>
       `

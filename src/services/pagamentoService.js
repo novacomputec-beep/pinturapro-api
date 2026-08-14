@@ -1,4 +1,5 @@
 const { MercadoPagoConfig, PreApproval } = require('mercadopago')
+const { MARCA } = require('../utils/marca')
 
 const client = new MercadoPagoConfig({
   accessToken: process.env.MP_ACCESS_TOKEN
@@ -14,7 +15,7 @@ const criarAssinatura = async (usuario, plano) => {
     preapproval_plan_id: null,
     payer_email: usuario.email,
     card_token_id: null,
-    reason: `ArrumaPro — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`,
+    reason: `${MARCA} — Plano ${plano === 'anual' ? 'Anual' : 'Mensal'}`,
     external_reference: usuario.id,
     auto_recurring: {
       frequency: 1,
