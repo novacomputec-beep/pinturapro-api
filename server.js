@@ -472,6 +472,101 @@ const notificarAssinaturasProximasVencimento = async () => {
   }
 }
 
+// Dois lembretes para o dono avaliar o profissional (1 dia / 3 dias APÓS o encerramento),
+// espelhando notificarAssinaturasProximasVencimento acima: bandas DISJUNTAS (no máximo um
+// lembrete por run e por contrato) e claim-then-send nas colunas aval_marco_N_em.
+// A diferença de forma em relação ao aviso de vencimento é só a direção do tempo: lá se conta
+// quanto FALTA para proximo_vencimento (bandas decrescentes), aqui quanto JÁ PASSOU desde
+// encerrado_em (bandas crescentes). O mecanismo é o mesmo.
+//
+// TETO_DIAS existe porque essa direção invertida traz um risco que o aviso de vencimento não
+// tem: sem limite superior, a banda mais alta ficaria aberta para sempre e o PRIMEIRO run
+// depois do deploy cutucaria de uma vez todo contrato encerrado e não avaliado da história —
+// "avalie o serviço que você fechou há oito meses". Com o teto, contrato encerrado há mais de
+// 7 dias nunca entra: os marcos ficam NULL e ninguém é incomodado. (Na verificação contra
+// produção não havia nenhum elegível, então o 1º run dispara zero de qualquer forma; o teto é
+// para daqui em diante.)
+const MARCOS_AVALIACAO = [
+  { n: 1, col: 'aval_marco_1_em', dias: 1 },
+  { n: 2, col: 'aval_marco_2_em', dias: 3 },
+]
+const TETO_LEMBRETE_AVALIACAO_DIAS = 7
+
+// contrato_tipo é SINGULAR ('obra'/'reparo') e contrato_id é o id da DEMANDA — não o id da
+// tabela `contratos`. Confirmado no banco de produção: as 3 avaliações existentes casam 3/3
+// com obras/reparos e 0/3 com contratos. Trocar isso faria o NOT EXISTS nunca casar, e o job
+// cutucaria justamente quem já avaliou.
+const LADOS_AVALIACAO = [
+  { tabela: 'obras',   tipo: 'obra',   chave: 'obra_id',   rotulo: 'a obra',    profissional: 'o pintor' },
+  { tabela: 'reparos', tipo: 'reparo', chave: 'reparo_id', rotulo: 'o serviço', profissional: 'o profissional' },
+]
+
+const lembrarAvaliacaoPendente = async () => {
+  let totalEnviados = 0
+  try {
+    for (const lado of LADOS_AVALIACAO) {
+      // Candidatos: encerrados COM match, dentro do teto e com pelo menos um marco pendente.
+      // push_token vazio/nulo já sai daqui — não há o que enviar.
+      // O NOT EXISTS é o predicado de "ainda não avaliou": avaliacoes tem
+      // UNIQUE(contrato_tipo, contrato_id, avaliador_id) e o avaliador é sempre o DONO
+      // (POST /avaliacoes dá 403 no prestador), então a ausência da linha para
+      // avaliador_id = d.criado_por é exatamente "este dono não avaliou este contrato".
+      // Por avaliador_id, e não por contrato: linhas legadas prestador→dono não podem contar
+      // como avaliação do dono. (Em produção não há nenhuma, mas o predicado não depende disso.)
+      const candidatos = await pool.query(`
+        SELECT d.id, d.titulo, d.encerrado_em, d.aval_marco_1_em, d.aval_marco_2_em, u.push_token
+          FROM ${lado.tabela} d
+          JOIN usuarios u ON u.id = d.criado_por
+         WHERE d.status = 'encerrada'
+           AND d.match_usuario_id IS NOT NULL
+           AND d.encerrado_em IS NOT NULL
+           AND d.aval_dispensada_em IS NULL
+           AND (d.aval_marco_1_em IS NULL OR d.aval_marco_2_em IS NULL)
+           AND d.encerrado_em <= NOW() - INTERVAL '${MARCOS_AVALIACAO[0].dias} days'
+           AND d.encerrado_em >  NOW() - INTERVAL '${TETO_LEMBRETE_AVALIACAO_DIAS} days'
+           AND u.push_token IS NOT NULL AND u.push_token <> ''
+           AND NOT EXISTS (
+             SELECT 1 FROM avaliacoes a
+              WHERE a.contrato_tipo = '${lado.tipo}'
+                AND a.contrato_id = d.id
+                AND a.avaliador_id = d.criado_por
+           )
+      `)
+
+      for (const d of candidatos.rows) {
+        const decorridoDias = (Date.now() - new Date(d.encerrado_em).getTime()) / 86400000
+
+        // Banda disjunta — no máximo um marco por run (mesma lógica do aviso de vencimento,
+        // com o teto no lugar do piso 0 porque aqui o tempo corre para cima).
+        const alvo = MARCOS_AVALIACAO.find((m, i) => {
+          const topo = MARCOS_AVALIACAO[i + 1]?.dias ?? TETO_LEMBRETE_AVALIACAO_DIAS
+          return d[m.col] === null && decorridoDias >= m.dias && decorridoDias < topo
+        })
+        if (!alvo) continue
+
+        // Claim-then-send: reivindica a coluna no MESMO UPDATE. Linha já reivindicada por
+        // outra réplica (ou por um run anterior) não volta no RETURNING e não gera 2º envio.
+        const claim = await pool.query(
+          `UPDATE ${lado.tabela} SET ${alvo.col} = NOW() WHERE id = $1 AND ${alvo.col} IS NULL RETURNING id`,
+          [d.id]
+        )
+        if (claim.rows.length === 0) continue
+
+        const titulo = alvo.n === 1 ? '⭐ Como foi o serviço?' : '⭐ Sua avaliação ainda ajuda'
+        const corpo = alvo.n === 1
+          ? `Avalie ${lado.profissional} de "${d.titulo}". Leva 10 segundos e ajuda outros solicitantes.`
+          : `Você ainda não avaliou ${lado.rotulo} "${d.titulo}". Sua nota ajuda quem for contratar depois.`
+        enviarPushNotificacao(d.push_token, titulo, corpo,
+          { tipo: 'avaliacao_pendente', [lado.chave]: d.id }).catch(() => {})
+        totalEnviados++
+      }
+    }
+    console.log(`[LembreteAvaliacao] ${totalEnviados} lembrete(s) de avaliação enviado(s)`)
+  } catch (err) {
+    console.error('[LembreteAvaliacao] Erro:', err.message)
+  }
+}
+
 const iniciarAgendador = () => {
   const INTERVALO_ENGAJAMENTO  = 8 * 60 * 60 * 1000
   const INTERVALO_EXPIRACAO    = 60 * 60 * 1000
@@ -520,6 +615,11 @@ const iniciarAgendador = () => {
   // De hora em hora como o job de expiração: as bandas de 12h e 6h não existem numa cadência
   // diária — um tick por dia pularia as duas mais urgentes.
   setInterval(() => { notificarAssinaturasProximasVencimento() }, 60 * 60 * 1000)
+  // De hora em hora, como o aviso de vencimento. As bandas aqui são de DIAS, então uma
+  // cadência horária é folgada de sobra: o lembrete sai no máximo ~1h depois de o contrato
+  // completar 1 (ou 3) dia(s) encerrado. Fora do warm-up pelo mesmo motivo que o aviso de
+  // vencimento: nada aqui é urgente o bastante para justificar disparar a cada deploy.
+  setInterval(() => { lembrarAvaliacaoPendente() }, 60 * 60 * 1000)
   // Descarga do buffer de visitas (src/utils/visitas.js): agrupa as visitas da janela num
   // UPDATE por tabela, em vez de um UPDATE por visualização no caminho de leitura.
   iniciarFlushVisitas()
@@ -573,7 +673,7 @@ const iniciarAgendador = () => {
     }
   }, 10 * 60 * 1000)
 
-  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 10min | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
+  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 10min | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
 }
 
 rotasApp.migracaoPronta

@@ -721,6 +721,36 @@ const migracaoPronta = (async () => {
       )
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS avaliacoes_avaliado_idx ON avaliacoes (avaliado_id)`)
+    // Lembrete de avaliação pendente — MESMO padrão dos marcos de vencimento da assinatura
+    // (assinaturas.marco_1_em/2_em/3_em): a coluna É o claim, preenchida no mesmo UPDATE que
+    // reivindica o envio, então re-run ou segunda réplica nunca mandam duas vezes.
+    //   aval_marco_1_em → 1 dia após encerrado_em  |  aval_marco_2_em → 3 dias após
+    // NULL = ainda não lembrado. Nomes prefixados com aval_ porque marco_1_em/2_em/3_em já
+    // existem nestas duas tabelas com outro significado (marcos de EXPIRAÇÃO, pré-match).
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS aval_marco_1_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS aval_marco_2_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS aval_marco_1_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS aval_marco_2_em TIMESTAMPTZ`)
+    // "Não quero avaliar", registrado NO SERVIDOR (POST /avaliacoes/dispensar). Até aqui essa
+    // escolha só existia no dispositivo: o job cutucaria quem já tinha dito não, e uma
+    // reinstalação ressuscitaria o card. Preenchido = silenciado para sempre naquele contrato.
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS aval_dispensada_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS aval_dispensada_em TIMESTAMPTZ`)
+    // Índice PARCIAL do predicado do job (espelha assinaturas_marcos_vencimento_idx): só
+    // encerradas COM match, não dispensadas e com algum marco pendente entram — a minoria.
+    // As já lembradas nas duas bandas, e as dispensadas, saem do índice sozinhas.
+    // A checagem de "não avaliada" fica de fora: é um NOT EXISTS em avaliacoes, não uma
+    // coluna da demanda, então não cabe num índice parcial daqui.
+    await client.query(`CREATE INDEX IF NOT EXISTS obras_aval_pendente_idx
+                        ON obras (encerrado_em)
+                        WHERE status = 'encerrada' AND match_usuario_id IS NOT NULL
+                          AND aval_dispensada_em IS NULL
+                          AND (aval_marco_1_em IS NULL OR aval_marco_2_em IS NULL)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS reparos_aval_pendente_idx
+                        ON reparos (encerrado_em)
+                        WHERE status = 'encerrada' AND match_usuario_id IS NOT NULL
+                          AND aval_dispensada_em IS NULL
+                          AND (aval_marco_1_em IS NULL OR aval_marco_2_em IS NULL)`)
     // Denúncias do prestador contra o dono de um contrato encerrado. Espelha avaliacoes:
     // contrato_id é UUID solto (aponta para obras OU reparos, por isso sem FK) e o UNIQUE
     // (contrato_tipo, contrato_id, denunciante_id) garante UMA denúncia por contrato.
@@ -4965,6 +4995,59 @@ router.post('/avaliacoes', autenticar, async (req, res) => {
   } catch (err) {
     console.error('[Avaliacoes] Erro:', err.message)
     res.status(500).json({ erro: 'Erro ao registrar avaliação' })
+  }
+})
+
+// POST /avaliacoes/dispensar — o dono declara que NÃO vai avaliar este contrato, e o
+// lembrete do job (lembrarAvaliacaoPendente, server.js) para de vez.
+// Existe porque a recusa só era guardada NO DISPOSITIVO: o servidor não sabia dela, então o
+// push cutucaria quem já tinha dito não — e uma reinstalação (ou um segundo aparelho)
+// ressuscitaria o card. Agora a escolha é do CONTRATO, não do aparelho.
+// Rota estática registrada depois de POST /avaliacoes e sem colisão com ela.
+// Escopo: só o dono (criado_por). O prestador não avalia (POST /avaliacoes lhe dá 403), então
+// também não tem o que dispensar — mesmas branches, mesma precedência, mesmos códigos.
+router.post('/avaliacoes/dispensar', autenticar, async (req, res) => {
+  try {
+    const { contrato_tipo, contrato_id } = req.body
+
+    if (!['reparo', 'obra'].includes(contrato_tipo)) {
+      return res.status(400).json({ erro: 'contrato_tipo deve ser reparo ou obra' })
+    }
+    if (!contrato_id) {
+      return res.status(400).json({ erro: 'contrato_id é obrigatório' })
+    }
+
+    // contrato_tipo já validado contra whitelist acima — interpolação de tabela é segura.
+    const tabela = contrato_tipo === 'reparo' ? 'reparos' : 'obras'
+
+    // Ownership NO PRÓPRIO UPDATE (criado_por = $2), não numa checagem separada antes: o
+    // handler não tem por que ler a linha duas vezes, e o RETURNING já diz se pegou.
+    // aval_dispensada_em IS NULL preserva o PRIMEIRO timestamp — chamar de novo é no-op, não
+    // um carimbo novo. Sem status/match no WHERE de propósito: dispensar é sempre seguro, e
+    // amarrar a dispensa ao estado do contrato só criaria um caminho em que o dono clica
+    // "não quero" e mesmo assim continua elegível.
+    const upd = await pool.query(
+      `UPDATE ${tabela} SET aval_dispensada_em = NOW()
+        WHERE id = $1 AND criado_por = $2 AND aval_dispensada_em IS NULL
+       RETURNING id`,
+      [contrato_id, req.usuario.id]
+    )
+    if (upd.rowCount > 0) {
+      return res.json({ mensagem: 'Lembrete de avaliação dispensado.', dispensada: true })
+    }
+
+    // rowCount 0 tem três causas — separadas aqui para não devolver 404 a quem só repetiu a
+    // chamada. Uma leitura só, e apenas neste caminho frio.
+    const c = await pool.query(`SELECT criado_por, aval_dispensada_em FROM ${tabela} WHERE id = $1`, [contrato_id])
+    if (c.rows.length === 0) return res.status(404).json({ erro: 'Contrato não encontrado' })
+    if (c.rows[0].criado_por !== req.usuario.id) {
+      return res.status(403).json({ erro: 'Apenas o dono do contrato pode dispensar a avaliação' })
+    }
+    // Já dispensado antes: idempotente, 200 — repetir a recusa não é erro.
+    res.json({ mensagem: 'Lembrete de avaliação já estava dispensado.', dispensada: true })
+  } catch (err) {
+    console.error('[Avaliacoes] Erro ao dispensar:', err.message)
+    res.status(500).json({ erro: 'Erro ao dispensar lembrete de avaliação' })
   }
 })
 
