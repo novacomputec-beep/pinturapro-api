@@ -1,7 +1,7 @@
 const crypto = require('crypto')
 const { pool } = require('../utils/supabase')
 const { enviarEmail } = require('../services/brevoService')
-const { marcaPorTipo } = require('../utils/marca')
+const { MARCA } = require('../utils/marca')
 
 const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN
 const PAGBANK_URL = 'https://api.pagseguro.com'
@@ -59,26 +59,25 @@ const colocarPendentVerificacao = async (usuarioId, plano) => {
   if (usuario.rows.length === 0) return
 
   const { nome, email } = usuario.rows[0]
-  const marca = marcaPorTipo(usuario.rows[0])
 
   enviarEmail({
     para: email,
-    remetenteNome: marca,
-    assunto: `${marca} — Pagamento recebido! Verificação em andamento`,
+    remetenteNome: MARCA,
+    assunto: `${MARCA} — Pagamento recebido! Verificação em andamento`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-          <h1 style="color: #0a0a0a; margin: 0;">${marca}</h1>
+          <h1 style="color: #0a0a0a; margin: 0;">${MARCA}</h1>
         </div>
         <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
           <h2>Olá, ${nome}! 🎉</h2>
           <p>Seu pagamento foi recebido com sucesso!</p>
           <p style="background: #fff3cd; padding: 16px; border-radius: 8px; border-left: 4px solid #E8833A;">
             <strong>Seus dados estão sendo verificados.</strong><br>
-            Em até <strong>1 hora</strong> você receberá a confirmação por e-mail e terá acesso completo ao ${marca}.
+            Em até <strong>1 hora</strong> você receberá a confirmação por e-mail e terá acesso completo ao ${MARCA}.
           </p>
           <p>Este processo é necessário para garantir a segurança de todos os usuários da plataforma.</p>
-          <p><strong>Equipe ${marca}</strong></p>
+          <p><strong>Equipe ${MARCA}</strong></p>
         </div>
       </div>
     `
@@ -138,10 +137,10 @@ const criarAssinatura = async (req, res) => {
 
       if (tipoPrestador === 'reparador') {
         valor     = plano === 'anual' ? 49900 : 4990
-        descricao = `ArrumaPro Serviços — Plano ${nomePlano}`
+        descricao = `${MARCA} Serviços — Plano ${nomePlano}`
       } else if (tipoPrestador === 'pintor') {
         valor     = plano === 'anual' ? 99900 : 9990
-        descricao = `ArrumaPro — Plano ${nomePlano}`
+        descricao = `${MARCA} — Plano ${nomePlano}`
       } else {
         // Tier não mapeado: falha alto em vez de cobrar silenciosamente o plano barato.
         console.error(`[pagamento] tipo_prestador não mapeado para preço — usuario=${usuario.id} tipo_prestador=${JSON.stringify(tipoPrestador)}`)
@@ -150,13 +149,13 @@ const criarAssinatura = async (req, res) => {
     } else {
       // Donos de obra têm acesso gratuito; assinantes genéricos pagam o plano padrão.
       valor     = plano === 'anual' ? 99900 : 9990
-      descricao = `ArrumaPro — Plano ${nomePlano}`
+      descricao = `${MARCA} — Plano ${nomePlano}`
     }
 
     const body = {
       reference_id: `${usuario.id}|${plano}`,
       customer: {
-        name: dadosUsuario?.nome || 'Cliente ArrumaPro',
+        name: dadosUsuario?.nome || `Cliente ${MARCA}`,
         email: dadosUsuario?.email || usuario.email,
         tax_id: taxId,
         phones: [{ country: '55', area: telArea, number: telNumero, type: 'MOBILE' }]
@@ -307,7 +306,7 @@ const webhookPagbank = async (req, res) => {
           const valorFmt = valorCentavos
             ? `R$ ${(valorCentavos / 100).toFixed(2).replace('.', ',')}`
             : plano
-          const texto = `💰 Novo pagamento PinturaPro!\nUsuario: ${usuario.nome}\nPlano: ${plano}\nValor: ${valorFmt}\nAguardando aprovacao no painel`
+          const texto = `💰 Novo pagamento ${MARCA}!\nUsuario: ${usuario.nome}\nPlano: ${plano}\nValor: ${valorFmt}\nAguardando aprovacao no painel`
           fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage?chat_id=${telegramChatId}&text=${encodeURIComponent(texto)}`)
             .catch(e => console.error('Telegram notify error:', e.message))
         } catch (e) {

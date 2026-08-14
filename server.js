@@ -10,6 +10,7 @@ const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
 const { limparTentativasAntigas } = require('./src/utils/tentativasAuth')
+const { MARCA } = require('./src/utils/marca')
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -175,7 +176,7 @@ app.get('/', async (req, res) => {
   try {
     await pool.query('SELECT 1')
     res.json({
-      api: 'PinturaPro API',
+      api: `${MARCA} API`,
       versao: '1.0.0',
       status: 'online',
       banco: 'conectado',
@@ -183,7 +184,7 @@ app.get('/', async (req, res) => {
     })
   } catch (err) {
     res.status(503).json({
-      api: 'PinturaPro API',
+      api: `${MARCA} API`,
       status: 'degradado',
       banco: 'erro',
       detalhe: err.message
@@ -663,7 +664,7 @@ const iniciarAgendador = () => {
         // O bug original vinha de haver DOIS mapas e a invalidação limpar só um; hoje é um só.
         invalidarCachesUsuario(p.id)
         if (p.push_token) {
-          await enviarPushNotificacao(p.push_token, '✅ Cadastro aprovado!', 'Bem-vindo ao PinturaPro! Seu acesso está liberado.', { tipo: 'verificacao_aprovada' }).catch(() => {})
+          await enviarPushNotificacao(p.push_token, '✅ Cadastro aprovado!', `Bem-vindo ao ${MARCA}! Seu acesso está liberado.`, { tipo: 'verificacao_aprovada' }).catch(() => {})
         }
         aprovados++
       }
@@ -681,7 +682,7 @@ rotasApp.migracaoPronta
     const server = app.listen(PORT, () => {
       console.log(`
 ╔══════════════════════════════════════╗
-║   PinturaPro API — v1.0.0            ║
+║   ${`${MARCA} API — v1.0.0`.padEnd(35)}║
 ║   Rodando em http://localhost:${PORT}   ║
 ╚══════════════════════════════════════╝
   `)

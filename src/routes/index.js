@@ -4,7 +4,7 @@ const router = express.Router()
 const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada } = require('../middlewares/auth')
 const { registrarVisita } = require('../utils/visitas')
 const { pool } = require('../utils/supabase')
-const { marcaPorTipo } = require('../utils/marca')
+const { MARCA } = require('../utils/marca')
 const authCtrl         = require('../controllers/authController')
 const obrasCtrl        = require('../controllers/obrasController')
 const candidaturasCtrl = require('../controllers/candidaturasController')
@@ -1365,18 +1365,18 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
 const enviarEmailExclusaoConta = (email, nome) =>
   enviarEmail({
     para: email,
-    assunto: 'ArrumaPro — Sua conta foi excluída',
+    assunto: `${MARCA} — Sua conta foi excluída`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-          <h1 style="color: #0a0a0a; margin: 0;">ArrumaPro</h1>
+          <h1 style="color: #0a0a0a; margin: 0;">${MARCA}</h1>
         </div>
         <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
           <h2>Olá, ${nome}!</h2>
-          <p>Confirmamos que sua conta no ArrumaPro foi excluída permanentemente, junto com todos os dados associados (obras, reparos, candidaturas, mídias, assinaturas e avaliações).</p>
+          <p>Confirmamos que sua conta no ${MARCA} foi excluída permanentemente, junto com todos os dados associados (obras, reparos, candidaturas, mídias, assinaturas e avaliações).</p>
           <p>Esta ação é irreversível. Se você <strong>não</strong> solicitou esta exclusão, entre em contato conosco imediatamente respondendo este e-mail.</p>
           <p>Você pode criar uma nova conta a qualquer momento.</p>
-          <p><strong>Equipe ArrumaPro</strong></p>
+          <p><strong>Equipe ${MARCA}</strong></p>
         </div>
       </div>
     `
@@ -4462,16 +4462,15 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
 
     // Notifica prestador por e-mail
     const { nome, email } = usuario.rows[0]
-    const marca = marcaPorTipo(usuario.rows[0])
     const nodemailer = require('nodemailer')
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST, port: 587, secure: false,
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
     })
     transporter.sendMail({
-      from: `${marca} <${process.env.SMTP_USER}>`,
+      from: `${MARCA} <${process.env.SMTP_USER}>`,
       to: email,
-      subject: `✅ ${marca} — Cadastro aprovado! Bem-vindo!`,
+      subject: `✅ ${MARCA} — Cadastro aprovado! Bem-vindo!`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #4caf50; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
@@ -4479,9 +4478,9 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
           </div>
           <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
             <h2>Parabéns, ${nome}!</h2>
-            <p>Sua identidade foi verificada e seu acesso ao ${marca} está liberado.</p>
+            <p>Sua identidade foi verificada e seu acesso ao ${MARCA} está liberado.</p>
             <p>Abra o aplicativo e comece a encontrar serviços na sua região agora mesmo!</p>
-            <p><strong>Equipe ${marca}</strong></p>
+            <p><strong>Equipe ${MARCA}</strong></p>
           </div>
         </div>
       `
@@ -4493,7 +4492,7 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
       await enviarPushNotificacao(
         pushToken.rows[0].push_token,
         '✅ Cadastro aprovado!',
-        'Sua identidade foi verificada. Bem-vindo ao ArrumaPro!',
+        `Sua identidade foi verificada. Bem-vindo ao ${MARCA}!`,
         { tipo: 'verificacao_aprovada' }
       )
     }
@@ -4516,7 +4515,6 @@ router.post('/verificacao/:id/reprovar', autenticar, exigirAdmin, async (req, re
     if (usuario.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
 
     const { nome, email, pix_reembolso } = usuario.rows[0]
-    const marca = marcaPorTipo(usuario.rows[0])
 
     // Reprova e cancela assinatura
     await pool.query(
@@ -4533,13 +4531,13 @@ router.post('/verificacao/:id/reprovar', autenticar, exigirAdmin, async (req, re
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
     })
     transporter.sendMail({
-      from: `${marca} <${process.env.SMTP_USER}>`,
+      from: `${MARCA} <${process.env.SMTP_USER}>`,
       to: email,
-      subject: `${marca} — Informação sobre seu cadastro`,
+      subject: `${MARCA} — Informação sobre seu cadastro`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-            <h1 style="color: #0a0a0a; margin: 0;">${marca}</h1>
+            <h1 style="color: #0a0a0a; margin: 0;">${MARCA}</h1>
           </div>
           <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
             <h2>Olá, ${nome}</h2>
@@ -4550,7 +4548,7 @@ router.post('/verificacao/:id/reprovar', autenticar, exigirAdmin, async (req, re
               <strong>${pix_reembolso || 'informada no cadastro'}</strong> em até 5 dias úteis.
             </p>
             <p>Se tiver dúvidas, entre em contato conosco respondendo este e-mail.</p>
-            <p><strong>Equipe ${marca}</strong></p>
+            <p><strong>Equipe ${MARCA}</strong></p>
           </div>
         </div>
       `
@@ -5724,7 +5722,9 @@ router.post('/admin/2fa/setup', autenticar, exigirAdmin, async (req, res) => {
   try {
     const adminResult = await pool.query(`SELECT email FROM usuarios WHERE id = $1`, [req.usuario.id])
     const email = adminResult.rows[0]?.email || 'admin'
-    const secret = speakeasy.generateSecret({ name: `PinturaPro Admin (${email})`, length: 20 })
+    // Rótulo mostrado no app autenticador. Só vale para QR gerados a partir daqui: quem já
+    // se cadastrou continua vendo o rótulo antigo no aparelho até refazer o setup.
+    const secret = speakeasy.generateSecret({ name: `${MARCA} Admin (${email})`, length: 20 })
     await pool.query(`UPDATE usuarios SET dois_fa_secret = $1, dois_fa_ativo = false WHERE id = $2`, [secret.base32, req.usuario.id])
     res.json({ secret: secret.base32, otpauth_url: secret.otpauth_url })
   } catch (err) {

@@ -1,6 +1,7 @@
 const { pool } = require('../utils/supabase')
 const { Expo } = require('expo-server-sdk')
 const { getFaixa } = require('../utils/faixasPrazo')
+const { MARCA } = require('../utils/marca')
 // Sem ciclo: middlewares/auth só importa jsonwebtoken e utils/supabase, nunca este serviço.
 const { invalidarCacheAssinatura } = require('../middlewares/auth')
 
@@ -157,7 +158,7 @@ const enviarBoasVindas = async (usuarioId) => {
 
     await enviarPushNotificacao(
       push_token,
-      `🎉 Bem-vindo ao ArrumaPro, ${primeiroNome}!`,
+      `🎉 Bem-vindo ao ${MARCA}, ${primeiroNome}!`,
       mensagem,
       { tipo: 'boas_vindas' }
     )

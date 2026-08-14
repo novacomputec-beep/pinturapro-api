@@ -1,6 +1,7 @@
 const PDFDocument = require('pdfkit')
 const { pool } = require('../utils/supabase')
 const { enviarEmailComAnexo } = require('./brevoService')
+const { MARCA, SITE } = require('../utils/marca')
 
 const gerarContratoPDF = (dados) => {
   return new Promise((resolve, reject) => {
@@ -12,7 +13,7 @@ const gerarContratoPDF = (dados) => {
     doc.on('error', reject)
 
     const { contratante, contratado, servico, cidade, data } = dados
-    const marca = dados.marca || 'PinturaPro'
+    const marca = dados.marca || MARCA
 
     // Cabeçalho
     doc.fontSize(16).font('Helvetica-Bold').text('CONTRATO DE PRESTAÇÃO DE SERVIÇOS', { align: 'center' })
@@ -160,22 +161,25 @@ const gerarContratoPDF = (dados) => {
 
     // Rodapé
     doc.moveDown(2)
-    doc.fontSize(8).fillColor('#888888').text(`Documento gerado automaticamente pela plataforma ${marca} | www.pinturapro.com.br`, { align: 'center' })
+    doc.fontSize(8).fillColor('#888888').text(`Documento gerado automaticamente pela plataforma ${marca} | ${SITE}`, { align: 'center' })
 
     doc.end()
   })
 }
 
+// Nome do anexo que as duas partes veem no cliente de e-mail — é copy, não caminho de storage.
+const NOME_ARQUIVO_CONTRATO = 'contrato_prolar.pdf'
+
 const enviarContratoPorEmail = async (emailContratante, emailContratado, pdfBuffer, dados) => {
-  const assunto = `ArrumaPro — Contrato de Serviço: ${dados.servico.descricao}`
+  const assunto = `${MARCA} — Contrato de Serviço: ${dados.servico.descricao}`
   const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
       <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-        <h1 style="color: #0a0a0a; margin: 0;">ArrumaPro</h1>
+        <h1 style="color: #0a0a0a; margin: 0;">${MARCA}</h1>
       </div>
       <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
         <h2 style="color: #333;">Contrato de Prestação de Serviços</h2>
-        <p>Olá! Segue em anexo o contrato referente ao serviço contratado pela plataforma ArrumaPro.</p>
+        <p>Olá! Segue em anexo o contrato referente ao serviço contratado pela plataforma ${MARCA}.</p>
         <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
           <tr style="background: #eee;">
             <td style="padding: 10px; font-weight: bold;">Serviço</td>
@@ -200,13 +204,13 @@ const enviarContratoPorEmail = async (emailContratante, emailContratado, pdfBuff
         </table>
         <p style="color: #666; font-size: 13px;">O contrato está disponível em anexo neste e-mail. Recomendamos que ambas as partes o assinem e guardem uma cópia.</p>
         <p style="color: #666; font-size: 13px;">Em caso de dúvidas, entre em contato conosco.</p>
-        <p style="margin-top: 30px; color: #333;"><strong>Equipe ArrumaPro</strong></p>
+        <p style="margin-top: 30px; color: #333;"><strong>Equipe ${MARCA}</strong></p>
       </div>
     </div>
   `
 
-  await enviarEmailComAnexo({ para: emailContratante, assunto, html, pdfBuffer, nomeArquivo: 'contrato_pinturapro.pdf' })
-  await enviarEmailComAnexo({ para: emailContratado,  assunto, html, pdfBuffer, nomeArquivo: 'contrato_pinturapro.pdf' })
+  await enviarEmailComAnexo({ para: emailContratante, assunto, html, pdfBuffer, nomeArquivo: NOME_ARQUIVO_CONTRATO })
+  await enviarEmailComAnexo({ para: emailContratado,  assunto, html, pdfBuffer, nomeArquivo: NOME_ARQUIVO_CONTRATO })
   console.log(`Contrato enviado para ${emailContratante} e ${emailContratado}`)
 }
 

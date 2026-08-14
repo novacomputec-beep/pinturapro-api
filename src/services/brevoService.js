@@ -1,4 +1,5 @@
 const SibApiV3Sdk = require('sib-api-v3-sdk')
+const { MARCA } = require('../utils/marca')
 
 const toRecipients = (para) =>
   Array.isArray(para) ? para.map(e => ({ email: e })) : [{ email: para }]
@@ -10,13 +11,14 @@ const getApiInstance = () => {
 }
 
 // Aceita "Nome <email@dominio.com>" ou apenas "email@dominio.com".
-// `nomeOverride` (opcional) força o nome de exibição do remetente (ex.: marca por
-// tipo de usuário), mantendo o endereço do EMAIL_REMETENTE.
+// `nomeOverride` (opcional) força o nome de exibição do remetente, mantendo o endereço do
+// EMAIL_REMETENTE. MARCA é só o ÚLTIMO fallback: o nome que vier no EMAIL_REMETENTE continua
+// mandando, porque ele é configuração de ambiente e não copy desta base.
 const parseSender = (nomeOverride) => {
   const raw = process.env.EMAIL_REMETENTE || ''
   const match = raw.match(/^(.+?)\s*<(.+?)>$/)
   const email = match ? match[2].trim() : (raw || 'novacomputec@gmail.com')
-  return { name: nomeOverride || (match ? match[1].trim() : 'PinturaPro'), email }
+  return { name: nomeOverride || (match ? match[1].trim() : MARCA), email }
 }
 
 const enviarEmail = async ({ para, assunto, html, remetenteNome }) => {
