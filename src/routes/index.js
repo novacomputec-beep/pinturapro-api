@@ -5065,7 +5065,7 @@ router.get('/avaliacoes/media/:usuario_id', autenticar, async (req, res) => {
 })
 
 // GET /avaliacoes/recebidas — lista as avaliações RECEBIDAS pelo usuário autenticado
-// (avaliado_id = req.usuario.id), com o nome de quem avaliou (transparência estilo iFood)
+// (avaliado_id = req.usuario.id), SEM identificar quem avaliou — nota e data apenas —
 // e um resumo (média + total) para o cabeçalho da tela. Rota estática — registrada depois de
 // '/avaliacoes/media/:usuario_id' e não colide com ela (segmento 'recebidas' != 'media').
 router.get('/avaliacoes/recebidas', autenticar, async (req, res) => {
@@ -5083,19 +5083,21 @@ router.get('/avaliacoes/recebidas', autenticar, async (req, res) => {
       [uid]
     )
 
-    // Lista paginada. Colunas EXPLÍCITAS (nunca SELECT *): do avaliador expõe SÓ u.nome —
-    // jamais email/telefone/CPF/qualquer outro PII. comentario ainda não existe no schema
-    // (a avaliação só grava estrelas) → devolvido como NULL, placeholder de contrato até a
-    // captura de comentário existir no write-path e no app.
+    // Lista paginada. Colunas EXPLÍCITAS (nunca SELECT *): NADA do avaliador é exposto —
+    // nem nome, nem id, nem foto; a avaliação recebida é anônima para quem a recebe.
+    // Sem JOIN em usuarios: ela existia só para trazer u.nome. Isso não muda o conjunto de
+    // linhas — avaliador_id é NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE, então
+    // toda avaliação sempre teve (e sempre terá) um avaliador vivo do outro lado do JOIN.
+    // comentario ainda não existe no schema (a avaliação só grava estrelas) → devolvido
+    // como NULL, placeholder de contrato até a captura de comentário existir no write-path
+    // e no app.
     const lista = await pool.query(
       `SELECT a.id,
               a.estrelas      AS nota,
               NULL::text      AS comentario,
               a.criado_em     AS created_at,
-              a.contrato_tipo AS contrato_tipo,
-              u.nome          AS avaliador_nome
+              a.contrato_tipo AS contrato_tipo
        FROM avaliacoes a
-       JOIN usuarios u ON u.id = a.avaliador_id
        WHERE a.avaliado_id = $1
        ORDER BY a.criado_em DESC
        LIMIT $2 OFFSET $3`,
