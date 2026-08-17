@@ -110,11 +110,12 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS complemento VARCHAR(100)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS bairro VARCHAR(100)`)
     // Diagnóstico de push: por que o usuário está sem push_token. Hoje só existe o sinal
-    // push_token IS NULL, que confunde quatro estados distintos. push_status registra o
+    // push_token IS NULL, que confunde cinco estados distintos. push_status registra o
     // motivo, reportado pelo app. Valores aceitos (texto puro, sem CHECK — mesma convenção
     // de verificacao_status): 'concedida' (permissão dada), 'negada' (permissão recusada),
     // 'bloqueada' (recusa permanente, canAskAgain=false), 'erro_registro' (falha ao obter/
-    // enviar o token). Default 'desconhecido' enquanto o app ainda não reportou.
+    // enviar o token), 'nao_solicitada' (app nunca chegou a pedir a permissão). Default
+    // 'desconhecido' enquanto o app ainda não reportou.
     // push_status_em = quando o estado foi observado (sem default: NULL até o 1º report,
     // evitando o rewrite de tabela que um default volátil como NOW() forçaria). Colunas
     // aditivas: nenhuma query existente as lê.
@@ -1165,7 +1166,7 @@ router.post('/auth/push-token/clear', autenticar, async (req, res) => {
 router.post('/auth/push-status', autenticar, async (req, res) => {
   try {
     const { status } = req.body
-    const permitidos = ['concedida', 'negada', 'bloqueada', 'erro_registro']
+    const permitidos = ['concedida', 'negada', 'bloqueada', 'erro_registro', 'nao_solicitada']
     if (!permitidos.includes(status)) {
       return res.status(400).json({ erro: 'Status inválido' })
     }
