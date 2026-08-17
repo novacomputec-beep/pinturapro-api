@@ -5065,52 +5065,43 @@ router.get('/avaliacoes/media/:usuario_id', autenticar, async (req, res) => {
   }
 })
 
-// GET /avaliacoes/recebidas — lista as avaliações RECEBIDAS pelo usuário autenticado
-// (avaliado_id = req.usuario.id), SEM identificar quem avaliou — nota e data apenas —
-// e um resumo (média + total) para o cabeçalho da tela. Rota estática — registrada depois de
+// GET /avaliacoes/recebidas — resumo das avaliações RECEBIDAS pelo usuário autenticado
+// (avaliado_id = req.usuario.id): média, total e a distribuição por estrela. Não devolve mais
+// as avaliações uma a uma — nada do avaliador jamais foi exposto aqui, e agora nem a linha
+// individual é; só contagens agregadas. Rota estática — registrada depois de
 // '/avaliacoes/media/:usuario_id' e não colide com ela (segmento 'recebidas' != 'media').
 router.get('/avaliacoes/recebidas', autenticar, async (req, res) => {
   try {
     const uid = req.usuario.id
-    const page  = parseInt(req.query.page)  || 1
-    const limit = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
 
-    // Resumo (média + total): computado on-read — não há coluna cacheada em usuarios.
-    // Espelha GET /avaliacoes/media/:usuario_id acima.
+    // Resumo (média + total + distribuição): computado on-read — não há coluna cacheada em
+    // usuarios. media/total seguem idênticos a GET /avaliacoes/media/:usuario_id acima (mesmo
+    // ROUND para 1 casa, mesmo COALESCE 0 para quem ainda não tem avaliação).
+    // Query ÚNICA: os cinco contadores são agregados condicionais na MESMA linha de
+    // total/media — o FILTER percorre as linhas já varridas pelo COUNT/AVG, sem I/O extra e
+    // sem uma segunda ida ao banco (índice avaliacoes_avaliado_idx cobre o WHERE).
+    // COUNT(*) FILTER nunca é NULL — é 0 quando nada casa —, então as cinco chaves existem
+    // sempre, zero-preenchidas. Somam total porque estrelas é INTEGER NOT NULL
+    // CHECK (estrelas BETWEEN 1 AND 5): não há bucket possível fora de 1..5, nem NULL.
     const resumo = await pool.query(
-      `SELECT COUNT(*)::int AS total, COALESCE(ROUND(AVG(estrelas)::numeric, 1), 0) AS media
+      `SELECT COUNT(*)::int AS total,
+              COALESCE(ROUND(AVG(estrelas)::numeric, 1), 0) AS media,
+              COUNT(*) FILTER (WHERE estrelas = 1)::int AS e1,
+              COUNT(*) FILTER (WHERE estrelas = 2)::int AS e2,
+              COUNT(*) FILTER (WHERE estrelas = 3)::int AS e3,
+              COUNT(*) FILTER (WHERE estrelas = 4)::int AS e4,
+              COUNT(*) FILTER (WHERE estrelas = 5)::int AS e5
        FROM avaliacoes WHERE avaliado_id = $1`,
       [uid]
     )
 
-    // Lista paginada. Colunas EXPLÍCITAS (nunca SELECT *): NADA do avaliador é exposto —
-    // nem nome, nem id, nem foto; a avaliação recebida é anônima para quem a recebe.
-    // Sem JOIN em usuarios: ela existia só para trazer u.nome. Isso não muda o conjunto de
-    // linhas — avaliador_id é NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE, então
-    // toda avaliação sempre teve (e sempre terá) um avaliador vivo do outro lado do JOIN.
-    // comentario ainda não existe no schema (a avaliação só grava estrelas) → devolvido
-    // como NULL, placeholder de contrato até a captura de comentário existir no write-path
-    // e no app.
-    const lista = await pool.query(
-      `SELECT a.id,
-              a.estrelas      AS nota,
-              NULL::text      AS comentario,
-              a.criado_em     AS created_at,
-              a.contrato_tipo AS contrato_tipo
-       FROM avaliacoes a
-       WHERE a.avaliado_id = $1
-       ORDER BY a.criado_em DESC
-       LIMIT $2 OFFSET $3`,
-      [uid, limit, offset]
-    )
-
+    // Agregado sem GROUP BY sempre devolve exatamente uma linha, inclusive para quem não tem
+    // nenhuma avaliação (total 0, media 0, cinco contadores 0) — rows[0] nunca é undefined.
+    const r = resumo.rows[0]
     res.json({
-      media: parseFloat(resumo.rows[0].media),
-      total: resumo.rows[0].total,
-      page,
-      limit,
-      avaliacoes: lista.rows
+      media: parseFloat(r.media),
+      total: r.total,
+      distribuicao: { '1': r.e1, '2': r.e2, '3': r.e3, '4': r.e4, '5': r.e5 }
     })
   } catch (err) {
     console.error('[Avaliacoes] Erro recebidas:', err.message)
