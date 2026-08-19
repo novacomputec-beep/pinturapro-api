@@ -2030,7 +2030,8 @@ const DEDUPE_ESTENDER_OBRA_MINUTOS = 5
 router.post('/obras/:id/estender', autenticar, async (req, res) => {
   try {
     const obra = await pool.query(
-      `SELECT id, criado_por, status, match_usuario_id, expira_em, criado_em, publicado_em, horas_para_expirar
+      `SELECT id, criado_por, status, match_usuario_id, expira_em, criado_em, publicado_em, horas_para_expirar,
+              prazo_modo, prazo_timezone
        FROM obras WHERE id = $1 AND criado_por = $2`,
       [req.params.id, req.usuario.id]
     )
@@ -2045,12 +2046,43 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
       return res.status(400).json({ erro: `horas inválido: máximo de ${TETO_ESTENDER_OBRA_HORAS} (365 dias)`, extensao_maxima_horas: TETO_ESTENDER_OBRA_HORAS })
     }
 
+    // Obra é SEMPRE estendida em dias inteiros — o modal do app manda dias * 24, mínimo 1 dia.
+    // O endpoint, porém, aceita qualquer inteiro de horas, então o valor é convertido aqui:
+    // CEIL para o dia seguinte em vez de recusar. Arredondar para CIMA e não para baixo porque
+    // o dono pediu MAIS prazo: 30h vira 2 dias, nunca 1. horas >= 1 (validado acima) garante
+    // dias >= 1, então não há extensão de zero dia.
+    const diasExtensao = Math.max(1, Math.ceil(horas / 24))
+
     // Só o novo expira_em: sem orçamento a calcular, a query perdeu a metade budget_antes.
+    //
+    // Dois ramos, e só o de "Hoje" mudou:
+    //
+    // FAIXA POR DURAÇÃO (prazo_modo NULL) — byte a byte o que sempre foi.
     // GREATEST(expira_em, NOW()) preservado — obra já vencida estende a partir de agora, e
     // não de um vencimento no passado (senão "+2h" compraria menos de 2h de vida real).
+    //
+    // FAIXA "HOJE" — o prazo é um INSTANTE DE CALENDÁRIO, não uma duração, então somar horas
+    // ao GREATEST convertia a meia-noite num horário de relógio para sempre: uma obra que
+    // venceu à meia-noite e é estendida às 09:00 caía em 09:00, não em meia-noite.
+    // Aqui a soma é de DIAS sobre o DIA, e o resultado volta a ser fim de dia:
+    //   base = o DIA mais tardio entre o do prazo guardado e o de hoje, no fuso do dono —
+    //          obra viva ganha dias a partir do PRÓPRIO prazo; obra vencida, a partir de hoje;
+    //   fim  = fim daquele dia + N dias (o +1 dia -1 microssegundo é o mesmo fecho de dia de
+    //          sqlFimDoDia, aplicado a um dia deslocado em vez de a hoje).
+    // A zona passa pelo MESMO lookup seguro dos caminhos de rebuild: zona morta ou NULL recua
+    // para São Paulo em vez de levantar 22023 (aqui derrubaria só esta request, mas o motivo
+    // para não confiar na coluna crua é o mesmo).
     const cap = await pool.query(
-      `SELECT GREATEST($1::timestamptz, NOW()) + ($2::numeric * INTERVAL '1 hour') AS novo_expira_em`,
-      [o.expira_em, horas]
+      `SELECT CASE WHEN $4::text = '${PRAZO_MODO_HOJE}' THEN (
+                     date_trunc('day', GREATEST(
+                       $1::timestamptz AT TIME ZONE ${sqlZonaSegura('$3::text')},
+                       NOW()           AT TIME ZONE ${sqlZonaSegura('$3::text')}
+                     ))
+                     + (($5::int + 1) * INTERVAL '1 day') - INTERVAL '1 microsecond'
+                   ) AT TIME ZONE ${sqlZonaSegura('$3::text')}
+                   ELSE GREATEST($1::timestamptz, NOW()) + ($2::numeric * INTERVAL '1 hour')
+              END AS novo_expira_em`,
+      [o.expira_em, horas, o.prazo_timezone, o.prazo_modo, diasExtensao]
     )
 
     // Guarda de dedupe DENTRO do UPDATE, não em um if antes dele: checar em uma query e gravar em
