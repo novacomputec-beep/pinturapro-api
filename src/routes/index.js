@@ -1443,8 +1443,44 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
     // profissional com falta registrada não consegue mais excluir a própria conta.
     await client.query(`DELETE FROM faltas_profissional WHERE usuario_id = $1`, [id])
 
-    // Conta em si (avaliacoes cai por ON DELETE CASCADE)
-    await client.query(`DELETE FROM usuarios WHERE id = $1`, [id])
+    // Conta em si (avaliacoes cai por ON DELETE CASCADE).
+    //
+    // As 4 URLs de Cloudinary que moram na PRÓPRIA linha de usuarios (foto de perfil, frente e
+    // verso do documento, selfie) entram na fila de órfãs no MESMO statement do DELETE. Sem
+    // isto, excluir a conta apagava a única referência a esses arquivos e o documento de
+    // identidade ficava no Cloudinary para sempre: os dois braços do cron enxergam mídia só
+    // através de obras/reparos, e midias_orfas só recebia o que passava por enfileirarOrfas.
+    //
+    // NÃO usa o wrapper enfileirarOrfas: ele assume um DELETE que devolve UMA LINHA POR MÍDIA
+    // já com as colunas (url, tipo), que é a forma de midias/midias_reparos. Aqui é o oposto —
+    // uma linha só, com quatro colunas de URL —, então o RETURNING precisa ser despivotado com
+    // unnest antes de virar linhas da fila. Mesma ideia, forma diferente.
+    //
+    // CTE em vez de um SELECT antes do DELETE: as URLs saem do RETURNING da linha REALMENTE
+    // apagada, então é impossível enfileirar arquivo de uma conta que não foi excluída (WHERE
+    // sem correspondência → nenhuma linha no del → nenhuma inserção).
+    // WHERE u IS NOT NULL: coluna vazia não vira linha na fila.
+    // 'foto' porque as quatro são imagens (todas gravadas como /image/upload/ no Cloudinary) e
+    // deletarDoCloudinary mapeia qualquer tipo != 'video' para resource_type 'image'.
+    // DISTINCT + ON CONFLICT: o mesmo arquivo reaproveitado em duas colunas entra uma vez, e
+    // URL já enfileirada por outro caminho não duplica.
+    await client.query(
+      `WITH del AS (
+         DELETE FROM usuarios WHERE id = $1
+         RETURNING foto_url, verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url
+       )
+       INSERT INTO midias_orfas (url, tipo)
+       SELECT DISTINCT u, 'foto'
+         FROM del, unnest(ARRAY[
+                del.foto_url,
+                del.verificacao_doc_frente_url,
+                del.verificacao_doc_verso_url,
+                del.verificacao_selfie_url
+              ]) AS u
+        WHERE u IS NOT NULL
+       ON CONFLICT (url) DO NOTHING`,
+      [id]
+    )
 
     await client.query('COMMIT')
 
