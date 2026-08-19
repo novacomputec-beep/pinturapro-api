@@ -15,6 +15,9 @@ const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = requi
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
+// Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
+// America/Sao_Paulo. Compartilhado com alertaService, que reconstrói expira_em nos crons.
+const { PRAZO_MODO_HOJE, SQL_FIM_DO_DIA_SP } = require('../utils/faixasPrazo')
 const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
@@ -269,6 +272,14 @@ const migracaoPronta = (async () => {
     // retry do app somava outra extensão inteira — exatamente o que a guarda do reparo já evitava.
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS ultima_extensao_em    TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS ultima_extensao_horas NUMERIC`)
+    // Faixa "Hoje": prazo que vence no FIM DO DIA em Brasília, não N horas depois da publicação.
+    // Marcador, não duração — ver PRAZO_MODO_HOJE em src/utils/faixasPrazo.js para o porquê de
+    // não usar sentinela nas colunas de horas. NULL = faixa por duração (todo o histórico).
+    // Aditiva e sem DEFAULT: nenhuma reescrita de tabela, nenhuma query existente a lê.
+    // Os TRÊS caminhos que escrevem/reconstroem expira_em consultam esta coluna: o create, o
+    // aprovarEPublicarObra e os dois crons de cronômetro (alertaService).
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS prazo_modo TEXT`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS prazo_modo TEXT`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_em    TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_horas NUMERIC`)
     // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o range scan lê
@@ -1671,15 +1682,25 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     // na aprovação. Validação do input segue DEFERIDA (não mexer nos creates).
     const horasExpiracao = horas_para_expirar || 720
     const expira_em = new Date(Date.now() + horasExpiracao * 3600 * 1000)
+    // Faixa "Hoje" (prazo_modo='hoje'): expira_em é o FIM DO DIA em America/Sao_Paulo, não
+    // publicação + N horas. NULL/ausente = faixa por duração, exatamente como antes.
+    const prazoModo = req.body?.prazo_modo === PRAZO_MODO_HOJE ? PRAZO_MODO_HOJE : null
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam a obra já criada em vez de inserir duplicata. Sem chave (NULL) → insert normal.
+    //
+    // O CASE existe para que SÓ o ramo 'hoje' mude: as outras faixas continuam gravando o
+    // $10 calculado no Node acima, byte a byte o que gravavam antes. O ramo 'hoje' é resolvido
+    // no POSTGRES — o container roda em UTC e um new Date() daria o DIA errado entre 21:00 e
+    // 00:00 de Brasília (mesmo motivo documentado em JANELAS_CHEGADA).
     const result = await pool.query(
-      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, coordenadas_origem, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'rascunho',true,'pendente',$18,$19)
+      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, coordenadas_origem, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar, prazo_modo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
+               CASE WHEN $20::text = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP} ELSE $10::timestamptz END,
+               $11,$12,$13,$14,$15,$16,$17,'rascunho',true,'pendente',$18,$19,$20)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao]
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao, prazoModo]
     )
     let obra = result.rows[0]
     // Aprovação automática de obras (flag global em configuracoes, default 'false' = OFF).
@@ -1770,9 +1791,13 @@ const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
 // aprovada — duplo clique do admin — ou o id não existe).
 const aprovarEPublicarObra = async (obraId) => {
   const atualizada = await pool.query(
+    // Faixa "Hoje": o relógio reinicia na APROVAÇÃO (é ela que publica), então "hoje" é o dia
+    // em que o admin aprovou, não o dia do rascunho. Sem este CASE, aprovar uma obra "Hoje"
+    // reconstruiria expira_em a partir de horas_para_expirar e desfaria a regra em silêncio.
     `UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta',
        publicado_em = NOW(),
-       expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
+       expira_em = CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP}
+                        ELSE NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour') END
      WHERE id = $1 AND status_aprovacao <> 'aprovada'
      RETURNING *`, [obraId])
   // Os DOIS avisos só na TRANSIÇÃO pendente/recusada → aprovada. rowCount 0 significa que o
@@ -2739,15 +2764,20 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     // a demanda ficava sem faixa e o job de marcos a pulava, sem alerta nenhum de expiração.
     const horasExpiracao = prazo_atendimento_horas || 720
     const expira_em = new Date(Date.now() + horasExpiracao * 3600 * 1000)
+    // Faixa "Hoje" — mesma regra e mesmo CASE do POST /obras/dono (ver lá o racional completo):
+    // só o ramo 'hoje' muda, resolvido no Postgres; as demais faixas gravam o $10 do Node.
+    const prazoModo = req.body?.prazo_modo === PRAZO_MODO_HOJE ? PRAZO_MODO_HOJE : null
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam o reparo já criado em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',$10,$11,$12,$13,$14,$15,$16,$17)
+      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id, prazo_modo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',
+               CASE WHEN $18::text = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP} ELSE $10::timestamptz END,
+               $11,$12,$13,$14,$15,$16,$17,$18)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null]
+      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo]
     )
     res.status(201).json(result.rows[0])
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))

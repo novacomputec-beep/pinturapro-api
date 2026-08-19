@@ -91,4 +91,33 @@ const getFaixa = (windowHours) => {
   return escolhida
 }
 
-module.exports = { FAIXAS, getFaixa }
+// ============================================================
+// FAIXA "HOJE" — prazo que vence no FIM DO DIA, não N horas depois
+// ============================================================
+// As faixas acima são todas DURAÇÕES: expira_em = publicação + windowHours. "Hoje" não é uma
+// duração — é um INSTANTE do calendário (o fim do dia corrente em Brasília), então não cabe na
+// tabela e precisa de um marcador próprio, gravado em obras.prazo_modo / reparos.prazo_modo.
+//
+// Por que um marcador em coluna, e não um valor sentinela em horas_para_expirar/
+// prazo_atendimento_horas: essas colunas são lidas por getFaixa (marcos), pelo predicado dos
+// dois crons (`IS NOT NULL`) e pela carência do estender. Um sentinela (0, -1) as
+// atravessaria todas com significado errado. NULL em prazo_modo = faixa por duração, o
+// comportamento de sempre.
+const PRAZO_MODO_HOJE = 'hoje'
+
+// Fim do dia CORRENTE às 23:59:59.999999 em America/Sao_Paulo, como timestamptz.
+// Modelado em SQL_FIM_DO_MES_SP (src/routes/index.js), trocando 'month' por 'day': os dois
+// AT TIME ZONE fazem coisas OPOSTAS e é isso que faz a conta fechar num banco UTC —
+//   1º (timestamptz → timestamp) TIRA o fuso e devolve o relógio de parede de SP, para o
+//      date_trunc cortar o dia BRASILEIRO;
+//   2º (timestamp → timestamptz) RECOLOCA o fuso e devolve o instante UTC a gravar.
+// Sem isso, 19/08 22:00 em SP já é 20/08 01:00 em UTC e o truncamento cairia um dia adiante —
+// exatamente o erro que o comentário de JANELAS_CHEGADA descreve para o `new Date()` do
+// container. Por isso a expressão é resolvida no Postgres, nunca no Node.
+// SEM PISO: publicar 23:58 dá dois minutos de prazo, e é essa a regra pedida.
+const SQL_FIM_DO_DIA_SP = `(
+        date_trunc('day', (NOW() AT TIME ZONE 'America/Sao_Paulo'))
+        + INTERVAL '1 day' - INTERVAL '1 microsecond'
+      ) AT TIME ZONE 'America/Sao_Paulo'`
+
+module.exports = { FAIXAS, getFaixa, PRAZO_MODO_HOJE, SQL_FIM_DO_DIA_SP }
