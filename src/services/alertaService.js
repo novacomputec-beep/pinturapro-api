@@ -1,9 +1,10 @@
 const { pool } = require('../utils/supabase')
 const { Expo } = require('expo-server-sdk')
-const { getFaixa, PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP } = require('../utils/faixasPrazo')
-// Ver src/routes/index.js: a obra guarda a zona do dono em prazo_timezone; linhas anteriores
-// à coluna recuam para o padrão. Só o lado OBRA tem zona — reparo não tem faixa "Hoje".
-const SQL_ZONA_DA_OBRA = `COALESCE(prazo_timezone, '${TZ_PADRAO}')`
+const { getFaixa, PRAZO_MODO_HOJE, sqlFimDoDia, SQL_FIM_DO_DIA_SP, sqlZonaSegura } = require('../utils/faixasPrazo')
+// Ver src/routes/index.js: a obra guarda a zona do dono em prazo_timezone, validada contra
+// pg_timezone_names NA HORA DO USO — zona NULL ou que deixou de existir recua para o padrão em
+// vez de derrubar o UPDATE do lote inteiro. Só o lado OBRA tem zona — reparo não tem "Hoje".
+const SQL_ZONA_DA_OBRA = sqlZonaSegura('obras.prazo_timezone')
 const { MARCA } = require('../utils/marca')
 // Sem ciclo: middlewares/auth só importa jsonwebtoken e utils/supabase, nunca este serviço.
 const { invalidarCacheAssinatura } = require('../middlewares/auth')

@@ -138,4 +138,27 @@ const SQL_FIM_DO_DIA_SP = sqlFimDoDia(`'${TZ_PADRAO}'`)
 // quem decide se a zona EXISTE é o Postgres, via pg_timezone_names.
 const FORMATO_ZONA_IANA = /^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)+$/
 
-module.exports = { FAIXAS, getFaixa, PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP, FORMATO_ZONA_IANA }
+// Zona GRAVADA na linha, resolvida com segurança, para os caminhos que RECONSTROEM expira_em.
+// `colunaQualificada` é a coluna da linha sendo atualizada (ex.: 'obras.prazo_timezone').
+//
+// A validação de create não basta aqui. Uma zona aceita hoje pode deixar de ser reconhecida
+// depois — upgrade do Postgres que remove um link renomeado (Europe/Kiev → Europe/Kyiv), poda
+// do tzdata, ou edição manual da linha. Consumida direta, `NOW() AT TIME ZONE <zona morta>`
+// levanta SQLSTATE 22023 (time zone not recognized), e como os dois caminhos atualizam um LOTE
+// num único statement, UMA linha ruim abortava o UPDATE INTEIRO: nenhuma obra do lote voltava
+// ao feed, e o try/catch do cron transformava isso numa linha de log a cada minuto.
+//
+// O LEFT-lookup em pg_timezone_names torna a resolução POR LINHA e sem exceção: zona ausente
+// do catálogo não devolve linha, o COALESCE cai no padrão, e as demais linhas do lote seguem.
+// Também absorve o caso NULL (`= NULL` não casa nada), então substitui o COALESCE anterior.
+//
+// Custo: pg_timezone_names é uma função que enumera o tzdata (~500 linhas) a cada avaliação, e
+// a expressão da zona aparece duas vezes no fim-do-dia — ou seja, 2 varreduras por linha do
+// lote. Os lotes aqui são de obras que acabaram de expirar (unidades, não milhares), e o ramo
+// só é avaliado quando prazo_modo = 'hoje'. Se um dia isso pesar, o passo seguinte é
+// materializar o catálogo num CTE do próprio statement — não voltar a confiar na coluna crua.
+const sqlZonaSegura = (colunaQualificada) => `COALESCE(
+        (SELECT tz.name FROM pg_timezone_names tz WHERE tz.name = ${colunaQualificada}),
+        '${TZ_PADRAO}')`
+
+module.exports = { FAIXAS, getFaixa, PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP, FORMATO_ZONA_IANA, sqlZonaSegura }
