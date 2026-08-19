@@ -1,6 +1,9 @@
 const { pool } = require('../utils/supabase')
 const { Expo } = require('expo-server-sdk')
-const { getFaixa, PRAZO_MODO_HOJE, SQL_FIM_DO_DIA_SP } = require('../utils/faixasPrazo')
+const { getFaixa, PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP } = require('../utils/faixasPrazo')
+// Ver src/routes/index.js: a obra guarda a zona do dono em prazo_timezone; linhas anteriores
+// à coluna recuam para o padrão. Só o lado OBRA tem zona — reparo não tem faixa "Hoje".
+const SQL_ZONA_DA_OBRA = `COALESCE(prazo_timezone, '${TZ_PADRAO}')`
 const { MARCA } = require('../utils/marca')
 // Sem ciclo: middlewares/auth só importa jsonwebtoken e utils/supabase, nunca este serviço.
 const { invalidarCacheAssinatura } = require('../middlewares/auth')
@@ -788,8 +791,9 @@ const verificarCronometroObras = async () => {
               THEN prestadores_bloqueados
               ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), match_usuario_id) END,
             -- Faixa "Hoje" — mesma regra do cron de reparos: volta ao fim do dia corrente,
-            -- nunca a horas_para_expirar novas.
-            expira_em = CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP}
+            -- nunca a horas_para_expirar novas. O dia é o do DONO (prazo_timezone), não o de
+            -- São Paulo: para um dono em Rio Branco o cron resolveria o dia errado.
+            expira_em = CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia(SQL_ZONA_DA_OBRA)}
                              ELSE NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour') END
           WHERE id = ANY($1::uuid[]) AND ${PRED_EXPIRADOS_OBRAS}
           RETURNING id

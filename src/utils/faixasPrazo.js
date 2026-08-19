@@ -105,19 +105,37 @@ const getFaixa = (windowHours) => {
 // comportamento de sempre.
 const PRAZO_MODO_HOJE = 'hoje'
 
-// Fim do dia CORRENTE às 23:59:59.999999 em America/Sao_Paulo, como timestamptz.
+// Fuso de recuo quando o cliente não manda zona, manda algo malformado, ou manda uma zona que
+// o Postgres não conhece. Era o valor fixo da primeira versão desta regra.
+const TZ_PADRAO = 'America/Sao_Paulo'
+
+// Fim do dia CORRENTE às 23:59:59.999999 NA ZONA DADA, como timestamptz.
+// `zonaSql` é um TRECHO DE SQL que resolve para o nome da zona — um placeholder ($21::text) no
+// create, ou uma expressão de coluna (COALESCE(prazo_timezone, ...)) nos caminhos que
+// reconstroem. Nunca o nome da zona interpolado: o valor vem do cliente e entra como PARÂMETRO.
+//
 // Modelado em SQL_FIM_DO_MES_SP (src/routes/index.js), trocando 'month' por 'day': os dois
 // AT TIME ZONE fazem coisas OPOSTAS e é isso que faz a conta fechar num banco UTC —
-//   1º (timestamptz → timestamp) TIRA o fuso e devolve o relógio de parede de SP, para o
-//      date_trunc cortar o dia BRASILEIRO;
+//   1º (timestamptz → timestamp) TIRA o fuso e devolve o relógio de parede LOCAL, para o
+//      date_trunc cortar o dia do USUÁRIO;
 //   2º (timestamp → timestamptz) RECOLOCA o fuso e devolve o instante UTC a gravar.
 // Sem isso, 19/08 22:00 em SP já é 20/08 01:00 em UTC e o truncamento cairia um dia adiante —
 // exatamente o erro que o comentário de JANELAS_CHEGADA descreve para o `new Date()` do
 // container. Por isso a expressão é resolvida no Postgres, nunca no Node.
 // SEM PISO: publicar 23:58 dá dois minutos de prazo, e é essa a regra pedida.
-const SQL_FIM_DO_DIA_SP = `(
-        date_trunc('day', (NOW() AT TIME ZONE 'America/Sao_Paulo'))
+const sqlFimDoDia = (zonaSql) => `(
+        date_trunc('day', (NOW() AT TIME ZONE ${zonaSql}))
         + INTERVAL '1 day' - INTERVAL '1 microsecond'
-      ) AT TIME ZONE 'America/Sao_Paulo'`
+      ) AT TIME ZONE ${zonaSql}`
 
-module.exports = { FAIXAS, getFaixa, PRAZO_MODO_HOJE, SQL_FIM_DO_DIA_SP }
+// Forma da primeira versão, fixa em São Paulo. Continua em uso no lado REPARO, que não tem
+// faixa "Hoje" e cujo cliente não manda zona — ali prazo_modo é sempre NULL e o ramo nunca
+// dispara, então não há o que parametrizar.
+const SQL_FIM_DO_DIA_SP = sqlFimDoDia(`'${TZ_PADRAO}'`)
+
+// Forma de nome IANA: exige ao menos uma barra (Region/City), aceita os níveis extras de
+// America/Argentina/Buenos_Aires e os sinais de Etc/GMT+3. É só uma triagem de FORMATO —
+// quem decide se a zona EXISTE é o Postgres, via pg_timezone_names.
+const FORMATO_ZONA_IANA = /^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)+$/
+
+module.exports = { FAIXAS, getFaixa, PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP, FORMATO_ZONA_IANA }

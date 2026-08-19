@@ -17,7 +17,10 @@ const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestado
 const { ufDeCidade } = require('../utils/localidade')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
 // America/Sao_Paulo. Compartilhado com alertaService, que reconstrói expira_em nos crons.
-const { PRAZO_MODO_HOJE, SQL_FIM_DO_DIA_SP } = require('../utils/faixasPrazo')
+const { PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP, FORMATO_ZONA_IANA } = require('../utils/faixasPrazo')
+// Zona a usar quando a obra reconstrói expira_em depois da criação: a que o cliente mandou,
+// com recuo para o padrão nas linhas gravadas antes de prazo_timezone existir.
+const SQL_ZONA_DA_OBRA = `COALESCE(prazo_timezone, '${TZ_PADRAO}')`
 const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
@@ -280,6 +283,14 @@ const migracaoPronta = (async () => {
     // aprovarEPublicarObra e os dois crons de cronômetro (alertaService).
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS prazo_modo TEXT`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS prazo_modo TEXT`)
+    // Zona IANA em que "Hoje" é resolvido, enviada pelo cliente no create. Coluna SEPARADA em
+    // vez de embutir a zona no próprio prazo_modo ('hoje:America/Manaus'): prazo_modo continua
+    // sendo o MODO, sem split_part no SQL dos dois caminhos que reconstroem expira_em, e uma
+    // faixa futura pode entrar sem colidir com o parsing. NULL = usar TZ_PADRAO (linhas
+    // gravadas antes desta mudança, e qualquer linha cujo cliente não mandou zona utilizável).
+    // Só em OBRAS: o lado reparo não tem faixa "Hoje" e seu cliente não manda zona.
+    // Aditiva e sem DEFAULT: nenhuma reescrita de tabela.
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS prazo_timezone TEXT`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_em    TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_horas NUMERIC`)
     // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o range scan lê
@@ -1664,6 +1675,35 @@ router.get('/obras/meus-contratos-dono', autenticar, async (req, res) => {
   }
 })
 
+// Resolve a zona IANA que o cliente manda no campo `timezone` do create, para a faixa "Hoje".
+// Devolve SEMPRE uma zona utilizável — nunca lança, nunca recusa o request.
+//
+// Três recuos para TZ_PADRAO, todos deliberados:
+//   ausente/não-string  → o cliente omite `timezone` quando o aparelho não sabe dizer a zona;
+//   malformada          → não passa na triagem de formato (sem barra, lixo, tamanho absurdo);
+//   desconhecida        → formato ok, mas o Postgres não tem essa zona no tzdata dele.
+// O caso `desconhecida` é consultado no BANCO (pg_timezone_names) e não no ICU do Node: quem
+// vai calcular o fim do dia é o Postgres, então é o catálogo DELE que decide. Isso também
+// elimina a possibilidade de o INSERT estourar 'time zone "X" not recognized' no meio do CASE.
+// A consulta só roda no ramo 'hoje', então não entra no caminho das outras faixas.
+const resolverZonaCliente = async (bruto) => {
+  if (typeof bruto !== 'string' || bruto.length > 64) return TZ_PADRAO
+  const candidata = bruto.trim()
+  if (!FORMATO_ZONA_IANA.test(candidata)) return TZ_PADRAO
+  try {
+    const r = await pool.query(`SELECT 1 FROM pg_timezone_names WHERE name = $1 LIMIT 1`, [candidata])
+    if (r.rowCount === 0) {
+      console.warn(`[obras/dono] timezone desconhecida pelo Postgres, usando ${TZ_PADRAO}`)
+      return TZ_PADRAO
+    }
+    return candidata
+  } catch (err) {
+    // Falha ao consultar o catálogo não pode derrubar a criação da obra.
+    console.error('[obras/dono] falha ao validar timezone:', err.message)
+    return TZ_PADRAO
+  }
+}
+
 router.post('/obras/dono', autenticar, async (req, res) => {
   try {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
@@ -1682,25 +1722,33 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     // na aprovação. Validação do input segue DEFERIDA (não mexer nos creates).
     const horasExpiracao = horas_para_expirar || 720
     const expira_em = new Date(Date.now() + horasExpiracao * 3600 * 1000)
-    // Faixa "Hoje" (prazo_modo='hoje'): expira_em é o FIM DO DIA em America/Sao_Paulo, não
+    // Faixa "Hoje" (prazo_modo='hoje'): expira_em é o FIM DO DIA na zona DO USUÁRIO, não
     // publicação + N horas. NULL/ausente = faixa por duração, exatamente como antes.
     const prazoModo = req.body?.prazo_modo === PRAZO_MODO_HOJE ? PRAZO_MODO_HOJE : null
+    // Zona só importa no ramo 'hoje' — nas outras faixas nem consulta o banco.
+    // Três recuos, todos para TZ_PADRAO e NUNCA para a faixa por duração: o cliente omite
+    // `timezone` de propósito quando o aparelho não sabe dizer a zona, e nesse caso ele ainda
+    // pediu "Hoje". Cair na faixa de horas seria entregar outra coisa; recusar o request seria
+    // pior ainda. O valor RESOLVIDO é gravado, então os caminhos que reconstroem não precisam
+    // repetir a validação.
+    const prazoZona = prazoModo ? await resolverZonaCliente(req.body?.timezone) : null
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam a obra já criada em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     //
     // O CASE existe para que SÓ o ramo 'hoje' mude: as outras faixas continuam gravando o
     // $10 calculado no Node acima, byte a byte o que gravavam antes. O ramo 'hoje' é resolvido
-    // no POSTGRES — o container roda em UTC e um new Date() daria o DIA errado entre 21:00 e
-    // 00:00 de Brasília (mesmo motivo documentado em JANELAS_CHEGADA).
+    // no POSTGRES — o container roda em UTC e um new Date() daria o DIA errado nas horas finais
+    // do dia local (mesmo motivo documentado em JANELAS_CHEGADA).
+    // A zona entra como PARÂMETRO ($21), nunca interpolada: o valor vem do cliente.
     const result = await pool.query(
-      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, coordenadas_origem, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar, prazo_modo)
+      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, coordenadas_origem, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar, prazo_modo, prazo_timezone)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
-               CASE WHEN $20::text = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP} ELSE $10::timestamptz END,
-               $11,$12,$13,$14,$15,$16,$17,'rascunho',true,'pendente',$18,$19,$20)
+               CASE WHEN $20::text = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia('$21::text')} ELSE $10::timestamptz END,
+               $11,$12,$13,$14,$15,$16,$17,'rascunho',true,'pendente',$18,$19,$20,$21)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao, prazoModo]
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao, prazoModo, prazoZona]
     )
     let obra = result.rows[0]
     // Aprovação automática de obras (flag global em configuracoes, default 'false' = OFF).
@@ -1794,9 +1842,11 @@ const aprovarEPublicarObra = async (obraId) => {
     // Faixa "Hoje": o relógio reinicia na APROVAÇÃO (é ela que publica), então "hoje" é o dia
     // em que o admin aprovou, não o dia do rascunho. Sem este CASE, aprovar uma obra "Hoje"
     // reconstruiria expira_em a partir de horas_para_expirar e desfaria a regra em silêncio.
+    // O dia é o do DONO, não o do admin nem o do servidor: a zona sai de prazo_timezone,
+    // gravada no create. Sem isso, aprovar uma obra de Rio Branco resolveria o dia de SP.
     `UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta',
        publicado_em = NOW(),
-       expira_em = CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP}
+       expira_em = CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia(SQL_ZONA_DA_OBRA)}
                         ELSE NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour') END
      WHERE id = $1 AND status_aprovacao <> 'aprovada'
      RETURNING *`, [obraId])
