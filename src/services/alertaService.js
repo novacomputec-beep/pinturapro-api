@@ -642,6 +642,9 @@ const verificarCronometroReparos = async () => {
             match_feito_em = NULL,
             match_usuario_id = NULL,
             notif_5min_enviada = false,
+            -- Mesmo re-armamento do lado obra (ver o comentário lá): sem isto o reparo volta
+            -- ao feed com prazo novo e marcos velhos, e não recebe aviso de expiração nenhum.
+            marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL,
             pedido_tempo_status = NULL,
             pedido_tempo_motivo = NULL,
             pedido_tempo_minutos = NULL,
@@ -775,6 +778,12 @@ const verificarCronometroObras = async () => {
             match_feito_em = NULL,
             match_usuario_id = NULL,
             notif_5min_enviada = false,
+            -- Marcos re-armados junto com o expira_em novo, exatamente como POST
+            -- /obras/:id/estender já faz: a obra volta ao feed com prazo novo, então os 3
+            -- avisos de expiração precisam valer de novo. Sem isto ela carregava os marcos
+            -- já gastos da PRIMEIRA vida e não recebia aviso nenhum na segunda — o candidato
+            -- da query de marcos exige ao menos um marco NULL, então ela nem era varrida.
+            marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL,
             chegada_janela = NULL,
             chegada_prevista_em = NULL,
             chegada_declarada_por = NULL,
