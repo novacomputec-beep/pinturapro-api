@@ -17,10 +17,12 @@ const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestado
 const { ufDeCidade } = require('../utils/localidade')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
 // America/Sao_Paulo. Compartilhado com alertaService, que reconstrói expira_em nos crons.
-const { PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP, FORMATO_ZONA_IANA } = require('../utils/faixasPrazo')
+const { PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP, FORMATO_ZONA_IANA, sqlZonaSegura } = require('../utils/faixasPrazo')
 // Zona a usar quando a obra reconstrói expira_em depois da criação: a que o cliente mandou,
-// com recuo para o padrão nas linhas gravadas antes de prazo_timezone existir.
-const SQL_ZONA_DA_OBRA = `COALESCE(prazo_timezone, '${TZ_PADRAO}')`
+// validada CONTRA O CATÁLOGO na hora do uso, com recuo para o padrão. Cobre tanto a linha
+// gravada antes de prazo_timezone existir (NULL) quanto a zona que deixou de ser reconhecida
+// — esta última abortava o UPDATE inteiro do lote antes desta guarda.
+const SQL_ZONA_DA_OBRA = sqlZonaSegura('obras.prazo_timezone')
 const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
