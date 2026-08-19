@@ -1,6 +1,6 @@
 const { pool } = require('../utils/supabase')
 const { Expo } = require('expo-server-sdk')
-const { getFaixa } = require('../utils/faixasPrazo')
+const { getFaixa, PRAZO_MODO_HOJE, SQL_FIM_DO_DIA_SP } = require('../utils/faixasPrazo')
 const { MARCA } = require('../utils/marca')
 // Sem ciclo: middlewares/auth só importa jsonwebtoken e utils/supabase, nunca este serviço.
 const { invalidarCacheAssinatura } = require('../middlewares/auth')
@@ -657,7 +657,11 @@ const verificarCronometroReparos = async () => {
               WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
               THEN prestadores_bloqueados
               ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), match_usuario_id) END,
-            expira_em = NOW() + (prazo_atendimento_horas * INTERVAL '1 hour')
+            -- Faixa "Hoje": devolver ao feed NÃO pode dar 24h novas a quem escolheu "hoje" —
+            -- o prazo volta a ser o fim do dia CORRENTE (o dia em que o match morreu).
+            -- Sem este CASE, o cron reconstruiria a partir de prazo_atendimento_horas.
+            expira_em = CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP}
+                             ELSE NOW() + (prazo_atendimento_horas * INTERVAL '1 hour') END
           WHERE id = ANY($1::uuid[]) AND ${PRED_EXPIRADOS_REPAROS}
           RETURNING id
         ), propostas AS (
@@ -783,7 +787,10 @@ const verificarCronometroObras = async () => {
               WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
               THEN prestadores_bloqueados
               ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), match_usuario_id) END,
-            expira_em = NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour')
+            -- Faixa "Hoje" — mesma regra do cron de reparos: volta ao fim do dia corrente,
+            -- nunca a horas_para_expirar novas.
+            expira_em = CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP}
+                             ELSE NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour') END
           WHERE id = ANY($1::uuid[]) AND ${PRED_EXPIRADOS_OBRAS}
           RETURNING id
         ), propostas AS (
