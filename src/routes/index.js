@@ -1349,7 +1349,40 @@ router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
     // derrubaria a transação inteira aqui. perdoada_por não precisa de limpeza (ON DELETE
     // SET NULL), então um admin que já liberou alguém é apagado sem tocar nas faltas dele.
     await client.query('DELETE FROM faltas_profissional WHERE usuario_id = $1', [id])
-    await client.query('DELETE FROM usuarios WHERE id = $1', [id])
+    // Mesma lacuna que DELETE /conta/excluir tinha (corrigida em af5d5fb), e mesma correção:
+    // as 4 URLs de Cloudinary que moram na PRÓPRIA linha de usuarios (foto de perfil, frente e
+    // verso do documento, selfie) entram na fila de órfãs no MESMO statement do DELETE. Sem
+    // isto, o admin excluir um usuário apagava a única referência a esses arquivos e o
+    // documento de identidade ficava no Cloudinary para sempre.
+    //
+    // NÃO usa o wrapper enfileirarOrfas: ele assume um DELETE que devolve UMA LINHA POR MÍDIA
+    // já com as colunas (url, tipo), que é a forma de midias/midias_reparos. Aqui é uma linha
+    // só com quatro colunas de URL, então o RETURNING é despivotado com unnest.
+    //
+    // CTE em vez de um SELECT antes do DELETE: as URLs saem do RETURNING da linha REALMENTE
+    // apagada, então é impossível enfileirar arquivo de um usuário que não foi excluído.
+    // WHERE u IS NOT NULL: coluna vazia não vira linha na fila.
+    // 'foto' porque as quatro são imagens (/image/upload/ no Cloudinary) e deletarDoCloudinary
+    // mapeia qualquer tipo != 'video' para resource_type 'image'.
+    // DISTINCT + ON CONFLICT: mesmo arquivo em duas colunas entra uma vez, e URL já enfileirada
+    // por outro caminho não duplica.
+    await client.query(
+      `WITH del AS (
+         DELETE FROM usuarios WHERE id = $1
+         RETURNING foto_url, verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url
+       )
+       INSERT INTO midias_orfas (url, tipo)
+       SELECT DISTINCT u, 'foto'
+         FROM del, unnest(ARRAY[
+                del.foto_url,
+                del.verificacao_doc_frente_url,
+                del.verificacao_doc_verso_url,
+                del.verificacao_selfie_url
+              ]) AS u
+        WHERE u IS NOT NULL
+       ON CONFLICT (url) DO NOTHING`,
+      [id]
+    )
 
     await client.query('COMMIT')
 
