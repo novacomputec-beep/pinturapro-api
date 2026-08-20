@@ -13,9 +13,11 @@ const minhas = async (req, res) => {
       `SELECT c.id, c.status, c.criado_em, c.valor_contraproposta, c.valor_proposto,
               o.id as obra_id, o.titulo, o.categoria, o.valor, o.cidade, o.status as obra_status,
               o.match_usuario_id, o.match_feito_em,
-              -- Encerramento em duas mãos: o lado do pintor precisa saber se há solicitação
-              -- pendente e quem pediu (_por = próprio usuário → aguardando o dono; _por = dono
-              -- → cabe ao pintor confirmar). NULL = nenhuma solicitação em aberto.
+              -- Encerramento assimétrico: só o PINTOR cria solicitação pendente. O dono não
+              -- solicita — ele encerra na hora, e é ele quem confirma a solicitação do pintor.
+              -- Para o lado do pintor: _por = próprio usuário → ele pediu e aguarda o dono
+              -- fechar; NULL = nenhuma solicitação em aberto. _por nunca é o dono daqui em
+              -- diante (linhas antigas do desenho simétrico podem ter, e fecham na 1ª chamada).
               o.encerramento_solicitado_por, o.encerramento_solicitado_em,
               -- Chegada: o pintor precisa ver a janela que ele mesmo prometeu e se o dono já
               -- confirmou a chegada (declarada por ele + confirmada = atendimento em curso).

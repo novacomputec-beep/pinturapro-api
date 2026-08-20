@@ -840,11 +840,14 @@ const verificarCronometroObras = async () => {
   }
 }
 
-// Encerramento em duas mãos: fecha sozinho a solicitação que a outra parte não confirmou
-// em 2 dias. Sem isto uma parte silenciosa deixaria a demanda pendente para sempre.
+// Encerramento assimétrico: fecha sozinho a solicitação do profissional que o dono não
+// confirmou no prazo. Sem isto um dono silencioso deixaria a demanda pendente para sempre.
 // status = 'aberta' no WHERE (mesma lição do cron de reparos): a demanda só é candidata
 // enquanto NÃO está encerrada. Notifica quem NÃO pediu — quem pediu já sabe.
-const AUTO_ENCERRAR_APOS = '2 days'
+// AUTO_ENCERRAR_ROTULO anda junto do intervalo pelo mesmo motivo de chegadaRotulo abaixo:
+// o prazo aparece no texto do push, e mudar só um avisaria um prazo que não é o aplicado.
+const AUTO_ENCERRAR_APOS   = '3 hours'
+const AUTO_ENCERRAR_ROTULO = '3 horas'
 
 // Auto-confirmação da chegada: o profissional declarou, o dono nunca respondeu. Vencido o
 // prazo a declaração vale por si — sem isto a demanda fica travada em "declarada mas não
@@ -883,7 +886,7 @@ const autoEncerrarPendentes = async () => {
         const alvo = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [avisarId])
         if (alvo.rows[0]?.push_token) {
           enviarPushNotificacao(alvo.rows[0].push_token, '✅ Encerrado automaticamente',
-            `Sem confirmação em 2 dias, ${lado.rotulo} "${d.titulo}" foi encerrad${lado.tabela === 'obras' ? 'a' : 'o'} automaticamente.`,
+            `Sem confirmação em ${AUTO_ENCERRAR_ROTULO}, ${lado.rotulo} "${d.titulo}" foi encerrad${lado.tabela === 'obras' ? 'a' : 'o'} automaticamente.`,
             { tipo: lado.tipoPush, [lado.chave]: d.id }).catch(() => {})
         }
       }
