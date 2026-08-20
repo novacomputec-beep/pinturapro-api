@@ -2464,7 +2464,8 @@ router.post('/obras/:id/match', autenticar, exigirAssinaturaAtiva, exigirPintor,
 // POST /obras/:id/encerrar — encerramento ASSIMÉTRICO: o DONO encerra na hora (foi quem
 // recebeu e pagou o serviço, e a palavra dele encerra); o PINTOR apenas registra a
 // solicitação, e o dono fecha de fato numa 2ª chamada. Admin e obra sem pintor casado também
-// fecham na hora (não há contraparte para confirmar). Cron fecha sozinho após 3 horas.
+// fecham na hora (não há contraparte para confirmar). Cron fecha sozinho vencido o prazo da
+// tabela: 2 dias numa obra, 3 horas num reparo (AUTO_ENCERRAR_APOS_* em alertaService).
 router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
   try {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
