@@ -222,11 +222,12 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS contrato_enviado BOOLEAN DEFAULT false`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
-    // Encerramento em duas mãos: a 1ª chamada de /encerrar registra a solicitação, a 2ª (da
-    // OUTRA parte) fecha de fato. encerramento_solicitado_por IS NOT NULL É o estado pendente
-    // — sem status novo no banco: a demanda segue 'aberta' até fechar, e encerrado_em continua
-    // significando "fechada de verdade". _por também diz QUEM pediu, que é como o handler
-    // distingue confirmação (outra parte) de repetição (mesma parte).
+    // Encerramento assimétrico: a chamada do PROFISSIONAL a /encerrar registra a solicitação,
+    // e o DONO fecha de fato (o dono nunca solicita — encerrar, para ele, encerra na hora).
+    // encerramento_solicitado_por IS NOT NULL É o estado pendente — sem status novo no banco:
+    // a demanda segue 'aberta' até fechar, e encerrado_em continua significando "fechada de
+    // verdade". _por diz QUEM pediu, que é como o handler distingue repetição do profissional
+    // (mesma parte, segue pendente) de qualquer outra chamada, que fecha.
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS encerramento_solicitado_por UUID REFERENCES usuarios(id)`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS encerramento_solicitado_em  TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS encerramento_solicitado_por UUID REFERENCES usuarios(id)`)
@@ -2460,9 +2461,10 @@ router.post('/obras/:id/match', autenticar, exigirAssinaturaAtiva, exigirPintor,
   }
 })
 
-// POST /obras/:id/encerrar — encerramento em DUAS MÃOS: a 1ª chamada registra a solicitação
-// e avisa a outra parte; a 2ª, feita pela OUTRA parte, fecha de fato. Admin e obra sem pintor
-// casado fecham na hora (não há contraparte para confirmar). Cron fecha sozinho após 2 dias.
+// POST /obras/:id/encerrar — encerramento ASSIMÉTRICO: o DONO encerra na hora (foi quem
+// recebeu e pagou o serviço, e a palavra dele encerra); o PINTOR apenas registra a
+// solicitação, e o dono fecha de fato numa 2ª chamada. Admin e obra sem pintor casado também
+// fecham na hora (não há contraparte para confirmar). Cron fecha sozinho após 3 horas.
 router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
   try {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
@@ -2486,11 +2488,15 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
       return res.status(409).json({ erro: 'Antes de encerrar a obra, confirme se o profissional chegou ao local.' })
     }
 
-    // Fecha na hora quando não há contraparte para confirmar: admin agindo por fora das
-    // partes, ou obra que nunca teve pintor casado.
+    // Fecha na hora quando não há confirmação a pedir: o DONO (a palavra dele encerra — e
+    // pendurá-lo numa confirmação alheia lhe custava o modal de avaliação, que só destrava
+    // no fechamento de fato, quando ele já não está no app), o admin agindo por fora das
+    // partes, ou obra que nunca teve pintor casado. Só o pintor passa pela solicitação.
+    // A barreira de chegada acima já rodou para todos: quando o dono chega aqui com pintor
+    // casado, ele mesmo já confirmou que o profissional esteve no local.
     const semContraparte = !o.match_usuario_id
-    if (!ehAdmin && !semContraparte) {
-      // 1ª chamada: registra a solicitação e avisa a outra parte. Não fecha.
+    if (!ehAdmin && !ehDono && !semContraparte) {
+      // 1ª chamada do pintor: registra a solicitação e avisa o dono. Não fecha.
       if (!o.encerramento_solicitado_por) {
         await pool.query(
           `UPDATE obras SET encerramento_solicitado_por = $1, encerramento_solicitado_em = NOW() WHERE id = $2`,
@@ -2505,12 +2511,11 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
         }
         return res.json({ mensagem: 'Encerramento solicitado. Aguardando confirmação da outra parte.', encerramento: 'pendente' })
       }
-      // Mesma parte chamando de novo: segue pendente. Não fecha (senão o encerramento
-      // deixaria de ser em duas mãos) e não reenvia push.
+      // Pintor chamando de novo: segue pendente. Não fecha (só o dono fecha) e não reenvia push.
       if (o.encerramento_solicitado_por === req.usuario.id) {
         return res.json({ mensagem: 'Encerramento já solicitado. Aguardando a outra parte.', encerramento: 'pendente' })
       }
-      // Outra parte confirmando → cai no fechamento abaixo.
+      // Dono confirmando → cai no fechamento abaixo.
     }
 
     await pool.query(
@@ -3107,9 +3112,11 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
              r.id as reparo_id, r.titulo, r.categoria, r.descricao, r.valor_estimado,
              r.cidade, r.bairro, r.latitude, r.longitude, r.expira_em, r.status as reparo_status, r.prazo_atendimento_horas,
              r.match_usuario_id, r.match_feito_em,
-             -- Encerramento em duas mãos: o lado do prestador precisa saber se há solicitação
-             -- pendente e quem pediu (_por = próprio usuário → aguardando o dono; _por = dono
-             -- → cabe ao prestador confirmar). NULL = nenhuma solicitação em aberto.
+             -- Encerramento assimétrico: só o PRESTADOR cria solicitação pendente. O dono não
+             -- solicita — ele encerra na hora, e é ele quem confirma a solicitação do prestador.
+             -- Para o lado do prestador: _por = próprio usuário → ele pediu e aguarda o dono
+             -- fechar; NULL = nenhuma solicitação em aberto. _por nunca é o dono daqui em
+             -- diante (linhas antigas do desenho simétrico podem ter, e fecham na 1ª chamada).
              r.encerramento_solicitado_por, r.encerramento_solicitado_em,
              -- Chegada: o prestador precisa ver a janela que ele mesmo prometeu e se o dono já
              -- confirmou a chegada (declarada por ele + confirmada = atendimento em curso).
@@ -3621,7 +3628,7 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
   }
 })
 
-// Encerramento em duas mãos — ver POST /obras/:id/encerrar para o racional completo.
+// Encerramento assimétrico — ver POST /obras/:id/encerrar para o racional completo.
 router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
@@ -3649,7 +3656,7 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
     }
 
     const semContraparte = !r.match_usuario_id
-    if (!ehAdmin && !semContraparte) {
+    if (!ehAdmin && !ehDono && !semContraparte) {
       if (!r.encerramento_solicitado_por) {
         await pool.query(
           `UPDATE reparos SET encerramento_solicitado_por = $1, encerramento_solicitado_em = NOW() WHERE id = $2`,
