@@ -610,8 +610,9 @@ const iniciarAgendador = () => {
   // de 30 min nos reparos. Uma varredura horária é mais grossa que a própria janela: o reparo
   // ficava elegível aos 30 min e só era pego no tique seguinte (30–90 min reais, ~60 em média),
   // então o valor configurado virava um piso, não o comportamento. A 5 min a folga cai para
-  // 30–35 min. O encerramento, hoje de 3 horas, também não se importa com a cadência mais
-  // fina; o custo é apenas o SELECT/UPDATE dos dois lados, indexado e quase sempre vazio.
+  // 30–35 min. O encerramento (2 dias numa obra, 3 horas num reparo) também não se importa
+  // com a cadência mais fina; o custo é apenas o SELECT/UPDATE dos dois lados, indexado e
+  // quase sempre vazio.
   setInterval(() => { autoEncerrarPendentes() }, INTERVALO_AUTO_ENCERRAR)
   // De hora em hora como o job de expiração: as bandas de 12h e 6h não existem numa cadência
   // diária — um tick por dia pularia as duas mais urgentes.

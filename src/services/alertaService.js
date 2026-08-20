@@ -844,10 +844,25 @@ const verificarCronometroObras = async () => {
 // confirmou no prazo. Sem isto um dono silencioso deixaria a demanda pendente para sempre.
 // status = 'aberta' no WHERE (mesma lição do cron de reparos): a demanda só é candidata
 // enquanto NÃO está encerrada. Notifica quem NÃO pediu — quem pediu já sabe.
-// AUTO_ENCERRAR_ROTULO anda junto do intervalo pelo mesmo motivo de chegadaRotulo abaixo:
-// o prazo aparece no texto do push, e mudar só um avisaria um prazo que não é o aplicado.
-const AUTO_ENCERRAR_APOS   = '3 hours'
-const AUTO_ENCERRAR_ROTULO = '3 horas'
+//
+// O prazo é POR TABELA, como já era o da chegada: um serviço é trabalho curto, começa e
+// termina no mesmo dia, e 3h de espera pela confirmação do dono cabem dentro dele; uma obra
+// corre noutra cadência, e fechar a solicitação do profissional em 3h ali seria errado — por
+// isso a obra mantém os 2 dias originais. O sufixo de cada constante é o nome da tabela a
+// que ela se aplica (lado.tabela), então casar constante e lado não exige tradução nenhuma.
+const AUTO_ENCERRAR_APOS_OBRAS   = '2 days'
+const AUTO_ENCERRAR_APOS_REPAROS = '3 hours'
+
+// Rótulo pt-BR DERIVADO do próprio INTERVAL aplicado, em vez de escrito à mão ao lado dele:
+// o push anuncia exatamente o prazo que o WHERE cobra, e não há um segundo valor para
+// esquecer de mudar. Cobre as unidades usadas aqui; qualquer outra cai no fallback e o push
+// sai com o intervalo cru, o que é feio mas não quebra o encerramento (já commitado).
+const UNIDADES_PRAZO = { day: ['dia', 'dias'], hour: ['hora', 'horas'], minute: ['minuto', 'minutos'] }
+const rotuloPrazo = (intervalo) => {
+  const [qtd, unidade = ''] = intervalo.split(' ')
+  const par = UNIDADES_PRAZO[unidade.replace(/s$/, '')]
+  return par ? `${qtd} ${Number(qtd) === 1 ? par[0] : par[1]}` : intervalo
+}
 
 // Auto-confirmação da chegada: o profissional declarou, o dono nunca respondeu. Vencido o
 // prazo a declaração vale por si — sem isto a demanda fica travada em "declarada mas não
@@ -861,8 +876,10 @@ const autoEncerrarPendentes = async () => {
   // tabela, coluna de id e prazos saem desta lista literal, nunca do request — interpolação segura.
   const lados = [
     { tabela: 'obras',   chave: 'obra_id',   tipoPush: 'obra_encerrada',    rotulo: 'a obra',
+      encerrarApos: AUTO_ENCERRAR_APOS_OBRAS,
       chegadaApos: '6 hours',   chegadaRotulo: '6 horas' },
     { tabela: 'reparos', chave: 'reparo_id', tipoPush: 'reparo_encerrado',  rotulo: 'o serviço',
+      encerrarApos: AUTO_ENCERRAR_APOS_REPAROS,
       chegadaApos: '30 minutes', chegadaRotulo: '30 minutos' }
   ]
   for (const lado of lados) {
@@ -876,7 +893,7 @@ const autoEncerrarPendentes = async () => {
           encerramento_solicitado_em = NULL
         WHERE status = 'aberta'
           AND encerramento_solicitado_por IS NOT NULL
-          AND encerramento_solicitado_em <= NOW() - INTERVAL '${AUTO_ENCERRAR_APOS}'
+          AND encerramento_solicitado_em <= NOW() - INTERVAL '${lado.encerrarApos}'
         RETURNING id, titulo, criado_por, match_usuario_id, encerramento_solicitado_por
       `)
       for (const d of fechados.rows) {
@@ -886,7 +903,7 @@ const autoEncerrarPendentes = async () => {
         const alvo = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [avisarId])
         if (alvo.rows[0]?.push_token) {
           enviarPushNotificacao(alvo.rows[0].push_token, '✅ Encerrado automaticamente',
-            `Sem confirmação em ${AUTO_ENCERRAR_ROTULO}, ${lado.rotulo} "${d.titulo}" foi encerrad${lado.tabela === 'obras' ? 'a' : 'o'} automaticamente.`,
+            `Sem confirmação em ${rotuloPrazo(lado.encerrarApos)}, ${lado.rotulo} "${d.titulo}" foi encerrad${lado.tabela === 'obras' ? 'a' : 'o'} automaticamente.`,
             { tipo: lado.tipoPush, [lado.chave]: d.id }).catch(() => {})
         }
       }
