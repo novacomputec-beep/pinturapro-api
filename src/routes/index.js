@@ -5836,15 +5836,38 @@ router.post('/admin/suspensos/:id/liberar', autenticar, exigirAdmin, async (req,
   }
 })
 
+// Paginação das listagens de admin. Ponto ÚNICO para /admin/denuncias e /admin/sugestoes:
+// as duas precisam se manter idênticas, e duas cópias do mesmo cálculo divergem na primeira
+// vez que alguém mexer só numa. Sanitiza em vez de recusar — a fila do admin não deve virar
+// 400 por causa de um parâmetro estranho na URL:
+//   page  < 1 ou não-numérico → 1     (impede o OFFSET negativo, que o Postgres rejeitava
+//                                      com erro e o handler devolvia como 500)
+//   limit < 1 ou não-numérico → 20    (o default de sempre)
+//   limit > 100               → 100   (clampado, NÃO rejeitado)
+// O teto de 100 é seguro para o painel: ele pede limit=20 fixo (DENUNCIAS_LIMITE) e deriva
+// "tem próxima página" de data.limit, que continua sendo o limit EFETIVO devolvido aqui.
+// NÃO aplicado a /admin/suspensos, que tem o mesmo cálculo copiado: está fora do escopo
+// desta mudança e segue como estava.
+const PAGINACAO_ADMIN_PADRAO = 20
+const PAGINACAO_ADMIN_MAX    = 100
+
+const paginacaoAdmin = (query) => {
+  const pageBruto  = parseInt(query.page)
+  const limitBruto = parseInt(query.limit)
+  const page  = Number.isFinite(pageBruto)  && pageBruto  >= 1 ? pageBruto : 1
+  const limit = Number.isFinite(limitBruto) && limitBruto >= 1
+    ? Math.min(limitBruto, PAGINACAO_ADMIN_MAX)
+    : PAGINACAO_ADMIN_PADRAO
+  return { page, limit, offset: (page - 1) * limit }
+}
+
 // GET /admin/denuncias — fila de moderação. Colunas EXPLÍCITAS (nunca SELECT *).
 // titulo do contrato sai de um LEFT JOIN por tipo: contrato_id é polimórfico (obras OU
 // reparos), então não há FK única para seguir. denunciado_nome pode vir NULL quando o
 // denunciado excluiu a conta — a denúncia sobrevive anonimizada (ON DELETE SET NULL).
 router.get('/admin/denuncias', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const page   = parseInt(req.query.page)  || 1
-    const limit  = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
+    const { page, limit, offset } = paginacaoAdmin(req.query)
 
     const STATUS_DENUNCIA = ['aberta', 'em_analise', 'resolvida', 'arquivada']
     const { status } = req.query
@@ -5912,8 +5935,8 @@ router.patch('/admin/denuncias/:id', autenticar, exigirAdmin, async (req, res) =
 // mesmo par de middlewares (autenticar + exigirAdmin, ou seja admin E aprovador), mesma
 // paginação (page/limit com defaults 1 e 20, offset calculado, LIMIT $1 OFFSET $2), mesma
 // ordem (criado_em DESC) e colunas EXPLÍCITAS — nunca SELECT *. Somente leitura.
-// Como lá, NÃO há teto para limit nem total de linhas na resposta: replicar a convenção
-// existente vale mais do que divergir dela em uma rota nova.
+// Como lá, a resposta não traz total de linhas; e as duas compartilham paginacaoAdmin,
+// então o teto de 100 e o saneamento de page/limit valem igualmente aqui e lá.
 // `por_status` não tem equivalente aqui (sugestoes não tem coluna status), então a resposta
 // traz só page, limit e a lista.
 // JOIN (interno, não LEFT) em usuarios, exatamente como o de denunciante_id lá: usuario_id é
@@ -5921,9 +5944,7 @@ router.patch('/admin/denuncias/:id', autenticar, exigirAdmin, async (req, res) =
 // com ele — não existe linha órfã para o join derrubar.
 router.get('/admin/sugestoes', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const page   = parseInt(req.query.page)  || 1
-    const limit  = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
+    const { page, limit, offset } = paginacaoAdmin(req.query)
 
     const lista = await pool.query(
       `SELECT s.id, s.texto, s.criado_em,
