@@ -1,7 +1,7 @@
 require('dotenv').config()
 const express = require('express')
 const router = express.Router()
-const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada } = require('../middlewares/auth')
+const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada } = require('../middlewares/auth')
 const { registrarVisita } = require('../utils/visitas')
 const { pool } = require('../utils/supabase')
 const { MARCA } = require('../utils/marca')
@@ -5952,6 +5952,57 @@ router.get('/admin/sugestoes', autenticar, exigirAdmin, async (req, res) => {
   } catch (err) {
     console.error('[Sugestoes] Erro listagem admin:', err.message)
     res.status(500).json({ erro: 'Erro ao buscar sugestões' })
+  }
+})
+
+// DELETE /admin/sugestoes — exclusão DEFINITIVA, em lote. Gate MAIS ESTRITO que o da
+// listagem, de propósito: autenticar + exigirSuperAdmin, que exige role === 'admin'.
+// A listagem (GET acima) segue em exigirAdmin, que também aceita 'aprovador' — ler a caixa
+// de sugestões é trabalho de moderação, apagar em definitivo não é. Sem token é 401 no
+// autenticar; com token de aprovador (ou de qualquer outra role) é 403 no exigirSuperAdmin,
+// antes de o handler rodar. A rota não decide nada de acesso sozinha.
+// Hard delete de verdade: a linha some da tabela. Não há coluna de soft-delete nem flag de
+// arquivo em sugestoes, e nada no schema referencia sugestoes.id (é a ponta da FK, não o
+// alvo), então o DELETE não cascateia nem esbarra em constraint de terceiros.
+// UM statement com = ANY($1::uuid[]), nunca um laço: N ids viram uma ida ao banco.
+// Os ids são VALIDADOS contra o formato UUID antes da query. Isso não é ornamento: eles
+// entram como parâmetro (jamais interpolados, então não há injeção possível), mas um valor
+// fora do formato faria o cast ::uuid[] estourar no Postgres e o handler devolver 500 —
+// a validação transforma esse caso em 400, que é o que ele é.
+// ids repetidos são inofensivos: ANY testa pertinência, a linha é apagada uma única vez, e
+// rowCount conta LINHAS apagadas — não ids recebidos. Pelo mesmo motivo, id inexistente não
+// derruba a chamada: apenas não entra na conta.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+// Mesmo teto da paginação (100) — um único número para "quanto o admin manipula por vez".
+const IDS_POR_CHAMADA_MAX = PAGINACAO_ADMIN_MAX
+
+router.delete('/admin/sugestoes', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    // req.body?.ids, não desestruturação direta: no Express 5 o body-parser NÃO define
+    // req.body quando a requisição chega sem corpo ou com outro content-type (verificado),
+    // e `const { ids } = req.body` estouraria um TypeError — devolvendo 500 para o que é,
+    // na verdade, uma chamada malformada. Com o ?. o caso cai no 400 logo abaixo.
+    const ids = req.body?.ids
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ erro: 'ids deve ser um array não-vazio' })
+    }
+    if (ids.length > IDS_POR_CHAMADA_MAX) {
+      return res.status(400).json({ erro: `Máximo de ${IDS_POR_CHAMADA_MAX} ids por chamada` })
+    }
+    if (!ids.every(id => typeof id === 'string' && UUID_RE.test(id))) {
+      return res.status(400).json({ erro: 'ids deve conter apenas UUIDs válidos' })
+    }
+
+    const result = await pool.query(
+      `DELETE FROM sugestoes WHERE id = ANY($1::uuid[])`,
+      [ids]
+    )
+
+    res.json({ apagadas: result.rowCount })
+  } catch (err) {
+    console.error('[Sugestoes] Erro ao apagar:', err.message)
+    res.status(500).json({ erro: 'Erro ao apagar sugestões' })
   }
 })
 
