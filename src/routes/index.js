@@ -1571,14 +1571,39 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
   }
 })
 
+// Paginação de TODA listagem paginada deste arquivo — as três telas de admin
+// (/admin/suspensos, /admin/denuncias, /admin/sugestoes) e os seis feeds públicos
+// (/obras, /obras/minhas, /obras-aprovacao, /reparos, /reparos/minhas,
+// /reparos/aprovacao). Ponto ÚNICO: cópias do mesmo cálculo divergem na primeira vez
+// que alguém mexer só numa. Sanitiza em vez de recusar — uma listagem não deve virar
+// 400 por causa de um parâmetro estranho na URL:
+//   page  < 1 ou não-numérico → 1     (impede o OFFSET negativo, que o Postgres rejeitava
+//                                      com erro e o handler devolvia como 500)
+//   limit < 1 ou não-numérico → 20    (o default de sempre)
+//   limit > 100               → 100   (clampado, NÃO rejeitado)
+// O teto de 100 não quebra nenhum chamador conhecido: o painel pede limit=20 fixo nas
+// telas que paginam e nada passa nas de aprovação; o app não manda limit em nenhum dos
+// seis feeds, então todos já recebiam 20. Quem lê data.limit para saber se há próxima
+// página continua correto — o limit devolvido é o EFETIVO.
+const PAGINACAO_ADMIN_PADRAO = 20
+const PAGINACAO_ADMIN_MAX    = 100
+
+const paginacaoAdmin = (query) => {
+  const pageBruto  = parseInt(query.page)
+  const limitBruto = parseInt(query.limit)
+  const page  = Number.isFinite(pageBruto)  && pageBruto  >= 1 ? pageBruto : 1
+  const limit = Number.isFinite(limitBruto) && limitBruto >= 1
+    ? Math.min(limitBruto, PAGINACAO_ADMIN_MAX)
+    : PAGINACAO_ADMIN_PADRAO
+  return { page, limit, offset: (page - 1) * limit }
+}
+
 // ============================================================
 // OBRAS
 // ============================================================
 router.get('/obras/minhas', autenticar, async (req, res) => {
   try {
-    const page  = parseInt(req.query.page)  || 1
-    const limit = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
+    const { page, limit, offset } = paginacaoAdmin(req.query)
 
     const result = await pool.query(
       `SELECT o.*,
@@ -1792,9 +1817,7 @@ router.post('/obras/dono', autenticar, async (req, res) => {
 
 router.get('/obras-aprovacao', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const page  = parseInt(req.query.page)  || 1
-    const limit = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
+    const { page, limit, offset } = paginacaoAdmin(req.query)
 
     const result = await pool.query(
       `SELECT o.*, u.nome as dono_nome, u.email as dono_email, u.telefone as dono_telefone,
@@ -1910,9 +1933,7 @@ router.post('/obras-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req,
 
 router.get('/obras', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
   try {
-    const page  = parseInt(req.query.page)  || 1
-    const limit = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
+    const { page, limit, offset } = paginacaoAdmin(req.query)
     req.query.page  = page
     req.query.limit = limit
     req.query.offset = offset
@@ -2807,9 +2828,7 @@ router.post('/obras/:id/responder-tempo', autenticar, async (req, res) => {
 // ============================================================
 router.get('/reparos/minhas', autenticar, async (req, res) => {
   try {
-    const page  = parseInt(req.query.page)  || 1
-    const limit = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
+    const { page, limit, offset } = paginacaoAdmin(req.query)
 
     const result = await pool.query(
       `SELECT r.*,
@@ -3050,9 +3069,7 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
 
 router.get('/reparos/aprovacao', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const page  = parseInt(req.query.page)  || 1
-    const limit = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
+    const { page, limit, offset } = paginacaoAdmin(req.query)
 
     const result = await pool.query(
       `SELECT r.*, u.nome as dono_nome, u.email as dono_email, u.telefone as dono_telefone
@@ -3243,9 +3260,7 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
 
 router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, async (req, res) => {
   try {
-    const page  = parseInt(req.query.page)  || 1
-    const limit = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
+    const { page, limit, offset } = paginacaoAdmin(req.query)
     const { categoria, raio_km, lat, lng } = req.query
 
     // $1 reservado para o usuario_id (filtro de bloqueados)
@@ -5735,9 +5750,7 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
 // saem na resposta para a tela exibir "3 de 3 em 90 dias" sem hardcodar a regra no app.
 router.get('/admin/suspensos', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const page   = parseInt(req.query.page)  || 1
-    const limit  = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
+    const { page, limit, offset } = paginacaoAdmin(req.query)
 
     const lista = await pool.query(
       `SELECT u.id, u.nome, u.email, u.telefone, u.role, u.tipo_prestador,
@@ -5842,9 +5855,7 @@ router.post('/admin/suspensos/:id/liberar', autenticar, exigirAdmin, async (req,
 // denunciado excluiu a conta — a denúncia sobrevive anonimizada (ON DELETE SET NULL).
 router.get('/admin/denuncias', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const page   = parseInt(req.query.page)  || 1
-    const limit  = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
+    const { page, limit, offset } = paginacaoAdmin(req.query)
 
     const STATUS_DENUNCIA = ['aberta', 'em_analise', 'resolvida', 'arquivada']
     const { status } = req.query
@@ -5905,6 +5916,42 @@ router.patch('/admin/denuncias/:id', autenticar, exigirAdmin, async (req, res) =
   } catch (err) {
     console.error('[Denuncias] Erro ao atualizar status:', err.message)
     res.status(500).json({ erro: 'Erro ao atualizar denúncia' })
+  }
+})
+
+// GET /admin/sugestoes — caixa de sugestões do app. ESPELHA GET /admin/denuncias:
+// mesmo par de middlewares (autenticar + exigirAdmin, ou seja admin E aprovador), mesma
+// paginação (page/limit com defaults 1 e 20, offset calculado, LIMIT $1 OFFSET $2), mesma
+// ordem (criado_em DESC) e colunas EXPLÍCITAS — nunca SELECT *. Somente leitura.
+// Como lá, a resposta não traz total de linhas; e ambas usam paginacaoAdmin, então o teto
+// de 100 e o saneamento de page/limit valem igualmente aqui e lá.
+// `por_status` não tem equivalente aqui (sugestoes não tem coluna status), então a resposta
+// traz só page, limit e a lista.
+// JOIN (interno, não LEFT) em usuarios, exatamente como o de denunciante_id lá: usuario_id é
+// NOT NULL e ON DELETE CASCADE, então a sugestão de um autor excluído deixa de existir junto
+// com ele — não existe linha órfã para o join derrubar.
+router.get('/admin/sugestoes', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { page, limit, offset } = paginacaoAdmin(req.query)
+
+    const lista = await pool.query(
+      `SELECT s.id, s.texto, s.criado_em,
+              s.usuario_id, u.nome AS usuario_nome, u.email AS usuario_email
+       FROM sugestoes s
+       JOIN usuarios u ON u.id = s.usuario_id
+       ORDER BY s.criado_em DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    )
+
+    res.json({
+      page,
+      limit,
+      sugestoes: lista.rows
+    })
+  } catch (err) {
+    console.error('[Sugestoes] Erro listagem admin:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar sugestões' })
   }
 })
 
