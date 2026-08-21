@@ -908,6 +908,20 @@ const migracaoPronta = (async () => {
     `)
     // O cron varre em ordem de chegada com LIMIT — este índice serve a esse ORDER BY.
     await client.query(`CREATE INDEX IF NOT EXISTS midias_orfas_criado_em_idx ON midias_orfas (criado_em)`)
+    // Sugestões livres do usuário sobre o app. Tabela NOVA e puramente aditiva: nada existente
+    // lê ou escreve nela, e nenhum ALTER a acompanha. CREATE TABLE IF NOT EXISTS torna o re-run
+    // de cada boot um no-op — a migração roda ANTES do app.listen e não pode falhar aqui.
+    // usuario_id segue a convenção das demais tabelas do usuário (UUID REFERENCES usuarios(id)):
+    // ON DELETE CASCADE porque a sugestão é do autor — sem conta, some junto, como em avaliacoes.
+    // Sem UNIQUE: o mesmo usuário pode sugerir quantas vezes quiser, e cada uma conta.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sugestoes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        texto TEXT NOT NULL,
+        criado_em TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -5407,6 +5421,38 @@ router.post('/denuncias', autenticar, async (req, res) => {
   } catch (err) {
     console.error('[Denuncias] Erro:', err.message)
     res.status(500).json({ erro: 'Erro ao registrar denúncia' })
+  }
+})
+
+// SUGESTÕES — caixa de sugestões do usuário sobre o app.
+
+const TEXTO_SUGESTAO_MAX = 2000
+
+// POST /sugestoes — registra uma sugestão do usuário autenticado.
+// Autenticada com `autenticar`, o MESMO middleware de POST /denuncias: o autor sai de
+// req.usuario.id e nunca do corpo, então não há como sugerir em nome de outro.
+router.post('/sugestoes', autenticar, async (req, res) => {
+  try {
+    const { texto } = req.body
+    // texto é o único campo, e é livre: exigir conteúdo e limitar tamanho aqui, já que a
+    // coluna só garante NOT NULL (mesma checagem que descricao recebe em /denuncias).
+    const conteudo = typeof texto === 'string' ? texto.trim() : ''
+    if (!conteudo) {
+      return res.status(400).json({ erro: 'texto é obrigatório' })
+    }
+    if (conteudo.length > TEXTO_SUGESTAO_MAX) {
+      return res.status(400).json({ erro: `texto deve ter no máximo ${TEXTO_SUGESTAO_MAX} caracteres` })
+    }
+
+    const result = await pool.query(
+      `INSERT INTO sugestoes (usuario_id, texto) VALUES ($1, $2) RETURNING id`,
+      [req.usuario.id, conteudo]
+    )
+
+    res.status(201).json({ mensagem: 'Sugestão registrada. Obrigado!', id: result.rows[0].id })
+  } catch (err) {
+    console.error('[Sugestoes] Erro:', err.message)
+    res.status(500).json({ erro: 'Erro ao registrar sugestão' })
   }
 })
 
