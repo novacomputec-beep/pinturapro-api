@@ -5733,11 +5733,33 @@ router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) 
 // faltas_validas = as que ainda contam (não perdoadas, dentro da janela); faltas_total inclui
 // perdoadas e antigas, para o admin ver o histórico completo antes de decidir. limite e janela
 // saem na resposta para a tela exibir "3 de 3 em 90 dias" sem hardcodar a regra no app.
+// Paginação das listagens de admin. Ponto ÚNICO para /admin/suspensos, /admin/denuncias e
+// /admin/sugestoes: as três precisam se manter idênticas, e cópias do mesmo cálculo divergem
+// na primeira vez que alguém mexer só numa. Sanitiza em vez de recusar — a fila do admin
+// não deve virar 400 por causa de um parâmetro estranho na URL:
+//   page  < 1 ou não-numérico → 1     (impede o OFFSET negativo, que o Postgres rejeitava
+//                                      com erro e o handler devolvia como 500)
+//   limit < 1 ou não-numérico → 20    (o default de sempre)
+//   limit > 100               → 100   (clampado, NÃO rejeitado)
+// O teto de 100 é seguro para o painel: ele pede limit=20 fixo em todas as três telas
+// (SUSPENSOS_LIMITE, DENUNCIAS_LIMITE, e a de sugestões ainda não existe) e deriva
+// "tem próxima página" de data.limit, que continua sendo o limit EFETIVO devolvido aqui.
+const PAGINACAO_ADMIN_PADRAO = 20
+const PAGINACAO_ADMIN_MAX    = 100
+
+const paginacaoAdmin = (query) => {
+  const pageBruto  = parseInt(query.page)
+  const limitBruto = parseInt(query.limit)
+  const page  = Number.isFinite(pageBruto)  && pageBruto  >= 1 ? pageBruto : 1
+  const limit = Number.isFinite(limitBruto) && limitBruto >= 1
+    ? Math.min(limitBruto, PAGINACAO_ADMIN_MAX)
+    : PAGINACAO_ADMIN_PADRAO
+  return { page, limit, offset: (page - 1) * limit }
+}
+
 router.get('/admin/suspensos', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const page   = parseInt(req.query.page)  || 1
-    const limit  = parseInt(req.query.limit) || 20
-    const offset = (page - 1) * limit
+    const { page, limit, offset } = paginacaoAdmin(req.query)
 
     const lista = await pool.query(
       `SELECT u.id, u.nome, u.email, u.telefone, u.role, u.tipo_prestador,
@@ -5835,31 +5857,6 @@ router.post('/admin/suspensos/:id/liberar', autenticar, exigirAdmin, async (req,
     client.release()
   }
 })
-
-// Paginação das listagens de admin. Ponto ÚNICO para /admin/denuncias e /admin/sugestoes:
-// as duas precisam se manter idênticas, e duas cópias do mesmo cálculo divergem na primeira
-// vez que alguém mexer só numa. Sanitiza em vez de recusar — a fila do admin não deve virar
-// 400 por causa de um parâmetro estranho na URL:
-//   page  < 1 ou não-numérico → 1     (impede o OFFSET negativo, que o Postgres rejeitava
-//                                      com erro e o handler devolvia como 500)
-//   limit < 1 ou não-numérico → 20    (o default de sempre)
-//   limit > 100               → 100   (clampado, NÃO rejeitado)
-// O teto de 100 é seguro para o painel: ele pede limit=20 fixo (DENUNCIAS_LIMITE) e deriva
-// "tem próxima página" de data.limit, que continua sendo o limit EFETIVO devolvido aqui.
-// NÃO aplicado a /admin/suspensos, que tem o mesmo cálculo copiado: está fora do escopo
-// desta mudança e segue como estava.
-const PAGINACAO_ADMIN_PADRAO = 20
-const PAGINACAO_ADMIN_MAX    = 100
-
-const paginacaoAdmin = (query) => {
-  const pageBruto  = parseInt(query.page)
-  const limitBruto = parseInt(query.limit)
-  const page  = Number.isFinite(pageBruto)  && pageBruto  >= 1 ? pageBruto : 1
-  const limit = Number.isFinite(limitBruto) && limitBruto >= 1
-    ? Math.min(limitBruto, PAGINACAO_ADMIN_MAX)
-    : PAGINACAO_ADMIN_PADRAO
-  return { page, limit, offset: (page - 1) * limit }
-}
 
 // GET /admin/denuncias — fila de moderação. Colunas EXPLÍCITAS (nunca SELECT *).
 // titulo do contrato sai de um LEFT JOIN por tipo: contrato_id é polimórfico (obras OU
