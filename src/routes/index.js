@@ -5908,6 +5908,44 @@ router.patch('/admin/denuncias/:id', autenticar, exigirAdmin, async (req, res) =
   }
 })
 
+// GET /admin/sugestoes — caixa de sugestões do app. ESPELHA GET /admin/denuncias:
+// mesmo par de middlewares (autenticar + exigirAdmin, ou seja admin E aprovador), mesma
+// paginação (page/limit com defaults 1 e 20, offset calculado, LIMIT $1 OFFSET $2), mesma
+// ordem (criado_em DESC) e colunas EXPLÍCITAS — nunca SELECT *. Somente leitura.
+// Como lá, NÃO há teto para limit nem total de linhas na resposta: replicar a convenção
+// existente vale mais do que divergir dela em uma rota nova.
+// `por_status` não tem equivalente aqui (sugestoes não tem coluna status), então a resposta
+// traz só page, limit e a lista.
+// JOIN (interno, não LEFT) em usuarios, exatamente como o de denunciante_id lá: usuario_id é
+// NOT NULL e ON DELETE CASCADE, então a sugestão de um autor excluído deixa de existir junto
+// com ele — não existe linha órfã para o join derrubar.
+router.get('/admin/sugestoes', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const page   = parseInt(req.query.page)  || 1
+    const limit  = parseInt(req.query.limit) || 20
+    const offset = (page - 1) * limit
+
+    const lista = await pool.query(
+      `SELECT s.id, s.texto, s.criado_em,
+              s.usuario_id, u.nome AS usuario_nome, u.email AS usuario_email
+       FROM sugestoes s
+       JOIN usuarios u ON u.id = s.usuario_id
+       ORDER BY s.criado_em DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    )
+
+    res.json({
+      page,
+      limit,
+      sugestoes: lista.rows
+    })
+  } catch (err) {
+    console.error('[Sugestoes] Erro listagem admin:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar sugestões' })
+  }
+})
+
 router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
