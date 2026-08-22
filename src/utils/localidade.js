@@ -85,4 +85,18 @@ async function ufDeCidade(cidade) {
   return FALLBACK_CIDADE_UF[chave] || null
 }
 
-module.exports = { ufDeCidade, FALLBACK_CIDADE_UF, normalizar }
+// Gêmeo SQL de normalizar(): MESMA semântica (minúsculas, sem acento, espaços colapsados,
+// sem espaço nas pontas), aplicada a uma coluna do banco. Existe porque normalizar() só roda
+// em JavaScript, e um dos lados da comparação de cidade vive no Postgres — comparar
+// 'São Paulo' do cadastro com 'Sao Paulo' da demanda precisa da mesma dobra dos dois lados.
+// NÃO é uma segunda convenção: é esta aqui, expressa em SQL, e as duas ficam neste arquivo
+// de propósito para que mudar uma sem a outra salte aos olhos.
+// TRANSLATE em vez de unaccent(): a extensão unaccent NÃO está instalada nesta base
+// (verificado) e instalá-la é DDL de produção, fora do escopo de uma correção de alcance.
+// lower() vem antes, então basta mapear as minúsculas acentuadas.
+const SQL_ACENTOS_DE = 'áàâãäéèêëíìîïóòôõöúùûüçñ'
+const SQL_ACENTOS_PARA = 'aaaaaeeeeiiiiooooouuuucn'
+const sqlNormalizarCidade = (expr) =>
+  `regexp_replace(btrim(lower(translate(${expr}, '${SQL_ACENTOS_DE}', '${SQL_ACENTOS_PARA}'))), '[[:space:]]+', ' ', 'g')`
+
+module.exports = { ufDeCidade, FALLBACK_CIDADE_UF, normalizar, sqlNormalizarCidade }
