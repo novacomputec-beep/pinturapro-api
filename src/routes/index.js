@@ -6006,6 +6006,118 @@ router.delete('/admin/sugestoes', autenticar, exigirSuperAdmin, async (req, res)
   }
 })
 
+// GET /admin/finalizadas — obras E reparos encerrados numa resposta só, para o painel.
+// Gate igual ao da LISTAGEM de sugestões (autenticar + exigirAdmin): ler histórico é
+// trabalho de moderação, então 'aprovador' entra. Nada aqui escreve — é só leitura.
+// Paginação pelo helper compartilhado paginacaoAdmin, sem cópia nova.
+//
+// valor_acordado sai do PROPOSTA ACEITA, nunca de obras.valor / reparos.valor_estimado:
+// essas duas são o orçamento/estimativa de quem PUBLICOU a demanda, não o preço de
+// fechamento. A convenção do repo para o número final é COALESCE(valor_contraproposta,
+// valor_proposto) — contraproposta quando houve negociação, proposta original quando não —
+// vinda de candidaturas (obras) e interesse_reparos (reparos), sempre em status='aceito'.
+// Os JOINs são LEFT de propósito: demanda encerrada SEM aceite registrado continua na
+// lista, com valor_acordado NULL. Sumir com a linha esconderia justamente o caso
+// interessante (encerrou sem fechar preço), e a contagem de finalizadas passaria a
+// discordar do total real.
+// Não há risco de a linha duplicar por dois aceites: candidaturas_aceito_unica_idx e
+// interesse_reparos_aceito_unico_idx são UNIQUE parciais em (obra_id)/(reparo_id) WHERE
+// status='aceito', então o LEFT JOIN casa no máximo uma linha e nem lista nem totais
+// contam duas vezes.
+// UNION ALL, não UNION: os dois lados são conjuntos distintos por construção, e o UNION
+// pagaria um DISTINCT inútil sobre a base inteira. Colisão de id entre uma obra e um
+// reparo não quebra nada — a identidade de cada linha é o par (tipo, id), o id nunca é
+// usado sozinho como chave, e nada é agrupado por ele.
+const PERIODOS_FINALIZADAS = {
+  // date_trunc na zona de São Paulo (e de volta para timestamptz): "mês atual" é o mês de
+  // quem opera o painel, não o do UTC — senão as primeiras/últimas horas do mês caem na
+  // caixa errada.
+  mes_atual:     `f.encerrado_em >= date_trunc('month', NOW() AT TIME ZONE '${TZ_PADRAO}') AT TIME ZONE '${TZ_PADRAO}'`,
+  mes_anterior:  `f.encerrado_em >= (date_trunc('month', NOW() AT TIME ZONE '${TZ_PADRAO}') - INTERVAL '1 month') AT TIME ZONE '${TZ_PADRAO}'
+                  AND f.encerrado_em < date_trunc('month', NOW() AT TIME ZONE '${TZ_PADRAO}') AT TIME ZONE '${TZ_PADRAO}'`,
+  ultimos_90:    `f.encerrado_em >= NOW() - INTERVAL '90 days'`,
+  tudo:          `TRUE`,
+}
+const PERIODO_FINALIZADAS_PADRAO = 'mes_atual'
+
+// Fonte única das duas consultas (lista e totais): um CTE só, escrito uma vez. Duas cópias
+// deste SELECT divergiriam no primeiro ajuste, e aí os totais deixariam de descrever a
+// lista que estão acompanhando.
+const SQL_FINALIZADAS = `
+  SELECT 'obra'::text AS tipo, o.id, o.titulo, o.cidade, o.uf, o.bairro, o.encerrado_em,
+         u.nome AS profissional_nome,
+         COALESCE(cd.valor_contraproposta, cd.valor_proposto) AS valor_acordado
+    FROM obras o
+    LEFT JOIN usuarios u      ON u.id = o.match_usuario_id
+    LEFT JOIN candidaturas cd ON cd.obra_id = o.id AND cd.status = 'aceito'
+   WHERE o.status = 'encerrada'
+  UNION ALL
+  SELECT 'reparo'::text AS tipo, r.id, r.titulo, r.cidade, r.uf, r.bairro, r.encerrado_em,
+         u.nome AS profissional_nome,
+         COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado
+    FROM reparos r
+    LEFT JOIN usuarios u           ON u.id = r.match_usuario_id
+    LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.status = 'aceito'
+   WHERE r.status = 'encerrada'
+`
+
+router.get('/admin/finalizadas', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { page, limit, offset } = paginacaoAdmin(req.query)
+    // periodo desconhecido NÃO é 400: o painel manda o filtro na URL e um valor errado deve
+    // mostrar o mês atual, não uma tela de erro. A chave só entra na SQL depois de casar com
+    // o catálogo, então nada do cliente chega perto do texto da consulta.
+    const periodo = Object.prototype.hasOwnProperty.call(PERIODOS_FINALIZADAS, req.query.periodo)
+      ? req.query.periodo
+      : PERIODO_FINALIZADAS_PADRAO
+    const filtro = PERIODOS_FINALIZADAS[periodo]
+
+    // ORDER BY com desempate por (encerrado_em, tipo, id): sem chave estável, duas linhas
+    // com o mesmo encerrado_em podem trocar de lugar entre páginas e uma delas some da
+    // paginação. NULLS LAST porque em DESC o padrão do Postgres é NULLS FIRST — sem isso
+    // uma linha sem data iria para o topo do painel.
+    const lista = await pool.query(
+      `SELECT f.tipo, f.id, f.titulo, f.cidade, f.uf, f.bairro, f.encerrado_em,
+              f.profissional_nome, f.valor_acordado
+         FROM (${SQL_FINALIZADAS}) f
+        WHERE ${filtro}
+        ORDER BY f.encerrado_em DESC NULLS LAST, f.tipo DESC, f.id DESC
+        LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    )
+
+    // Totais sobre TODAS as linhas do período — não sobre a página. Consulta separada (mesmo
+    // padrão de por_status em /admin/denuncias): com window function os totais sumiriam numa
+    // página vazia, que é exatamente quando o painel ainda precisa mostrar o resumo.
+    // valor_total usa COALESCE(...,0): sem linha nenhuma, SUM devolve NULL e o painel
+    // mostraria vazio onde o certo é R$ 0.
+    // ticket_medio é AVG, que IGNORA nulos: é a média dos valores CONHECIDOS, não
+    // valor_total/total_finalizadas — dividir pelo total afundaria o ticket toda vez que uma
+    // encerrada sem aceite entrasse na conta. Com zero linhas AVG devolve NULL (não é
+    // divisão por zero, não estoura): o painel recebe null e mostra "—".
+    const totais = await pool.query(
+      `SELECT COUNT(*)::int                                        AS total_finalizadas,
+              COALESCE(SUM(f.valor_acordado), 0)                   AS valor_total,
+              AVG(f.valor_acordado)                                AS ticket_medio,
+              COUNT(*) FILTER (WHERE f.tipo = 'obra')::int         AS total_obras,
+              COUNT(*) FILTER (WHERE f.tipo = 'reparo')::int       AS total_reparos
+         FROM (${SQL_FINALIZADAS}) f
+        WHERE ${filtro}`
+    )
+
+    res.json({
+      page,
+      limit,
+      periodo,
+      totais: totais.rows[0],
+      finalizadas: lista.rows
+    })
+  } catch (err) {
+    console.error('[Finalizadas] Erro listagem admin:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar demandas finalizadas' })
+  }
+})
+
 router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
