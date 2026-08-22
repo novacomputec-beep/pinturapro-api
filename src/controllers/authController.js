@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken')
 const { pool } = require('../utils/supabase')
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { MARCA } = require('../utils/marca')
+const { validarEspecialidades } = require('../utils/especialidades')
 const nodemailer = require('nodemailer')
 const crypto = require('crypto')
 
@@ -69,6 +70,17 @@ const cadastrar = async (req, res) => {
     let role = 'assinante'
     if (tipo_conta === 'dono_obra') role = 'dono_obra'
     else if (tipo_conta === 'prestador' || tipo_conta === 'pintor' || tipo_conta === 'construtor') role = 'prestador'
+
+    // Validação do vocabulário FECHADO de especialidades (utils/especialidades). Roda aqui,
+    // depois de role estar resolvido, porque o mínimo de 1 só vale para profissional — dono
+    // não presta serviço e entra com lista vazia, que segue válida.
+    // Campo ausente vira [] (mesmo default de antes), então dono que não manda nada continua
+    // passando; profissional que não manda nada agora recebe 400, que é o ponto do fechamento.
+    const espCadastro = validarEspecialidades(especialidades || [], role === 'prestador')
+    if (espCadastro.erro) {
+      console.log(`[CADASTRO][${ts}] ✗ 400 especialidades | motivo=${espCadastro.erro}`)
+      return res.status(400).json({ erro: espCadastro.erro })
+    }
 
     // Define tipo_dono para distinguir donos de pintura vs reparo
     let tipo_dono = null
@@ -143,7 +155,7 @@ const cadastrar = async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
        RETURNING id, nome, email, telefone, cidade, role, tipo_dono, tipo_prestador, foto_url`,
       [nome.trim(), emailNormalizado, telefone, senha_hash, cidade, uf || null,
-       especialidades || [], anos_experiencia || 0,
+       espCadastro.valor, anos_experiencia || 0,
        tamanho_equipe || 1, cpf_cnpj, role,
        tipo_dono,
        pix_reembolso || null,
@@ -393,19 +405,36 @@ const atualizarPerfil = async (req, res) => {
       return res.status(400).json({ erro: 'Nome é obrigatório' })
     }
 
+    // PRESENÇA da chave, não valor "truthy": [] e null são valores que o cliente pode ter
+    // mandado de propósito, e `especialidades !== undefined` trataria { especialidades: null }
+    // como ausência. Chave ausente = não mexe na coluna, exatamente como nome/telefone/
+    // cidade/uf se comportam — e é o que preserva o texto livre legado de quem salva o
+    // perfil sem tocar no campo. Nada aqui lê o valor já gravado: não há retro-validação.
+    const mexeEspecialidades = Object.prototype.hasOwnProperty.call(req.body, 'especialidades')
+    let especialidadesValidadas = null
+    if (mexeEspecialidades) {
+      const r = validarEspecialidades(req.body.especialidades, req.usuario.role === 'prestador')
+      if (r.erro) return res.status(400).json({ erro: r.erro })
+      especialidadesValidadas = r.valor
+    }
+
     // cidade/uf são não-destrutivos: só sobrescrevem quando vem valor não-vazio.
     // Antes o UPDATE gravava cidade incondicionalmente, então salvar o perfil com o
     // campo em branco (a tela valida só o nome) APAGAVA a cidade do usuário — e cidade
     // vazia degrada o feed inteiro (o filtro geográfico não resolve e a busca perde o
     // recorte). NULLIF(btrim($n), '') transforma ausente/em branco em NULL e o COALESCE
     // mantém o valor já gravado.
+    // $6 governa se a coluna é tocada: com a chave ausente o CASE devolve o próprio valor
+    // gravado, então a linha legada sobrevive intacta a um salvamento de perfil comum.
     const result = await pool.query(
       `UPDATE usuarios SET nome = $1, telefone = $2,
               cidade = COALESCE(NULLIF(btrim($3), ''), cidade),
-              uf     = COALESCE(NULLIF(btrim($4), ''), uf)
+              uf     = COALESCE(NULLIF(btrim($4), ''), uf),
+              especialidades = CASE WHEN $6::boolean THEN $7::text[] ELSE especialidades END
         WHERE id = $5
-        RETURNING id, nome, email, telefone, cidade, uf, foto_url`,
-      [nome.trim(), telefone, cidade || '', uf || '', req.usuario.id]
+        RETURNING id, nome, email, telefone, cidade, uf, foto_url, especialidades`,
+      [nome.trim(), telefone, cidade || '', uf || '', req.usuario.id,
+       mexeEspecialidades, especialidadesValidadas]
     )
     res.json(result.rows[0])
   } catch (err) {
