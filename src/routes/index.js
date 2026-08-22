@@ -2903,6 +2903,14 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
       [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo]
     )
     res.status(201).json(result.rows[0])
+    // ESTE e o unico envio que dispara no fluxo real, e por isso ele FICA. O INSERT acima
+    // grava status_aprovacao='aprovada' direto: reparo nasce publicado, nao passa por fila de
+    // aprovacao (as 16 linhas em producao estao todas em 'aprovada'/'encerrada', nenhuma
+    // 'pendente'). Ou seja, a transicao para aprovada acontece AQUI, na criacao — e o envio
+    // daqui e justamente "um envio, na transicao de aprovacao" que obras faz no endpoint de
+    // aprovacao. Remove-lo deixaria o reparo sem nenhum aviso, porque
+    // POST /reparos/aprovacao/:id/aprovar nunca chega a rodar para uma linha ja aprovada
+    // (e agora, com a guarda de transicao la, nem notificaria).
     notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
   } catch (err) {
     console.error('[reparos/dono]', err.message)
@@ -3086,8 +3094,19 @@ router.get('/reparos/aprovacao', autenticar, exigirAdmin, async (req, res) => {
 
 router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
   try {
-    await pool.query(`UPDATE reparos SET status_aprovacao = 'aprovada', status = 'aberta' WHERE id = $1`, [req.params.id])
+    // Guarda de TRANSICAO, igual a de obras (ver POST /obras-aprovacao/:id/aprovar): o aviso
+    // so sai quando a linha REALMENTE saiu de pendente/recusada para aprovada. rowCount 0
+    // significa que o UPDATE nao mudou nada — reaprovar um reparo ja aprovado anunciaria
+    // como "novo" um item publicado dias atras, para ate 500 pessoas de uma vez. Sem esta
+    // clausula WHERE o UPDATE casava a linha toda vez e o rebroadcast era so uma questao de
+    // alguem clicar duas vezes.
+    const atualizado = await pool.query(
+      `UPDATE reparos SET status_aprovacao = 'aprovada', status = 'aberta'
+        WHERE id = $1 AND status_aprovacao IS DISTINCT FROM 'aprovada'`,
+      [req.params.id]
+    )
     res.json({ mensagem: 'Reparo aprovado e publicado!' })
+    if (atualizado.rowCount === 0) return
     notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores:', err))
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao aprovar reparo' })

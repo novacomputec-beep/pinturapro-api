@@ -6,6 +6,10 @@ const { getFaixa, PRAZO_MODO_HOJE, sqlFimDoDia, SQL_FIM_DO_DIA_SP, sqlZonaSegura
 // vez de derrubar o UPDATE do lote inteiro. Só o lado OBRA tem zona — reparo não tem "Hoje".
 const SQL_ZONA_DA_OBRA = sqlZonaSegura('obras.prazo_timezone')
 const { MARCA } = require('../utils/marca')
+const { normalizar, sqlNormalizarCidade } = require('../utils/localidade')
+// Cidade dobrada dos DOIS lados com a MESMA regra (ver utils/localidade): a do profissional
+// aqui, a da demanda em JS com normalizar(). uf compara em caixa alta, que e como e gravado.
+const SQL_CIDADE_PRESTADOR = sqlNormalizarCidade('u.cidade')
 // Sem ciclo: middlewares/auth só importa jsonwebtoken e utils/supabase, nunca este serviço.
 const { invalidarCacheAssinatura } = require('../middlewares/auth')
 
@@ -174,12 +178,26 @@ const enviarBoasVindas = async (usuarioId) => {
 const notificarPintoresSobreNovaObra = async (obraId) => {
   try {
     const obraResult = await pool.query(
-      `SELECT titulo, cidade FROM obras WHERE id = $1`,
+      `SELECT titulo, cidade, uf FROM obras WHERE id = $1`,
       [obraId]
     )
     if (obraResult.rows.length === 0) return
     const obra = obraResult.rows[0]
 
+    // Sem cidade OU sem uf na demanda nao ha alvo possivel: antes disto a consulta nao
+    // filtrava lugar nenhum e o aviso ia para o pais inteiro. Silencio e o comportamento
+    // correto aqui — melhor ninguem do que todos.
+    const cidadeObra = normalizar(obra.cidade)
+    const ufObra = String(obra.uf || '').trim().toUpperCase()
+    if (!cidadeObra || !ufObra) {
+      console.log('[Push] Obra sem cidade/uf — nenhum pintor notificado |', obraId)
+      return
+    }
+
+    // cidade E uf, nunca cidade sozinha: ha municipios homonimos em estados diferentes.
+    // Prestador sem cidade ou sem uf fica de FORA (NULLIF ... IS NOT NULL) — sem lugar
+    // declarado nao da para afirmar que ele atende ali.
+    // LIMIT 500 mantido como rede de seguranca.
     const pintores = await pool.query(
       `SELECT u.push_token
        FROM usuarios u
@@ -187,7 +205,12 @@ const notificarPintoresSobreNovaObra = async (obraId) => {
        WHERE u.role = 'prestador' AND u.tipo_prestador = 'pintor'
          AND a.status = 'ativa'
          AND u.push_token IS NOT NULL
-       LIMIT 500`
+         AND NULLIF(btrim(u.cidade), '') IS NOT NULL
+         AND NULLIF(btrim(u.uf), '')     IS NOT NULL
+         AND ${SQL_CIDADE_PRESTADOR} = $1
+         AND upper(btrim(u.uf)) = $2
+       LIMIT 500`,
+      [cidadeObra, ufObra]
     )
 
     const total = await enviarPushEmLote(
@@ -205,18 +228,35 @@ const notificarPintoresSobreNovaObra = async (obraId) => {
 const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
   try {
     const reparoResult = await pool.query(
-      `SELECT titulo, cidade, categoria FROM reparos WHERE id = $1`,
+      `SELECT titulo, cidade, uf, categoria FROM reparos WHERE id = $1`,
       [reparoId]
     )
     if (reparoResult.rows.length === 0) return
     const reparo = reparoResult.rows[0]
 
+    const cidadeReparo = normalizar(reparo.cidade)
+    const ufReparo = String(reparo.uf || '').trim().toUpperCase()
+    if (!cidadeReparo || !ufReparo) {
+      console.log('[Push] Reparo sem cidade/uf — nenhum prestador notificado |', reparoId)
+      return
+    }
+
+    // Mesma dobra de cidade+uf da obra. Alem disso ganha o JOIN em assinaturas com
+    // status='ativa', que faltava SO aqui: o aviso de trabalho novo ia para quem esta com a
+    // assinatura vencida e nem consegue demonstrar interesse depois de abrir o app.
     const prestadores = await pool.query(
       `SELECT u.push_token
        FROM usuarios u
+       JOIN assinaturas a ON a.usuario_id = u.id
        WHERE u.role = 'prestador' AND u.tipo_prestador IS DISTINCT FROM 'pintor'
+         AND a.status = 'ativa'
          AND u.push_token IS NOT NULL
-       LIMIT 500`
+         AND NULLIF(btrim(u.cidade), '') IS NOT NULL
+         AND NULLIF(btrim(u.uf), '')     IS NOT NULL
+         AND ${SQL_CIDADE_PRESTADOR} = $1
+         AND upper(btrim(u.uf)) = $2
+       LIMIT 500`,
+      [cidadeReparo, ufReparo]
     )
 
     const total = await enviarPushEmLote(
