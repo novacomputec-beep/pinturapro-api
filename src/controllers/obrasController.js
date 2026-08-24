@@ -210,13 +210,40 @@ const editar = async (req, res) => {
       return res.status(400).json({ erro: 'Status inválido' })
     }
 
-    // Rede de segurança: deriva o uf da cidade quando o cliente não envia
-    const ufFinal = uf || await ufDeCidade(cidade)
+    // Atualização PARCIAL: cada coluna só entra no SET quando a chave veio no body
+    // (presença, não truthiness — 0 e "" continuam sendo valores enviados de propósito).
+    // Antes o UPDATE gravava as 11 colunas incondicionalmente, então um body parcial
+    // como { status: "encerrada" } anulava titulo, valor, cidade, tags e o resto
+    // (chave ausente → undefined → NULL no pg).
+    const tem = chave => Object.prototype.hasOwnProperty.call(req.body, chave)
+    const sets = []
+    const valores = []
+    const set = (coluna, valor) => { valores.push(valor); sets.push(`${coluna}=$${valores.length}`) }
+
+    if (tem('titulo')) set('titulo', titulo)
+    if (tem('categoria')) set('categoria', categoria)
+    if (tem('valor')) set('valor', valor)
+    if (tem('cidade')) set('cidade', cidade)
+    if (tem('bairro')) set('bairro', bairro)
+    if (tem('metragem')) set('metragem', metragem)
+    if (tem('prazo_execucao_dias')) set('prazo_execucao_dias', prazo_execucao_dias)
+    if (tem('descricao')) set('descricao', descricao)
+    if (tem('tags')) set('tags', tags)
+    if (tem('status')) set('status', status)
+    // Rede de segurança: deriva o uf da cidade quando o cliente não envia — mas só
+    // quando cidade veio no body; com as duas chaves ausentes o uf gravado fica como está.
+    if (tem('uf') || tem('cidade')) {
+      set('uf', uf || (tem('cidade') ? await ufDeCidade(cidade) : null))
+    }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ erro: 'Nenhum campo para atualizar' })
+    }
+
+    valores.push(req.params.id)
     const result = await pool.query(
-      `UPDATE obras SET titulo=$1, categoria=$2, valor=$3, cidade=$4, bairro=$5, uf=$6,
-       metragem=$7, prazo_execucao_dias=$8, descricao=$9, tags=$10, status=$11
-       WHERE id=$12 RETURNING *`,
-      [titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, descricao, tags, status, req.params.id]
+      `UPDATE obras SET ${sets.join(', ')} WHERE id=$${valores.length} RETURNING *`,
+      valores
     )
 
     res.json(result.rows[0])
