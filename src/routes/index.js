@@ -1182,6 +1182,14 @@ router.patch('/auth/foto-perfil', autenticar, async (req, res) => {
 router.post('/auth/push-token', autenticar, async (req, res) => {
   try {
     const { token } = req.body
+    // Esta rota só REGISTRA: token precisa vir e ser uma string não-vazia. Remover é
+    // papel exclusivo de /auth/push-token/clear (o logout do app já usa essa rota).
+    // Antes, body vazio (ou chave renomeada) gravava push_token = NULL e devolvia 200 —
+    // matava todo push do usuário em silêncio; agora essa falha aparece como 400 e o
+    // app a registra via push-status ('erro_registro').
+    if (typeof token !== 'string' || !token.trim()) {
+      return res.status(400).json({ erro: 'token é obrigatório — para remover o token use /auth/push-token/clear' })
+    }
     await pool.query('UPDATE usuarios SET push_token = $1 WHERE id = $2', [token, req.usuario.id])
     res.json({ mensagem: 'Token registrado' })
   } catch (err) {
