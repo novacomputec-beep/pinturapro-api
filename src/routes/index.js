@@ -2484,7 +2484,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
 })
 
 // POST /obras/:id/match — pintor confirma ida ao local
-router.post('/obras/:id/match', autenticar, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
+router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
   try {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
@@ -3492,7 +3492,7 @@ router.post('/reparos/:id/abertura', autenticar, exigirPrestador, exigirReparado
   }
 })
 
-router.post('/reparos/:id/match', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
+router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
