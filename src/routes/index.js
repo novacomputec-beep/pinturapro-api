@@ -11,7 +11,7 @@ const candidaturasCtrl = require('../controllers/candidaturasController')
 const mensagensCtrl    = require('../controllers/mensagensController')
 const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
-const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = require('../services/uploadService')
+const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
@@ -4779,7 +4779,17 @@ router.get('/verificacao/pendentes', autenticar, exigirAdmin, async (req, res) =
         AND u.role IN ('prestador', 'pintor', 'assinante')
       ORDER BY u.criado_em DESC
     `)
-    res.json({ prestadores: result.rows })
+    // Adiciona URLs de leitura ASSINADAS ao lado das cruas (D62 passo 1). As cruas ficam —
+    // nada é privado ainda, então a tela atual segue funcionando com os assets públicos; a
+    // versão assinada acompanha o tipo de entrega da URL guardada e continuará resolvendo
+    // quando o passo 3 tornar os assets authenticated.
+    const prestadores = result.rows.map(p => ({
+      ...p,
+      verificacao_doc_frente_url_assinada: gerarUrlAssinadaVerificacao(p.verificacao_doc_frente_url),
+      verificacao_doc_verso_url_assinada:  gerarUrlAssinadaVerificacao(p.verificacao_doc_verso_url),
+      verificacao_selfie_url_assinada:     gerarUrlAssinadaVerificacao(p.verificacao_selfie_url),
+    }))
+    res.json({ prestadores })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar pendentes' })
   }
