@@ -7,9 +7,36 @@ const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN
 const PAGBANK_URL = 'https://api.pagseguro.com'
 const APP_URL = 'https://pinturapro-api-production.up.railway.app/api'
 
+// Verificação de assinatura do webhook: LIGADA por padrão. Só um WEBHOOK_ENFORCE_SIGNATURE
+// explicitamente igual a 'false' desliga — qualquer outro valor (ou a ausência) enforça.
+const WEBHOOK_ENFORCE = process.env.WEBHOOK_ENFORCE_SIGNATURE !== 'false'
+
+// Aviso ALTO de boot: enforce ligado sem PAGBANK_TOKEN significa que TODO evento — inclusive
+// pagamentos legítimos — será rejeitado, porque sem o segredo não há como verificar assinatura.
+// Nomeia as duas variáveis para o operador saber exatamente o que configurar antes de ligar
+// os pagamentos. (Hoje o livro de webhook está vazio, então isto não perde nada — é guardrail.)
+if (WEBHOOK_ENFORCE && !PAGBANK_TOKEN) {
+  console.warn('[webhook-pagbank][BOOT] ATENÇÃO: verificação de assinatura LIGADA (WEBHOOK_ENFORCE_SIGNATURE != "false") mas PAGBANK_TOKEN AUSENTE — todo evento de pagamento será REJEITADO até PAGBANK_TOKEN ser configurado. Configure PAGBANK_TOKEN antes de habilitar pagamentos, ou defina WEBHOOK_ENFORCE_SIGNATURE=false para desligar a verificação.')
+}
+
 const limparCpfCnpj = (str) => {
   if (!str) return null
   return str.replace(/\D/g, '')
+}
+
+// Tabela de preços da assinatura — FONTE ÚNICA, em centavos. Usada tanto para COBRAR
+// (criarAssinatura) quanto para VALIDAR o valor pago no webhook, para que os dois lados
+// nunca divirjam. Devolve null quando o tier não é mapeável (não dá para cobrar às cegas).
+//   prestador+reparador → 4.990 / 49.900   |   prestador+pintor → 9.990 / 99.900
+//   demais papéis (dono/assinante genérico) → 9.990 / 99.900
+const precoAssinaturaCentavos = (role, tipoPrestador, plano) => {
+  const anual = plano === 'anual'
+  if (role === 'prestador') {
+    if (tipoPrestador === 'reparador') return anual ? 49900 : 4990
+    if (tipoPrestador === 'pintor')    return anual ? 99900 : 9990
+    return null // tier não mapeado
+  }
+  return anual ? 99900 : 9990
 }
 
 const ativarAssinatura = async (usuarioId, plano) => {
@@ -130,27 +157,16 @@ const criarAssinatura = async (req, res) => {
     // então usar role cobrava R$ 49,90 de todo mundo. O tier real é tipo_prestador.
     //   reparador           → R$ 49,90 / mês (R$ 499,00 anual)
     //   pintor (construção) → R$ 99,90 / mês (R$ 999,00 anual)
-    let valor, descricao
-
-    if (usuario.role === 'prestador') {
-      const tipoPrestador = dadosUsuario?.tipo_prestador
-
-      if (tipoPrestador === 'reparador') {
-        valor     = plano === 'anual' ? 49900 : 4990
-        descricao = `${MARCA} Serviços — Plano ${nomePlano}`
-      } else if (tipoPrestador === 'pintor') {
-        valor     = plano === 'anual' ? 99900 : 9990
-        descricao = `${MARCA} — Plano ${nomePlano}`
-      } else {
-        // Tier não mapeado: falha alto em vez de cobrar silenciosamente o plano barato.
-        console.error(`[pagamento] tipo_prestador não mapeado para preço — usuario=${usuario.id} tipo_prestador=${JSON.stringify(tipoPrestador)}`)
-        return res.status(422).json({ erro: 'Tipo de prestador não reconhecido para cobrança. Atualize seu cadastro ou contate o suporte.' })
-      }
-    } else {
-      // Donos de obra têm acesso gratuito; assinantes genéricos pagam o plano padrão.
-      valor     = plano === 'anual' ? 99900 : 9990
-      descricao = `${MARCA} — Plano ${nomePlano}`
+    const tipoPrestador = dadosUsuario?.tipo_prestador
+    const valor = precoAssinaturaCentavos(usuario.role, tipoPrestador, plano)
+    if (valor == null) {
+      // Tier não mapeado: falha alto em vez de cobrar silenciosamente o plano barato.
+      console.error(`[pagamento] tipo_prestador não mapeado para preço — usuario=${usuario.id} tipo_prestador=${JSON.stringify(tipoPrestador)}`)
+      return res.status(422).json({ erro: 'Tipo de prestador não reconhecido para cobrança. Atualize seu cadastro ou contate o suporte.' })
     }
+    const descricao = (usuario.role === 'prestador' && tipoPrestador === 'reparador')
+      ? `${MARCA} Serviços — Plano ${nomePlano}`
+      : `${MARCA} — Plano ${nomePlano}`
 
     const body = {
       reference_id: `${usuario.id}|${plano}`,
@@ -220,11 +236,11 @@ const webhookPagbank = async (req, res) => {
       assinaturaRecebida.length === assinaturaEsperada.length &&
       crypto.timingSafeEqual(Buffer.from(assinaturaRecebida), Buffer.from(assinaturaEsperada))
 
-    // Modo MONITOR (padrão): só loga o resultado e processa o evento mesmo assim.
-    // Para REJEITAR eventos sem assinatura válida, defina WEBHOOK_ENFORCE_SIGNATURE=true
-    // no ambiente (sem alteração de código).
-    const enforce = process.env.WEBHOOK_ENFORCE_SIGNATURE === 'true'
-    console.log(`[webhook-pagbank] assinatura match=${assinaturaValida} | modo=${enforce ? 'enforce' : 'monitor'} | content-type=${req.headers['content-type'] || '(none)'}`)
+    // Verificação LIGADA por padrão (D1). Só WEBHOOK_ENFORCE_SIGNATURE='false' desliga
+    // (volta ao modo MONITOR, que só loga e processa mesmo sem assinatura válida).
+    const enforce = WEBHOOK_ENFORCE
+    const tokenConfigurado = !!process.env.PAGBANK_TOKEN
+    console.log(`[webhook-pagbank] assinatura match=${assinaturaValida} | modo=${enforce ? 'enforce' : 'monitor'} | token=${tokenConfigurado ? 'ok' : 'AUSENTE'} | content-type=${req.headers['content-type'] || '(none)'}`)
 
     // Diagnóstico do ESQUEMA de assinatura, para a primeira entrega real revelar o que o
     // PagBank manda de fato. Só NOMES de header e TAMANHOS — nenhum valor de header, nenhum
@@ -237,9 +253,17 @@ const webhookPagbank = async (req, res) => {
     console.log(`[webhook-pagbank] headers recebidos (apenas nomes): ${Object.keys(req.headers).join(', ') || '(nenhum)'}`)
     console.log(`[webhook-pagbank] tamanhos | x-authenticity-token=${tamAuthenticity ?? '(ausente)'} | x-payload-signature=${tamPayloadSignature ?? '(ausente)'} | sha256_hex_esperado=${assinaturaEsperada.length}`)
 
-    if (!assinaturaValida && enforce) {
-      console.warn('[webhook-pagbank] assinatura inválida ou ausente — evento ignorado (enforce)')
-      return res.sendStatus(200)
+    if (enforce) {
+      // Sem token não há como verificar: um segredo vazio é forjável (o atacante conhece o
+      // algoritmo), então "assinatura válida" seria falso-positivo. Rejeita TUDO e grita.
+      if (!tokenConfigurado) {
+        console.error('[webhook-pagbank] REJEITADO: WEBHOOK_ENFORCE_SIGNATURE ligado mas PAGBANK_TOKEN AUSENTE — impossível verificar assinatura; nenhum evento é processado. Configure PAGBANK_TOKEN (ou WEBHOOK_ENFORCE_SIGNATURE=false para desligar).')
+        return res.sendStatus(200)
+      }
+      if (!assinaturaValida) {
+        console.warn(`[webhook-pagbank] REJEITADO: assinatura inválida ou ausente (enforce) — nada concedido | x-authenticity-token=${tamAuthenticity ?? '(ausente)'} | esperado_len=${assinaturaEsperada.length}`)
+        return res.sendStatus(200)
+      }
     }
 
     res.sendStatus(200)
@@ -287,11 +311,26 @@ const webhookPagbank = async (req, res) => {
     const [usuarioId, plano] = partes
 
     const usuarioResult = await pool.query(
-      `SELECT id, role, nome FROM usuarios WHERE id = $1`, [usuarioId]
+      `SELECT id, role, nome, tipo_prestador FROM usuarios WHERE id = $1`, [usuarioId]
     )
     if (usuarioResult.rows.length === 0) return
 
     const usuario = usuarioResult.rows[0]
+
+    // D2 — o plano concedido é validado contra o valor REALMENTE pago, pela MESMA tabela
+    // que cobrou (precoAssinaturaCentavos). Divergência (a menor ou a maior), tier não
+    // mapeável, ou ausência do valor no payload: REJEITA e loga, não concede nada. Sem isto,
+    // o acesso vinha do texto do reference_id e um pagamento parcial/forjado valia o mesmo.
+    const valorEsperado = precoAssinaturaCentavos(usuario.role, usuario.tipo_prestador, plano)
+    const valorPago = charge.amount?.value
+    if (valorEsperado == null) {
+      console.error(`[webhook-pagbank] REJEITADO: preço não mapeável — usuario=${usuarioId} role=${usuario.role} tipo_prestador=${JSON.stringify(usuario.tipo_prestador)} plano=${plano}; nada concedido`)
+      return
+    }
+    if (valorPago == null || Number(valorPago) !== valorEsperado) {
+      console.error(`[webhook-pagbank] REJEITADO: valor pago (${valorPago}) != esperado (${valorEsperado} centavos) — usuario=${usuarioId} plano=${plano}; nada concedido`)
+      return
+    }
 
     // Prestadores ficam pendentes de verificação — donos de obra ativam direto
     if (usuario.role === 'prestador' || usuario.role === 'pintor' || usuario.role === 'assinante') {
