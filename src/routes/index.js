@@ -5255,7 +5255,7 @@ router.post('/upload/dono', autenticar,              upload.single('arquivo'), u
 // ============================================================
 // CANDIDATURAS
 // ============================================================
-router.post('/candidaturas', autenticar, exigirAssinaturaAtiva, async (req, res) => {
+router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, async (req, res) => {
   try {
     const { obra_id, referencias, valor_oferta, mensagem_oferta } = req.body
     const obraResult = await pool.query(`SELECT id, titulo, status FROM obras WHERE id = $1 AND status = 'aberta'`, [obra_id])
