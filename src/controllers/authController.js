@@ -1,6 +1,7 @@
 const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
 const { pool } = require('../utils/supabase')
+const { invalidarCacheAssinatura } = require('../middlewares/auth')
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { MARCA } = require('../utils/marca')
 const { validarEspecialidades } = require('../utils/especialidades')
@@ -14,7 +15,7 @@ const crypto = require('crypto')
 const HASH_FICTICIO = '$2b$10$TurXFLIbHVFyg7b3h/.ame16E9jSv4PmsB5G47xyqYPM1rXeqDSda'
 
 const gerarToken = (usuario) => jwt.sign(
-  { id: usuario.id, role: usuario.role },
+  { id: usuario.id, role: usuario.role, tv: usuario.token_version ?? 1 },
   process.env.JWT_SECRET,
   { expiresIn: usuario.role === 'admin' ? '30d' : (process.env.JWT_EXPIRES_IN || '7d') }
 )
@@ -298,7 +299,7 @@ const login = async (req, res) => {
     }
 
     const result = await pool.query(
-      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida FROM usuarios WHERE email = $1',
+      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version FROM usuarios WHERE email = $1',
       [emailNormalizado]
     )
 
@@ -479,7 +480,9 @@ const alterarSenha = async (req, res) => {
       return res.status(401).json({ erro: 'Senha atual incorreta' })
     }
     const nova_hash = await bcrypt.hash(nova_senha, 10)
-    await pool.query('UPDATE usuarios SET senha_hash = $1 WHERE id = $2', [nova_hash, req.usuario.id])
+    // Incrementa token_version: revoga TODAS as sessões (D51) — inclusive a que trocou a senha.
+    await pool.query('UPDATE usuarios SET senha_hash = $1, token_version = token_version + 1 WHERE id = $2', [nova_hash, req.usuario.id])
+    invalidarCacheAssinatura(req.usuario.id) // revogação imediata nesta réplica; até 30s nas demais
     res.json({ mensagem: 'Senha alterada com sucesso' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao alterar senha' })

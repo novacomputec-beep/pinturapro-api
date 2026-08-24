@@ -103,6 +103,11 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_estado VARCHAR(2)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_secret VARCHAR(100)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_ativo BOOLEAN DEFAULT false`)
+    // Versão de token: revogação de sessão por troca de senha (D51). O JWT carrega a versão
+    // vigente na emissão; trocar a senha incrementa a coluna e os tokens antigos param de casar.
+    // NOT NULL DEFAULT 1: linhas existentes viram versão 1 (= tokens legados sem 'tv', tratados
+    // como 1 no autenticar), então o deploy NÃO desloga ninguém.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 1`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_prestador VARCHAR(20)`)
     // Auditoria de aprovação: true = aprovado pelo job automático (Modo Auto ON) sem revisão
     // de idoneidade; false = aprovado/reprovado manualmente por admin; null = legado/não tocado.
@@ -6297,7 +6302,9 @@ router.post('/admin/trocar-senha', autenticar, exigirAdmin, async (req, res) => 
     const ok = await bcrypt.compare(senha_atual, result.rows[0].senha_hash)
     if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' })
     const hash = await bcrypt.hash(nova_senha, 10)
-    await pool.query(`UPDATE usuarios SET senha_hash = $1 WHERE id = $2`, [hash, req.usuario.id])
+    // Incrementa token_version: revoga TODAS as sessões admin (D51), inclusive esta.
+    await pool.query(`UPDATE usuarios SET senha_hash = $1, token_version = token_version + 1 WHERE id = $2`, [hash, req.usuario.id])
+    invalidarCacheAssinatura(req.usuario.id) // imediata nesta réplica; até 30s nas demais
     res.json({ mensagem: 'Senha alterada com sucesso' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao trocar senha' })
@@ -6352,7 +6359,7 @@ router.post('/admin/2fa/login-verificar', async (req, res) => {
     }
 
     const userResult = await pool.query(
-      `SELECT id, nome, email, role, dois_fa_secret, dois_fa_ativo FROM usuarios WHERE id = $1`,
+      `SELECT id, nome, email, role, dois_fa_secret, dois_fa_ativo, token_version FROM usuarios WHERE id = $1`,
       [payload.id]
     )
     if (userResult.rows.length === 0) return res.status(401).json({ erro: 'Usuário não encontrado' })
@@ -6372,7 +6379,7 @@ router.post('/admin/2fa/login-verificar', async (req, res) => {
     if (!valido) return res.status(401).json({ erro: 'Código 2FA inválido' })
 
     const token = jwt.sign(
-      { id: usuario.id, role: usuario.role },
+      { id: usuario.id, role: usuario.role, tv: usuario.token_version ?? 1 },
       process.env.JWT_SECRET,
       { expiresIn: '30d' }
     )
