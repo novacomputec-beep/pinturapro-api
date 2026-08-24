@@ -401,9 +401,14 @@ const atualizarPerfil = async (req, res) => {
   try {
     const { nome, telefone, cidade, uf } = req.body
 
-    if (!nome || !nome.trim()) {
+    // Rota de atualização PARCIAL: cada campo só é validado/gravado quando a chave
+    // veio no body. Nome ausente ≠ nome inválido — a tela de especialidades manda
+    // só { especialidades } de propósito, e exigir nome aqui quebrava esse save.
+    const mexeNome = Object.prototype.hasOwnProperty.call(req.body, 'nome')
+    if (mexeNome && (typeof nome !== 'string' || !nome.trim())) {
       return res.status(400).json({ erro: 'Nome é obrigatório' })
     }
+    const mexeTelefone = Object.prototype.hasOwnProperty.call(req.body, 'telefone')
 
     // PRESENÇA da chave, não valor "truthy": [] e null são valores que o cliente pode ter
     // mandado de propósito, e `especialidades !== undefined` trataria { especialidades: null }
@@ -424,16 +429,30 @@ const atualizarPerfil = async (req, res) => {
     // vazia degrada o feed inteiro (o filtro geográfico não resolve e a busca perde o
     // recorte). NULLIF(btrim($n), '') transforma ausente/em branco em NULL e o COALESCE
     // mantém o valor já gravado.
-    // $6 governa se a coluna é tocada: com a chave ausente o CASE devolve o próprio valor
-    // gravado, então a linha legada sobrevive intacta a um salvamento de perfil comum.
+    // Body sem nenhum campo atualizável: 400 explícito em vez de um UPDATE que não
+    // muda nada e devolve 200 como se tivesse salvo.
+    const mexeCidade = Object.prototype.hasOwnProperty.call(req.body, 'cidade')
+    const mexeUf = Object.prototype.hasOwnProperty.call(req.body, 'uf')
+    if (!mexeNome && !mexeTelefone && !mexeCidade && !mexeUf && !mexeEspecialidades) {
+      return res.status(400).json({ erro: 'Nenhum campo para atualizar' })
+    }
+
+    // Os flags booleanos governam se a coluna é tocada: com a chave ausente o CASE
+    // devolve o próprio valor gravado. Isso vale também para telefone — antes ele era
+    // gravado incondicionalmente, então um body sem a chave (undefined → NULL no pg)
+    // apagava o telefone do usuário.
     const result = await pool.query(
-      `UPDATE usuarios SET nome = $1, telefone = $2,
-              cidade = COALESCE(NULLIF(btrim($3), ''), cidade),
-              uf     = COALESCE(NULLIF(btrim($4), ''), uf),
-              especialidades = CASE WHEN $6::boolean THEN $7::text[] ELSE especialidades END
-        WHERE id = $5
+      `UPDATE usuarios SET
+              nome     = CASE WHEN $1::boolean THEN $2::text ELSE nome END,
+              telefone = CASE WHEN $3::boolean THEN $4::text ELSE telefone END,
+              cidade   = COALESCE(NULLIF(btrim($5), ''), cidade),
+              uf       = COALESCE(NULLIF(btrim($6), ''), uf),
+              especialidades = CASE WHEN $8::boolean THEN $9::text[] ELSE especialidades END
+        WHERE id = $7
         RETURNING id, nome, email, telefone, cidade, uf, foto_url, especialidades`,
-      [nome.trim(), telefone, cidade || '', uf || '', req.usuario.id,
+      [mexeNome, mexeNome ? nome.trim() : null,
+       mexeTelefone, mexeTelefone ? telefone : null,
+       cidade || '', uf || '', req.usuario.id,
        mexeEspecialidades, especialidadesValidadas]
     )
     res.json(result.rows[0])
