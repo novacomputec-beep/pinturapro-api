@@ -5120,7 +5120,7 @@ router.get('/config/lancamento', async (req, res) => {
 // ou os dois entram, ou nenhum. Sem isso a janela desligava e a coorte seguia grátis para
 // sempre, que é o defeito que este endpoint fecha. GET /config/lancamento/previa devolve a
 // contagem antes, para o painel confirmar com o número na tela.
-router.post('/config/lancamento', autenticar, exigirAdmin, async (req, res) => {
+router.post('/config/lancamento', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     const { data_fim } = req.body
@@ -5726,7 +5726,7 @@ router.post('/pagamentos/webhook-pagbank',    pagamentoCtrl.webhookPagbank)
 router.get('/pagamentos/sucesso',             pagamentoCtrl.sucesso)
 router.get('/pagamentos/falha',               (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
 router.get('/pagamentos/pendente',            (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
-router.post('/pagamentos/acesso-gratuito',    autenticar, exigirAdmin, pagamentoCtrl.darAcessoGratuito)
+router.post('/pagamentos/acesso-gratuito',    autenticar, exigirSuperAdmin, pagamentoCtrl.darAcessoGratuito)
 router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamentoCtrl.listarAssinantes)
 
 // ============================================================
