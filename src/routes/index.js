@@ -2302,9 +2302,12 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
   try {
     const { action, valor } = req.body
     const { id: obra_id, candidaturaId } = req.params
-    const obra = await pool.query(`SELECT criado_por, titulo FROM obras WHERE id = $1`, [obra_id])
+    const obra = await pool.query(`SELECT criado_por, titulo, status, match_usuario_id FROM obras WHERE id = $1`, [obra_id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
     if (obra.rows[0].criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
+    // Guarda de estado da DEMANDA (D8): aceitar/contrapropor só numa obra viva e ainda não
+    // casada. Sem isto, uma obra 'encerrada' podia ser reaberta e o valor reescrito pós-fechamento.
+    const obraAbertaParaNegociar = obra.rows[0].status === 'aberta' && !obra.rows[0].match_usuario_id
     const candidatura = await pool.query(
       `SELECT c.*, u.push_token FROM candidaturas c JOIN usuarios u ON c.usuario_id = u.id WHERE c.id = $1 AND c.obra_id = $2`,
       [candidaturaId, obra_id]
@@ -2320,6 +2323,15 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
       if (cand.status === 'aceito') {
         enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
         return res.json({ mensagem: 'Candidatura aceita! Contrato enviado por e-mail.' })
+      }
+      // Guarda de estado (D8): só uma candidatura 'pendente' pode ser aceita. Isto bloqueia
+      // o dono aceitar a PRÓPRIA contraproposta ('contraproposta_dono' — é a vez do pintor) e
+      // ressuscitar 'recusado'/'expirado'. Recusa clara, nunca 500 nem no-op silencioso.
+      if (!obraAbertaParaNegociar) {
+        return res.status(409).json({ erro: 'Esta obra não está mais aberta para negociação.' })
+      }
+      if (cand.status !== 'pendente') {
+        return res.status(409).json({ erro: 'Esta candidatura não está mais disponível para aceite.' })
       }
       const jaAceito = await pool.query(
         `SELECT id FROM candidaturas WHERE obra_id = $1 AND status = 'aceito' AND id != $2`,
@@ -2363,6 +2375,14 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
     }
     if (action === 'contraproposta') {
       if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
+      // Guarda de estado (D8): contrapropor só numa obra viva e sobre candidatura 'pendente'.
+      // Bloqueia reescrever o valor depois de aceito, recusado, expirado ou já fechado.
+      if (!obraAbertaParaNegociar) {
+        return res.status(409).json({ erro: 'Esta obra não está mais aberta para negociação.' })
+      }
+      if (cand.status !== 'pendente') {
+        return res.status(409).json({ erro: 'Esta candidatura não está mais em negociação.' })
+      }
       await pool.query(
         `UPDATE candidaturas SET status = 'contraproposta_dono', valor_contraproposta = $2 WHERE id = $1`,
         [candidaturaId, valor]
@@ -3522,9 +3542,12 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
     const { action, valor } = req.body
     const { id: reparo_id, interesse_id } = req.params
 
-    const reparo = await pool.query(`SELECT criado_por, titulo FROM reparos WHERE id = $1`, [reparo_id])
+    const reparo = await pool.query(`SELECT criado_por, titulo, status, match_usuario_id FROM reparos WHERE id = $1`, [reparo_id])
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     if (reparo.rows[0].criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
+    // Guarda de estado da DEMANDA (D8): espelha a obra — aceitar/contrapropor só num serviço
+    // vivo e ainda não casado, para não reabrir um encerrado nem reescrever valor pós-fechamento.
+    const reparoAbertoParaNegociar = reparo.rows[0].status === 'aberta' && !reparo.rows[0].match_usuario_id
 
     const interesse = await pool.query(
       `SELECT ir.*, u.push_token FROM interesse_reparos ir JOIN usuarios u ON ir.usuario_id = u.id WHERE ir.id = $1 AND ir.reparo_id = $2`,
@@ -3542,6 +3565,14 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
       if (int.status === 'aceito') {
         enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
         return res.json({ mensagem: 'Proposta aceita! Contrato enviado por e-mail.' })
+      }
+      // Guarda de estado (D8): só um interesse 'pendente' pode ser aceito — bloqueia aceitar a
+      // própria contraproposta do dono, e ressuscitar 'recusado'/'expirado'.
+      if (!reparoAbertoParaNegociar) {
+        return res.status(409).json({ erro: 'Este serviço não está mais aberto para negociação.' })
+      }
+      if (int.status !== 'pendente') {
+        return res.status(409).json({ erro: 'Esta proposta não está mais disponível para aceite.' })
       }
       const jaAceito = await pool.query(
         `SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND status = 'aceito' AND id != $2`,
@@ -3588,6 +3619,13 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
 
     if (action === 'contraproposta') {
       if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
+      // Guarda de estado (D8): contrapropor só num serviço vivo e sobre interesse 'pendente'.
+      if (!reparoAbertoParaNegociar) {
+        return res.status(409).json({ erro: 'Este serviço não está mais aberto para negociação.' })
+      }
+      if (int.status !== 'pendente') {
+        return res.status(409).json({ erro: 'Esta proposta não está mais em negociação.' })
+      }
       await pool.query(
         `UPDATE interesse_reparos SET status = 'contraproposta_dono', valor_contraproposta = $2, rodada = 2 WHERE id = $1`,
         [interesse_id, valor]
@@ -5025,9 +5063,13 @@ const SQL_FIM_DO_MES_SP = `(
 // aprovação pararem de forçar proximo_vencimento = NULL. marco_* zerados para os avisos de
 // vencimento dispararem para esta coorte.
 // Idempotente por construção: depois de rodar, as linhas não casam mais tipo='gratuito'.
+// GREATEST (mesmo padrão de darAcessoGratuito :394 e das aprovações :4737/:4922) impede que o
+// backfill ENCURTE um prazo já mais distante: quem entrou grátis mas depois PAGOU carrega um
+// vencimento futuro que precisa sobreviver ao desligamento da janela. GREATEST ignora NULL no
+// Postgres, então a coorte sem vencimento cai no fim-do-mês, como antes.
 const SQL_BACKFILL_LANCAMENTO = `
   UPDATE assinaturas a
-     SET proximo_vencimento = ${SQL_FIM_DO_MES_SP},
+     SET proximo_vencimento = GREATEST(a.proximo_vencimento, ${SQL_FIM_DO_MES_SP}),
          tipo          = NULL,
          marco_1_em    = NULL,
          marco_2_em    = NULL,

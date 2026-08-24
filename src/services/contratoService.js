@@ -3,6 +3,11 @@ const { pool } = require('../utils/supabase')
 const { enviarEmailComAnexo } = require('./brevoService')
 const { MARCA, SITE } = require('../utils/marca')
 
+// Valor do contrato é positivo e finito, ou "a combinar" (D27): sem isto, valor NULL
+// imprimia "R$ 0,00" na linha numérica E "valor não informado" por extenso no MESMO PDF.
+const TEXTO_VALOR_A_COMBINAR = 'a combinar entre as partes'
+const valorContratoValido = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 }
+
 const gerarContratoPDF = (dados) => {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 50, size: 'A4' })
@@ -69,8 +74,10 @@ const gerarContratoPDF = (dados) => {
     )
 
     clausula('2', 'DO VALOR E FORMA DE PAGAMENTO',
-      `2.1 O valor total pelos serviços prestados é de R$ ${Number(servico.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} ` +
-      `(${valorPorExtenso(servico.valor)}).\n\n` +
+      (valorContratoValido(servico.valor)
+        ? `2.1 O valor total pelos serviços prestados é de R$ ${Number(servico.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} ` +
+          `(${valorPorExtenso(servico.valor)}).\n\n`
+        : `2.1 O valor total pelos serviços prestados será combinado diretamente entre as partes.\n\n`) +
       `2.2 O pagamento será realizado conforme acordado entre as partes, preferencialmente via PIX ou transferência bancária, com comprovante enviado ao CONTRATADO.`
     )
 
@@ -195,7 +202,7 @@ const enviarContratoPorEmail = async (emailContratante, emailContratado, pdfBuff
           </tr>
           <tr>
             <td style="padding: 10px; font-weight: bold;">Valor</td>
-            <td style="padding: 10px; color: #4caf50; font-weight: bold;">R$ ${Number(dados.servico.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+            <td style="padding: 10px; color: #4caf50; font-weight: bold;">${valorContratoValido(dados.servico.valor) ? `R$ ${Number(dados.servico.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` : TEXTO_VALOR_A_COMBINAR}</td>
           </tr>
           <tr style="background: #eee;">
             <td style="padding: 10px; font-weight: bold;">Prazo</td>

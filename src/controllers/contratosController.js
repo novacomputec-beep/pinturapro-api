@@ -23,7 +23,10 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
   const prazoHoras = reparo.prazo_atendimento_horas
     ? Math.ceil(reparo.prazo_atendimento_horas * 1.2)
     : null
-  const valor = reparo.valor_estimado
+  // Valor ACORDADO (D9), não a estimativa do dono: COALESCE(valor_contraproposta,
+  // valor_proposto) do interesse aceito, igual a /admin/finalizadas. Null (sem valor
+  // negociado) NÃO cai para valor_estimado — imprime "a combinar", nunca a estimativa.
+  const valor = reparo.valor_acordado
   const marca = MARCA
 
   return `
@@ -89,7 +92,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
   <p>II – Ser adquiridos pelo Contratado, mediante autorização prévia da Contratante, sendo os valores reembolsados posteriormente.</p>
 
   <h2>Cláusula 4 — Do Pagamento</h2>
-  <p>Pelos serviços prestados, a Contratante pagará ao Contratado o valor de <strong>${valor ? formatarValor(valor) : '_______________'}</strong>.</p>
+  <p>Pelos serviços prestados, a Contratante pagará ao Contratado o valor de <strong>${valor ? formatarValor(valor) : 'a combinar entre as partes'}</strong>.</p>
   <p>Forma de pagamento: ( ) PIX &nbsp;&nbsp; ( ) Dinheiro &nbsp;&nbsp; ( ) Transferência &nbsp;&nbsp; ( ) Cartão</p>
   <p>O pagamento deverá ocorrer após a conclusão dos serviços, salvo acordo diferente entre as partes.</p>
 
@@ -137,7 +140,10 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
 // ============================================================
 const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
   const prazoContrato = Math.ceil((obra.prazo_execucao_dias || 7) * 1.2)
-  const valor = candidatura.valor_oferta || obra.valor
+  // Valor ACORDADO (D9): COALESCE(valor_contraproposta, valor_proposto) da candidatura
+  // aceita, igual a /admin/finalizadas. Não usa mais valor_oferta nem o obra.valor (pedido
+  // do dono). Null NÃO cai para o pedido do dono — imprime "a combinar".
+  const valor = candidatura.valor_acordado
   const marca = MARCA
 
   return `
@@ -175,7 +181,7 @@ const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
   <p>Prestação de serviços de <strong>${obra.categoria || 'pintura e reforma'}</strong> referente à obra <strong>"${obra.titulo}"</strong>, localizada em ${obra.endereco_obra || `${obra.cidade}${obra.bairro ? ', ' + obra.bairro : ''}`}.${obra.descricao ? ` Descrição: ${obra.descricao}` : ''}</p>
 
   <h2>Cláusula 3 — Do Valor e Pagamento</h2>
-  <p>Valor total acordado: <strong>${formatarValor(valor)}</strong>, conforme proposta aceita por ambas as partes através do aplicativo ${marca}. Condições de pagamento a serem definidas diretamente entre as partes.</p>
+  <p>Valor total acordado: <strong>${valor ? formatarValor(valor) : 'a combinar entre as partes'}</strong>, conforme proposta aceita por ambas as partes através do aplicativo ${marca}. Condições de pagamento a serem definidas diretamente entre as partes.</p>
 
   <h2>Cláusula 4 — Do Prazo</h2>
   <p>Prazo estimado para conclusão: <strong>${prazoContrato} dias corridos</strong> a partir do início efetivo dos trabalhos, podendo ser prorrogado mediante acordo.</p>
@@ -238,7 +244,11 @@ const enviarContratoReparo = async (reparoId) => {
               (SELECT ir.id FROM interesse_reparos ir
                 WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
                   AND ir.status = 'aceito'
-                ORDER BY ir.criado_em DESC LIMIT 1) as interesse_id
+                ORDER BY ir.criado_em DESC LIMIT 1) as interesse_id,
+              (SELECT COALESCE(ir.valor_contraproposta, ir.valor_proposto) FROM interesse_reparos ir
+                WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
+                  AND ir.status = 'aceito'
+                ORDER BY ir.criado_em DESC LIMIT 1) as valor_acordado
        FROM reparos r
        JOIN usuarios u_dono  ON r.criado_por       = u_dono.id
        JOIN usuarios u_prest ON r.match_usuario_id = u_prest.id
@@ -289,7 +299,7 @@ const enviarContratoReparo = async (reparoId) => {
         tipo:       r.categoria || 'serviço',
         descricao:  r.titulo + (r.descricao ? ` — ${r.descricao}` : ''),
         endereco:   r.endereco_obra || `${r.cidade}${r.bairro ? ', ' + r.bairro : ''}`,
-        valor:      r.valor_estimado,
+        valor:      r.valor_acordado,
         prazo_dias: r.prazo_atendimento_horas ? Math.max(1, Math.ceil(r.prazo_atendimento_horas / 24)) : 1,
         metragem:   null
       },
@@ -336,7 +346,8 @@ const enviarContratoObra = async (candidaturaId) => {
   let emailsEnviados = false
   try {
     const result = await pool.query(
-      `SELECT c.valor_oferta, c.mensagem_oferta, o.*,
+      `SELECT c.valor_oferta, c.mensagem_oferta,
+              COALESCE(c.valor_contraproposta, c.valor_proposto) as valor_acordado, o.*,
               u_dono.nome  as dono_nome,  u_dono.email  as dono_email,
               u_dono.telefone  as dono_telefone,  u_dono.cpf_cnpj  as dono_cpf,
               u_dono.cidade  as dono_cidade,
@@ -374,7 +385,7 @@ const enviarContratoObra = async (candidaturaId) => {
 
     const dono      = { nome: r.dono_nome,  email: r.dono_email,  telefone: r.dono_telefone,  cpf_cnpj: r.dono_cpf  }
     const prestador = { nome: r.prest_nome, email: r.prest_email, telefone: r.prest_telefone, cpf_cnpj: r.prest_cpf }
-    const candidatura = { valor_oferta: r.valor_oferta }
+    const candidatura = { valor_acordado: r.valor_acordado }
 
     const html = gerarContratoObra({ dono, prestador, obra: r, candidatura })
 
@@ -387,7 +398,7 @@ const enviarContratoObra = async (candidaturaId) => {
         tipo:       r.categoria || 'pintura',
         descricao:  r.titulo,
         endereco:   r.endereco_obra || `${r.cidade}${r.bairro ? ', ' + r.bairro : ''}`,
-        valor:      r.valor_oferta || r.valor,
+        valor:      r.valor_acordado,
         prazo_dias: r.prazo_execucao_dias || 7,
         metragem:   r.metragem
       },
