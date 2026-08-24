@@ -1344,7 +1344,7 @@ const SQL_DELETE_CONTRATOS_DO_USUARIO = `
          )
 `
 
-router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
+router.delete('/usuarios/:id', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     const { id } = req.params
@@ -1992,8 +1992,8 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
 })
 
 router.post('/obras',       autenticar, exigirAdmin, obrasCtrl.criar)
-router.put('/obras/:id',    autenticar, exigirAdmin, obrasCtrl.editar)
-router.delete('/obras/:id', autenticar, exigirAdmin, obrasCtrl.encerrar)
+router.put('/obras/:id',    autenticar, exigirSuperAdmin, obrasCtrl.editar)
+router.delete('/obras/:id', autenticar, exigirSuperAdmin, obrasCtrl.encerrar)
 
 // Dono pode excluir sua própria obra
 router.delete('/obras/dono/:id', autenticar, async (req, res) => {
@@ -4688,7 +4688,7 @@ router.post('/admin/buscar-usuario', autenticar, exigirAdmin, async (req, res) =
 })
 
 // Limpar dados de teste (admin) — apaga tudo exceto admins
-router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) => {
+router.post('/admin/limpar-testes', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -4941,7 +4941,7 @@ router.get('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, 
   }
 })
 
-router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
+router.post('/verificacao/modo-automatico', autenticar, exigirSuperAdmin, async (req, res) => {
   try {
     const { ativo } = req.body
     // Toggle GLOBAL: só um boolean explícito no body é instrução. Antes, chave ausente
@@ -5007,7 +5007,7 @@ router.get('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (r
   }
 })
 
-router.post('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
+router.post('/obras-aprovacao/modo-automatico', autenticar, exigirSuperAdmin, async (req, res) => {
   try {
     const { ativo, aprovar_pendentes } = req.body
     // Mesma guarda do toggle de prestadores acima: só boolean explícito é instrução;
@@ -5204,7 +5204,7 @@ router.get('/config/limite-demandas', autenticar, exigirAdmin, async (req, res) 
 })
 
 // Admin ajusta o teto. Só inteiro positivo: os demais valores cairiam no padrão em silêncio.
-router.post('/config/limite-demandas', autenticar, exigirAdmin, async (req, res) => {
+router.post('/config/limite-demandas', autenticar, exigirSuperAdmin, async (req, res) => {
   try {
     const { limite } = req.body
     const n = Number(limite)
@@ -5778,7 +5778,7 @@ router.get('/health', (req, res) => res.json({ status: 'ok', versao: '1.0.0' }))
 // ============================================================
 // ADMIN — LIMPEZA SELETIVA
 // ============================================================
-router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) => {
+router.post('/admin/limpar-usuarios', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -6227,7 +6227,7 @@ router.get('/admin/finalizadas', autenticar, exigirAdmin, async (req, res) => {
   }
 })
 
-router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => {
+router.post('/admin/limpar-obras', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -6245,7 +6245,7 @@ router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => 
   } finally { client.release() }
 })
 
-router.post('/admin/limpar-reparos', autenticar, exigirAdmin, async (req, res) => {
+router.post('/admin/limpar-reparos', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -6270,7 +6270,7 @@ router.post('/admin/limpar-reparos', autenticar, exigirAdmin, async (req, res) =
   } finally { client.release() }
 })
 
-router.post('/admin/limpar-mensagens', autenticar, exigirAdmin, async (req, res) => {
+router.post('/admin/limpar-mensagens', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
