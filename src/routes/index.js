@@ -4890,6 +4890,13 @@ router.get('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, 
 router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { ativo } = req.body
+    // Toggle GLOBAL: só um boolean explícito no body é instrução. Antes, chave ausente
+    // (ou valor não-boolean) caía no `ativo ? : 'false'` e DESLIGAVA a verificação
+    // automática em silêncio, respondendo "desativado" como se tivesse sido pedido.
+    // false explícito continua funcionando — a guarda é de tipo, não de truthiness.
+    if (typeof ativo !== 'boolean') {
+      return res.status(400).json({ erro: 'ativo é obrigatório e deve ser true ou false' })
+    }
     await pool.query(
       `UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'aprovacao_automatica'`,
       [ativo ? 'true' : 'false']
@@ -4949,6 +4956,11 @@ router.get('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (r
 router.post('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { ativo, aprovar_pendentes } = req.body
+    // Mesma guarda do toggle de prestadores acima: só boolean explícito é instrução;
+    // chave ausente/não-boolean era lida como false e desligava o modo em silêncio.
+    if (typeof ativo !== 'boolean') {
+      return res.status(400).json({ erro: 'ativo é obrigatório e deve ser true ou false' })
+    }
     await pool.query(
       `UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'aprovacao_automatica_obras'`,
       [ativo ? 'true' : 'false']
