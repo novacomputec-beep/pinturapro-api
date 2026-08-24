@@ -1182,6 +1182,14 @@ router.patch('/auth/foto-perfil', autenticar, async (req, res) => {
 router.post('/auth/push-token', autenticar, async (req, res) => {
   try {
     const { token } = req.body
+    // Esta rota só REGISTRA: token precisa vir e ser uma string não-vazia. Remover é
+    // papel exclusivo de /auth/push-token/clear (o logout do app já usa essa rota).
+    // Antes, body vazio (ou chave renomeada) gravava push_token = NULL e devolvia 200 —
+    // matava todo push do usuário em silêncio; agora essa falha aparece como 400 e o
+    // app a registra via push-status ('erro_registro').
+    if (typeof token !== 'string' || !token.trim()) {
+      return res.status(400).json({ erro: 'token é obrigatório — para remover o token use /auth/push-token/clear' })
+    }
     await pool.query('UPDATE usuarios SET push_token = $1 WHERE id = $2', [token, req.usuario.id])
     res.json({ mensagem: 'Token registrado' })
   } catch (err) {
@@ -4882,6 +4890,13 @@ router.get('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, 
 router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { ativo } = req.body
+    // Toggle GLOBAL: só um boolean explícito no body é instrução. Antes, chave ausente
+    // (ou valor não-boolean) caía no `ativo ? : 'false'` e DESLIGAVA a verificação
+    // automática em silêncio, respondendo "desativado" como se tivesse sido pedido.
+    // false explícito continua funcionando — a guarda é de tipo, não de truthiness.
+    if (typeof ativo !== 'boolean') {
+      return res.status(400).json({ erro: 'ativo é obrigatório e deve ser true ou false' })
+    }
     await pool.query(
       `UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'aprovacao_automatica'`,
       [ativo ? 'true' : 'false']
@@ -4941,6 +4956,11 @@ router.get('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (r
 router.post('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { ativo, aprovar_pendentes } = req.body
+    // Mesma guarda do toggle de prestadores acima: só boolean explícito é instrução;
+    // chave ausente/não-boolean era lida como false e desligava o modo em silêncio.
+    if (typeof ativo !== 'boolean') {
+      return res.status(400).json({ erro: 'ativo é obrigatório e deve ser true ou false' })
+    }
     await pool.query(
       `UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'aprovacao_automatica_obras'`,
       [ativo ? 'true' : 'false']
@@ -5041,10 +5061,17 @@ router.post('/config/lancamento', autenticar, exigirAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     const { data_fim } = req.body
+    // Desligar é porta de mão única (backfill irreversível), então só uma instrução
+    // EXPLÍCITA no body pode disparar: a chave data_fim PRESENTE com null ou ''.
+    // Chave ausente (body malformado, campo renomeado) não é instrução — antes ela
+    // caía no mesmo caminho do null e desligava a janela com backfill e tudo.
+    if (!Object.prototype.hasOwnProperty.call(req.body, 'data_fim')) {
+      return res.status(400).json({ erro: 'Nenhum campo para atualizar — envie data_fim (data ISO para ligar/estender, null para desligar)' })
+    }
     // valor é NOT NULL na tabela: usar '' (não null) como estado "desligado" para
     // nunca violar a constraint. Downstream trata '' e ausência como janela off.
     let valor = ''
-    if (data_fim !== null && data_fim !== undefined && data_fim !== '') {
+    if (data_fim !== null && data_fim !== '') {
       const d = new Date(data_fim)
       if (isNaN(d.getTime())) return res.status(400).json({ erro: 'data_fim inválida — use uma data ISO válida ou null para desligar' })
       valor = d.toISOString()
