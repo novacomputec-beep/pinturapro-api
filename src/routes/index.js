@@ -3653,7 +3653,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
 })
 
 // Prestador responde a uma contraproposta do dono
-router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
+router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autenticar, exigirReparador, async (req, res) => {
   try {
     const { action, valor } = req.body
     const { id: reparo_id, interesse_id } = req.params
