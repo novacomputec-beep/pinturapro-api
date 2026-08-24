@@ -5025,9 +5025,13 @@ const SQL_FIM_DO_MES_SP = `(
 // aprovação pararem de forçar proximo_vencimento = NULL. marco_* zerados para os avisos de
 // vencimento dispararem para esta coorte.
 // Idempotente por construção: depois de rodar, as linhas não casam mais tipo='gratuito'.
+// GREATEST (mesmo padrão de darAcessoGratuito :394 e das aprovações :4737/:4922) impede que o
+// backfill ENCURTE um prazo já mais distante: quem entrou grátis mas depois PAGOU carrega um
+// vencimento futuro que precisa sobreviver ao desligamento da janela. GREATEST ignora NULL no
+// Postgres, então a coorte sem vencimento cai no fim-do-mês, como antes.
 const SQL_BACKFILL_LANCAMENTO = `
   UPDATE assinaturas a
-     SET proximo_vencimento = ${SQL_FIM_DO_MES_SP},
+     SET proximo_vencimento = GREATEST(a.proximo_vencimento, ${SQL_FIM_DO_MES_SP}),
          tipo          = NULL,
          marco_1_em    = NULL,
          marco_2_em    = NULL,
