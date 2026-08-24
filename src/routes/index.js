@@ -5052,16 +5052,26 @@ router.post('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (
 const emailsEspeciais = () => (process.env.EMAILS_ESPECIAIS || '')
   .split(',').map(e => e.trim().toLowerCase()).filter(Boolean)
 
-// Fim do mês CORRENTE às 23:59:59.999999 em America/Sao_Paulo, como timestamptz.
-// Os dois AT TIME ZONE fazem coisas OPOSTAS e é isso que faz a conta fechar num banco UTC:
+// Primeiro dia (00:00) do mês que está a `nMeses` do mês CORRENTE, em America/Sao_Paulo,
+// como timestamptz. Os dois AT TIME ZONE fazem coisas OPOSTAS e é isso que faz a conta
+// fechar num banco UTC:
 //   1º (timestamptz → timestamp) TIRA o fuso e devolve o relógio de parede de SP, para o
 //      date_trunc contar o mês BRASILEIRO;
 //   2º (timestamp → timestamptz) RECOLOCA o fuso e devolve o instante UTC a gravar.
 // Sem isso, 31/08 22:00 em SP já é 01/09 01:00 em UTC e o truncamento cairia um mês adiante.
-const SQL_FIM_DO_MES_SP = `(
-        date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))
-        + INTERVAL '1 month' - INTERVAL '1 microsecond'
-      ) AT TIME ZONE 'America/Sao_Paulo'`
+// nMeses é literal inteiro controlado aqui (1 ou 2), nunca entrada de usuário.
+const SQL_PRIMEIRO_DIA_MES_SP = (nMeses) =>
+  `(date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '${nMeses} month') AT TIME ZONE 'America/Sao_Paulo'`
+
+// Alvo do vencimento no desligamento da janela (regra de negócio do dono): vence no PRIMEIRO
+// DIA do próximo mês — mas NUNCA a menos de 30 dias do desligamento (NOW). Se o 1º do próximo
+// mês estiver a menos de 30 dias, o alvo passa para o 1º do mês SEGUINTE (um único salto).
+const SQL_ALVO_BACKFILL_SP = `(
+        CASE WHEN ${SQL_PRIMEIRO_DIA_MES_SP(1)} - NOW() < INTERVAL '30 days'
+             THEN ${SQL_PRIMEIRO_DIA_MES_SP(2)}
+             ELSE ${SQL_PRIMEIRO_DIA_MES_SP(1)}
+        END
+      )`
 
 // Backfill do desligamento da janela: a coorte que entrou grátis passa a ter vencimento real.
 // Alvo = tipo='gratuito' COM valor_mensal > 0, que isola os prestadores do lançamento —
@@ -5076,7 +5086,7 @@ const SQL_FIM_DO_MES_SP = `(
 // Postgres, então a coorte sem vencimento cai no fim-do-mês, como antes.
 const SQL_BACKFILL_LANCAMENTO = `
   UPDATE assinaturas a
-     SET proximo_vencimento = GREATEST(a.proximo_vencimento, ${SQL_FIM_DO_MES_SP}),
+     SET proximo_vencimento = GREATEST(a.proximo_vencimento, ${SQL_ALVO_BACKFILL_SP}),
          tipo          = NULL,
          marco_1_em    = NULL,
          marco_2_em    = NULL,
@@ -5167,7 +5177,7 @@ router.get('/config/lancamento/previa', autenticar, exigirAdmin, async (req, res
                            AND LOWER(u.email) = ANY($1::text[]))::int  AS especiais_preservados,
         COUNT(*) FILTER (WHERE a.tipo = 'gratuito'
                            AND COALESCE(a.valor_mensal, 0) = 0)::int   AS gratuitos_permanentes,
-        ${SQL_FIM_DO_MES_SP} AS data_alvo
+        ${SQL_ALVO_BACKFILL_SP} AS data_alvo
       FROM assinaturas a
       JOIN usuarios u ON u.id = a.usuario_id
     `, [especiais])
