@@ -5063,15 +5063,10 @@ const emailsEspeciais = () => (process.env.EMAILS_ESPECIAIS || '')
 const SQL_PRIMEIRO_DIA_MES_SP = (nMeses) =>
   `(date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '${nMeses} month') AT TIME ZONE 'America/Sao_Paulo'`
 
-// Alvo do vencimento no desligamento da janela (regra de negócio do dono): vence no PRIMEIRO
-// DIA do próximo mês — mas NUNCA a menos de 30 dias do desligamento (NOW). Se o 1º do próximo
-// mês estiver a menos de 30 dias, o alvo passa para o 1º do mês SEGUINTE (um único salto).
-const SQL_ALVO_BACKFILL_SP = `(
-        CASE WHEN ${SQL_PRIMEIRO_DIA_MES_SP(1)} - NOW() < INTERVAL '30 days'
-             THEN ${SQL_PRIMEIRO_DIA_MES_SP(2)}
-             ELSE ${SQL_PRIMEIRO_DIA_MES_SP(1)}
-        END
-      )`
+// Alvo do vencimento no desligamento da janela (regra de negócio do dono, final): SEMPRE o
+// PRIMEIRO DIA do próximo mês (00:00 America/Sao_Paulo), qualquer que seja o dia do
+// desligamento — o mês corrente fica grátis. Sem piso de 30 dias, sem salto de mês.
+const SQL_ALVO_BACKFILL_SP = SQL_PRIMEIRO_DIA_MES_SP(1)
 
 // Backfill do desligamento da janela: a coorte que entrou grátis passa a ter vencimento real.
 // Alvo = tipo='gratuito' COM valor_mensal > 0, que isola os prestadores do lançamento —
