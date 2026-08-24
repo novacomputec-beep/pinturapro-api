@@ -512,13 +512,18 @@ const esqueciSenha = async (req, res) => {
     if (result.rows.length === 0) return
 
     const usuario = result.rows[0]
-    const tokenCompleto = crypto.randomBytes(32).toString('hex')
-    const codigoExibido = tokenCompleto.substring(0, 6).toUpperCase()
+    // Código de 6 caracteres hex maiúsculos (0-9 A-F, 3 bytes → 16^6 ≈ 16,8M) — É o que vai no
+    // e-mail. Antes gravava o token de 64 chars mas mandava só os 6 primeiros em MAIÚSCULO,
+    // então código digitado nunca casava. Agora guarda o HASH bcrypt do próprio código enviado
+    // (não texto puro): um vazamento do banco não expõe o código, e a verificação é a mesma
+    // bcrypt.compare das senhas.
+    const codigo = crypto.randomBytes(3).toString('hex').toUpperCase()
+    const codigoHash = await bcrypt.hash(codigo, 10)
     const expira = new Date(Date.now() + 3600000)
 
     await pool.query(
       `UPDATE usuarios SET reset_token = $1, reset_token_expira = $2 WHERE id = $3`,
-      [tokenCompleto, expira, usuario.id]
+      [codigoHash, expira, usuario.id]
     )
 
     await transporter.sendMail({
@@ -534,7 +539,7 @@ const esqueciSenha = async (req, res) => {
             <h2>Olá, ${usuario.nome}!</h2>
             <p>Seu código de redefinição é:</p>
             <div style="background: #0a0a0a; color: #E8833A; font-size: 32px; font-weight: bold; text-align: center; padding: 20px; border-radius: 8px; letter-spacing: 8px; margin: 20px 0;">
-              ${codigoExibido}
+              ${codigo}
             </div>
             <p style="color: #666; font-size: 13px;">Este código expira em 1 hora.</p>
             <p><strong>Equipe ${MARCA}</strong></p>
@@ -547,4 +552,89 @@ const esqueciSenha = async (req, res) => {
   }
 }
 
-module.exports = { cadastrar, login, perfil, atualizarPerfil, alterarSenha, esqueciSenha }
+// Consome o código enviado por esqueciSenha e redefine a senha. Público (o usuário está
+// deslogado). Anti-enumeração: código errado, expirado, sem token e e-mail inexistente
+// devolvem a MESMA resposta genérica, e a comparação bcrypt roda SEMPRE (contra HASH_FICTICIO
+// quando não há alvo) para não vazar existência pelo tempo — mesma filosofia de login/esqueci.
+const redefinirSenha = async (req, res) => {
+  const GENERICO = { erro: 'Código inválido ou expirado. Solicite um novo.' }
+  try {
+    const { email, codigo, nova_senha } = req.body
+    if (!email || !codigo || !nova_senha) {
+      return res.status(400).json({ erro: 'Informe e-mail, código e a nova senha' })
+    }
+    // MESMA regra do cadastro (authController cadastrar: senha.length < 8).
+    if (nova_senha.length < 8) {
+      return res.status(400).json({ erro: 'A senha deve ter pelo menos 8 caracteres' })
+    }
+    const emailNorm = email.toLowerCase().trim()
+    const codigoNorm = String(codigo).toUpperCase().trim()
+
+    // Brute force: conta ANTES de checar o código e conta até para e-mail SEM conta (chave por
+    // e-mail submetido, sem FK), então o 429 não vira oráculo de existência. 5/15min: dentro da
+    // 1h de validade do código dá ~20 tentativas contra ~16,8M combinações — inviável — sem
+    // trancar quem erra a digitação algumas vezes.
+    const tentativa = await registrarTentativa('reset_confirmar', emailNorm)
+    if (tentativa.excedeu) {
+      return res.status(429).json({ erro: `Muitas tentativas. Tente novamente em ${Math.ceil(tentativa.segundosRestantes / 60)} minuto(s).` })
+    }
+
+    const result = await pool.query(
+      'SELECT id, reset_token, reset_token_expira FROM usuarios WHERE email = $1', [emailNorm]
+    )
+    const usuario = result.rows[0]
+    const naoExpirou = usuario?.reset_token_expira && new Date(usuario.reset_token_expira) > new Date()
+    const hashAlvo = (usuario?.reset_token && naoExpirou) ? usuario.reset_token : HASH_FICTICIO
+    const ok = await bcrypt.compare(codigoNorm, hashAlvo)
+    if (!ok) return res.status(400).json(GENERICO)
+
+    const novaHash = await bcrypt.hash(nova_senha, 10)
+    // Limpa o token (uso único), incrementa token_version (revoga sessões antigas — D51).
+    await pool.query(
+      `UPDATE usuarios SET senha_hash = $1, reset_token = NULL, reset_token_expira = NULL,
+              token_version = token_version + 1 WHERE id = $2`,
+      [novaHash, usuario.id]
+    )
+    invalidarCacheAssinatura(usuario.id)
+    await limparTentativas('reset_confirmar', emailNorm)
+    res.json({ mensagem: 'Senha redefinida com sucesso. Faça login com a nova senha.' })
+  } catch (err) {
+    console.error('Erro ao redefinir senha:', err.message)
+    res.status(500).json({ erro: 'Erro ao redefinir senha' })
+  }
+}
+
+// Admin (superadmin) redefine a senha de um usuário. GERA uma senha temporária e a devolve UMA
+// vez na resposta, em vez de o admin digitar uma: senha alta-entropia, sem reuso e sem o admin
+// precisar inventar/ver a antiga — ele repassa ao usuário, que troca depois. NUNCA age sobre
+// outro admin. Incrementa token_version (revoga sessões do alvo).
+const resetarSenhaUsuario = async (req, res) => {
+  try {
+    const { id } = req.params
+    const alvo = await pool.query('SELECT id, role, nome FROM usuarios WHERE id = $1', [id])
+    if (alvo.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
+    if (alvo.rows[0].role === 'admin') {
+      return res.status(403).json({ erro: 'Não é possível redefinir a senha de um administrador por aqui.' })
+    }
+    // Alfabeto sem caracteres ambíguos (0/O, 1/l/I) — o admin lê/repassa a senha.
+    const ALFABETO = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789abcdefghijkmnpqrstuvwxyz'
+    const novaSenha = Array.from(crypto.randomBytes(12)).map(b => ALFABETO[b % ALFABETO.length]).join('')
+    const hash = await bcrypt.hash(novaSenha, 10)
+    await pool.query(
+      `UPDATE usuarios SET senha_hash = $1, reset_token = NULL, reset_token_expira = NULL,
+              token_version = token_version + 1 WHERE id = $2`,
+      [hash, id]
+    )
+    invalidarCacheAssinatura(id)
+    res.json({
+      mensagem: 'Senha redefinida. Entregue esta senha ao usuário — ela aparece só uma vez.',
+      usuario: alvo.rows[0].nome,
+      senha_temporaria: novaSenha,
+    })
+  } catch (err) {
+    console.error('Erro ao resetar senha do usuário:', err.message)
+    res.status(500).json({ erro: 'Erro ao resetar senha' })
+  }
+}
+
+module.exports = { cadastrar, login, perfil, atualizarPerfil, alterarSenha, esqueciSenha, redefinirSenha, resetarSenhaUsuario }

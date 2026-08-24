@@ -108,6 +108,10 @@ const migracaoPronta = (async () => {
     // NOT NULL DEFAULT 1: linhas existentes viram versão 1 (= tokens legados sem 'tv', tratados
     // como 1 no autenticar), então o deploy NÃO desloga ninguém.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 1`)
+    // Redefinição de senha por código (DDL existia só em prod, criada fora da migração — aqui
+    // para um banco novo não nascer sem elas). reset_token guarda o HASH bcrypt do código.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS reset_token TEXT`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS reset_token_expira TIMESTAMPTZ`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_prestador VARCHAR(20)`)
     // Auditoria de aprovação: true = aprovado pelo job automático (Modo Auto ON) sem revisão
     // de idoneidade; false = aprovado/reprovado manualmente por admin; null = legado/não tocado.
@@ -895,13 +899,18 @@ const migracaoPronta = (async () => {
     // exclusão dela.
     await client.query(`
       CREATE TABLE IF NOT EXISTS tentativas_auth (
-        acao          TEXT NOT NULL CHECK (acao IN ('login', 'reset')),
+        acao          TEXT NOT NULL CHECK (acao IN ('login', 'reset', 'reset_confirmar')),
         identificador TEXT NOT NULL,
         tentativas    INT NOT NULL DEFAULT 0,
         janela_em     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY (acao, identificador)
       )
     `)
+    // Amplia o CHECK do acao para incluir 'reset_confirmar' (adivinhação do código de
+    // redefinição). CREATE TABLE IF NOT EXISTS não altera tabela existente, então em bancos
+    // já criados o CHECK antigo (login,reset) rejeitaria o novo acao — drop-and-add idempotente.
+    await client.query(`ALTER TABLE tentativas_auth DROP CONSTRAINT IF EXISTS tentativas_auth_acao_check`)
+    await client.query(`ALTER TABLE tentativas_auth ADD CONSTRAINT tentativas_auth_acao_check CHECK (acao IN ('login', 'reset', 'reset_confirmar'))`)
     // A PK atende as buscas; este índice serve só à varredura diária por idade.
     await client.query(`CREATE INDEX IF NOT EXISTS tentativas_auth_janela_idx ON tentativas_auth (janela_em)`)
     // Fila de mídias cujo ARQUIVO ainda está no Cloudinary mas cuja LINHA já foi apagada.
@@ -1168,6 +1177,7 @@ router.get('/auth/perfil',           autenticar, authCtrl.perfil)
 router.put('/auth/perfil',           autenticar, authCtrl.atualizarPerfil)
 router.post('/auth/alterar-senha',   autenticar, authCtrl.alterarSenha)
 router.post('/auth/esqueci-senha',   authCtrl.esqueciSenha)
+router.post('/auth/redefinir-senha', authCtrl.redefinirSenha)
 
 router.post('/auth/foto-perfil', autenticar, upload.single('arquivo'), async (req, res) => {
   try {
@@ -6294,6 +6304,9 @@ router.post('/admin/limpar-mensagens', autenticar, exigirSuperAdmin, async (req,
 // ============================================================
 // ADMIN — SEGURANÇA (SENHA + 2FA)
 // ============================================================
+// Owner (superadmin) redefine a senha de um usuário — fallback direto, sem depender do e-mail.
+router.post('/admin/usuarios/:id/resetar-senha', autenticar, exigirSuperAdmin, authCtrl.resetarSenhaUsuario)
+
 router.post('/admin/trocar-senha', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { senha_atual, nova_senha } = req.body
