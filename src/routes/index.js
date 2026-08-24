@@ -4571,7 +4571,16 @@ router.get('/upload/assinatura-publica', (req, res) => {
   const ts = new Date().toISOString()
   console.log(`[ASSINATURA][${ts}] ▶ GET /upload/assinatura-publica`)
   try {
-    const params = gerarAssinaturaCloudinary('pinturapro/verificacao')
+    // D61: prende formato (só imagem) e tamanho (10MB, o mesmo teto de imagem do
+    // /upload/midia) DENTRO da assinatura, para ela não servir a upload arbitrário. O app
+    // sobe só JPEG de verificação (ImagePicker Images, quality 0.6 → bem abaixo de 10MB), então
+    // os limites não quebram o uso real. allowed_formats recusa vídeo/raw/PDF mesmo que a
+    // assinatura seja replayada para /video ou /raw. ATENÇÃO: o cliente precisa REENVIAR
+    // allowed_formats e max_file_size no upload (estão assinados) — ver nota no fim do commit.
+    const params = gerarAssinaturaCloudinary('pinturapro/verificacao', {
+      allowed_formats: 'jpg,png,webp',
+      max_file_size: 10 * 1024 * 1024,
+    })
     console.log(`[ASSINATURA][${ts}] ✓ assinatura gerada | folder=${params.folder} timestamp=${params.timestamp}`)
     res.json(params)
   } catch (err) {

@@ -58,11 +58,19 @@ const uploadArquivo = async (file) => {
   return uploadParaCloudinary(file.buffer, tipo)
 }
 
-const gerarAssinaturaCloudinary = (folder = 'pinturapro/videos') => {
+// Gera a assinatura de upload direto ao Cloudinary. `restricoes` é mesclado NO conjunto
+// ASSINADO (não é campo meramente informativo): tudo que entra aqui é coberto pela
+// assinatura, e por isso o CLIENTE precisa reenviar EXATAMENTE estes mesmos valores no
+// upload — o Cloudinary recomputa a assinatura a partir dos parâmetros recebidos e recusa
+// (401 Invalid Signature) se divergirem. Use para prender formato/tamanho e impedir que a
+// assinatura sirva para subir arquivo arbitrário (D61). `transformation` continua fora da
+// assinatura, apenas informativo.
+const gerarAssinaturaCloudinary = (folder = 'pinturapro/videos', restricoes = {}) => {
   const timestamp = Math.round(Date.now() / 1000)
   const transformation = folder.includes('fotos') ? 'q_auto:good,w_1280' : 'q_auto:low,w_1280'
-  const signature = cloudinary.utils.api_sign_request({ timestamp, folder }, process.env.CLOUDINARY_API_SECRET)
-  return { signature, timestamp, cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, folder, transformation }
+  const paramsAssinados = { timestamp, folder, ...restricoes }
+  const signature = cloudinary.utils.api_sign_request(paramsAssinados, process.env.CLOUDINARY_API_SECRET)
+  return { signature, timestamp, cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, folder, transformation, ...restricoes }
 }
 
 const extrairPublicId = (url) => {
