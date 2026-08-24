@@ -5041,10 +5041,17 @@ router.post('/config/lancamento', autenticar, exigirAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     const { data_fim } = req.body
+    // Desligar é porta de mão única (backfill irreversível), então só uma instrução
+    // EXPLÍCITA no body pode disparar: a chave data_fim PRESENTE com null ou ''.
+    // Chave ausente (body malformado, campo renomeado) não é instrução — antes ela
+    // caía no mesmo caminho do null e desligava a janela com backfill e tudo.
+    if (!Object.prototype.hasOwnProperty.call(req.body, 'data_fim')) {
+      return res.status(400).json({ erro: 'Nenhum campo para atualizar — envie data_fim (data ISO para ligar/estender, null para desligar)' })
+    }
     // valor é NOT NULL na tabela: usar '' (não null) como estado "desligado" para
     // nunca violar a constraint. Downstream trata '' e ausência como janela off.
     let valor = ''
-    if (data_fim !== null && data_fim !== undefined && data_fim !== '') {
+    if (data_fim !== null && data_fim !== '') {
       const d = new Date(data_fim)
       if (isNaN(d.getTime())) return res.status(400).json({ erro: 'data_fim inválida — use uma data ISO válida ou null para desligar' })
       valor = d.toISOString()
