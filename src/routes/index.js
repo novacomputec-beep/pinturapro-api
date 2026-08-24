@@ -170,6 +170,13 @@ const migracaoPronta = (async () => {
     await client.query(`DROP INDEX IF EXISTS idx_mensagens_respondido`)
     // Contratos de reparo: referência ao interesse aceito (paridade com candidatura_id de obra)
     await client.query(`ALTER TABLE contratos ADD COLUMN IF NOT EXISTS interesse_id uuid`)
+    // Valor ACORDADO congelado no ENVIO do contrato: COALESCE(valor_contraproposta,
+    // valor_proposto) da candidatura/interesse aceito no instante da emissão — torna o PDF
+    // emitido um registro auditável, imune a edições posteriores da candidatura/interesse.
+    // NUMERIC nullable (mesma convenção de valor_proposto/valor_contraproposta); NULL = caso
+    // "a combinar entre as partes". Coluna aditiva: nenhuma query existente a lê. Fica ao lado
+    // do ALTER de interesse_id de propósito — os dois dependem de contratos já existir.
+    await client.query(`ALTER TABLE contratos ADD COLUMN IF NOT EXISTS valor_acordado NUMERIC`)
     // Idempotência de criação de obra/reparo — evita duplicatas em retries após timeout/ERR_NETWORK
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
