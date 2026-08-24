@@ -269,10 +269,10 @@ const enviarContratoReparo = async (reparoId) => {
     // reparo reaberto com OUTRO prestador ficaria bloqueado para sempre.
     if (r.interesse_id) {
       const claim = await pool.query(
-        `INSERT INTO contratos (interesse_id, status)
-         SELECT $1, 'enviado' WHERE NOT EXISTS (SELECT 1 FROM contratos WHERE interesse_id = $1)
+        `INSERT INTO contratos (interesse_id, status, valor_acordado)
+         SELECT $1, 'enviado', $2 WHERE NOT EXISTS (SELECT 1 FROM contratos WHERE interesse_id = $1)
          RETURNING id`,
-        [r.interesse_id]
+        [r.interesse_id, r.valor_acordado ?? null]
       )
       if (claim.rows.length === 0) {
         console.log(`[Contrato] Reparo ${reparoId} — já existe contrato para o interesse ${r.interesse_id}, e-mail NÃO reenviado`)
@@ -372,10 +372,10 @@ const enviarContratoObra = async (candidaturaId) => {
     // (o índice único da tabela). DO NOTHING em vez do antigo DO UPDATE: linha já existente
     // significa contrato já enviado, então não há status a refrescar — há envio a evitar.
     const claim = await pool.query(
-      `INSERT INTO contratos (candidatura_id, status) VALUES ($1, 'enviado')
+      `INSERT INTO contratos (candidatura_id, status, valor_acordado) VALUES ($1, 'enviado', $2)
        ON CONFLICT (candidatura_id) DO NOTHING
        RETURNING id`,
-      [candidaturaId]
+      [candidaturaId, r.valor_acordado ?? null]
     )
     if (claim.rows.length === 0) {
       console.log(`[Contrato] Obra — já existe contrato para a candidatura ${candidaturaId}, e-mail NÃO reenviado`)
