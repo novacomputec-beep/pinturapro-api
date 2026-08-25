@@ -100,7 +100,11 @@ const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}) => {
 
 // Envia notificações em lote para múltiplos tokens de uma vez
 // Muito mais eficiente que um loop sequencial com await
-const enviarPushEmLote = async (destinatarios, titulo, corpo, data = {}) => {
+// Versão com contadores (A5): devolve { elegiveis, invalidos, enviados, falhos } para o
+// chamador poder logar truncamento/falha em vez de um único número. enviados = ticket 'ok';
+// falhos = ticket 'error' OU chunk inteiro que estourou na chamada HTTP; invalidos = token
+// que nem é Expo. Os chunks de 100 seguem SEQUENCIAIS (um await por chamada HTTP).
+const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}) => {
   const mensagens = destinatarios
     .filter(d => Expo.isExpoPushToken(d.push_token))
     .map(d => ({
@@ -111,8 +115,9 @@ const enviarPushEmLote = async (destinatarios, titulo, corpo, data = {}) => {
       body: corpo,
       data,
     }))
+  const stats = { elegiveis: destinatarios.length, invalidos: destinatarios.length - mensagens.length, enviados: 0, falhos: 0 }
 
-  if (mensagens.length === 0) return 0
+  if (mensagens.length === 0) return stats
 
   // Expo recomenda chunks de até 100 mensagens por chamada
   const chunks = expo.chunkPushNotifications(mensagens)
@@ -123,6 +128,7 @@ const enviarPushEmLote = async (destinatarios, titulo, corpo, data = {}) => {
       tickets.forEach((ticket, i) => {
         const pushToken = chunk[i].to
         if (ticket && ticket.status === 'error') {
+          stats.falhos++
           console.error(
             '[Push] Falha no envio (lote):', titulo,
             '| erro:', ticket.message,
@@ -130,10 +136,12 @@ const enviarPushEmLote = async (destinatarios, titulo, corpo, data = {}) => {
             '→', pushToken.substring(0, 30)
           )
         } else {
+          stats.enviados++
           ticketsComToken.push({ ticket, pushToken })
         }
       })
     } catch (err) {
+      stats.falhos += chunk.length
       console.error('Erro ao enviar chunk de notificações:', err)
     }
   }
@@ -143,7 +151,14 @@ const enviarPushEmLote = async (destinatarios, titulo, corpo, data = {}) => {
       console.error('[Push] Erro no processamento de recibos:', err.message))
   }
 
-  return mensagens.length
+  return stats
+}
+
+// Compatibilidade: os chamadores antigos recebem o mesmo número de sempre (mensagens com
+// token válido, enviadas ou não).
+const enviarPushEmLote = async (destinatarios, titulo, corpo, data = {}) => {
+  const s = await enviarPushEmLoteDetalhado(destinatarios, titulo, corpo, data)
+  return s.enviados + s.falhos
 }
 
 const enviarBoasVindas = async (usuarioId) => {
@@ -177,6 +192,53 @@ const enviarBoasVindas = async (usuarioId) => {
   }
 }
 
+// Predicado canônico de "assinatura ativa" — o MESMO de assinaturaAtivaCacheada
+// (src/middlewares/auth.js), que é o gate que todo prestador atravessa, e dos detalhes
+// GET /obras/:id e GET /reparos/:id: status 'ativa' E vencimento nulo ou futuro. Antes o
+// broadcast olhava só o status e avisava quem já estava vencido (A5, item 3).
+const SQL_ASSINATURA_ATIVA = `a.status = 'ativa' AND (a.proximo_vencimento IS NULL OR a.proximo_vencimento > NOW())`
+
+// Tamanho de página do broadcast — o antigo LIMIT 500 vira o passo do cursor, não o teto.
+const PAGINA_BROADCAST = 500
+
+// Broadcast PAGINADO por chave estável (A5): u.id > cursor ORDER BY u.id LIMIT 500, até
+// esgotar. Antes era LIMIT 500 sem ORDER BY nem continuação: numa cidade com 5.000
+// assinantes, até 90% nunca recebiam a publicação — e, sem ordem, possivelmente sempre os
+// mesmos. Cada página é enviada antes de buscar a próxima (a memória não cresce com a
+// cidade). No fim, UMA linha de log com elegíveis / enviados / falhos / inválidos / páginas,
+// para truncamento ou falha nunca mais ser silencioso. Declarada ANTES dos dois chamadores
+// (const em TDZ derrubou o boot em 25/08).
+const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo }) => {
+  const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
+  let cursor = null
+  for (;;) {
+    const pagina = await pool.query(
+      `SELECT u.id, u.push_token
+       FROM usuarios u
+       JOIN assinaturas a ON a.usuario_id = u.id
+       WHERE u.role = 'prestador' AND u.tipo_prestador = $1
+         AND ${SQL_ASSINATURA_ATIVA}
+         AND u.push_token IS NOT NULL
+         AND NULLIF(btrim(u.cidade), '') IS NOT NULL
+         AND NULLIF(btrim(u.uf), '')     IS NOT NULL
+         AND ${SQL_CIDADE_PRESTADOR} = $2
+         AND upper(btrim(u.uf)) = $3
+         AND ($4::uuid IS NULL OR u.id > $4::uuid)
+       ORDER BY u.id
+       LIMIT $5`,
+      [tipoPrestador, cidade, uf, cursor, PAGINA_BROADCAST]
+    )
+    if (pagina.rows.length === 0) break
+    total.paginas++
+    const s = await enviarPushEmLoteDetalhado(pagina.rows, titulo, corpo, data)
+    total.elegiveis += s.elegiveis; total.invalidos += s.invalidos; total.enviados += s.enviados; total.falhos += s.falhos
+    cursor = pagina.rows[pagina.rows.length - 1].id
+    if (pagina.rows.length < PAGINA_BROADCAST) break
+  }
+  console.log(`[Broadcast] ${rotulo} | elegíveis: ${total.elegiveis} | enviados: ${total.enviados} | falhos: ${total.falhos} | tokens inválidos: ${total.invalidos} | páginas: ${total.paginas}`)
+  return total
+}
+
 const notificarPintoresSobreNovaObra = async (obraId) => {
   try {
     const obraResult = await pool.query(
@@ -198,30 +260,15 @@ const notificarPintoresSobreNovaObra = async (obraId) => {
 
     // cidade E uf, nunca cidade sozinha: ha municipios homonimos em estados diferentes.
     // Prestador sem cidade ou sem uf fica de FORA (NULLIF ... IS NOT NULL) — sem lugar
-    // declarado nao da para afirmar que ele atende ali.
-    // LIMIT 500 mantido como rede de seguranca.
-    const pintores = await pool.query(
-      `SELECT u.push_token
-       FROM usuarios u
-       JOIN assinaturas a ON a.usuario_id = u.id
-       WHERE u.role = 'prestador' AND u.tipo_prestador = 'pintor'
-         AND a.status = 'ativa'
-         AND u.push_token IS NOT NULL
-         AND NULLIF(btrim(u.cidade), '') IS NOT NULL
-         AND NULLIF(btrim(u.uf), '')     IS NOT NULL
-         AND ${SQL_CIDADE_PRESTADOR} = $1
-         AND upper(btrim(u.uf)) = $2
-       LIMIT 500`,
-      [cidadeObra, ufObra]
-    )
-
-    const total = await enviarPushEmLote(
-      pintores.rows,
-      '🎨 Nova obra disponível!',
-      `"${obra.titulo}" em ${obra.cidade} acabou de ser publicada!`,
-      { tipo: 'nova_obra', obra_id: obraId }
-    )
-    console.log(`Notificados ${total} pintores sobre nova obra`)
+    // declarado nao da para afirmar que ele atende ali. Paginado por u.id (A5): todos os
+    // pintores assinantes da cidade recebem, em páginas de 500.
+    await broadcastPaginado({
+      tipoPrestador: 'pintor', cidade: cidadeObra, uf: ufObra,
+      titulo: '🎨 Nova obra disponível!',
+      corpo: `"${obra.titulo}" em ${obra.cidade} acabou de ser publicada!`,
+      data: { tipo: 'nova_obra', obra_id: obraId },
+      rotulo: `nova obra ${obraId}`,
+    })
   } catch (err) {
     console.error('Erro ao notificar pintores:', err)
   }
@@ -249,28 +296,14 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     // tipo_prestador = 'reparador' ESTRITO (D87), o mesmo predicado de exigirReparador: o
     // "IS DISTINCT FROM 'pintor'" antigo incluía NULL/legado, que recebia o push e caía em
     // 403 TIER_INCORRETO ao tocar. Paridade com o broadcast de obra (= 'pintor').
-    const prestadores = await pool.query(
-      `SELECT u.push_token
-       FROM usuarios u
-       JOIN assinaturas a ON a.usuario_id = u.id
-       WHERE u.role = 'prestador' AND u.tipo_prestador = 'reparador'
-         AND a.status = 'ativa'
-         AND u.push_token IS NOT NULL
-         AND NULLIF(btrim(u.cidade), '') IS NOT NULL
-         AND NULLIF(btrim(u.uf), '')     IS NOT NULL
-         AND ${SQL_CIDADE_PRESTADOR} = $1
-         AND upper(btrim(u.uf)) = $2
-       LIMIT 500`,
-      [cidadeReparo, ufReparo]
-    )
-
-    const total = await enviarPushEmLote(
-      prestadores.rows,
-      '🔧 Novo serviço disponível!',
-      `"${reparo.titulo}" em ${reparo.cidade} — categoria: ${reparo.categoria}`,
-      { tipo: 'novo_reparo', reparo_id: reparoId }
-    )
-    console.log(`Notificados ${total} prestadores sobre novo reparo`)
+    // Paginado por u.id (A5), mesmo helper do lado obra.
+    await broadcastPaginado({
+      tipoPrestador: 'reparador', cidade: cidadeReparo, uf: ufReparo,
+      titulo: '🔧 Novo serviço disponível!',
+      corpo: `"${reparo.titulo}" em ${reparo.cidade} — categoria: ${reparo.categoria}`,
+      data: { tipo: 'novo_reparo', reparo_id: reparoId },
+      rotulo: `novo reparo ${reparoId}`,
+    })
   } catch (err) {
     console.error('Erro ao notificar prestadores:', err)
   }
