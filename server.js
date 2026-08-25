@@ -167,8 +167,20 @@ app.use('/api/pagamentos/criar-assinatura', rateLimit({
 // Webhook PagBank precisa do corpo cru (bytes exatos) p/ validar a assinatura
 // SHA-256. Escopado só a esta rota — não retém buffers crus no resto da API.
 app.use('/api/pagamentos/webhook-pagbank', express.raw({ type: '*/*', limit: '1mb' }))
-app.use(express.json({ limit: '100mb' }))
-app.use(express.urlencoded({ extended: true, limit: '100mb' }))
+// Limite GLOBAL de corpo JSON/urlencoded (A8 da auditoria externa). Antes: 100 MB para a API
+// inteira, materializado em memória ANTES de qualquer rota/autenticação — meia dúzia de
+// requests perto do limite derrubavam o container, e o shedding por pool não ajuda porque o
+// custo acontece antes de qualquer consulta. O número vem do que os clientes realmente
+// mandam: o app nunca põe base64 em JSON (toda mídia sobe por multipart/stream, que
+// express.json não lê); os maiores corpos são POST /obras/dono e /reparos/dono (campos
+// curtos + tags + endereço), textos com teto de 2000 caracteres (denúncia, sugestão) e os
+// lotes de ids do painel (paginação máxima 100 → ~5 KB). Tudo cabe em poucos KB; 64 KB dá
+// mais de 10x de folga. Nenhuma rota JSON precisa de exceção — as únicas cargas grandes são
+// multipart (multer, teto próprio em uploadService) e o stream de /upload/midia
+// (uploadStreamController lê o socket direto), e o webhook já é raw com 1 MB acima.
+const LIMITE_CORPO_JSON = '64kb'
+app.use(express.json({ limit: LIMITE_CORPO_JSON }))
+app.use(express.urlencoded({ extended: true, limit: LIMITE_CORPO_JSON }))
 app.use('/api', rotasApp)
 
 // Health check
@@ -200,6 +212,12 @@ app.use((err, req, res, next) => {
   console.error('Erro não tratado:', err.message)
   if (err.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({ erro: 'Arquivo muito grande. Máximo permitido: 50MB.' })
+  }
+  // Corpo JSON/urlencoded acima de LIMITE_CORPO_JSON (A8): body-parser levanta
+  // PayloadTooLargeError (type 'entity.too.large', status 413). Sem este ramo virava 500
+  // "erro interno", mascarando o motivo para o cliente e para o log.
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ erro: `Corpo da requisição muito grande. Máximo permitido: ${LIMITE_CORPO_JSON}.` })
   }
   res.status(500).json({ erro: 'Erro interno do servidor. Tente novamente.' })
 })
@@ -381,10 +399,17 @@ const deletarMidiasAntigas = semSobreposicao('deletarMidiasAntigas', async () =>
     const orfas = await pool.query(`SELECT url, tipo FROM midias_orfas ORDER BY criado_em LIMIT 200`)
     if (orfas.rows.length > 0) {
       const urlsRemovidas = []
+      let terminais = 0
       for (const m of orfas.rows) {
+        // Regra terminal (A9), a mesma dos dois braços de demanda morta: URL sem public_id
+        // extraível nunca vai passar pelo helper (ele devolve false antes de chamar o
+        // Cloudinary) e, ordenada por criado_em, pinaria a cabeça de todo lote para sempre.
+        // Não há o que apagar lá fora com um nome que não sabemos calcular — sai da fila.
+        if (!extrairPublicId(m.url)) { urlsRemovidas.push(m.url); terminais++; continue }
         const sucesso = await deletarDoCloudinary(m.url, m.tipo)
         if (sucesso) urlsRemovidas.push(m.url)
       }
+      if (terminais > 0) console.log(`[MidiasAntigas] fila de órfãs: ${terminais} linha(s) sem public_id extraível descartada(s) sem chamada externa`)
       // Só sai da fila o que o Cloudinary confirmou (o helper trata 'not found' como sucesso,
       // então arquivo já apagado também limpa a fila em vez de ficar preso para sempre).
       if (urlsRemovidas.length > 0) {
