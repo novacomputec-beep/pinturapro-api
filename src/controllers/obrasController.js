@@ -267,8 +267,16 @@ const encerrar = async (req, res) => {
     // cron de auto-encerramento, que já o preenchem.
     // COALESCE e não NOW() puro: este UPDATE não tem guarda de status, então reencerrar uma
     // obra já encerrada reiniciaria a contagem de 7 dias do zero.
+    // Mesmo estado final de POST /obras/:id/encerrar (D85): status_aprovacao='encerrada'
+    // (sem isso a obra ficava 'encerrada' com status_aprovacao 'aprovada', única linha assim
+    // entre as encerradas) e limpeza de encerramento_solicitado_* (senão uma solicitação do
+    // pintor ficava pendurada numa obra já fechada). encerrado_em segue COALESCE — este
+    // caminho não tem o no-op idempotente do /encerrar, então reencerrar não pode reiniciar
+    // os 7 dias de retenção de mídia.
     const result = await pool.query(
-      `UPDATE obras SET status='encerrada', encerrado_em = COALESCE(encerrado_em, NOW())
+      `UPDATE obras SET status = 'encerrada', status_aprovacao = 'encerrada',
+              encerrado_em = COALESCE(encerrado_em, NOW()),
+              encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL
         WHERE id=$1 RETURNING id, titulo, status`,
       [req.params.id]
     )
