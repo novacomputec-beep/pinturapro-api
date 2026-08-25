@@ -186,6 +186,12 @@ const migracaoPronta = (async () => {
     // "a combinar entre as partes". Coluna aditiva: nenhuma query existente a lê. Fica ao lado
     // do ALTER de interesse_id de propósito — os dois dependem de contratos já existir.
     await client.query(`ALTER TABLE contratos ADD COLUMN IF NOT EXISTS valor_acordado NUMERIC`)
+    // Índice único PARCIAL em interesse_id (D79): o claim do contrato de reparo era
+    // INSERT ... WHERE NOT EXISTS sem índice — duas execuções concorrentes passavam as duas e
+    // gravavam dois contratos (e dois e-mails). Parcial porque a linha de obra tem
+    // interesse_id NULL; mesmo padrão dos índices de client_request_id acima. Sem duplicatas
+    // em produção na data da migração (verificado), então o CREATE não falha no boot.
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS contratos_interesse_id_uniq ON contratos (interesse_id) WHERE interesse_id IS NOT NULL`)
     // Idempotência de criação de obra/reparo — evita duplicatas em retries após timeout/ERR_NETWORK
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS client_request_id TEXT`)
@@ -5362,16 +5368,25 @@ router.post('/upload/dono', autenticar,              upload.single('arquivo'), u
 // ============================================================
 router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
   try {
-    const { obra_id, referencias, valor_oferta, mensagem_oferta } = req.body
+    // D83: este caminho gravava valor_oferta/mensagem_oferta, colunas que NENHUM leitor de
+    // preço usa (contrato, finalizadas, minhas, meus-contratos leem valor_proposto/
+    // valor_contraproposta) — a candidatura aceita por aqui virava contrato "a combinar".
+    // Passa a gravar as mesmas colunas de POST /obras/:id/candidatura; os nomes antigos
+    // seguem aceitos no corpo como sinônimos. Hoje nenhum cliente chama esta rota (app usa
+    // /obras/:id/candidatura; painel só lista/aprova/recusa).
+    const { obra_id, referencias } = req.body
+    const valor_proposto = req.body.valor_proposto ?? req.body.valor_oferta ?? null
+    const mensagem = req.body.mensagem ?? req.body.mensagem_oferta ?? null
     const obraResult = await pool.query(`SELECT id, titulo, status FROM obras WHERE id = $1 AND status = 'aberta'`, [obra_id])
     if (obraResult.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada ou não está disponível' })
     const existente = await pool.query(`SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`, [obra_id, req.usuario.id])
     if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse nesta obra' })
     const result = await pool.query(
-      `INSERT INTO candidaturas (obra_id, usuario_id, referencias, valor_oferta, mensagem_oferta, status)
+      `INSERT INTO candidaturas (obra_id, usuario_id, referencias, valor_proposto, mensagem, status)
        VALUES ($1, $2, $3, $4, $5, 'pendente') RETURNING *`,
-      [obra_id, req.usuario.id, referencias, valor_oferta || null, mensagem_oferta || null]
+      [obra_id, req.usuario.id, referencias, valor_proposto || null, mensagem || null]
     )
+    const valor_oferta = valor_proposto
     const dono = await pool.query(
       `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
       [obra_id]

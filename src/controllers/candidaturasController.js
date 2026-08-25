@@ -124,7 +124,7 @@ const aprovar = async (req, res) => {
 
     // titulo entra aqui para compor o push "Deu match!" no fim da função, sem query extra.
     const obraCheck = await pool.query(
-      `SELECT criado_por, titulo FROM obras WHERE id = $1`,
+      `SELECT criado_por, titulo, status, match_usuario_id FROM obras WHERE id = $1`,
       [existe.rows[0].obra_id]
     )
     if (
@@ -132,6 +132,15 @@ const aprovar = async (req, res) => {
       (obraCheck.rows[0].criado_por !== req.usuario.id && req.usuario.role !== 'admin')
     ) {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
+    }
+
+    // Guarda de estado da DEMANDA (D82 — mesma de POST /obras/:id/candidatura/:cid/responder e
+    // do lado reparo): aceitar só numa obra viva e ainda não casada. Sem isto, este caminho
+    // (usado pelo painel) casava uma obra 'encerrada'/'cancelada' — o UPDATE em obras só
+    // exigia match_usuario_id IS NULL.
+    const obraAbertaParaNegociar = obraCheck.rows[0].status === 'aberta' && !obraCheck.rows[0].match_usuario_id
+    if (!obraAbertaParaNegociar) {
+      return res.status(409).json({ erro: 'Esta obra não está mais aberta para negociação.' })
     }
 
     if (existe.rows[0].status !== 'pendente') {
@@ -223,13 +232,13 @@ const recusar = async (req, res) => {
   try {
     const { id } = req.params
 
-    const existe = await pool.query(`SELECT id, status, obra_id FROM candidaturas WHERE id = $1`, [id])
+    const existe = await pool.query(`SELECT id, status, obra_id, usuario_id FROM candidaturas WHERE id = $1`, [id])
     if (existe.rows.length === 0) {
       return res.status(404).json({ erro: 'Candidatura não encontrada' })
     }
 
     const obraCheck = await pool.query(
-      `SELECT criado_por FROM obras WHERE id = $1`,
+      `SELECT criado_por, titulo FROM obras WHERE id = $1`,
       [existe.rows[0].obra_id]
     )
     if (
@@ -250,6 +259,15 @@ const recusar = async (req, res) => {
     )
 
     res.json(result.rows[0])
+
+    // Aviso ao pintor recusado (D82): mesmo push de POST /obras/:id/candidatura/:cid/responder
+    // e do lado reparo — este caminho (painel) era o único que recusava em silêncio.
+    const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [existe.rows[0].usuario_id])
+    if (pintor.rows[0]?.push_token) {
+      enviarPushNotificacao(pintor.rows[0].push_token, '❌ Candidatura não aceita',
+        `Sua candidatura para "${obraCheck.rows[0].titulo}" não foi selecionada desta vez.`,
+        { tipo: 'candidatura_recusada', obra_id: existe.rows[0].obra_id }).catch(() => {})
+    }
 
   } catch (err) {
     console.error('Erro ao recusar candidatura:', err)
