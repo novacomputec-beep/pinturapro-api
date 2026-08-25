@@ -2214,6 +2214,13 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     const ehPintorDoMatch = obra.match_usuario_id === req.usuario.id
 
     if (!ehDono && !ehPintorDoMatch && req.usuario.role !== 'admin') {
+      // Mesma guarda de GET /reparos/:id (D74): quem não é o dono desta obra, nem o pintor do
+      // match, nem admin, só passa se for prestador — e aí precisa de assinatura. Sem esta
+      // linha, qualquer dono_obra com linha ativa em `assinaturas` (todos os donos, hoje) lia
+      // fotos, coordenadas e a lista de propostas de obras de outros donos.
+      if (req.usuario.role !== 'prestador') {
+        return res.status(403).json({ erro: 'Sem permissão para ver esta obra' })
+      }
       const assinatura = await pool.query(
         `SELECT status FROM assinaturas WHERE usuario_id = $1 AND status = 'ativa' AND (proximo_vencimento IS NULL OR proximo_vencimento > NOW()) LIMIT 1`,
         [req.usuario.id]
@@ -3341,14 +3348,16 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
     const params = [req.usuario.id]
 
     let query = `
-      SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
+      SELECT r.id, r.titulo, r.categoria, r.valor_estimado, r.cidade, r.bairro, r.uf,
              r.latitude, r.longitude, r.coordenadas_origem,
              -- prazo_atendimento_horas (D81): o card do feed no app lê exatamente este campo
              -- para a faixa de urgência ("🔴 URGENTE / Atender em até Nh") e devolve null
              -- sem ele — o SELECT nunca o incluiu, então a faixa nunca aparecia.
-             r.status, r.status_aprovacao, r.expira_em, r.prazo_atendimento_horas, r.criado_em, r.criado_por,
-             r.match_feito_em, r.match_usuario_id, r.pedido_tempo_status,
-             r.prestadores_bloqueados, r.client_request_id,
+             -- Só o que o card lê (D80 — mesma forma do feed de obras): criado_por,
+             -- match_usuario_id, match_feito_em, pedido_tempo_status, prestadores_bloqueados
+             -- (a lista negra de quem furou NESTE reparo), client_request_id, status_aprovacao,
+             -- criado_em e descricao saíam para todo reparador assinante sem nada no app lê-los.
+             r.status, r.expira_em, r.prazo_atendimento_horas,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM reparos r
