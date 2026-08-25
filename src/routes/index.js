@@ -23,6 +23,10 @@ const { PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP, FORMATO_ZONA
 // gravada antes de prazo_timezone existir (NULL) quanto a zona que deixou de ser reconhecida
 // — esta última abortava o UPDATE inteiro do lote antes desta guarda.
 const SQL_ZONA_DA_OBRA = sqlZonaSegura('obras.prazo_timezone')
+// Mesma zona segura para o reparo (D78): a faixa "Hoje" do reparo resolvia sempre em São Paulo
+// e não guardava a zona do dono; agora grava prazo_timezone no create e lê daqui em todo
+// ponto que reconstrói o fim do dia (aprovação, estender, cron).
+const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
 const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
@@ -316,6 +320,8 @@ const migracaoPronta = (async () => {
     // Só em OBRAS: o lado reparo não tem faixa "Hoje" e seu cliente não manda zona.
     // Aditiva e sem DEFAULT: nenhuma reescrita de tabela.
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS prazo_timezone TEXT`)
+    // D78: o reparo passa a guardar a zona do dono para a faixa "Hoje", como a obra.
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS prazo_timezone TEXT`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_em    TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_horas NUMERIC`)
     // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o range scan lê
@@ -2958,17 +2964,20 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     // Faixa "Hoje" — mesma regra e mesmo CASE do POST /obras/dono (ver lá o racional completo):
     // só o ramo 'hoje' muda, resolvido no Postgres; as demais faixas gravam o $10 do Node.
     const prazoModo = req.body?.prazo_modo === PRAZO_MODO_HOJE ? PRAZO_MODO_HOJE : null
+    // Zona do DONO para a faixa "Hoje" (D78 — mesmo par de POST /obras/dono): validada contra
+    // pg_timezone_names e gravada em prazo_timezone; o fim do dia é o do dono, não o de SP.
+    const prazoZona = prazoModo ? await resolverZonaCliente(req.body?.timezone) : null
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam o reparo já criado em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id, prazo_modo)
+      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id, prazo_modo, prazo_timezone)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',
-               CASE WHEN $18::text = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP} ELSE $10::timestamptz END,
-               $11,$12,$13,$14,$15,$16,$17,$18)
+               CASE WHEN $18::text = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia('$19::text')} ELSE $10::timestamptz END,
+               $11,$12,$13,$14,$15,$16,$17,$18,$19)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo]
+      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo, prazoZona]
     )
     res.status(201).json(result.rows[0])
     // ESTE e o unico envio que dispara no fluxo real, e por isso ele FICA. O INSERT acima
@@ -3069,7 +3078,8 @@ const DEDUPE_ESTENDER_REPARO_MINUTOS = 5
 router.post('/reparos/:id/estender', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(
-      `SELECT id, criado_por, status, match_usuario_id, expira_em, criado_em, prazo_atendimento_horas
+      `SELECT id, criado_por, status, match_usuario_id, expira_em, criado_em, prazo_atendimento_horas,
+              prazo_modo, prazo_timezone
        FROM reparos WHERE id = $1 AND criado_por = $2`,
       [req.params.id, req.usuario.id]
     )
@@ -3090,11 +3100,24 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
 
     // Carência e novo prazo na MESMA query: as duas comparações precisam do relógio do banco
     // (NOW()), não do relógio do processo, senão skew de container decide quem pode estender.
+    // Faixa "Hoje" (D78 — mesmo CASE de POST /obras/:id/estender): quem escolheu "hoje" estende
+    // por DIAS inteiros e volta ao fim do dia na zona gravada em prazo_timezone; somar horas ao
+    // fim do dia converteria a meia-noite num horário de relógio. Fora de "hoje", segue
+    // GREATEST(expira_em, NOW()) + horas.
+    const diasExtensao = Math.max(1, Math.ceil(horas / 24))
     const cap = await pool.query(
       `SELECT
-         GREATEST($1::timestamptz, NOW()) + ($2::numeric * INTERVAL '1 hour') AS novo_expira_em,
+         CASE WHEN $6::text = '${PRAZO_MODO_HOJE}' THEN (
+                date_trunc('day', GREATEST(
+                  $1::timestamptz AT TIME ZONE ${sqlZonaSegura('$5::text')},
+                  NOW()           AT TIME ZONE ${sqlZonaSegura('$5::text')}
+                ))
+                + (($7::int + 1) * INTERVAL '1 day') - INTERVAL '1 microsecond'
+              ) AT TIME ZONE ${sqlZonaSegura('$5::text')}
+              ELSE GREATEST($1::timestamptz, NOW()) + ($2::numeric * INTERVAL '1 hour')
+         END AS novo_expira_em,
          (NOW() >= $3::timestamptz + ($4::numeric * INTERVAL '1 hour')) AS carencia_cumprida`,
-      [r.expira_em, horas, r.criado_em, CARENCIA_ESTENDER_REPARO_HORAS]
+      [r.expira_em, horas, r.criado_em, CARENCIA_ESTENDER_REPARO_HORAS, r.prazo_timezone, r.prazo_modo, diasExtensao]
     )
 
     // Faixa longa (> 24h) e prazo NULL: só estende 1h após o cadastro. NULL entra via o
@@ -3201,7 +3224,7 @@ router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (re
     const atualizado = await pool.query(
       `UPDATE reparos SET status_aprovacao = 'aprovada', status = 'aberta',
          expira_em = GREATEST(expira_em,
-           CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP}
+           CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia(SQL_ZONA_DO_REPARO)}
                 ELSE NOW() + (COALESCE(prazo_atendimento_horas, 720) * INTERVAL '1 hour') END)
         WHERE id = $1 AND status_aprovacao IS DISTINCT FROM 'aprovada'`,
       [req.params.id]
