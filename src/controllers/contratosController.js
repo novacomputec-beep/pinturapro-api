@@ -268,9 +268,13 @@ const enviarContratoReparo = async (reparoId) => {
     // Chave = interesse_id (por contrato), não contrato_enviado (por reparo), senão um
     // reparo reaberto com OUTRO prestador ficaria bloqueado para sempre.
     if (r.interesse_id) {
+      // Mesmo claim atômico do lado obra (ON CONFLICT no índice único, D79): o antigo
+      // INSERT ... WHERE NOT EXISTS deixava duas execuções concorrentes passarem as duas.
+      // O índice contratos_interesse_id_uniq é parcial (WHERE interesse_id IS NOT NULL),
+      // então o ON CONFLICT precisa repetir o predicado para casar com ele.
       const claim = await pool.query(
-        `INSERT INTO contratos (interesse_id, status, valor_acordado)
-         SELECT $1, 'enviado', $2 WHERE NOT EXISTS (SELECT 1 FROM contratos WHERE interesse_id = $1)
+        `INSERT INTO contratos (interesse_id, status, valor_acordado) VALUES ($1, 'enviado', $2)
+         ON CONFLICT (interesse_id) WHERE interesse_id IS NOT NULL DO NOTHING
          RETURNING id`,
         [r.interesse_id, r.valor_acordado ?? null]
       )
