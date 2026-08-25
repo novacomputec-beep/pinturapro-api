@@ -979,10 +979,16 @@ const autoEncerrarPendentes = async () => {
       // confirma sozinho. Query separada (não um SET a mais no UPDATE acima): são regras
       // independentes — encerramento em duas mãos vs. chegada em duas mãos — com prazos e
       // predicados próprios, e a maioria das linhas candidatas a uma não é candidata à outra.
+      // A3 (auditoria externa): só confirma chegada de demanda ABERTA, COM match, e declarada
+      // por um dos dois participantes. Sem isto o job mutava demandas canceladas/encerradas
+      // ou sem profissional (chegada órfã) — estado terminal não pode ganhar confirmação.
       const chegadas = await pool.query(`
         UPDATE ${lado.tabela} SET chegada_confirmada_em = NOW()
-        WHERE chegada_declarada_em IS NOT NULL
+        WHERE status = 'aberta'
+          AND match_usuario_id IS NOT NULL
+          AND chegada_declarada_em IS NOT NULL
           AND chegada_confirmada_em IS NULL
+          AND chegada_declarada_por IN (criado_por, match_usuario_id)
           AND chegada_declarada_em <= NOW() - INTERVAL '${lado.chegadaApos}'
         RETURNING id, titulo, match_usuario_id
       `)
