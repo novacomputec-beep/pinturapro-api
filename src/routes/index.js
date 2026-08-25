@@ -2013,8 +2013,13 @@ router.delete('/obras/:id', autenticar, exigirSuperAdmin, obrasCtrl.encerrar)
 // Dono pode excluir sua própria obra
 router.delete('/obras/dono/:id', autenticar, async (req, res) => {
   try {
-    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+    const obra = await pool.query(`SELECT id, match_usuario_id FROM obras WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    // Mesma guarda de DELETE /reparos/dono/:id (D72): com pintor casado, cancelar deixava a
+    // candidatura 'aceito', o contrato já enviado e o match preso numa obra 'cancelada' — sem
+    // push ao pintor e sem cron que desfizesse (todos exigem status = 'aberta'). A saída do
+    // dono continua sendo POST /obras/:id/expirar-match, que desfaz o match avisando os dois.
+    if (obra.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Não é possível excluir uma obra com pintor a caminho' })
     // encerrado_em: mesmo motivo do recusar acima — libera a obra cancelada para a limpeza
     // de mídia depois de 7 dias. COALESCE não reinicia contagem já iniciada.
     await pool.query(`UPDATE obras SET status = 'cancelada', status_aprovacao = 'cancelada',
