@@ -333,6 +333,23 @@ const verificarObrasExpirando = async () => {
   }
 }
 
+// Guarda de sobreposição LOCAL (A7 da auditoria externa): setInterval dispara sem esperar o
+// tique anterior, então um tique lento do MESMO job no MESMO processo rodava por cima do
+// outro. Um nome por job; tique que encontra o nome ocupado sai sem fazer nada (o próximo
+// pega o que sobrou). Não substitui o claim atômico abaixo — este só cobre um processo;
+// entre réplicas quem decide é o RETURNING.
+// Declarada AQUI, acima do primeiro uso: é const, e usá-la antes da declaração derruba o
+// módulo no require (TDZ) — foi a causa da queda de 25/08.
+const jobsEmExecucao = new Set()
+const semSobreposicao = (nome, fn) => async (...args) => {
+  if (jobsEmExecucao.has(nome)) {
+    console.warn(`[Cron] ${nome} ainda em execução — tique ignorado`)
+    return
+  }
+  jobsEmExecucao.add(nome)
+  try { return await fn(...args) } finally { jobsEmExecucao.delete(nome) }
+}
+
 const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaixoEngajamento', async () => {
   try {
     console.log('Verificando obras com baixo engajamento...')
@@ -628,21 +645,6 @@ const registrarFalta = async (tabela, demanda) => {
 // Os dois ramos param assim que a chegada é DECLARADA (por qualquer lado) ou CONFIRMADA: a
 // partir daí o prestador está no local, e nem faz sentido cobrar "ainda não chegou?" nem
 // devolver ao feed um reparo em atendimento.
-// Guarda de sobreposição LOCAL (A7 da auditoria externa): setInterval dispara sem esperar o
-// tique anterior, então um tique lento do MESMO job no MESMO processo rodava por cima do
-// outro. Um nome por job; tique que encontra o nome ocupado sai sem fazer nada (o próximo
-// pega o que sobrou). Não substitui o claim atômico abaixo — este só cobre um processo;
-// entre réplicas quem decide é o RETURNING.
-const jobsEmExecucao = new Set()
-const semSobreposicao = (nome, fn) => async (...args) => {
-  if (jobsEmExecucao.has(nome)) {
-    console.warn(`[Cron] ${nome} ainda em execução — tique ignorado`)
-    return
-  }
-  jobsEmExecucao.add(nome)
-  try { return await fn(...args) } finally { jobsEmExecucao.delete(nome) }
-}
-
 const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos', async () => {
   try {
     // (a) 5 minutos restantes → notifica o dono (uma vez por match).
