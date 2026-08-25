@@ -2098,6 +2098,26 @@ router.patch('/obras/dono/:id/ponto-referencia', autenticar, async (req, res) =>
 // único limite é absoluto, para barrar valor absurdo (ex.: um dígito a mais por engano).
 const TETO_ESTENDER_OBRA_HORAS = 8760
 
+// Carência para estender obra de faixa longa (D89 — decisão do dono: a mesma regra dos dois
+// lados). Espelha CARENCIA_ESTENDER_REPARO_HORAS / FAIXA_LONGA_REPARO_HORAS: faixa > 24h ou
+// janela NULL só estende 1h após a PUBLICAÇÃO; faixas curtas (<= 24h) seguem sem carência.
+// A âncora da obra é COALESCE(publicado_em, criado_em) — a obra publica na aprovação, o
+// reparo na criação; é a mesma âncora que o advisory e o relógio de vida já usam.
+const CARENCIA_ESTENDER_OBRA_HORAS = 1
+const FAIXA_LONGA_OBRA_HORAS = 24
+
+// Regra ÚNICA de "quanto ainda dá para estender" (D89), usada pelo endpoint e pelo detalhe
+// dos DOIS lados: teto plano menos as horas que expira_em já foi empurrado ALÉM do vencimento
+// original (âncora + janela). Envelhecer sem estender não consome teto. Antes eram três
+// números: obra-endpoint = 8760 − horas desta request; obra-detalhe = este acumulado;
+// reparo = 8760 constante.
+const restanteExtensao = (teto, ancora, janelaHoras, expiraEm) => {
+  const ancoraMs = new Date(ancora).getTime()
+  const expiraOriginalMs = ancoraMs + (Number(janelaHoras) || 720) * 3600 * 1000
+  const horasUsadas = Math.max(0, (new Date(expiraEm).getTime() - expiraOriginalMs) / 3600000)
+  return Math.max(0, teto - horasUsadas)
+}
+
 // Janela de dedupe do estender de obra — espelha DEDUPE_ESTENDER_REPARO_MINUTOS. Sem
 // client_request_id no corpo, a chave é (ultima_extensao_em, ultima_extensao_horas): repetir o
 // MESMO horas dentro da janela é tratado como retry do mesmo clique — devolve o prazo atual sem
@@ -2164,9 +2184,19 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
                      + (($5::int + 1) * INTERVAL '1 day') - INTERVAL '1 microsecond'
                    ) AT TIME ZONE ${sqlZonaSegura('$3::text')}
                    ELSE GREATEST($1::timestamptz, NOW()) + ($2::numeric * INTERVAL '1 hour')
-              END AS novo_expira_em`,
-      [o.expira_em, horas, o.prazo_timezone, o.prazo_modo, diasExtensao]
+              END AS novo_expira_em,
+              -- Carência no relógio do banco (D89), como no reparo: âncora de publicação + 1h.
+              (NOW() >= $6::timestamptz + ($7::numeric * INTERVAL '1 hour')) AS carencia_cumprida`,
+      [o.expira_em, horas, o.prazo_timezone, o.prazo_modo, diasExtensao, o.publicado_em || o.criado_em, CARENCIA_ESTENDER_OBRA_HORAS]
     )
+
+    // Faixa longa (> 24h) e janela NULL: só estende 1h após a publicação — regra idêntica à de
+    // POST /reparos/:id/estender (`=== null` explícito porque Number(null) é 0).
+    const janelaObra = o.horas_para_expirar === null ? null : Number(o.horas_para_expirar)
+    const exigeCarencia = janelaObra === null || janelaObra > FAIXA_LONGA_OBRA_HORAS
+    if (exigeCarencia && !cap.rows[0].carencia_cumprida) {
+      return res.status(409).json({ erro: 'Aguarde 1 hora após a publicação para estender' })
+    }
 
     // Guarda de dedupe DENTRO do UPDATE, não em um if antes dele: checar em uma query e gravar em
     // outra deixa a janela aberta para dois cliques simultâneos passarem os dois pela checagem e
@@ -2196,10 +2226,10 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
         [req.params.id, req.usuario.id]
       )
       if (atual.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-      return res.json({ expira_em: atual.rows[0].expira_em, extensao_maxima_horas: TETO_ESTENDER_OBRA_HORAS - horas })
+      return res.json({ expira_em: atual.rows[0].expira_em, extensao_maxima_horas: restanteExtensao(TETO_ESTENDER_OBRA_HORAS, o.publicado_em || o.criado_em, o.horas_para_expirar, atual.rows[0].expira_em) })
     }
 
-    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: TETO_ESTENDER_OBRA_HORAS - horas })
+    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: restanteExtensao(TETO_ESTENDER_OBRA_HORAS, o.publicado_em || o.criado_em, o.horas_para_expirar, upd.rows[0].expira_em) })
   } catch (err) {
     console.error('[obras/estender]', err.message)
     res.status(500).json({ erro: 'Erro ao estender prazo da obra' })
@@ -2215,10 +2245,15 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         -- botão de estender sem comparar com o relógio do aparelho. Mesma expressão do
         -- GET /obras/minhas.
         (o.status <> 'encerrada' AND o.expira_em <= NOW()) AS expirada,
+        -- pode_estender_em (D89): mesmo campo e mesma regra de GET /reparos/:id — instante a
+        -- partir do qual POST /obras/:id/estender para de recusar com 409; NULL = faixa curta,
+        -- sem carência. Âncora COALESCE(publicado_em, criado_em), as mesmas constantes do endpoint.
+        CASE WHEN o.horas_para_expirar IS NULL OR o.horas_para_expirar > $2::numeric
+             THEN COALESCE(o.publicado_em, o.criado_em) + ($3::numeric * INTERVAL '1 hour') END AS pode_estender_em,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
        FROM obras o WHERE o.id = $1`,
-      [req.params.id]
+      [req.params.id, FAIXA_LONGA_OBRA_HORAS, CARENCIA_ESTENDER_OBRA_HORAS]
     )
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
     const obra = result.rows[0]
@@ -2298,11 +2333,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // no máximo o que sobra do total, e o endpoint aceitaria mais. Erra para o lado seguro
     // (nunca oferece o que tomaria 400), mas os dois só ficam idênticos quando o endpoint
     // também passar a descontar o acumulado.
-    const ancoraObraMs = new Date(obra.publicado_em || obra.criado_em).getTime()
-    const expiraOriginalObraMs = ancoraObraMs + (Number(obra.horas_para_expirar) || 720) * 3600 * 1000
-    const horasUsadasObra = Math.max(0, (new Date(obra.expira_em).getTime() - expiraOriginalObraMs) / 3600000)
-    const extensao_maxima_horas = Math.max(0, TETO_ESTENDER_OBRA_HORAS - horasUsadasObra)
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, extensao_maxima_horas })
+    // Regra única (restanteExtensao) — o endpoint devolve o MESMO número após estender.
+    const extensao_maxima_horas = restanteExtensao(TETO_ESTENDER_OBRA_HORAS, obra.publicado_em || obra.criado_em, obra.horas_para_expirar, obra.expira_em)
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, extensao_maxima_horas, pode_estender_em: obra.pode_estender_em })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -3156,10 +3189,11 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
         [req.params.id, req.usuario.id]
       )
       if (atual.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
-      return res.json({ expira_em: atual.rows[0].expira_em, extensao_maxima_horas: ADVISORY_ESTENDER_REPARO_HORAS })
+      return res.json({ expira_em: atual.rows[0].expira_em, extensao_maxima_horas: restanteExtensao(ADVISORY_ESTENDER_REPARO_HORAS, r.criado_em, r.prazo_atendimento_horas, atual.rows[0].expira_em) })
     }
 
-    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: ADVISORY_ESTENDER_REPARO_HORAS })
+    // D89: mesma regra única da obra — desconta o já consumido, em vez do 8760 constante.
+    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: restanteExtensao(ADVISORY_ESTENDER_REPARO_HORAS, r.criado_em, r.prazo_atendimento_horas, upd.rows[0].expira_em) })
   } catch (err) {
     console.error('[reparos/estender]', err.message)
     res.status(500).json({ erro: 'Erro ao estender prazo do serviço' })
@@ -4605,7 +4639,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // as opções por ele (ModalEstenderPrazo); a MESMA constante do endpoint, para os dois
     // números não divergirem. NÃO reflete a carência de 1h das faixas longas: dentro da
     // primeira hora o app ainda oferece opções que o endpoint recusa com 409.
-    const extensao_maxima_horas = ADVISORY_ESTENDER_REPARO_HORAS
+    // D89: regra única (restanteExtensao), a mesma de GET /obras/:id e dos dois endpoints.
+    const extensao_maxima_horas = restanteExtensao(ADVISORY_ESTENDER_REPARO_HORAS, reparo.criado_em, reparo.prazo_atendimento_horas, reparo.expira_em)
     res.json({
       reparo,
       midias: midias.rows,
