@@ -20,6 +20,9 @@ const LIMITES = {
   // Não é ataque de adivinhação: é bomba de e-mail / enumeração. Três por hora é folgado
   // para uso real e inútil como canal de abuso.
   reset: { max: 3, janela: '1 hour' },
+  // Adivinhação do CÓDIGO de 6 chars (redefinir-senha). 5/15min: dentro da 1h de validade do
+  // código dá ~20 palpites contra ~16,8M combinações — inviável — sem trancar erro de digitação.
+  reset_confirmar: { max: 5, janela: '15 minutes' },
 }
 
 // Registra a tentativa e DEVOLVE o total da janela — checar e incrementar no MESMO statement

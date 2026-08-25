@@ -11,7 +11,7 @@ const candidaturasCtrl = require('../controllers/candidaturasController')
 const mensagensCtrl    = require('../controllers/mensagensController')
 const pagamentoCtrl    = require('../controllers/pagamentoController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
-const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary } = require('../services/uploadService')
+const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
@@ -103,6 +103,15 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_estado VARCHAR(2)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_secret VARCHAR(100)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS dois_fa_ativo BOOLEAN DEFAULT false`)
+    // Versão de token: revogação de sessão por troca de senha (D51). O JWT carrega a versão
+    // vigente na emissão; trocar a senha incrementa a coluna e os tokens antigos param de casar.
+    // NOT NULL DEFAULT 1: linhas existentes viram versão 1 (= tokens legados sem 'tv', tratados
+    // como 1 no autenticar), então o deploy NÃO desloga ninguém.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 1`)
+    // Redefinição de senha por código (DDL existia só em prod, criada fora da migração — aqui
+    // para um banco novo não nascer sem elas). reset_token guarda o HASH bcrypt do código.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS reset_token TEXT`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS reset_token_expira TIMESTAMPTZ`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_prestador VARCHAR(20)`)
     // Auditoria de aprovação: true = aprovado pelo job automático (Modo Auto ON) sem revisão
     // de idoneidade; false = aprovado/reprovado manualmente por admin; null = legado/não tocado.
@@ -890,13 +899,18 @@ const migracaoPronta = (async () => {
     // exclusão dela.
     await client.query(`
       CREATE TABLE IF NOT EXISTS tentativas_auth (
-        acao          TEXT NOT NULL CHECK (acao IN ('login', 'reset')),
+        acao          TEXT NOT NULL CHECK (acao IN ('login', 'reset', 'reset_confirmar')),
         identificador TEXT NOT NULL,
         tentativas    INT NOT NULL DEFAULT 0,
         janela_em     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY (acao, identificador)
       )
     `)
+    // Amplia o CHECK do acao para incluir 'reset_confirmar' (adivinhação do código de
+    // redefinição). CREATE TABLE IF NOT EXISTS não altera tabela existente, então em bancos
+    // já criados o CHECK antigo (login,reset) rejeitaria o novo acao — drop-and-add idempotente.
+    await client.query(`ALTER TABLE tentativas_auth DROP CONSTRAINT IF EXISTS tentativas_auth_acao_check`)
+    await client.query(`ALTER TABLE tentativas_auth ADD CONSTRAINT tentativas_auth_acao_check CHECK (acao IN ('login', 'reset', 'reset_confirmar'))`)
     // A PK atende as buscas; este índice serve só à varredura diária por idade.
     await client.query(`CREATE INDEX IF NOT EXISTS tentativas_auth_janela_idx ON tentativas_auth (janela_em)`)
     // Fila de mídias cujo ARQUIVO ainda está no Cloudinary mas cuja LINHA já foi apagada.
@@ -1163,6 +1177,7 @@ router.get('/auth/perfil',           autenticar, authCtrl.perfil)
 router.put('/auth/perfil',           autenticar, authCtrl.atualizarPerfil)
 router.post('/auth/alterar-senha',   autenticar, authCtrl.alterarSenha)
 router.post('/auth/esqueci-senha',   authCtrl.esqueciSenha)
+router.post('/auth/redefinir-senha', authCtrl.redefinirSenha)
 
 router.post('/auth/foto-perfil', autenticar, upload.single('arquivo'), async (req, res) => {
   try {
@@ -1344,7 +1359,7 @@ const SQL_DELETE_CONTRATOS_DO_USUARIO = `
          )
 `
 
-router.delete('/usuarios/:id', autenticar, exigirAdmin, async (req, res) => {
+router.delete('/usuarios/:id', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     const { id } = req.params
@@ -1992,8 +2007,8 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
 })
 
 router.post('/obras',       autenticar, exigirAdmin, obrasCtrl.criar)
-router.put('/obras/:id',    autenticar, exigirAdmin, obrasCtrl.editar)
-router.delete('/obras/:id', autenticar, exigirAdmin, obrasCtrl.encerrar)
+router.put('/obras/:id',    autenticar, exigirSuperAdmin, obrasCtrl.editar)
+router.delete('/obras/:id', autenticar, exigirSuperAdmin, obrasCtrl.encerrar)
 
 // Dono pode excluir sua própria obra
 router.delete('/obras/dono/:id', autenticar, async (req, res) => {
@@ -2484,7 +2499,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
 })
 
 // POST /obras/:id/match — pintor confirma ida ao local
-router.post('/obras/:id/match', autenticar, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
+router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
   try {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
@@ -3492,7 +3507,7 @@ router.post('/reparos/:id/abertura', autenticar, exigirPrestador, exigirReparado
   }
 })
 
-router.post('/reparos/:id/match', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
+router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
@@ -3653,7 +3668,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
 })
 
 // Prestador responde a uma contraproposta do dono
-router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
+router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autenticar, exigirReparador, async (req, res) => {
   try {
     const { action, valor } = req.body
     const { id: reparo_id, interesse_id } = req.params
@@ -4571,7 +4586,16 @@ router.get('/upload/assinatura-publica', (req, res) => {
   const ts = new Date().toISOString()
   console.log(`[ASSINATURA][${ts}] ▶ GET /upload/assinatura-publica`)
   try {
-    const params = gerarAssinaturaCloudinary('pinturapro/verificacao')
+    // D61: prende formato (só imagem) e tamanho (10MB, o mesmo teto de imagem do
+    // /upload/midia) DENTRO da assinatura, para ela não servir a upload arbitrário. O app
+    // sobe só JPEG de verificação (ImagePicker Images, quality 0.6 → bem abaixo de 10MB), então
+    // os limites não quebram o uso real. allowed_formats recusa vídeo/raw/PDF mesmo que a
+    // assinatura seja replayada para /video ou /raw. ATENÇÃO: o cliente precisa REENVIAR
+    // allowed_formats e max_file_size no upload (estão assinados) — ver nota no fim do commit.
+    const params = gerarAssinaturaCloudinary('pinturapro/verificacao', {
+      allowed_formats: 'jpg,png,webp',
+      max_file_size: 10 * 1024 * 1024,
+    })
     console.log(`[ASSINATURA][${ts}] ✓ assinatura gerada | folder=${params.folder} timestamp=${params.timestamp}`)
     res.json(params)
   } catch (err) {
@@ -4679,7 +4703,7 @@ router.post('/admin/buscar-usuario', autenticar, exigirAdmin, async (req, res) =
 })
 
 // Limpar dados de teste (admin) — apaga tudo exceto admins
-router.post('/admin/limpar-testes', autenticar, exigirAdmin, async (req, res) => {
+router.post('/admin/limpar-testes', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -4755,7 +4779,17 @@ router.get('/verificacao/pendentes', autenticar, exigirAdmin, async (req, res) =
         AND u.role IN ('prestador', 'pintor', 'assinante')
       ORDER BY u.criado_em DESC
     `)
-    res.json({ prestadores: result.rows })
+    // Adiciona URLs de leitura ASSINADAS ao lado das cruas (D62 passo 1). As cruas ficam —
+    // nada é privado ainda, então a tela atual segue funcionando com os assets públicos; a
+    // versão assinada acompanha o tipo de entrega da URL guardada e continuará resolvendo
+    // quando o passo 3 tornar os assets authenticated.
+    const prestadores = result.rows.map(p => ({
+      ...p,
+      verificacao_doc_frente_url_assinada: gerarUrlAssinadaVerificacao(p.verificacao_doc_frente_url),
+      verificacao_doc_verso_url_assinada:  gerarUrlAssinadaVerificacao(p.verificacao_doc_verso_url),
+      verificacao_selfie_url_assinada:     gerarUrlAssinadaVerificacao(p.verificacao_selfie_url),
+    }))
+    res.json({ prestadores })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar pendentes' })
   }
@@ -4932,7 +4966,7 @@ router.get('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, 
   }
 })
 
-router.post('/verificacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
+router.post('/verificacao/modo-automatico', autenticar, exigirSuperAdmin, async (req, res) => {
   try {
     const { ativo } = req.body
     // Toggle GLOBAL: só um boolean explícito no body é instrução. Antes, chave ausente
@@ -4998,7 +5032,7 @@ router.get('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (r
   }
 })
 
-router.post('/obras-aprovacao/modo-automatico', autenticar, exigirAdmin, async (req, res) => {
+router.post('/obras-aprovacao/modo-automatico', autenticar, exigirSuperAdmin, async (req, res) => {
   try {
     const { ativo, aprovar_pendentes } = req.body
     // Mesma guarda do toggle de prestadores acima: só boolean explícito é instrução;
@@ -5111,7 +5145,7 @@ router.get('/config/lancamento', async (req, res) => {
 // ou os dois entram, ou nenhum. Sem isso a janela desligava e a coorte seguia grátis para
 // sempre, que é o defeito que este endpoint fecha. GET /config/lancamento/previa devolve a
 // contagem antes, para o painel confirmar com o número na tela.
-router.post('/config/lancamento', autenticar, exigirAdmin, async (req, res) => {
+router.post('/config/lancamento', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     const { data_fim } = req.body
@@ -5195,7 +5229,7 @@ router.get('/config/limite-demandas', autenticar, exigirAdmin, async (req, res) 
 })
 
 // Admin ajusta o teto. Só inteiro positivo: os demais valores cairiam no padrão em silêncio.
-router.post('/config/limite-demandas', autenticar, exigirAdmin, async (req, res) => {
+router.post('/config/limite-demandas', autenticar, exigirSuperAdmin, async (req, res) => {
   try {
     const { limite } = req.body
     const n = Number(limite)
@@ -5246,7 +5280,7 @@ router.post('/upload/dono', autenticar,              upload.single('arquivo'), u
 // ============================================================
 // CANDIDATURAS
 // ============================================================
-router.post('/candidaturas', autenticar, exigirAssinaturaAtiva, async (req, res) => {
+router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
   try {
     const { obra_id, referencias, valor_oferta, mensagem_oferta } = req.body
     const obraResult = await pool.query(`SELECT id, titulo, status FROM obras WHERE id = $1 AND status = 'aberta'`, [obra_id])
@@ -5717,7 +5751,7 @@ router.post('/pagamentos/webhook-pagbank',    pagamentoCtrl.webhookPagbank)
 router.get('/pagamentos/sucesso',             pagamentoCtrl.sucesso)
 router.get('/pagamentos/falha',               (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
 router.get('/pagamentos/pendente',            (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
-router.post('/pagamentos/acesso-gratuito',    autenticar, exigirAdmin, pagamentoCtrl.darAcessoGratuito)
+router.post('/pagamentos/acesso-gratuito',    autenticar, exigirSuperAdmin, pagamentoCtrl.darAcessoGratuito)
 router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamentoCtrl.listarAssinantes)
 
 // ============================================================
@@ -5769,7 +5803,7 @@ router.get('/health', (req, res) => res.json({ status: 'ok', versao: '1.0.0' }))
 // ============================================================
 // ADMIN — LIMPEZA SELETIVA
 // ============================================================
-router.post('/admin/limpar-usuarios', autenticar, exigirAdmin, async (req, res) => {
+router.post('/admin/limpar-usuarios', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -6218,7 +6252,7 @@ router.get('/admin/finalizadas', autenticar, exigirAdmin, async (req, res) => {
   }
 })
 
-router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => {
+router.post('/admin/limpar-obras', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -6236,7 +6270,7 @@ router.post('/admin/limpar-obras', autenticar, exigirAdmin, async (req, res) => 
   } finally { client.release() }
 })
 
-router.post('/admin/limpar-reparos', autenticar, exigirAdmin, async (req, res) => {
+router.post('/admin/limpar-reparos', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -6261,7 +6295,7 @@ router.post('/admin/limpar-reparos', autenticar, exigirAdmin, async (req, res) =
   } finally { client.release() }
 })
 
-router.post('/admin/limpar-mensagens', autenticar, exigirAdmin, async (req, res) => {
+router.post('/admin/limpar-mensagens', autenticar, exigirSuperAdmin, async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -6280,6 +6314,9 @@ router.post('/admin/limpar-mensagens', autenticar, exigirAdmin, async (req, res)
 // ============================================================
 // ADMIN — SEGURANÇA (SENHA + 2FA)
 // ============================================================
+// Owner (superadmin) redefine a senha de um usuário — fallback direto, sem depender do e-mail.
+router.post('/admin/usuarios/:id/resetar-senha', autenticar, exigirSuperAdmin, authCtrl.resetarSenhaUsuario)
+
 router.post('/admin/trocar-senha', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { senha_atual, nova_senha } = req.body
@@ -6288,7 +6325,9 @@ router.post('/admin/trocar-senha', autenticar, exigirAdmin, async (req, res) => 
     const ok = await bcrypt.compare(senha_atual, result.rows[0].senha_hash)
     if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' })
     const hash = await bcrypt.hash(nova_senha, 10)
-    await pool.query(`UPDATE usuarios SET senha_hash = $1 WHERE id = $2`, [hash, req.usuario.id])
+    // Incrementa token_version: revoga TODAS as sessões admin (D51), inclusive esta.
+    await pool.query(`UPDATE usuarios SET senha_hash = $1, token_version = token_version + 1 WHERE id = $2`, [hash, req.usuario.id])
+    invalidarCacheAssinatura(req.usuario.id) // imediata nesta réplica; até 30s nas demais
     res.json({ mensagem: 'Senha alterada com sucesso' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao trocar senha' })
@@ -6343,7 +6382,7 @@ router.post('/admin/2fa/login-verificar', async (req, res) => {
     }
 
     const userResult = await pool.query(
-      `SELECT id, nome, email, role, dois_fa_secret, dois_fa_ativo FROM usuarios WHERE id = $1`,
+      `SELECT id, nome, email, role, dois_fa_secret, dois_fa_ativo, token_version FROM usuarios WHERE id = $1`,
       [payload.id]
     )
     if (userResult.rows.length === 0) return res.status(401).json({ erro: 'Usuário não encontrado' })
@@ -6363,7 +6402,7 @@ router.post('/admin/2fa/login-verificar', async (req, res) => {
     if (!valido) return res.status(401).json({ erro: 'Código 2FA inválido' })
 
     const token = jwt.sign(
-      { id: usuario.id, role: usuario.role },
+      { id: usuario.id, role: usuario.role, tv: usuario.token_version ?? 1 },
       process.env.JWT_SECRET,
       { expiresIn: '30d' }
     )

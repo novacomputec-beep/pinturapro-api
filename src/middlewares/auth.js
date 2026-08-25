@@ -86,7 +86,7 @@ const autenticar = async (req, res, next) => {
     let usuario = getCacheUsuario(decoded.id)
     if (!usuario) {
       const result = await pool.query(
-        'SELECT id, nome, email, role, ativo, tipo_prestador, suspenso_em, suspenso_motivo FROM usuarios WHERE id = $1',
+        'SELECT id, nome, email, role, ativo, tipo_prestador, suspenso_em, suspenso_motivo, token_version FROM usuarios WHERE id = $1',
         [decoded.id]
       )
       if (result.rows.length === 0) {
@@ -98,6 +98,15 @@ const autenticar = async (req, res, next) => {
 
     if (!usuario.ativo) {
       return res.status(403).json({ erro: 'Conta desativada' })
+    }
+
+    // Revogação por troca de senha (D51): o JWT carrega a versão vigente na emissão (tv);
+    // trocar a senha incrementa token_version e o token antigo deixa de casar. Token legado
+    // sem 'tv' conta como 1, que casa com o default 1 das linhas — ninguém é deslogado no
+    // deploy. Lê token_version do MESMO `usuario` (cache de 30s): a revogação é imediata na
+    // réplica que processou a troca (ela invalida o cache local) e vale em até 30s nas demais.
+    if ((decoded.tv ?? 1) !== usuario.token_version) {
+      return res.status(401).json({ erro: 'Sua senha foi alterada. Faça login novamente.', codigo: 'TOKEN_REVOGADO' })
     }
 
     req.usuario = usuario

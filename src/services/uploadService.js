@@ -58,11 +58,48 @@ const uploadArquivo = async (file) => {
   return uploadParaCloudinary(file.buffer, tipo)
 }
 
-const gerarAssinaturaCloudinary = (folder = 'pinturapro/videos') => {
+// Gera a assinatura de upload direto ao Cloudinary. `restricoes` é mesclado NO conjunto
+// ASSINADO (não é campo meramente informativo): tudo que entra aqui é coberto pela
+// assinatura, e por isso o CLIENTE precisa reenviar EXATAMENTE estes mesmos valores no
+// upload — o Cloudinary recomputa a assinatura a partir dos parâmetros recebidos e recusa
+// (401 Invalid Signature) se divergirem. Use para prender formato/tamanho e impedir que a
+// assinatura sirva para subir arquivo arbitrário (D61). `transformation` continua fora da
+// assinatura, apenas informativo.
+const gerarAssinaturaCloudinary = (folder = 'pinturapro/videos', restricoes = {}) => {
   const timestamp = Math.round(Date.now() / 1000)
   const transformation = folder.includes('fotos') ? 'q_auto:good,w_1280' : 'q_auto:low,w_1280'
-  const signature = cloudinary.utils.api_sign_request({ timestamp, folder }, process.env.CLOUDINARY_API_SECRET)
-  return { signature, timestamp, cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, folder, transformation }
+  const paramsAssinados = { timestamp, folder, ...restricoes }
+  const signature = cloudinary.utils.api_sign_request(paramsAssinados, process.env.CLOUDINARY_API_SECRET)
+  return { signature, timestamp, cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, folder, transformation, ...restricoes }
+}
+
+// TTL da URL assinada de leitura dos documentos de verificação. 10 min: o admin revisa os
+// documentos numa sessão só; prazo curto limita a exposição de uma URL vazada (histórico do
+// navegador, referrer, log, tela compartilhada). A EXPIRAÇÃO real depende do token-auth do
+// Cloudinary (CLOUDINARY_AUTH_TOKEN_KEY): com a chave, auth_token impõe o prazo; sem ela,
+// sign_url dá acesso ASSINADO mas sem prazo rígido (limitação de plano — tratar no passo 3).
+const TTL_URL_VERIFICACAO = 10 * 60
+
+// Gera a URL de leitura ASSINADA de um asset de verificação a partir da URL ARMAZENADA. Deriva
+// public_id, versão e TIPO DE ENTREGA (upload/authenticated/private) da própria URL guardada,
+// então a MESMA função serve o asset público de hoje E o authenticated de depois (passo 3) —
+// a URL assinada acompanha o tipo vigente. NÃO substitui a URL guardada (delete e legado ainda
+// dependem dela). Formato inesperado ou falha: devolve a original, para nunca quebrar a tela.
+const gerarUrlAssinadaVerificacao = (urlArmazenada, ttlSegundos = TTL_URL_VERIFICACAO) => {
+  if (!urlArmazenada || typeof urlArmazenada !== 'string') return urlArmazenada || null
+  const m = urlArmazenada.match(/\/(image|video|raw)\/(upload|authenticated|private)\/(?:v(\d+)\/)?(.+?)(?:\.\w+)?$/)
+  if (!m) return urlArmazenada
+  const [, resourceType, deliveryType, version, publicId] = m
+  const opcoes = { resource_type: resourceType, type: deliveryType, secure: true, sign_url: true }
+  if (version) opcoes.version = version
+  const tokenKey = process.env.CLOUDINARY_AUTH_TOKEN_KEY
+  if (tokenKey) opcoes.auth_token = { key: tokenKey, duration: ttlSegundos }
+  try {
+    return cloudinary.url(publicId, opcoes)
+  } catch (err) {
+    console.error('[Cloudinary] falha ao assinar URL de verificação:', err.message)
+    return urlArmazenada
+  }
 }
 
 const extrairPublicId = (url) => {
@@ -91,4 +128,4 @@ const deletarDoCloudinary = async (url, tipo = 'foto') => {
   }
 }
 
-module.exports = { upload, uploadParaCloudinary, uploadArquivo, gerarAssinaturaCloudinary, extrairPublicId, deletarDoCloudinary }
+module.exports = { upload, uploadParaCloudinary, uploadArquivo, gerarAssinaturaCloudinary, gerarUrlAssinadaVerificacao, extrairPublicId, deletarDoCloudinary }
