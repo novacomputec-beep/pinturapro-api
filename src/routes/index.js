@@ -3154,6 +3154,25 @@ router.get('/reparos/aprovacao', autenticar, exigirAdmin, async (req, res) => {
   }
 })
 
+// Espelho de notificarDonoSobreAnaliseObra (D77): o dono do reparo passa a saber do desfecho
+// da análise, como o dono de obra já sabia. Mesmo formato; muda só o substantivo e a chave.
+const notificarDonoSobreAnaliseReparo = async (reparoId, aprovada) => {
+  const info = await pool.query(
+    `SELECT u.push_token, r.titulo FROM reparos r JOIN usuarios u ON r.criado_por = u.id WHERE r.id = $1`,
+    [reparoId]
+  )
+  const { push_token, titulo } = info.rows[0] || {}
+  if (!push_token) return
+  await enviarPushNotificacao(
+    push_token,
+    aprovada ? '✅ Serviço aprovado!' : '❌ Serviço não aprovado',
+    aprovada
+      ? `"${titulo}" já está publicado e visível para os prestadores.`
+      : `"${titulo}" não foi publicado desta vez. Toque para rever os detalhes e cadastrar novamente.`,
+    { tipo: aprovada ? 'reparo_aprovado' : 'reparo_recusado', reparo_id: reparoId }
+  )
+}
+
 router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
   try {
     // Guarda de TRANSICAO, igual a de obras (ver POST /obras-aprovacao/:id/aprovar): o aviso
@@ -3162,14 +3181,31 @@ router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (re
     // como "novo" um item publicado dias atras, para ate 500 pessoas de uma vez. Sem esta
     // clausula WHERE o UPDATE casava a linha toda vez e o rebroadcast era so uma questao de
     // alguem clicar duas vezes.
+    //
+    // expira_em reiniciado na aprovação (D77 — espelho de aprovarEPublicarObra): o relógio
+    // gravado na criação correu enquanto o reparo esteve fora do ar (recusado/pendente), e
+    // sem isto ele voltava ao feed já vencido ou com o prazo gasto. Mesmo CASE da faixa
+    // "Hoje" do create de reparo (SQL_FIM_DO_DIA_SP) e mesmo COALESCE(..., 720) do cron.
+    // GREATEST(expira_em, ...) — mesma forma de chegada-prevista/responder (expira_em =
+    // GREATEST(expira_em, chegada_pendente_em)): a aprovação nunca ENCURTA um prazo que
+    // ainda está valendo; só empurra para frente o que já venceu ou venceria antes.
+    // Sem publicado_em: reparo publica na criação, então criado_em já é a âncora que
+    // publicado_em é para a obra, e nada no lado reparo lê uma âncora de publicação
+    // (a carência de /estender usa criado_em; o advisory é constante).
     const atualizado = await pool.query(
-      `UPDATE reparos SET status_aprovacao = 'aprovada', status = 'aberta'
+      `UPDATE reparos SET status_aprovacao = 'aprovada', status = 'aberta',
+         expira_em = GREATEST(expira_em,
+           CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP}
+                ELSE NOW() + (COALESCE(prazo_atendimento_horas, 720) * INTERVAL '1 hour') END)
         WHERE id = $1 AND status_aprovacao IS DISTINCT FROM 'aprovada'`,
       [req.params.id]
     )
     res.json({ mensagem: 'Reparo aprovado e publicado!' })
     if (atualizado.rowCount === 0) return
     notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores:', err))
+    // Desfecho ao dono só na TRANSIÇÃO, como no lado obra.
+    notificarDonoSobreAnaliseReparo(req.params.id, true)
+      .catch(err => console.error('Erro notificar dono (reparo aprovado):', err.message))
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao aprovar reparo' })
   }
@@ -3177,11 +3213,22 @@ router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (re
 
 router.post('/reparos/aprovacao/:id/recusar', autenticar, exigirAdmin, async (req, res) => {
   try {
+    // Guarda de idempotência espelhando POST /obras-aprovacao/:id/recusar (D77): sem ela,
+    // reprocessar uma recusa (duplo clique do admin) reavisaria o dono de uma decisão que
+    // ele já recebeu. IS DISTINCT FROM é a forma NULL-safe do <> da obra, a mesma que o
+    // aprovar acima já usa.
     // encerrado_em: idem ao lado obra — reparo recusado guarda mídia e sem esta coluna o
-    // deletarMidiasAntigas nunca o alcança.
-    await pool.query(`UPDATE reparos SET status_aprovacao = 'recusada', status = 'cancelada',
-      encerrado_em = COALESCE(encerrado_em, NOW()) WHERE id = $1`, [req.params.id])
+    // deletarMidiasAntigas nunca o alcança. COALESCE preserva a data de um encerramento anterior.
+    const atualizado = await pool.query(
+      `UPDATE reparos SET status_aprovacao = 'recusada', status = 'cancelada',
+              encerrado_em = COALESCE(encerrado_em, NOW())
+        WHERE id = $1 AND status_aprovacao IS DISTINCT FROM 'recusada'
+        RETURNING id`, [req.params.id])
     res.json({ mensagem: 'Reparo recusado' })
+    if (atualizado.rowCount > 0) {
+      notificarDonoSobreAnaliseReparo(req.params.id, false)
+        .catch(err => console.error('Erro notificar dono (reparo recusado):', err.message))
+    }
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao recusar reparo' })
   }
