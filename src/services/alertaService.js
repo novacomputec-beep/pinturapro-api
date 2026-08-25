@@ -625,7 +625,6 @@ const verificarCronometroReparos = async () => {
       FROM reparos r
       JOIN usuarios u ON r.criado_por = u.id
       WHERE r.match_usuario_id IS NOT NULL
-        AND r.prazo_atendimento_horas IS NOT NULL
         AND r.notif_5min_enviada = false
         AND u.push_token IS NOT NULL
         AND r.chegada_declarada_em IS NULL
@@ -657,10 +656,14 @@ const verificarCronometroReparos = async () => {
     // é NULL — e é justamente ele que precisamos para bloquear e notificar o prestador. O mesmo
     // predicado vai nos dois: o UPDATE continua sendo quem decide (linha que deixar de casar
     // entre as duas queries simplesmente não é atualizada e não gera push).
+    // prazo_atendimento_horas NULL NÃO exclui mais a linha (D73 — paridade com o cron de obras):
+    // o prazo pós-match é COALESCE(chegada_prevista_em, expira_em), que independe da coluna;
+    // o filtro só servia para proteger o rebuild abaixo de "NULL * interval", e isso agora é
+    // COALESCE. Com o filtro, um reparo casado com prazo NULL ficava com match eterno: sem
+    // aviso de 5 min, sem voltar ao feed e sem falta.
     const PRED_EXPIRADOS_REPAROS = `
       status = 'aberta'
         AND match_usuario_id IS NOT NULL
-        AND prazo_atendimento_horas IS NOT NULL
         AND chegada_declarada_em IS NULL
         AND chegada_confirmada_em IS NULL
         AND COALESCE(chegada_prevista_em, expira_em) <= NOW()`
@@ -707,8 +710,13 @@ const verificarCronometroReparos = async () => {
             -- Faixa "Hoje": devolver ao feed NÃO pode dar 24h novas a quem escolheu "hoje" —
             -- o prazo volta a ser o fim do dia CORRENTE (o dia em que o match morreu).
             -- Sem este CASE, o cron reconstruiria a partir de prazo_atendimento_horas.
+            -- COALESCE(prazo_atendimento_horas, 720): mesma rede do cron de obras. 720h é o
+            -- default do PRÓPRIO create de reparo quando o cliente não manda prazo
+            -- (index.js: horasExpiracao = prazo || 720) e o que verificarMarcosExpiracao já
+            -- assume para reparo com prazo NULL — a segunda vida da linha ganha a mesma janela
+            -- da primeira, e os dois crons leem o mesmo número para a mesma linha.
             expira_em = CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP}
-                             ELSE NOW() + (prazo_atendimento_horas * INTERVAL '1 hour') END
+                             ELSE NOW() + (COALESCE(prazo_atendimento_horas, 720) * INTERVAL '1 hour') END
           WHERE id = ANY($1::uuid[]) AND ${PRED_EXPIRADOS_REPAROS}
           RETURNING id
         ), propostas AS (
