@@ -626,25 +626,42 @@ const registrarFalta = async (tabela, demanda) => {
 // Os dois ramos param assim que a chegada é DECLARADA (por qualquer lado) ou CONFIRMADA: a
 // partir daí o prestador está no local, e nem faz sentido cobrar "ainda não chegou?" nem
 // devolver ao feed um reparo em atendimento.
-const verificarCronometroReparos = async () => {
+// Guarda de sobreposição LOCAL (A7 da auditoria externa): setInterval dispara sem esperar o
+// tique anterior, então um tique lento do MESMO job no MESMO processo rodava por cima do
+// outro. Um nome por job; tique que encontra o nome ocupado sai sem fazer nada (o próximo
+// pega o que sobrou). Não substitui o claim atômico abaixo — este só cobre um processo;
+// entre réplicas quem decide é o RETURNING.
+const jobsEmExecucao = new Set()
+const semSobreposicao = (nome, fn) => async (...args) => {
+  if (jobsEmExecucao.has(nome)) {
+    console.warn(`[Cron] ${nome} ainda em execução — tique ignorado`)
+    return
+  }
+  jobsEmExecucao.add(nome)
+  try { return await fn(...args) } finally { jobsEmExecucao.delete(nome) }
+}
+
+const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos', async () => {
   try {
-    // (a) 5 minutos restantes → notifica o dono (uma vez por match)
+    // (a) 5 minutos restantes → notifica o dono (uma vez por match).
+    // CLAIM atômico (A7): o próprio UPDATE decide quem avisa — notif_5min_enviada = false no
+    // WHERE e RETURNING com o token. Duas réplicas (ou dois tiques) não avisam a mesma linha
+    // duas vezes: a segunda não casa mais o predicado e recebe zero linhas. Antes era
+    // SELECT → UPDATE WHERE id = ANY → push para a lista do SELECT, e as duas venciam.
     const cincoMin = await pool.query(`
-      SELECT r.id, r.titulo, u.push_token
-      FROM reparos r
-      JOIN usuarios u ON r.criado_por = u.id
-      WHERE r.match_usuario_id IS NOT NULL
+      UPDATE reparos r SET notif_5min_enviada = true
+      FROM usuarios u
+      WHERE u.id = r.criado_por
+        AND r.match_usuario_id IS NOT NULL
         AND r.notif_5min_enviada = false
         AND u.push_token IS NOT NULL
         AND r.chegada_declarada_em IS NULL
         AND r.chegada_confirmada_em IS NULL
         AND COALESCE(r.chegada_prevista_em, r.expira_em) BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
+      RETURNING r.id, r.titulo, u.push_token
     `)
 
     if (cincoMin.rows.length > 0) {
-      const ids = cincoMin.rows.map(r => r.id)
-      await pool.query(`UPDATE reparos SET notif_5min_enviada = true WHERE id = ANY($1)`, [ids])
-
       for (const reparo of cincoMin.rows) {
         await enviarPushNotificacao(
           reparo.push_token,
@@ -768,7 +785,7 @@ const verificarCronometroReparos = async () => {
   } catch (err) {
     console.error('Erro ao verificar cronômetro de reparos:', err.message)
   }
-}
+})
 
 // Cronômetro de matches de obras — espelha verificarCronometroReparos com as colunas reais de obra.
 // Prazo pós-match: COALESCE(chegada_prevista_em, expira_em) — a janela prometida pelo pintor
@@ -777,26 +794,25 @@ const verificarCronometroReparos = async () => {
 // (b) Quando o prazo zera: devolve a obra ao feed e limpa o match, reiniciando a janela
 //     PRÉ-match (horas_para_expirar) para a próxima rodada de candidatos.
 // Chegada declarada ou confirmada congela os dois ramos (mesma regra do cron de reparos).
-const verificarCronometroObras = async () => {
+const verificarCronometroObras = semSobreposicao('verificarCronometroObras', async () => {
   try {
-    // (a) 5 minutos restantes → notifica o dono (uma vez por match)
+    // (a) 5 minutos restantes → notifica o dono (uma vez por match).
+    // CLAIM atômico (A7) — ver o comentário no cron de reparos: o UPDATE decide, RETURNING avisa.
     const cincoMin = await pool.query(`
-      SELECT o.id, o.titulo, u.push_token
-      FROM obras o
-      JOIN usuarios u ON o.criado_por = u.id
-      WHERE o.status = 'aberta'
+      UPDATE obras o SET notif_5min_enviada = true
+      FROM usuarios u
+      WHERE u.id = o.criado_por
+        AND o.status = 'aberta'
         AND o.match_usuario_id IS NOT NULL
         AND o.notif_5min_enviada = false
         AND u.push_token IS NOT NULL
         AND o.chegada_declarada_em IS NULL
         AND o.chegada_confirmada_em IS NULL
         AND COALESCE(o.chegada_prevista_em, o.expira_em) BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
+      RETURNING o.id, o.titulo, u.push_token
     `)
 
     if (cincoMin.rows.length > 0) {
-      const ids = cincoMin.rows.map(o => o.id)
-      await pool.query(`UPDATE obras SET notif_5min_enviada = true WHERE id = ANY($1)`, [ids])
-
       for (const obra of cincoMin.rows) {
         await enviarPushNotificacao(
           obra.push_token,
@@ -902,7 +918,7 @@ const verificarCronometroObras = async () => {
   } catch (err) {
     console.error('Erro ao verificar cronômetro de obras:', err.message)
   }
-}
+})
 
 // Encerramento assimétrico: fecha sozinho a solicitação do profissional que o dono não
 // confirmou no prazo. Sem isto um dono silencioso deixaria a demanda pendente para sempre.
