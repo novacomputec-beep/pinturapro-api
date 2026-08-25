@@ -333,15 +333,20 @@ const verificarObrasExpirando = async () => {
   }
 }
 
-const verificarObrasComBaixoEngajamento = async () => {
+const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaixoEngajamento', async () => {
   try {
     console.log('Verificando obras com baixo engajamento...')
 
+    // CLAIM atômico (A7, mesmo desenho do aviso de 5 min): o próprio UPDATE grava
+    // alerta_enviado_em e devolve, via RETURNING, só as linhas que ELE reivindicou. O push sai
+    // apenas para essas. Antes era SELECT → UPDATE WHERE id = ANY → push para a lista do
+    // SELECT: duas réplicas (ou dois tiques sobrepostos) avisavam o mesmo dono duas vezes.
+    // Cadência de 24h (D86) preservada no predicado.
     const obras = await pool.query(`
-      SELECT o.id, o.titulo, o.total_visitas, u.push_token
-      FROM obras o
-      JOIN usuarios u ON o.criado_por = u.id
-      WHERE o.status = 'aberta'
+      UPDATE obras o SET alerta_enviado_em = NOW()
+      FROM usuarios u
+      WHERE u.id = o.criado_por
+        AND o.status = 'aberta'
         AND o.status_aprovacao = 'aprovada'
         AND o.match_usuario_id IS NULL
         AND o.total_visitas >= 10
@@ -353,12 +358,10 @@ const verificarObrasComBaixoEngajamento = async () => {
           WHERE c.obra_id = o.id AND c.status IS DISTINCT FROM 'recusado'
         )
         AND u.push_token IS NOT NULL
+      RETURNING o.id, o.titulo, o.total_visitas, u.push_token
     `)
 
     if (obras.rows.length > 0) {
-      const ids = obras.rows.map(o => o.id)
-      await pool.query(`UPDATE obras SET alerta_enviado_em = NOW() WHERE id = ANY($1)`, [ids])
-
       // Envio individual aqui pois a mensagem inclui total_visitas específico de cada obra
       for (const obra of obras.rows) {
         await enviarPushNotificacao(
@@ -370,11 +373,12 @@ const verificarObrasComBaixoEngajamento = async () => {
       }
     }
 
+    // Mesmo claim atômico do lado obra (ver acima).
     const reparos = await pool.query(`
-      SELECT r.id, r.titulo, r.total_visitas, u.push_token
-      FROM reparos r
-      JOIN usuarios u ON r.criado_por = u.id
-      WHERE r.status = 'aberta'
+      UPDATE reparos r SET alerta_enviado_em = NOW()
+      FROM usuarios u
+      WHERE u.id = r.criado_por
+        AND r.status = 'aberta'
         AND r.status_aprovacao = 'aprovada'
         AND r.match_usuario_id IS NULL
         AND r.total_visitas >= 10
@@ -390,12 +394,10 @@ const verificarObrasComBaixoEngajamento = async () => {
           WHERE ir.reparo_id = r.id AND ir.status IS DISTINCT FROM 'recusado'
         )
         AND u.push_token IS NOT NULL
+      RETURNING r.id, r.titulo, r.total_visitas, u.push_token
     `)
 
     if (reparos.rows.length > 0) {
-      const ids = reparos.rows.map(r => r.id)
-      await pool.query(`UPDATE reparos SET alerta_enviado_em = NOW() WHERE id = ANY($1)`, [ids])
-
       for (const reparo of reparos.rows) {
         await enviarPushNotificacao(
           reparo.push_token,
@@ -410,7 +412,7 @@ const verificarObrasComBaixoEngajamento = async () => {
   } catch (err) {
     console.error('Erro ao verificar engajamento:', err)
   }
-}
+})
 
 // Marcos de expiração PROPORCIONAIS à faixa de prazo da demanda (ver src/utils/faixasPrazo.js).
 // Alerta o dono de uma demanda SEM match e SEM interessados em 3 marcos cujos offsets VARIAM por
@@ -1031,6 +1033,7 @@ const autoEncerrarPendentes = async () => {
 }
 
 module.exports = {
+  semSobreposicao,
   enviarPushNotificacao,
   enviarBoasVindas,
   notificarPintoresSobreNovaObra,
