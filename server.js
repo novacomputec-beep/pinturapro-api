@@ -5,9 +5,9 @@ const helmet = require('helmet')
 const rateLimit = require('express-rate-limit')
 const rotasApp = require('./src/routes')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
-const { deletarDoCloudinary } = require('./src/services/uploadService')
+const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
 const { limparTentativasAntigas } = require('./src/utils/tentativasAuth')
 const { MARCA } = require('./src/utils/marca')
@@ -297,12 +297,41 @@ const verificarPrestadoresProximos = async () => {
   }
 }
 
-const deletarMidiasAntigas = async () => {
+// Lote por rodada dos dois braços de demanda MORTA (A9 da auditoria externa) — o mesmo 200 da
+// fila de órfãs: custo por item é o mesmo (uma chamada ao Cloudinary, sequencial), a cadência
+// é diária e o job já tolera sobra. Sem cursor: a linha some da tabela quando o Cloudinary
+// confirma, então "o próximo lote" é o que sobrou. O que NÃO some é o que falha — por isso
+// URL sem public_id extraível é tratada como terminal (ver abaixo), senão pinaria a cabeça do
+// lote para sempre; falha transitória (rede/API) fica para a rodada seguinte, como sempre foi.
+const LOTE_MIDIAS_ANTIGAS = 200
+
+// Apaga no Cloudinary as mídias de um lote e devolve os ids das linhas que podem sair da
+// tabela: confirmadas ('ok' ou 'not found' no helper) OU cuja URL não tem public_id — para
+// essas não há nada em Cloudinary que a gente saiba apagar, e manter a linha só faria o
+// mesmo lote ser relido todo dia sem nunca avançar.
+const apagarLoteNoCloudinary = async (linhas, rotulo) => {
+  const removiveis = []
+  let terminais = 0
+  for (const m of linhas) {
+    if (!extrairPublicId(m.url)) { removiveis.push(m.midia_id); terminais++; continue }
+    const sucesso = await deletarDoCloudinary(m.url, m.tipo)
+    if (sucesso) removiveis.push(m.midia_id)
+  }
+  if (terminais > 0) console.log(`[MidiasAntigas] ${rotulo}: ${terminais} linha(s) sem public_id extraível descartada(s) sem chamada externa`)
+  return removiveis
+}
+
+// Sem claim antes da chamada externa, de propósito: não há coluna de reserva em midias/
+// midias_reparos, e um advisory lock seguraria uma sessão do banco durante minutos de chamadas
+// lentas ao Cloudinary. Rodada duplicada (outra réplica) é desperdício, não dano — apagar o
+// que já foi apagado devolve 'not found', que o helper trata como sucesso. A sobreposição no
+// MESMO processo (intervalo diário + aquecimento do boot) é fechada por semSobreposicao.
+const deletarMidiasAntigas = semSobreposicao('deletarMidiasAntigas', async () => {
   try {
     // Reparos MORTOS (encerrados ou cancelados) há mais de 7 dias com mídias ainda não
     // removidas. 'cancelada' entra junto porque demanda cancelada retém mídia igual à
     // encerrada — só 'encerrada' deixava a de recusado/cancelado no Cloudinary para sempre.
-    // Janela de 7 dias inalterada.
+    // Janela de 7 dias inalterada. ORDER BY determinístico + LIMIT: os mais antigos primeiro.
     const reparosAntigos = await pool.query(`
       SELECT r.id, mr.id as midia_id, mr.url, mr.tipo
       FROM reparos r
@@ -310,20 +339,18 @@ const deletarMidiasAntigas = async () => {
       WHERE r.status IN ('encerrada', 'cancelada')
         AND r.encerrado_em IS NOT NULL
         AND r.encerrado_em < NOW() - INTERVAL '7 days'
-    `)
+      ORDER BY r.encerrado_em, mr.id
+      LIMIT $1
+    `, [LOTE_MIDIAS_ANTIGAS])
     // As chamadas ao Cloudinary seguem UMA POR MÍDIA — é trabalho de rede por arquivo, não
     // há o que agrupar. O que sai do laço é só o DELETE: junta os ids que de fato saíram do
     // Cloudinary e apaga tudo num statement, em vez de um DELETE por mídia.
-    const removidosReparos = []
-    for (const m of reparosAntigos.rows) {
-      const sucesso = await deletarDoCloudinary(m.url, m.tipo)
-      if (sucesso) removidosReparos.push(m.midia_id)
-    }
+    const removidosReparos = await apagarLoteNoCloudinary(reparosAntigos.rows, 'reparos')
     if (removidosReparos.length > 0) {
       await pool.query(`DELETE FROM midias_reparos WHERE id = ANY($1::uuid[])`, [removidosReparos])
     }
     if (reparosAntigos.rows.length > 0) {
-      console.log(`[MidiasAntigas] ${reparosAntigos.rows.length} mídias de reparos processadas, ${removidosReparos.length} removida(s)`)
+      console.log(`[MidiasAntigas] ${reparosAntigos.rows.length} mídias de reparos processadas, ${removidosReparos.length} removida(s)${reparosAntigos.rows.length === LOTE_MIDIAS_ANTIGAS ? ' (lote cheio — sobra fica para a próxima rodada)' : ''}`)
     }
 
     // Obras MORTAS (encerradas ou canceladas) há mais de 7 dias — mesmo racional do lado reparo.
@@ -334,17 +361,15 @@ const deletarMidiasAntigas = async () => {
       WHERE o.status IN ('encerrada', 'cancelada')
         AND o.encerrado_em IS NOT NULL
         AND o.encerrado_em < NOW() - INTERVAL '7 days'
-    `)
-    const removidosObras = []
-    for (const m of obrasAntigas.rows) {
-      const sucesso = await deletarDoCloudinary(m.url, m.tipo)
-      if (sucesso) removidosObras.push(m.midia_id)
-    }
+      ORDER BY o.encerrado_em, m.id
+      LIMIT $1
+    `, [LOTE_MIDIAS_ANTIGAS])
+    const removidosObras = await apagarLoteNoCloudinary(obrasAntigas.rows, 'obras')
     if (removidosObras.length > 0) {
       await pool.query(`DELETE FROM midias WHERE id = ANY($1::uuid[])`, [removidosObras])
     }
     if (obrasAntigas.rows.length > 0) {
-      console.log(`[MidiasAntigas] ${obrasAntigas.rows.length} mídias de obras processadas, ${removidosObras.length} removida(s)`)
+      console.log(`[MidiasAntigas] ${obrasAntigas.rows.length} mídias de obras processadas, ${removidosObras.length} removida(s)${obrasAntigas.rows.length === LOTE_MIDIAS_ANTIGAS ? ' (lote cheio — sobra fica para a próxima rodada)' : ''}`)
     }
 
     // Terceiro braço: fila de ÓRFÃS — mídias cuja linha já sumiu (exclusão de conta, limpezas
@@ -370,7 +395,7 @@ const deletarMidiasAntigas = async () => {
   } catch (err) {
     console.error('[MidiasAntigas] Erro:', err.message)
   }
-}
+})
 
 const expirarAssinaturasVencidas = async () => {
   try {
