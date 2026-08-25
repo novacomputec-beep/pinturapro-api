@@ -244,11 +244,14 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     // Mesma dobra de cidade+uf da obra. Alem disso ganha o JOIN em assinaturas com
     // status='ativa', que faltava SO aqui: o aviso de trabalho novo ia para quem esta com a
     // assinatura vencida e nem consegue demonstrar interesse depois de abrir o app.
+    // tipo_prestador = 'reparador' ESTRITO (D87), o mesmo predicado de exigirReparador: o
+    // "IS DISTINCT FROM 'pintor'" antigo incluía NULL/legado, que recebia o push e caía em
+    // 403 TIER_INCORRETO ao tocar. Paridade com o broadcast de obra (= 'pintor').
     const prestadores = await pool.query(
       `SELECT u.push_token
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
-       WHERE u.role = 'prestador' AND u.tipo_prestador IS DISTINCT FROM 'pintor'
+       WHERE u.role = 'prestador' AND u.tipo_prestador = 'reparador'
          AND a.status = 'ativa'
          AND u.push_token IS NOT NULL
          AND NULLIF(btrim(u.cidade), '') IS NOT NULL
