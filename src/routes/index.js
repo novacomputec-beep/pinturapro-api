@@ -3859,6 +3859,12 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
          UPDATE reparos SET
            match_feito_em = NULL,
            match_usuario_id = NULL,
+           -- pedido_tempo_* zerados como em POST /obras/:id/expirar-match e no cron de reparos
+           -- (D75): sem isto o serviço voltava ao feed com um pedido de tempo do prestador
+           -- anterior, e o próximo match nascia "aguardando aprovação" de alguém que já saiu.
+           pedido_tempo_status = NULL,
+           pedido_tempo_motivo = NULL,
+           pedido_tempo_minutos = NULL,
            chegada_janela = NULL,
            chegada_prevista_em = NULL,
            chegada_declarada_por = NULL,
@@ -4372,25 +4378,35 @@ router.post('/reparos/:id/responder-tempo', autenticar, async (req, res) => {
       // chegada_* zeradas — incluindo chegada_confirmada_em, pelo mesmo motivo explicado em
       // POST /obras/:id/responder-tempo (este caminho não tem o guard que os outros têm).
       await pool.query(
-        `UPDATE reparos SET
-          match_feito_em = NULL,
-          match_usuario_id = NULL,
-          pedido_tempo_status = NULL,
-          pedido_tempo_motivo = NULL,
-          pedido_tempo_minutos = NULL,
-          chegada_janela = NULL,
-          chegada_prevista_em = NULL,
-          chegada_declarada_por = NULL,
-          chegada_declarada_em = NULL,
-          chegada_pendente_janela = NULL,
-          chegada_pendente_em = NULL,
-          chegada_recusada_em = NULL,
-          chegada_confirmada_em = NULL,
-          prestadores_bloqueados = CASE
-            WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
-            THEN prestadores_bloqueados
-            ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
-         WHERE id = $1`,
+        `WITH desfeito AS (
+           UPDATE reparos SET
+            match_feito_em = NULL,
+            match_usuario_id = NULL,
+            pedido_tempo_status = NULL,
+            pedido_tempo_motivo = NULL,
+            pedido_tempo_minutos = NULL,
+            chegada_janela = NULL,
+            chegada_prevista_em = NULL,
+            chegada_declarada_por = NULL,
+            chegada_declarada_em = NULL,
+            chegada_pendente_janela = NULL,
+            chegada_pendente_em = NULL,
+            chegada_recusada_em = NULL,
+            chegada_confirmada_em = NULL,
+            prestadores_bloqueados = CASE
+              WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
+              THEN prestadores_bloqueados
+              ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
+           WHERE id = $1
+           RETURNING id
+         )
+         -- Interesse vencedor expira junto (D71 — paridade com POST /obras/:id/responder-tempo e
+         -- com os dois expirar-match): recusar o tempo extra é un-match como os outros, e sem
+         -- isto o serviço voltava ao feed com interesse_reparos_aceito_unico_idx ainda ocupado —
+         -- nenhum aceite novo passava (guard jaAceito → 409) e o próprio prestador bloqueado
+         -- ainda refazia o match sozinho por POST /reparos/:id/match, que só olha o 'aceito'.
+         UPDATE interesse_reparos SET status = 'expirado'
+          WHERE reparo_id IN (SELECT id FROM desfeito) AND usuario_id = $2::uuid AND status = 'aceito'`,
         [req.params.id, r.match_usuario_id]
       )
 
