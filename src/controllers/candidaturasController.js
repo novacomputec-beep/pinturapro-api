@@ -178,8 +178,12 @@ const aprovar = async (req, res) => {
     // O aceite já casa o profissional com a obra. usuario_id/obra_id saem do RETURNING *
     // acima, então não é preciso alargar o SELECT de `existe`. Guard match_usuario_id IS
     // NULL: idempotente em retry e impede que um segundo aceite roube um match existente.
+    // chegada_* zerada no mesmo UPDATE (A1/A2 da auditoria externa): um match novo nasce sem
+    // rastro de chegada de rodada anterior — mesma lista de POST /obras/:id/candidatura/:cid/responder.
     await pool.query(
-      `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW()
+      `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW(),
+              chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
+              chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL, chegada_confirmada_em = NULL
        WHERE id = $2 AND match_usuario_id IS NULL`,
       [result.rows[0].usuario_id, result.rows[0].obra_id]
     )

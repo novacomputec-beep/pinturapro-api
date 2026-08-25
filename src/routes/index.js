@@ -27,6 +27,15 @@ const SQL_ZONA_DA_OBRA = sqlZonaSegura('obras.prazo_timezone')
 // e não guardava a zona do dono; agora grava prazo_timezone no create e lê daqui em todo
 // ponto que reconstrói o fim do dia (aprovação, estender, cron).
 const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
+// Grupo chegada_* zerado NO MESMO UPDATE que cria um match (A1/A2 da auditoria externa): o
+// match novo nasce sem rastro de chegada de uma rodada anterior — uma declaração/confirmação
+// órfã congelaria o cronômetro do profissional novo (os crons pulam linha com
+// chegada_declarada_em) e o write-once de /chegada-prevista o travaria. Em vez de recusar o
+// aceite quando há lixo, limpa: no instante do aceite match_usuario_id É NULL, então qualquer
+// chegada_* presente pertence a ninguém por definição, e recusar deixaria o dono sem saída
+// (expirar-match exige match). Mesma lista dos un-matches (expirar-match, responder-tempo).
+const SQL_LIMPAR_CHEGADA = `chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
+              chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL, chegada_confirmada_em = NULL`
 const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
@@ -2428,7 +2437,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
       // O aceite já casa o profissional com a obra. Guard match_usuario_id IS NULL: torna o
       // write idempotente em retry e impede que um segundo aceite roube um match existente.
       await pool.query(
-        `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW()
+        `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW(), ${SQL_LIMPAR_CHEGADA}
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [cand.usuario_id, obra_id]
       )
@@ -2525,7 +2534,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
       await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
       // O aceite já casa o profissional com a obra (ver POST .../responder).
       await pool.query(
-        `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW()
+        `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW(), ${SQL_LIMPAR_CHEGADA}
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [req.usuario.id, obra_id]
       )
@@ -2578,7 +2587,8 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
     )
     if (candidaturaAceita.rows.length === 0) return res.status(403).json({ erro: 'Sua candidatura ainda não foi aceita para esta obra.' })
     await pool.query(
-      `UPDATE obras SET match_feito_em = NOW(), match_usuario_id = $1 WHERE id = $2`,
+      `UPDATE obras SET match_feito_em = NOW(), match_usuario_id = $1, ${SQL_LIMPAR_CHEGADA}
+       WHERE id = $2 AND match_usuario_id IS NULL`,
       [req.usuario.id, req.params.id]
     )
     const dono = await pool.query(
@@ -3656,7 +3666,8 @@ router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) 
     )
     if (interesseAceito.rows.length === 0) return res.status(403).json({ erro: 'Sua proposta ainda não foi aceita para este serviço.' })
     await pool.query(
-      `UPDATE reparos SET match_feito_em = NOW(), match_usuario_id = $1 WHERE id = $2`,
+      `UPDATE reparos SET match_feito_em = NOW(), match_usuario_id = $1, ${SQL_LIMPAR_CHEGADA}
+       WHERE id = $2 AND match_usuario_id IS NULL`,
       [req.usuario.id, req.params.id]
     )
     const dono = await pool.query(
@@ -3738,7 +3749,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
       // O aceite já casa o prestador com o reparo. Guard match_usuario_id IS NULL: torna o
       // write idempotente em retry e impede que um segundo aceite roube um match existente.
       await pool.query(
-        `UPDATE reparos SET match_usuario_id = $1, match_feito_em = NOW()
+        `UPDATE reparos SET match_usuario_id = $1, match_feito_em = NOW(), ${SQL_LIMPAR_CHEGADA}
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [int.usuario_id, reparo_id]
       )
@@ -3839,7 +3850,7 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
       await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
       // O aceite já casa o prestador com o reparo (ver POST .../responder).
       await pool.query(
-        `UPDATE reparos SET match_usuario_id = $1, match_feito_em = NOW()
+        `UPDATE reparos SET match_usuario_id = $1, match_feito_em = NOW(), ${SQL_LIMPAR_CHEGADA}
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [req.usuario.id, reparo_id]
       )
@@ -4215,6 +4226,14 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
     //   profissional → só se o DONO já tinha declarado antes. As expressões do SET leem a
     //                  linha ANTIGA, então `chegada_declarada_por = criado_por` aqui testa
     //                  quem declarou ANTES desta chamada, não o valor que estamos gravando.
+    //
+    // Autorização e transição no MESMO UPDATE (A1/A2 da auditoria externa): a chegada é etapa
+    // posterior ao match, então a linha precisa estar 'aberta', COM profissional casado, e o
+    // chamador precisa ser o dono OU o profissional do match — reavaliado na linha VIVA, não
+    // no SELECT de cima. Sem isto o dono declarava chegada numa demanda vazia (blindando o
+    // match futuro: os crons pulam linha com chegada_declarada_em) e, na corrida com o cron,
+    // o UPDATE tardio gravava chegada numa demanda já devolvida ao feed. rowCount 0 nunca é
+    // sucesso silencioso: o re-SELECT abaixo escolhe 404/403/409.
     const upd = await pool.query(
       `UPDATE ${tabela} SET
          chegada_declarada_por = COALESCE(chegada_declarada_por, $2::uuid),
@@ -4226,9 +4245,27 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
            ELSE NULL
          END
        WHERE id = $1
+         AND status = 'aberta'
+         AND match_usuario_id IS NOT NULL
+         AND (criado_por = $2::uuid OR match_usuario_id = $2::uuid)
        RETURNING chegada_declarada_por, chegada_declarada_em, chegada_confirmada_em`,
       [req.params.id, req.usuario.id, ehDono]
     )
+    if (upd.rowCount === 0) {
+      const vivo = await pool.query(
+        `SELECT criado_por, match_usuario_id, status FROM ${tabela} WHERE id = $1`, [req.params.id]
+      )
+      if (vivo.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
+      const v = vivo.rows[0]
+      if (v.criado_por !== req.usuario.id && v.match_usuario_id !== req.usuario.id) {
+        return res.status(403).json({ erro: 'Apenas o dono ou o profissional do match podem declarar a chegada' })
+      }
+      return res.status(409).json({
+        erro: v.status !== 'aberta'
+          ? 'A demanda não está mais aberta — a chegada não pode ser declarada.'
+          : 'Não há profissional a caminho — a chegada só pode ser declarada depois do match.'
+      })
+    }
     // Transições NULL → preenchido, comparando o estado lido antes com o RETURNING. Só a
     // transição notifica: rechamar o endpoint não reenvia push, porque na segunda vez o campo
     // já estava preenchido ANTES.
