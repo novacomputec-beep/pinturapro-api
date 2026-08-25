@@ -3338,7 +3338,10 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
     let query = `
       SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
              r.latitude, r.longitude, r.coordenadas_origem,
-             r.status, r.status_aprovacao, r.expira_em, r.criado_em, r.criado_por,
+             -- prazo_atendimento_horas (D81): o card do feed no app lê exatamente este campo
+             -- para a faixa de urgência ("🔴 URGENTE / Atender em até Nh") e devolve null
+             -- sem ele — o SELECT nunca o incluiu, então a faixa nunca aparecia.
+             r.status, r.status_aprovacao, r.expira_em, r.prazo_atendimento_horas, r.criado_em, r.criado_por,
              r.match_feito_em, r.match_usuario_id, r.pedido_tempo_status,
              r.prestadores_bloqueados, r.client_request_id,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
@@ -5759,7 +5762,7 @@ router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamento
 // ============================================================
 router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
   try {
-    const [obras, assinaturas, candidaturas, obrasAprovacao, reparosAprovacao, reparos, mensagensPendentes] = await Promise.all([
+    const [obras, assinaturas, candidaturas, interesses, obrasAprovacao, reparosAprovacao, reparos, mensagensPendentes] = await Promise.all([
       pool.query(`SELECT COUNT(*) FROM obras WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()`),
       // Métricas de assinaturas em uma única passagem:
       // - ativos: todas as assinaturas ativas
@@ -5775,6 +5778,9 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
         FROM assinaturas
       `),
       pool.query(`SELECT COUNT(*) FROM candidaturas WHERE status = 'pendente'`),
+      // D84: propostas pendentes do lado reparo nunca entravam no painel — só candidaturas
+      // (obra) eram contadas, então o admin via 0 com interesses esperando resposta.
+      pool.query(`SELECT COUNT(*) FROM interesse_reparos WHERE status = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM obras WHERE enviada_por_dono = true AND status_aprovacao = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM reparos WHERE status_aprovacao = 'pendente'`),
       pool.query(`SELECT COUNT(*) FROM reparos WHERE status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()`),
@@ -5787,7 +5793,12 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
       assinantes_ativos: parseInt(assinRow.ativos),
       assinantes_gratuitos: parseInt(assinRow.gratuitos),
       receita_mensal: parseFloat(assinRow.receita),
+      // candidaturas_pendentes mantém o significado antigo (só obra) para não mudar um campo
+      // que já existia; interesses_pendentes é o lado reparo e propostas_pendentes é a soma
+      // dos dois — o painel escolhe se mostra um número ou dois.
       candidaturas_pendentes: parseInt(candidaturas.rows[0].count),
+      interesses_pendentes: parseInt(interesses.rows[0].count),
+      propostas_pendentes: parseInt(candidaturas.rows[0].count) + parseInt(interesses.rows[0].count),
       obras_para_aprovar: parseInt(obrasAprovacao.rows[0].count),
       reparos_para_aprovar: parseInt(reparosAprovacao.rows[0].count),
       mensagens_pendentes: parseInt(mensagensPendentes.rows[0].count)
