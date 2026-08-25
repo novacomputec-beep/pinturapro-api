@@ -5,6 +5,8 @@ const { getFaixa, PRAZO_MODO_HOJE, sqlFimDoDia, SQL_FIM_DO_DIA_SP, sqlZonaSegura
 // pg_timezone_names NA HORA DO USO — zona NULL ou que deixou de existir recua para o padrão em
 // vez de derrubar o UPDATE do lote inteiro. Só o lado OBRA tem zona — reparo não tem "Hoje".
 const SQL_ZONA_DA_OBRA = sqlZonaSegura('obras.prazo_timezone')
+// D78: o reparo também guarda a zona do dono (reparos.prazo_timezone) para a faixa "Hoje".
+const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
 const { MARCA } = require('../utils/marca')
 const { normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 // Cidade dobrada dos DOIS lados com a MESMA regra (ver utils/localidade): a do profissional
@@ -378,7 +380,11 @@ const verificarObrasComBaixoEngajamento = async () => {
         AND r.total_visitas >= 10
         AND r.criado_em < NOW() - INTERVAL '1 day'
         AND r.expira_em > NOW()
-        AND (r.alerta_enviado_em IS NULL OR r.alerta_enviado_em < NOW() - INTERVAL '8 hours')
+        -- 24h como na obra (D86): o job roda a cada 8h, e com '8 hours' o dono de reparo era
+        -- cutucado até 3x por dia sobre a mesma demanda. O gate criado_em < NOW() - 1 day acima
+        -- já garante que só reparos com vida de dias chegam aqui, então a cadência de obra
+        -- (uma vez por dia) é a certa para os dois lados.
+        AND (r.alerta_enviado_em IS NULL OR r.alerta_enviado_em < NOW() - INTERVAL '24 hours')
         AND NOT EXISTS (
           SELECT 1 FROM interesse_reparos ir
           WHERE ir.reparo_id = r.id AND ir.status IS DISTINCT FROM 'recusado'
@@ -718,7 +724,8 @@ const verificarCronometroReparos = async () => {
             -- (index.js: horasExpiracao = prazo || 720) e o que verificarMarcosExpiracao já
             -- assume para reparo com prazo NULL — a segunda vida da linha ganha a mesma janela
             -- da primeira, e os dois crons leem o mesmo número para a mesma linha.
-            expira_em = CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${SQL_FIM_DO_DIA_SP}
+            -- O dia é o do DONO (reparos.prazo_timezone, D78), como no cron de obras — não o de SP.
+            expira_em = CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia(SQL_ZONA_DO_REPARO)}
                              ELSE NOW() + (COALESCE(prazo_atendimento_horas, 720) * INTERVAL '1 hour') END
           WHERE id = ANY($1::uuid[]) AND ${PRED_EXPIRADOS_REPAROS}
           RETURNING id
