@@ -15,7 +15,8 @@ const { pool } = require('../utils/supabase')
 const { registrarTentativa } = require('../utils/tentativasAuth')
 const { transporter } = require('./authController')
 const { MARCA } = require('../utils/marca')
-const { criarCheckoutPagBank, ErroCheckout, precoAssinaturaCentavos } = require('./pagamentoController')
+const pagamento = require('./pagamentoController')
+const { criarCheckoutPagBank, ErroCheckout, precoAssinaturaCentavos } = pagamento
 
 const SITE_URL = 'https://protudo.app.br'
 // Validade do link — ÚNICA definição: o INSERT (expira_em), o texto do e-mail e, por
@@ -201,9 +202,11 @@ const criarCheckout = async (req, res) => {
     //     plano na linha e cai na criação de uma ordem nova. "Não paga" = usado_em IS NULL
     //     (o único escritor de usado_em é o webhook, no PAID); o UPDATE repete order_id e
     //     plano lidos, então uma corrida com o webhook ou com outra aba não limpa uma linha
-    //     que já mudou. A ordem antiga NÃO é cancelada aqui: morre sozinha no
-    //     expiration_date (= expira_em do link); enquanto viver, se for paga, o webhook
-    //     valida plano/valor DAQUELA ordem e fecha o link do usuário.
+    //     que já mudou. SÓ DEPOIS do UPDATE ter casado a linha, a ordem antiga é inativada
+    //     no PagBank (POST /checkouts/{id}/inactivate) — fire-and-forget: falha vira log e a
+    //     troca segue; se a inativação não pegar, a ordem morre sozinha no expiration_date
+    //     (= expira_em do link) e, se for paga antes disso, o webhook valida plano/valor
+    //     DAQUELA ordem e fecha o link do usuário.
     if (l.order_id && l.order_id !== MARCADOR_CRIANDO && l.init_point) {
       if (l.plano === planoNorm) return res.json({ init_point: l.init_point })
       const troca = await pool.query(
@@ -221,6 +224,9 @@ const criarCheckout = async (req, res) => {
         return res.status(410).json(GENERICO_INVALIDO)
       }
       console.log(`[LinkAssinatura] troca de plano ${l.plano} → ${planoNorm} | link=${l.id} | ordem anterior abandonada=${l.order_id}`)
+      // Linha já atualizada (rowCount = 1): a ordem antiga não tem mais dono. Inativa no
+      // PagBank sem esperar nem depender do resultado — inativarCheckoutPagBank nunca lança.
+      pagamento.inativarCheckoutPagBank(l.order_id).catch(() => {})
     }
     // Reserva ATÔMICA antes da chamada externa: só quem casa order_id IS NULL cria a ordem.
     const reserva = await pool.query(

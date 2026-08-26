@@ -201,6 +201,39 @@ const criarCheckoutPagBank = async ({ usuarioId, role, email, plano = 'mensal', 
   return { init_point: linkPagamento, order_id: data.id, status: data.status }
 }
 
+// Inativa um checkout PagBank que deixou de ter dono (troca de plano em ordem NÃO paga):
+// POST /checkouts/{id}/inactivate, mesmo Bearer e x-api-version do POST /checkouts.
+// NUNCA lança e NUNCA bloqueia: sucesso/falha vira log e devolve true/false. Um PagBank
+// fora do ar não pode impedir o cliente de pagar — a ordem nova já existe/vai existir de
+// qualquer jeito e a antiga morre sozinha no expiration_date.
+// NÃO verificado contra o PagBank real (sem credenciais vivas): endpoint e cabeçalhos
+// seguem a documentação pública da API Checkout v4 (mesmo host/auth do POST /checkouts).
+const INATIVAR_CHECKOUT_TIMEOUT_MS = 10000
+const inativarCheckoutPagBank = async (checkoutId) => {
+  if (!checkoutId) return false
+  try {
+    const response = await fetch(`${PAGBANK_URL}/checkouts/${encodeURIComponent(checkoutId)}/inactivate`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${PAGBANK_TOKEN}`,
+        'Content-Type': 'application/json',
+        'x-api-version': '4.0'
+      },
+      signal: AbortSignal.timeout(INATIVAR_CHECKOUT_TIMEOUT_MS)
+    })
+    if (!response.ok) {
+      const corpo = await response.text().catch(() => '')
+      console.error(`[pagamento] falha ao inativar checkout ${checkoutId} no PagBank: HTTP ${response.status} ${corpo.slice(0, 300)}`)
+      return false
+    }
+    console.log(`[pagamento] checkout ${checkoutId} inativado no PagBank`)
+    return true
+  } catch (err) {
+    console.error(`[pagamento] falha ao inativar checkout ${checkoutId} no PagBank: ${err.message}`)
+    return false
+  }
+}
+
 // POST /pagamentos/criar-assinatura (JWT) — fino sobre o núcleo; respostas idênticas às de antes.
 const criarAssinatura = async (req, res) => {
   try {
@@ -465,4 +498,4 @@ const listarAssinantes = async (req, res) => {
   }
 }
 
-module.exports = { criarAssinatura, criarCheckoutPagBank, ErroCheckout, precoAssinaturaCentavos, sucesso, webhookPagbank, darAcessoGratuito, listarAssinantes }
+module.exports = { criarAssinatura, criarCheckoutPagBank, inativarCheckoutPagBank, ErroCheckout, precoAssinaturaCentavos, sucesso, webhookPagbank, darAcessoGratuito, listarAssinantes }
