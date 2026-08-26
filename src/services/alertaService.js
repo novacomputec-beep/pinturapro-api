@@ -75,7 +75,7 @@ const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}) => {
     const tickets = await expo.sendPushNotificationsAsync([{
       to: pushToken,
       sound: 'default',
-      channelId: 'default_v2',
+      channelId: 'default_v3',
       title: titulo,
       body: corpo,
       data,
@@ -110,7 +110,7 @@ const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}
     .map(d => ({
       to: d.push_token,
       sound: 'default',
-      channelId: 'default_v2',
+      channelId: 'default_v3',
       title: titulo,
       body: corpo,
       data,
