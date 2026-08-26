@@ -18,7 +18,10 @@ const { MARCA } = require('../utils/marca')
 const { criarCheckoutPagBank, ErroCheckout, precoAssinaturaCentavos } = require('./pagamentoController')
 
 const SITE_URL = 'https://protudo.app.br'
-const VALIDADE_LINK_MINUTOS = 30
+// Validade do link — ÚNICA definição: o INSERT (expira_em), o texto do e-mail e, por
+// derivação de expira_em, o expiration_date do checkout PagBank saem daqui.
+const VALIDADE_LINK_HORAS = 24
+const VALIDADE_LINK_MINUTOS = VALIDADE_LINK_HORAS * 60
 const GENERICO_SOLICITAR = { mensagem: 'Se este e-mail estiver cadastrado como profissional, você receberá o link para assinar em breve.' }
 const GENERICO_INVALIDO = { erro: 'Link inválido ou expirado. Solicite um novo.' }
 // Mesmo hash fictício do reset: comparação sempre roda, com ou sem linha, para não vazar existência pelo tempo.
@@ -94,7 +97,7 @@ const solicitarLink = async (req, res) => {
             <p style="text-align: center; margin: 24px 0;">
               <a href="${link}" style="background: #0a0a0a; color: #E8833A; font-size: 18px; font-weight: bold; padding: 14px 28px; border-radius: 8px; text-decoration: none;">Assinar agora</a>
             </p>
-            <p style="color: #666; font-size: 13px;">Este link expira em ${VALIDADE_LINK_MINUTOS} minutos e só pode ser usado uma vez. Se você não pediu este e-mail, ignore-o.</p>
+            <p style="color: #666; font-size: 13px;">Este link vale por ${VALIDADE_LINK_HORAS} horas e só pode ser usado uma vez. Se você não pediu este e-mail, ignore-o.</p>
             <p><strong>Equipe ${MARCA}</strong></p>
           </div>
         </div>
@@ -148,7 +151,7 @@ const MARCADOR_CRIANDO = '__criando__'
 
 // POST /assinatura/criar-checkout — { token, plano }
 // O link NÃO é consumido aqui: usado_em só é gravado pelo webhook quando o pagamento da ordem
-// é confirmado. Enquanto o link vive (30 min) e não foi pago, chamar de novo devolve a MESMA
+// é confirmado. Enquanto o link vive (VALIDADE_LINK_HORAS) e não foi pago, chamar de novo devolve a MESMA
 // ordem (idempotente) — abandonar a página do PagBank não queima o link nem multiplica ordens.
 const criarCheckout = async (req, res) => {
   try {
@@ -180,7 +183,7 @@ const criarCheckout = async (req, res) => {
       // REUSO da lógica de POST /pagamentos/criar-assinatura (criarCheckoutPagBank): mesmos
       // guards de CPF/tier, mesmo reference_id "<usuario_id>|<plano>", mesmo webhook. Só o
       // redirect_url muda: volta para o site, não para o painel.
-      // expiraEm = expiração do LINK (não "30 min a partir de agora"): checkout e link morrem
+      // expiraEm = expiração do LINK (não "validade a partir de agora"): checkout e link morrem
       // no mesmo instante, então uma ordem abandonada nunca sobrevive ao link que a gerou.
       const resultado = await criarCheckoutPagBank({
         usuarioId: l.usuario_id, role: l.role, email: l.email, plano: planoNorm,
@@ -223,4 +226,4 @@ const limparLinksAssinaturaAntigos = async () => {
   }
 }
 
-module.exports = { solicitarLink, consultarLink, criarCheckout, limparLinksAssinaturaAntigos, parseToken, precosReais, VALIDADE_LINK_MINUTOS, SITE_URL, MARCADOR_CRIANDO, LINKS_PODA_DIAS }
+module.exports = { solicitarLink, consultarLink, criarCheckout, limparLinksAssinaturaAntigos, parseToken, precosReais, VALIDADE_LINK_MINUTOS, VALIDADE_LINK_HORAS, SITE_URL, MARCADOR_CRIANDO, LINKS_PODA_DIAS }
