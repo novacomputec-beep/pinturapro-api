@@ -140,6 +140,13 @@ const migracaoPronta = (async () => {
       criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`)
     await client.query(`CREATE INDEX IF NOT EXISTS links_assinatura_usuario_idx ON links_assinatura (usuario_id)`)
+    // O link sobrevive a um pagamento abandonado: a ordem PagBank criada a partir dele fica
+    // gravada (order_id + init_point + plano) e uma nova chamada devolve a MESMA ordem em vez
+    // de abrir outra; usado_em passa a ser gravado só quando o webhook confirma o pagamento.
+    await client.query(`ALTER TABLE links_assinatura ADD COLUMN IF NOT EXISTS order_id TEXT`)
+    await client.query(`ALTER TABLE links_assinatura ADD COLUMN IF NOT EXISTS init_point TEXT`)
+    await client.query(`ALTER TABLE links_assinatura ADD COLUMN IF NOT EXISTS plano TEXT`)
+    await client.query(`CREATE INDEX IF NOT EXISTS links_assinatura_order_idx ON links_assinatura (order_id) WHERE order_id IS NOT NULL`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_prestador VARCHAR(20)`)
     // Auditoria de aprovação: true = aprovado pelo job automático (Modo Auto ON) sem revisão
     // de idoneidade; false = aprovado/reprovado manualmente por admin; null = legado/não tocado.

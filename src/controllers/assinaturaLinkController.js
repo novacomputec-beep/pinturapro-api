@@ -115,7 +115,7 @@ const validarToken = async (token) => {
   const tentativa = await registrarTentativa('link_assinatura_token', p.id)
   if (tentativa.excedeu) return null
   const r = await pool.query(
-    `SELECT l.id, l.token_hash, l.expira_em, l.usado_em,
+    `SELECT l.id, l.token_hash, l.expira_em, l.usado_em, l.order_id, l.init_point, l.plano,
             u.id AS usuario_id, u.nome, u.email, u.role, u.tipo_prestador
        FROM links_assinatura l
        JOIN usuarios u ON u.id = l.usuario_id
@@ -142,22 +142,40 @@ const consultarLink = async (req, res) => {
   }
 }
 
+// Marcador de reserva: ocupa order_id enquanto a ordem está sendo criada no PagBank, para
+// duas requisições simultâneas (duas abas, duplo clique) não abrirem duas ordens.
+const MARCADOR_CRIANDO = '__criando__'
+
 // POST /assinatura/criar-checkout — { token, plano }
+// O link NÃO é consumido aqui: usado_em só é gravado pelo webhook quando o pagamento da ordem
+// é confirmado. Enquanto o link vive (30 min) e não foi pago, chamar de novo devolve a MESMA
+// ordem (idempotente) — abandonar a página do PagBank não queima o link nem multiplica ordens.
 const criarCheckout = async (req, res) => {
   try {
     const { token, plano } = req.body || {}
     const planoNorm = plano === 'anual' ? 'anual' : 'mensal'
     const l = await validarToken(token)
     if (!l) return res.status(410).json(GENERICO_INVALIDO)
-    // Consumo ATÔMICO: só uma requisição casa usado_em IS NULL — duas abas/cliques não abrem
-    // dois checkouts. Marca USADO antes da chamada externa, como pedido.
-    const claim = await pool.query(
-      `UPDATE links_assinatura SET usado_em = NOW()
-        WHERE id = $1 AND usado_em IS NULL AND expira_em > NOW()
+    // Já existe ordem para este link → mesmo init_point, sem tocar no PagBank. O plano da
+    // ordem é o que foi fixado na criação; um `plano` diferente no corpo não abre outra ordem.
+    if (l.order_id && l.order_id !== MARCADOR_CRIANDO && l.init_point) {
+      return res.json({ init_point: l.init_point })
+    }
+    // Reserva ATÔMICA antes da chamada externa: só quem casa order_id IS NULL cria a ordem.
+    const reserva = await pool.query(
+      `UPDATE links_assinatura SET order_id = $2
+        WHERE id = $1 AND order_id IS NULL AND usado_em IS NULL AND expira_em > NOW()
         RETURNING id`,
-      [l.id]
+      [l.id, MARCADOR_CRIANDO]
     )
-    if (claim.rowCount === 0) return res.status(410).json(GENERICO_INVALIDO)
+    if (reserva.rowCount === 0) {
+      // Outra requisição está criando (ou acabou de criar) a ordem: devolve a dela se já
+      // existe; senão pede para tentar de novo — nunca uma segunda ordem.
+      const atual = await pool.query(`SELECT init_point, expira_em, usado_em FROM links_assinatura WHERE id = $1`, [l.id])
+      const a = atual.rows[0]
+      if (a?.init_point && !a.usado_em && new Date(a.expira_em) > new Date()) return res.json({ init_point: a.init_point })
+      return res.status(409).json({ erro: 'Checkout em criação. Tente novamente em alguns segundos.' })
+    }
     try {
       // REUSO da lógica de POST /pagamentos/criar-assinatura (criarCheckoutPagBank): mesmos
       // guards de CPF/tier, mesmo reference_id "<usuario_id>|<plano>", mesmo webhook. Só o
@@ -166,11 +184,15 @@ const criarCheckout = async (req, res) => {
         usuarioId: l.usuario_id, role: l.role, email: l.email, plano: planoNorm,
         redirectUrl: `${SITE_URL}/assinar/obrigado`,
       })
+      await pool.query(
+        `UPDATE links_assinatura SET order_id = $2, init_point = $3, plano = $4 WHERE id = $1`,
+        [l.id, resultado.order_id || `sem-id:${l.id}`, resultado.init_point, planoNorm]
+      )
       res.json({ init_point: resultado.init_point })
     } catch (err) {
-      // O checkout NÃO nasceu (CPF inválido, tier sem preço, PagBank fora): devolve o link em
-      // vez de queimá-lo — a falha foi nossa ou do gateway, não do usuário.
-      await pool.query(`UPDATE links_assinatura SET usado_em = NULL WHERE id = $1`, [l.id]).catch(() => {})
+      // O checkout NÃO nasceu (CPF inválido, tier sem preço, PagBank fora): solta a reserva —
+      // a falha foi nossa ou do gateway, não do usuário; o link continua válido.
+      await pool.query(`UPDATE links_assinatura SET order_id = NULL WHERE id = $1 AND order_id = $2`, [l.id, MARCADOR_CRIANDO]).catch(() => {})
       if (err instanceof ErroCheckout) return res.status(err.status).json(err.corpo)
       throw err
     }
@@ -180,4 +202,4 @@ const criarCheckout = async (req, res) => {
   }
 }
 
-module.exports = { solicitarLink, consultarLink, criarCheckout, parseToken, precosReais, VALIDADE_LINK_MINUTOS, SITE_URL }
+module.exports = { solicitarLink, consultarLink, criarCheckout, parseToken, precosReais, VALIDADE_LINK_MINUTOS, SITE_URL, MARCADOR_CRIANDO }

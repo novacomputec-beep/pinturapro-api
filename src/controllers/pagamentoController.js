@@ -356,6 +356,25 @@ const webhookPagbank = async (req, res) => {
       await ativarAssinatura(usuarioId, plano)
       console.log(`Assinatura ativada via PagBank — usuário: ${usuarioId}, plano: ${plano}`)
     }
+    // Link de assinatura pela web: com o pagamento confirmado, fecha o link que gerou a ordem
+    // (usado_em). Isolado em try/catch próprio e DEPOIS da ativação: não muda nada do que o
+    // webhook já fazia — plano, datas e ativação vêm das linhas acima, inalteradas.
+    // Chave primária: order_id gravado no link = id devolvido pelo POST /checkouts; a
+    // notificação do PagBank pode trazer o id da ORDEM (payload.id) e/ou do checkout
+    // (payload.checkout?.id), então os dois são tentados. Rede de segurança: reference_id
+    // "<usuario_id>|<plano>" — fecha o link aberto desse usuário/plano mesmo que os ids não casem.
+    try {
+      const fechados = await pool.query(
+        `UPDATE links_assinatura SET usado_em = NOW()
+          WHERE usado_em IS NULL AND order_id IS NOT NULL
+            AND (order_id = $3 OR order_id = $4 OR (usuario_id = $1 AND plano = $2))
+          RETURNING id`,
+        [usuarioId, plano, payload.id || null, payload.checkout?.id || null]
+      )
+      if (fechados.rowCount > 0) console.log(`[LinkAssinatura] ${fechados.rowCount} link(s) fechado(s) por pagamento confirmado | usuario=${usuarioId} plano=${plano}`)
+    } catch (e) {
+      console.error('[LinkAssinatura] falha ao fechar link após pagamento:', e.message)
+    }
 
   } catch (err) {
     console.error('Erro no webhook PagBank:', err.message)
