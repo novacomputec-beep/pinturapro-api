@@ -10,6 +10,7 @@ const obrasCtrl        = require('../controllers/obrasController')
 const candidaturasCtrl = require('../controllers/candidaturasController')
 const mensagensCtrl    = require('../controllers/mensagensController')
 const pagamentoCtrl    = require('../controllers/pagamentoController')
+const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
@@ -125,6 +126,27 @@ const migracaoPronta = (async () => {
     // para um banco novo não nascer sem elas). reset_token guarda o HASH bcrypt do código.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS reset_token TEXT`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS reset_token_expira TIMESTAMPTZ`)
+    // Link de assinatura pela web (protudo.app.br): TABELA própria em vez de colunas em usuarios
+    // como o reset. Motivo: o link chega SEM e-mail (só o token na URL), então a linha precisa
+    // de um seletor próprio (id) para achar o hash; e uso único / expiração ficam auditáveis
+    // por pedido (usado_em), sem um pedido novo sobrescrever o anterior. token_hash guarda o
+    // HASH bcrypt do segredo, exatamente como reset_token.
+    await client.query(`CREATE TABLE IF NOT EXISTS links_assinatura (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL,
+      expira_em TIMESTAMPTZ NOT NULL,
+      usado_em TIMESTAMPTZ,
+      criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`)
+    await client.query(`CREATE INDEX IF NOT EXISTS links_assinatura_usuario_idx ON links_assinatura (usuario_id)`)
+    // O link sobrevive a um pagamento abandonado: a ordem PagBank criada a partir dele fica
+    // gravada (order_id + init_point + plano) e uma nova chamada devolve a MESMA ordem em vez
+    // de abrir outra; usado_em passa a ser gravado só quando o webhook confirma o pagamento.
+    await client.query(`ALTER TABLE links_assinatura ADD COLUMN IF NOT EXISTS order_id TEXT`)
+    await client.query(`ALTER TABLE links_assinatura ADD COLUMN IF NOT EXISTS init_point TEXT`)
+    await client.query(`ALTER TABLE links_assinatura ADD COLUMN IF NOT EXISTS plano TEXT`)
+    await client.query(`CREATE INDEX IF NOT EXISTS links_assinatura_order_idx ON links_assinatura (order_id) WHERE order_id IS NOT NULL`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_prestador VARCHAR(20)`)
     // Auditoria de aprovação: true = aprovado pelo job automático (Modo Auto ON) sem revisão
     // de idoneidade; false = aprovado/reprovado manualmente por admin; null = legado/não tocado.
@@ -920,7 +942,7 @@ const migracaoPronta = (async () => {
     // exclusão dela.
     await client.query(`
       CREATE TABLE IF NOT EXISTS tentativas_auth (
-        acao          TEXT NOT NULL CHECK (acao IN ('login', 'reset', 'reset_confirmar')),
+        acao          TEXT NOT NULL CHECK (acao IN ('login', 'reset', 'reset_confirmar', 'link_assinatura', 'link_assinatura_token')),
         identificador TEXT NOT NULL,
         tentativas    INT NOT NULL DEFAULT 0,
         janela_em     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -930,8 +952,11 @@ const migracaoPronta = (async () => {
     // Amplia o CHECK do acao para incluir 'reset_confirmar' (adivinhação do código de
     // redefinição). CREATE TABLE IF NOT EXISTS não altera tabela existente, então em bancos
     // já criados o CHECK antigo (login,reset) rejeitaria o novo acao — drop-and-add idempotente.
+    // 'link_assinatura' / 'link_assinatura_token': tetos do link de assinatura pela web (pedido
+    // por e-mail e validação por id do link). Sem ampliar o CHECK aqui, registrarTentativa
+    // estourava a constraint em produção e as três rotas do link nunca funcionariam.
     await client.query(`ALTER TABLE tentativas_auth DROP CONSTRAINT IF EXISTS tentativas_auth_acao_check`)
-    await client.query(`ALTER TABLE tentativas_auth ADD CONSTRAINT tentativas_auth_acao_check CHECK (acao IN ('login', 'reset', 'reset_confirmar'))`)
+    await client.query(`ALTER TABLE tentativas_auth ADD CONSTRAINT tentativas_auth_acao_check CHECK (acao IN ('login', 'reset', 'reset_confirmar', 'link_assinatura', 'link_assinatura_token'))`)
     // A PK atende as buscas; este índice serve só à varredura diária por idade.
     await client.query(`CREATE INDEX IF NOT EXISTS tentativas_auth_janela_idx ON tentativas_auth (janela_em)`)
     // Fila de mídias cujo ARQUIVO ainda está no Cloudinary mas cuja LINHA já foi apagada.
@@ -5943,6 +5968,15 @@ router.get('/pagamentos/falha',               (req, res) => res.redirect('https:
 router.get('/pagamentos/pendente',            (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
 router.post('/pagamentos/acesso-gratuito',    autenticar, exigirSuperAdmin, pagamentoCtrl.darAcessoGratuito)
 router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamentoCtrl.listarAssinantes)
+
+// ============================================================
+// ASSINATURA PELA WEB (protudo.app.br) — públicas, sem JWT: a credencial é o link de uso
+// único enviado por e-mail (padrão do reset de senha). Teto por identidade no banco
+// (tentativas_auth), não no limitador por IP. CORS para o site só nestas rotas (server.js).
+// ============================================================
+router.post('/assinatura/solicitar-link', assinaturaLinkCtrl.solicitarLink)
+router.get('/assinatura/link/:token',     assinaturaLinkCtrl.consultarLink)
+router.post('/assinatura/criar-checkout', assinaturaLinkCtrl.criarCheckout)
 
 // ============================================================
 // DASHBOARD

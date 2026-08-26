@@ -10,6 +10,9 @@ const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
 const { limparTentativasAntigas } = require('./src/utils/tentativasAuth')
+// Poda de links de assinatura pela web nunca usados (> 7 dias) — mesmo agendamento diário
+// de limparTentativasAntigas, sem mecanismo novo.
+const { limparLinksAssinaturaAntigos } = require('./src/controllers/assinaturaLinkController')
 const { MARCA } = require('./src/utils/marca')
 
 const app = express()
@@ -68,16 +71,26 @@ app.use((req, res, next) => {
 
 app.use(helmet())
 
-app.use(cors({
-  origin: [
-    'https://pinturapro-painel-production.up.railway.app',
-    'http://localhost:3000',
-    'http://localhost:8081',
-    'exp://',
-  ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+// CORS: lista base para a API inteira (inalterada) + a origem do site protudo.app.br
+// admitida SOMENTE nas rotas /api/assinatura/* (link de assinatura pela web). Feito no
+// delegate do cors — que recebe o req — em vez de somar o site à lista global: assim
+// nenhuma outra rota passa a aceitar o site, e o preflight (OPTIONS) segue o mesmo critério.
+const CORS_ORIGENS = [
+  'https://pinturapro-painel-production.up.railway.app',
+  'http://localhost:3000',
+  'http://localhost:8081',
+  'exp://',
+]
+const CORS_ORIGEM_SITE = 'https://protudo.app.br'
+const ROTAS_SITE = /^\/api\/assinatura\//
+app.use(cors((req, callback) => {
+  const origin = ROTAS_SITE.test(req.path) ? [...CORS_ORIGENS, CORS_ORIGEM_SITE] : CORS_ORIGENS
+  callback(null, {
+    origin,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+  })
 }))
 
 // ============================================================
@@ -641,6 +654,7 @@ const iniciarAgendador = () => {
     // simplesmente não acontecia. Aqui rodam ao menos uma vez por deploy.
     deletarMidiasAntigas()
     limparTentativasAntigas()
+    limparLinksAssinaturaAntigos()
   }, 60 * 1000)
 
   setInterval(() => { verificarObrasComBaixoEngajamento() }, INTERVALO_ENGAJAMENTO)
@@ -653,7 +667,7 @@ const iniciarAgendador = () => {
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
   // Poda das tentativas de auth: a tabela acumula linhas de e-mails inexistentes, que é o
   // preço de contar TODOS (o que fecha o oráculo de existência de conta).
-  setInterval(() => { limparTentativasAntigas() }, 24 * 60 * 60 * 1000)
+  setInterval(() => { limparTentativasAntigas(); limparLinksAssinaturaAntigos() }, 24 * 60 * 60 * 1000)
   setInterval(() => { expirarAssinaturasVencidas() }, 60 * 60 * 1000)
   // De 5 em 5 minutos. Era de hora em hora, justificado pelo prazo (então de 2 dias) do
   // encerramento — mas a MESMA função também auto-confirma chegada, e esse prazo passou a ser
