@@ -140,7 +140,11 @@ class ErroCheckout extends Error {
 // guards, mesmas mensagens, mesmo reference_id "<usuario_id>|<plano>", mesmo webhook. Recebe
 // a identidade por parâmetro (a rota passa req.usuario; o link pela web passa o usuário da
 // linha do link) e o redirect_url (padrão = o de sempre).
-const criarCheckoutPagBank = async ({ usuarioId, role, email, plano = 'mensal', redirectUrl = `${APP_URL}/pagamentos/sucesso` }) => {
+// expiraEm (opcional): instante ISO-8601 em que o checkout deixa de aceitar pagamento —
+// vai em `expiration_date` do POST /checkouts. A rota com JWT não passa (comportamento de
+// sempre); o link pela web passa a expiração do PRÓPRIO link, para os dois morrerem juntos
+// e uma ordem parada não ficar pagável dias depois a um preço que já mudou.
+const criarCheckoutPagBank = async ({ usuarioId, role, email, plano = 'mensal', redirectUrl = `${APP_URL}/pagamentos/sucesso`, expiraEm = null }) => {
   const usuarioResult = await pool.query(
     'SELECT nome, email, cpf_cnpj, telefone, tipo_prestador FROM usuarios WHERE id = $1',
     [usuarioId]
@@ -176,6 +180,7 @@ const criarCheckoutPagBank = async ({ usuarioId, role, email, plano = 'mensal', 
     redirect_url: redirectUrl,
     notification_urls: [`${APP_URL}/pagamentos/webhook-pagbank`]
   }
+  if (expiraEm) body.expiration_date = new Date(expiraEm).toISOString()
   const response = await fetch(`${PAGBANK_URL}/checkouts`, {
     method: 'POST',
     headers: {

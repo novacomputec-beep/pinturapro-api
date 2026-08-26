@@ -10,6 +10,9 @@ const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
 const { limparTentativasAntigas } = require('./src/utils/tentativasAuth')
+// Poda de links de assinatura pela web nunca usados (> 7 dias) — mesmo agendamento diário
+// de limparTentativasAntigas, sem mecanismo novo.
+const { limparLinksAssinaturaAntigos } = require('./src/controllers/assinaturaLinkController')
 const { MARCA } = require('./src/utils/marca')
 
 const app = express()
@@ -651,6 +654,7 @@ const iniciarAgendador = () => {
     // simplesmente não acontecia. Aqui rodam ao menos uma vez por deploy.
     deletarMidiasAntigas()
     limparTentativasAntigas()
+    limparLinksAssinaturaAntigos()
   }, 60 * 1000)
 
   setInterval(() => { verificarObrasComBaixoEngajamento() }, INTERVALO_ENGAJAMENTO)
@@ -663,7 +667,7 @@ const iniciarAgendador = () => {
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
   // Poda das tentativas de auth: a tabela acumula linhas de e-mails inexistentes, que é o
   // preço de contar TODOS (o que fecha o oráculo de existência de conta).
-  setInterval(() => { limparTentativasAntigas() }, 24 * 60 * 60 * 1000)
+  setInterval(() => { limparTentativasAntigas(); limparLinksAssinaturaAntigos() }, 24 * 60 * 60 * 1000)
   setInterval(() => { expirarAssinaturasVencidas() }, 60 * 60 * 1000)
   // De 5 em 5 minutos. Era de hora em hora, justificado pelo prazo (então de 2 dias) do
   // encerramento — mas a MESMA função também auto-confirma chegada, e esse prazo passou a ser

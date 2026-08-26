@@ -180,9 +180,12 @@ const criarCheckout = async (req, res) => {
       // REUSO da lógica de POST /pagamentos/criar-assinatura (criarCheckoutPagBank): mesmos
       // guards de CPF/tier, mesmo reference_id "<usuario_id>|<plano>", mesmo webhook. Só o
       // redirect_url muda: volta para o site, não para o painel.
+      // expiraEm = expiração do LINK (não "30 min a partir de agora"): checkout e link morrem
+      // no mesmo instante, então uma ordem abandonada nunca sobrevive ao link que a gerou.
       const resultado = await criarCheckoutPagBank({
         usuarioId: l.usuario_id, role: l.role, email: l.email, plano: planoNorm,
         redirectUrl: `${SITE_URL}/assinar/obrigado`,
+        expiraEm: l.expira_em,
       })
       await pool.query(
         `UPDATE links_assinatura SET order_id = $2, init_point = $3, plano = $4 WHERE id = $1`,
@@ -202,4 +205,22 @@ const criarCheckout = async (req, res) => {
   }
 }
 
-module.exports = { solicitarLink, consultarLink, criarCheckout, parseToken, precosReais, VALIDADE_LINK_MINUTOS, SITE_URL, MARCADOR_CRIANDO }
+// Poda diária (agendada em server.js junto de limparTentativasAntigas): apaga links NUNCA
+// usados com mais de 7 dias. `usado_em IS NULL` é a garantia de que linha com pagamento
+// confirmado (o webhook grava usado_em) nunca é apagada — ela fica como registro; só o
+// lixo de pedidos que não viraram pagamento sai. Nada é apagado no PagBank: a ordem já
+// expirou sozinha (expiration_date = expiração do link).
+const LINKS_PODA_DIAS = 7
+const limparLinksAssinaturaAntigos = async () => {
+  try {
+    const r = await pool.query(
+      `DELETE FROM links_assinatura WHERE usado_em IS NULL AND criado_em < NOW() - ($1::int * INTERVAL '1 day')`,
+      [LINKS_PODA_DIAS]
+    )
+    if (r.rowCount > 0) console.log(`[LinkAssinatura] ${r.rowCount} link(s) não usado(s) com mais de ${LINKS_PODA_DIAS} dias removido(s)`)
+  } catch (err) {
+    console.error('[LinkAssinatura] Erro na poda de links antigos:', err.message)
+  }
+}
+
+module.exports = { solicitarLink, consultarLink, criarCheckout, limparLinksAssinaturaAntigos, parseToken, precosReais, VALIDADE_LINK_MINUTOS, SITE_URL, MARCADOR_CRIANDO, LINKS_PODA_DIAS }
