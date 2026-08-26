@@ -68,16 +68,26 @@ app.use((req, res, next) => {
 
 app.use(helmet())
 
-app.use(cors({
-  origin: [
-    'https://pinturapro-painel-production.up.railway.app',
-    'http://localhost:3000',
-    'http://localhost:8081',
-    'exp://',
-  ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+// CORS: lista base para a API inteira (inalterada) + a origem do site protudo.app.br
+// admitida SOMENTE nas rotas /api/assinatura/* (link de assinatura pela web). Feito no
+// delegate do cors — que recebe o req — em vez de somar o site à lista global: assim
+// nenhuma outra rota passa a aceitar o site, e o preflight (OPTIONS) segue o mesmo critério.
+const CORS_ORIGENS = [
+  'https://pinturapro-painel-production.up.railway.app',
+  'http://localhost:3000',
+  'http://localhost:8081',
+  'exp://',
+]
+const CORS_ORIGEM_SITE = 'https://protudo.app.br'
+const ROTAS_SITE = /^\/api\/assinatura\//
+app.use(cors((req, callback) => {
+  const origin = ROTAS_SITE.test(req.path) ? [...CORS_ORIGENS, CORS_ORIGEM_SITE] : CORS_ORIGENS
+  callback(null, {
+    origin,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+  })
 }))
 
 // ============================================================

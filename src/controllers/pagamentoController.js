@@ -130,82 +130,82 @@ const colocarPendentVerificacao = async (usuarioId, plano) => {
   }).catch(err => console.error('Erro ao notificar admin:', err))
 }
 
+// Erro tipado do checkout: status HTTP + corpo, para os DOIS chamadores (rota com JWT e link
+// pela web) responderem exatamente o que a rota sempre respondeu.
+class ErroCheckout extends Error {
+  constructor(status, corpo) { super(corpo.erro); this.status = status; this.corpo = corpo }
+}
+
+// Núcleo do checkout PagBank, extraído de criarAssinatura SEM mudar comportamento: mesmos
+// guards, mesmas mensagens, mesmo reference_id "<usuario_id>|<plano>", mesmo webhook. Recebe
+// a identidade por parâmetro (a rota passa req.usuario; o link pela web passa o usuário da
+// linha do link) e o redirect_url (padrão = o de sempre).
+const criarCheckoutPagBank = async ({ usuarioId, role, email, plano = 'mensal', redirectUrl = `${APP_URL}/pagamentos/sucesso` }) => {
+  const usuarioResult = await pool.query(
+    'SELECT nome, email, cpf_cnpj, telefone, tipo_prestador FROM usuarios WHERE id = $1',
+    [usuarioId]
+  )
+  const dadosUsuario = usuarioResult.rows[0]
+  const taxId = limparCpfCnpj(dadosUsuario?.cpf_cnpj)
+  if (!taxId || (taxId.length !== 11 && taxId.length !== 14)) {
+    throw new ErroCheckout(400, { erro: 'CPF ou CNPJ inválido. Atualize seu perfil com um documento válido.' })
+  }
+  const telLimpo  = (dadosUsuario?.telefone || '').replace(/\D/g, '')
+  const telArea   = telLimpo.substring(0, 2) || '34'
+  const telNumero = telLimpo.substring(2)    || '999999999'
+  const nomePlano = plano === 'anual' ? 'Anual' : 'Mensal'
+  const tipoPrestador = dadosUsuario?.tipo_prestador
+  const valor = precoAssinaturaCentavos(role, tipoPrestador, plano)
+  if (valor == null) {
+    console.error(`[pagamento] tipo_prestador não mapeado para preço — usuario=${usuarioId} tipo_prestador=${JSON.stringify(tipoPrestador)}`)
+    throw new ErroCheckout(422, { erro: 'Tipo de prestador não reconhecido para cobrança. Atualize seu cadastro ou contate o suporte.' })
+  }
+  const descricao = (role === 'prestador' && tipoPrestador === 'reparador')
+    ? `${MARCA} Serviços — Plano ${nomePlano}`
+    : `${MARCA} — Plano ${nomePlano}`
+  const body = {
+    reference_id: `${usuarioId}|${plano}`,
+    customer: {
+      name: dadosUsuario?.nome || `Cliente ${MARCA}`,
+      email: dadosUsuario?.email || email,
+      tax_id: taxId,
+      phones: [{ country: '55', area: telArea, number: telNumero, type: 'MOBILE' }]
+    },
+    items: [{ reference_id: `plano_${plano}`, name: descricao, quantity: 1, unit_amount: valor }],
+    payment_methods: [{ type: 'CREDIT_CARD' }, { type: 'PIX' }],
+    redirect_url: redirectUrl,
+    notification_urls: [`${APP_URL}/pagamentos/webhook-pagbank`]
+  }
+  const response = await fetch(`${PAGBANK_URL}/checkouts`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${PAGBANK_TOKEN}`,
+      'Content-Type': 'application/json',
+      'x-api-version': '4.0'
+    },
+    body: JSON.stringify(body)
+  })
+  const data = await response.json()
+  if (!response.ok) {
+    console.error('Erro PagBank:', JSON.stringify(data))
+    throw new ErroCheckout(500, { erro: 'Erro ao criar pagamento', detalhe: data })
+  }
+  const linkPagamento = data.links?.find(l => l.rel === 'PAY')?.href
+    || data.links?.find(l => l.rel === 'pay')?.href
+    || data.links?.[0]?.href
+  return { init_point: linkPagamento, order_id: data.id, status: data.status }
+}
+
+// POST /pagamentos/criar-assinatura (JWT) — fino sobre o núcleo; respostas idênticas às de antes.
 const criarAssinatura = async (req, res) => {
   try {
     const { plano = 'mensal' } = req.body
-    const usuario = req.usuario
-
-    const usuarioResult = await pool.query(
-      'SELECT nome, email, cpf_cnpj, telefone, tipo_prestador FROM usuarios WHERE id = $1',
-      [usuario.id]
-    )
-    const dadosUsuario = usuarioResult.rows[0]
-    const taxId = limparCpfCnpj(dadosUsuario?.cpf_cnpj)
-
-    if (!taxId || (taxId.length !== 11 && taxId.length !== 14)) {
-      return res.status(400).json({ erro: 'CPF ou CNPJ inválido. Atualize seu perfil com um documento válido.' })
-    }
-
-    const telLimpo  = (dadosUsuario?.telefone || '').replace(/\D/g, '')
-    const telArea   = telLimpo.substring(0, 2) || '34'
-    const telNumero = telLimpo.substring(2)    || '999999999'
-
-    const nomePlano = plano === 'anual' ? 'Anual' : 'Mensal'
-
-    // Preço definido pelo TIER do prestador (tipo_prestador), NÃO pelo role:
-    // todos os prestadores (pintor/construtor e reparador) têm role='prestador',
-    // então usar role cobrava R$ 49,90 de todo mundo. O tier real é tipo_prestador.
-    //   reparador           → R$ 49,90 / mês (R$ 499,00 anual)
-    //   pintor (construção) → R$ 99,90 / mês (R$ 999,00 anual)
-    const tipoPrestador = dadosUsuario?.tipo_prestador
-    const valor = precoAssinaturaCentavos(usuario.role, tipoPrestador, plano)
-    if (valor == null) {
-      // Tier não mapeado: falha alto em vez de cobrar silenciosamente o plano barato.
-      console.error(`[pagamento] tipo_prestador não mapeado para preço — usuario=${usuario.id} tipo_prestador=${JSON.stringify(tipoPrestador)}`)
-      return res.status(422).json({ erro: 'Tipo de prestador não reconhecido para cobrança. Atualize seu cadastro ou contate o suporte.' })
-    }
-    const descricao = (usuario.role === 'prestador' && tipoPrestador === 'reparador')
-      ? `${MARCA} Serviços — Plano ${nomePlano}`
-      : `${MARCA} — Plano ${nomePlano}`
-
-    const body = {
-      reference_id: `${usuario.id}|${plano}`,
-      customer: {
-        name: dadosUsuario?.nome || `Cliente ${MARCA}`,
-        email: dadosUsuario?.email || usuario.email,
-        tax_id: taxId,
-        phones: [{ country: '55', area: telArea, number: telNumero, type: 'MOBILE' }]
-      },
-      items: [{ reference_id: `plano_${plano}`, name: descricao, quantity: 1, unit_amount: valor }],
-      payment_methods: [{ type: 'CREDIT_CARD' }, { type: 'PIX' }],
-      redirect_url: `${APP_URL}/pagamentos/sucesso`,
-      notification_urls: [`${APP_URL}/pagamentos/webhook-pagbank`]
-    }
-
-    const response = await fetch(`${PAGBANK_URL}/checkouts`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${PAGBANK_TOKEN}`,
-        'Content-Type': 'application/json',
-        'x-api-version': '4.0'
-      },
-      body: JSON.stringify(body)
+    const resultado = await criarCheckoutPagBank({
+      usuarioId: req.usuario.id, role: req.usuario.role, email: req.usuario.email, plano,
     })
-
-    const data = await response.json()
-
-    if (!response.ok) {
-      console.error('Erro PagBank:', JSON.stringify(data))
-      return res.status(500).json({ erro: 'Erro ao criar pagamento', detalhe: data })
-    }
-
-    const linkPagamento = data.links?.find(l => l.rel === 'PAY')?.href
-      || data.links?.find(l => l.rel === 'pay')?.href
-      || data.links?.[0]?.href
-
-    res.json({ init_point: linkPagamento, order_id: data.id, status: data.status })
-
+    res.json(resultado)
   } catch (err) {
+    if (err instanceof ErroCheckout) return res.status(err.status).json(err.corpo)
     console.error('Erro ao criar preferência PagBank:', err)
     res.status(500).json({ erro: 'Erro ao criar assinatura' })
   }
@@ -439,4 +439,4 @@ const listarAssinantes = async (req, res) => {
   }
 }
 
-module.exports = { criarAssinatura, sucesso, webhookPagbank, darAcessoGratuito, listarAssinantes }
+module.exports = { criarAssinatura, criarCheckoutPagBank, ErroCheckout, precoAssinaturaCentavos, sucesso, webhookPagbank, darAcessoGratuito, listarAssinantes }
