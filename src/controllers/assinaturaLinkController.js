@@ -195,10 +195,32 @@ const criarCheckout = async (req, res) => {
         ? { erro: 'Sua assinatura já está ativa. Não há nada a pagar agora.', codigo: 'ASSINATURA_ATIVA' }
         : { erro: 'Seu pagamento já foi recebido e está em verificação. Você receberá um e-mail assim que for aprovado.', codigo: 'PAGAMENTO_EM_VERIFICACAO' })
     }
-    // Já existe ordem para este link → mesmo init_point, sem tocar no PagBank. O plano da
-    // ordem é o que foi fixado na criação; um `plano` diferente no corpo não abre outra ordem.
+    // Já existe ordem para este link:
+    //   - mesmo plano → mesmo init_point, sem tocar no PagBank (idempotente);
+    //   - plano DIFERENTE e ordem ainda NÃO PAGA → troca de plano: limpa order_id/init_point/
+    //     plano na linha e cai na criação de uma ordem nova. "Não paga" = usado_em IS NULL
+    //     (o único escritor de usado_em é o webhook, no PAID); o UPDATE repete order_id e
+    //     plano lidos, então uma corrida com o webhook ou com outra aba não limpa uma linha
+    //     que já mudou. A ordem antiga NÃO é cancelada aqui: morre sozinha no
+    //     expiration_date (= expira_em do link); enquanto viver, se for paga, o webhook
+    //     valida plano/valor DAQUELA ordem e fecha o link do usuário.
     if (l.order_id && l.order_id !== MARCADOR_CRIANDO && l.init_point) {
-      return res.json({ init_point: l.init_point })
+      if (l.plano === planoNorm) return res.json({ init_point: l.init_point })
+      const troca = await pool.query(
+        `UPDATE links_assinatura SET order_id = NULL, init_point = NULL, plano = NULL
+          WHERE id = $1 AND usado_em IS NULL AND order_id = $2 AND plano IS DISTINCT FROM $3
+          RETURNING id`,
+        [l.id, l.order_id, planoNorm]
+      )
+      if (troca.rowCount === 0) {
+        // Linha mudou entre a leitura e agora (pagou, ou outra aba já trocou): devolve o que
+        // está lá se ainda for uma ordem viva; senão, tratamento genérico de link inválido.
+        const atual = await pool.query(`SELECT init_point, usado_em FROM links_assinatura WHERE id = $1`, [l.id])
+        const a = atual.rows[0]
+        if (a?.init_point && !a.usado_em) return res.json({ init_point: a.init_point })
+        return res.status(410).json(GENERICO_INVALIDO)
+      }
+      console.log(`[LinkAssinatura] troca de plano ${l.plano} → ${planoNorm} | link=${l.id} | ordem anterior abandonada=${l.order_id}`)
     }
     // Reserva ATÔMICA antes da chamada externa: só quem casa order_id IS NULL cria a ordem.
     const reserva = await pool.query(

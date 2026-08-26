@@ -366,15 +366,17 @@ const webhookPagbank = async (req, res) => {
     // webhook já fazia — plano, datas e ativação vêm das linhas acima, inalteradas.
     // Chave primária: order_id gravado no link = id devolvido pelo POST /checkouts; a
     // notificação do PagBank pode trazer o id da ORDEM (payload.id) e/ou do checkout
-    // (payload.checkout?.id), então os dois são tentados. Rede de segurança: reference_id
-    // "<usuario_id>|<plano>" — fecha o link aberto desse usuário/plano mesmo que os ids não casem.
+    // (payload.checkout?.id), então os dois são tentados. Rede de segurança: o usuario_id do
+    // reference_id — fecha o link vivo desse usuário QUALQUER que seja o plano: depois de uma
+    // troca de plano a linha guarda o plano novo, e a ordem antiga (ainda aberta no PagBank)
+    // pode ser a paga; casar por plano deixaria o link vivo com a segunda ordem pagável.
     try {
       const fechados = await pool.query(
         `UPDATE links_assinatura SET usado_em = NOW()
           WHERE usado_em IS NULL AND order_id IS NOT NULL
-            AND (order_id = $3 OR order_id = $4 OR (usuario_id = $1 AND plano = $2))
+            AND (order_id = $2 OR order_id = $3 OR usuario_id = $1)
           RETURNING id`,
-        [usuarioId, plano, payload.id || null, payload.checkout?.id || null]
+        [usuarioId, payload.id || null, payload.checkout?.id || null]
       )
       if (fechados.rowCount > 0) console.log(`[LinkAssinatura] ${fechados.rowCount} link(s) fechado(s) por pagamento confirmado | usuario=${usuarioId} plano=${plano}`)
     } catch (e) {
