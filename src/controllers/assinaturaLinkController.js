@@ -74,13 +74,32 @@ const solicitarLink = async (req, res) => {
 
     const segredo = crypto.randomBytes(24).toString('hex')
     const hash = await bcrypt.hash(segredo, 10)
-    const ins = await pool.query(
-      `INSERT INTO links_assinatura (usuario_id, token_hash, expira_em)
-       VALUES ($1, $2, NOW() + ($3::int * INTERVAL '1 minute'))
-       RETURNING id`,
-      [u.id, hash, VALIDADE_LINK_MINUTOS]
+    // UM link vivo por usuário: se já existe linha VIVA e NÃO PAGA, reaproveita a MESMA linha
+    // (mesmo id, mesma expira_em, mesma ordem PagBank se já houver) em vez de criar outra —
+    // é o que impede 72 links/ordens abertas por dia. O segredo não é recuperável (só o hash
+    // bcrypt fica guardado, como no reset), então o verificador é ROTACIONADO: o e-mail novo
+    // traz um link que funciona; o link do e-mail anterior deixa de funcionar. O contador de
+    // 3/h acima já foi incrementado — reenviar também custa uma tentativa.
+    const vivo = await pool.query(
+      `SELECT id FROM links_assinatura
+        WHERE usuario_id = $1 AND usado_em IS NULL AND expira_em > NOW()
+        ORDER BY criado_em DESC LIMIT 1`,
+      [u.id]
     )
-    const link = `${SITE_URL}/assinar?t=${ins.rows[0].id}.${segredo}`
+    let linkId
+    if (vivo.rows.length > 0) {
+      linkId = vivo.rows[0].id
+      await pool.query(`UPDATE links_assinatura SET token_hash = $2 WHERE id = $1`, [linkId, hash])
+    } else {
+      const ins = await pool.query(
+        `INSERT INTO links_assinatura (usuario_id, token_hash, expira_em)
+         VALUES ($1, $2, NOW() + ($3::int * INTERVAL '1 minute'))
+         RETURNING id`,
+        [u.id, hash, VALIDADE_LINK_MINUTOS]
+      )
+      linkId = ins.rows[0].id
+    }
+    const link = `${SITE_URL}/assinar?t=${linkId}.${segredo}`
     // MESMO caminho de e-mail do reset (SMTP/nodemailer, transporter do authController).
     await transporter.sendMail({
       from: `${MARCA} <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
@@ -159,6 +178,23 @@ const criarCheckout = async (req, res) => {
     const planoNorm = plano === 'anual' ? 'anual' : 'mensal'
     const l = await validarToken(token)
     if (!l) return res.status(410).json(GENERICO_INVALIDO)
+    // Quem já pagou não paga de novo: assinatura ATIVA (mesmo predicado canônico de
+    // assinaturaAtivaCacheada) ou pagamento já recebido e aguardando verificação
+    // (pendente_verificacao — o estado em que um prestador pagaria duas vezes). Sem esta
+    // guarda, a rota com JWT e este link abriam checkout para quem já tem acesso (D3).
+    const jaPago = await pool.query(
+      `SELECT status FROM assinaturas
+        WHERE usuario_id = $1
+          AND (status = 'pendente_verificacao'
+               OR (status = 'ativa' AND (proximo_vencimento IS NULL OR proximo_vencimento > NOW())))
+        LIMIT 1`,
+      [l.usuario_id]
+    )
+    if (jaPago.rows.length > 0) {
+      return res.status(409).json(jaPago.rows[0].status === 'ativa'
+        ? { erro: 'Sua assinatura já está ativa. Não há nada a pagar agora.', codigo: 'ASSINATURA_ATIVA' }
+        : { erro: 'Seu pagamento já foi recebido e está em verificação. Você receberá um e-mail assim que for aprovado.', codigo: 'PAGAMENTO_EM_VERIFICACAO' })
+    }
     // Já existe ordem para este link → mesmo init_point, sem tocar no PagBank. O plano da
     // ordem é o que foi fixado na criação; um `plano` diferente no corpo não abre outra ordem.
     if (l.order_id && l.order_id !== MARCADOR_CRIANDO && l.init_point) {
