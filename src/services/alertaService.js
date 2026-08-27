@@ -208,7 +208,14 @@ const PAGINA_BROADCAST = 500
 // cidade). No fim, UMA linha de log com elegíveis / enviados / falhos / inválidos / páginas,
 // para truncamento ou falha nunca mais ser silencioso. Declarada ANTES dos dois chamadores
 // (const em TDZ derrubou o boot em 25/08).
-const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo }) => {
+//
+// categoria (opcional, só o lado reparo passa): casa a categoria da demanda com
+// usuarios.especialidades NO SQL —
+//   - null (lado obra): sem filtro, comportamento de sempre;
+//   - 'outros': todo reparador ativo da cidade que tenha AO MENOS UMA especialidade;
+//   - qualquer outra: só quem tem exatamente esse slug no array.
+// Array NULL ou vazio nunca recebe nada, nem 'outros' (cardinality(NULL) é NULL → falso).
+const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null }) => {
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
   let cursor = null
   for (;;) {
@@ -224,9 +231,10 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
          AND ${SQL_CIDADE_PRESTADOR} = $2
          AND upper(btrim(u.uf)) = $3
          AND ($4::uuid IS NULL OR u.id > $4::uuid)
+         AND ($6::text IS NULL OR (cardinality(u.especialidades) > 0 AND ($6::text = 'outros' OR $6::text = ANY(u.especialidades))))
        ORDER BY u.id
        LIMIT $5`,
-      [tipoPrestador, cidade, uf, cursor, PAGINA_BROADCAST]
+      [tipoPrestador, cidade, uf, cursor, PAGINA_BROADCAST, categoria]
     )
     if (pagina.rows.length === 0) break
     total.paginas++
@@ -297,8 +305,11 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     // "IS DISTINCT FROM 'pintor'" antigo incluía NULL/legado, que recebia o push e caía em
     // 403 TIER_INCORRETO ao tocar. Paridade com o broadcast de obra (= 'pintor').
     // Paginado por u.id (A5), mesmo helper do lado obra.
+    // categoria: só quem declarou esse serviço em especialidades recebe; 'outros' vai a
+    // todo reparador da cidade com ao menos uma especialidade (ver broadcastPaginado).
+    // Os DOIS chamadores (POST /reparos/dono e a rota de aprovação) passam por aqui.
     await broadcastPaginado({
-      tipoPrestador: 'reparador', cidade: cidadeReparo, uf: ufReparo,
+      tipoPrestador: 'reparador', cidade: cidadeReparo, uf: ufReparo, categoria: reparo.categoria,
       titulo: '🔧 Novo serviço disponível!',
       corpo: `"${reparo.titulo}" em ${reparo.cidade} — categoria: ${reparo.categoria}`,
       data: { tipo: 'novo_reparo', reparo_id: reparoId },
