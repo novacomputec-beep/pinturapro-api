@@ -15,7 +15,7 @@ const listar = async (req, res) => {
     let query = `
       SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.estado, o.bairro, o.uf,
              o.latitude, o.longitude, o.coordenadas_origem,
-             o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status, o.horas_para_expirar, o.prazo_modo, o.criado_em,
+             o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status, o.horas_para_expirar, o.prazo_modo, o.criado_em, o.ultima_extensao_horas,
              0 as distancia_metros,
              (SELECT COUNT(*) FROM midias WHERE obra_id = o.id) as total_midias,
              (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
