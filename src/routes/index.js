@@ -3025,6 +3025,11 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     if (typeof titulo !== 'string' || !titulo.trim()) {
       return res.status(400).json({ erro: 'Título é obrigatório' })
     }
+    // cidade — presença apenas, mesmo estilo do titulo. Sem cidade a linha era gravada e o
+    // broadcast pulava em silêncio ("Reparo sem cidade/uf"): ninguém era avisado.
+    if (typeof cidade !== 'string' || !cidade.trim()) {
+      return res.status(400).json({ erro: 'Cidade é obrigatória' })
+    }
     // categoria — dois guards, ANTES de qualquer ida ao banco:
     //   1) presença (ausente/null/''): mesmo estilo do check de campos obrigatórios do
     //      POST /obras (obrasController.criar): teste falsy, 400, { erro }.
@@ -3045,6 +3050,12 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
       return res.status(409).json(erroLimiteDemandas(limiteReparos.limite))
     }
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
+    // uf pode continuar nula MESMO com cidade presente: ufDeCidade devolve null para cidade
+    // desconhecida, grafada errado ou homônima sem fallback. Sem uf o broadcast (que casa
+    // cidade E uf) pula em silêncio — então é 400 aqui, não linha gravada sem alvo.
+    if (typeof ufFinal !== 'string' || !ufFinal.trim()) {
+      return res.status(400).json({ erro: 'UF é obrigatória: não foi possível determinar o estado da cidade informada' })
+    }
     const { lat: latFinal, lng: lngFinal, origem: coordOrigem } = resolverCoordenadas(cidade, ufFinal, latitude, longitude, '[reparos/dono]')
     // Janela original resolvida UMA vez: mesma base do expira_em e do prazo_atendimento_horas
     // gravado, sem risco de os dois divergirem (mesmo padrão de POST /obras/dono). Antes a
