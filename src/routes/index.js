@@ -399,14 +399,6 @@ const migracaoPronta = (async () => {
     // (a demanda cai em uma banda só), então o 1º run pós-deploy não gera rajada — cada demanda
     // dispara no máximo o marco da banda em que está agora. (O backfill antigo, que marcava os
     // marcos fixos já passados, saiu junto com as colunas antigas.)
-    // "Esta semana" passou de 72h para 168h (7 dias). Reclassifica as demandas legadas de faixa:
-    // 72 → 168, apenas a coluna de janela (o rótulo da faixa para os marcos proporcionais futuros).
-    // NÃO mexe em expira_em — as linhas mantêm o prazo atual que já foi calculado a partir de 72h;
-    // recalcular empurraria deadlines ao vivo. Idempotente: após rodar, nenhuma linha tem 72, então
-    // re-executar a cada boot é no-op. Update de valor simples, sem risco de constraint (não lança).
-    // Obras hoje não têm nenhuma linha 72 → no-op inofensivo, mantido por simetria com reparos.
-    await client.query(`UPDATE reparos SET prazo_atendimento_horas = 168 WHERE prazo_atendimento_horas = 72`)
-    await client.query(`UPDATE obras   SET horas_para_expirar      = 168 WHERE horas_para_expirar      = 72`)
     // Backfill one-time de encerrado_em para linhas já encerradas antes da coluna existir.
     // Usa match_feito_em como melhor aproximação, caindo para criado_em quando o item foi
     // encerrado sem nunca ter match. Idempotente via WHERE encerrado_em IS NULL.
