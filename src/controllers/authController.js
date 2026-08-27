@@ -72,26 +72,30 @@ const cadastrar = async (req, res) => {
     if (tipo_conta === 'dono_obra') role = 'dono_obra'
     else if (tipo_conta === 'prestador' || tipo_conta === 'pintor' || tipo_conta === 'construtor') role = 'prestador'
 
-    // Validação do vocabulário FECHADO de especialidades (utils/especialidades). Roda aqui,
-    // depois de role estar resolvido, porque o mínimo de 1 só vale para profissional — dono
-    // não presta serviço e entra com lista vazia, que segue válida.
-    // Campo ausente vira [] (mesmo default de antes), então dono que não manda nada continua
-    // passando; profissional que não manda nada agora recebe 400, que é o ponto do fechamento.
-    const espCadastro = validarEspecialidades(especialidades || [], role === 'prestador')
-    if (espCadastro.erro) {
-      console.log(`[CADASTRO][${ts}] ✗ 400 especialidades | motivo=${espCadastro.erro}`)
-      return res.status(400).json({ erro: espCadastro.erro })
-    }
-
     // Define tipo_dono para distinguir donos de pintura vs reparo
     let tipo_dono = null
     if (tipo_conta === 'dono_obra') tipo_dono = 'pintura'
     else if (tipo_conta === 'dono_reparo') { role = 'dono_obra'; tipo_dono = 'reparo' }
 
-    // Define tipo_prestador para distinguir pintores/construtores de reparadores
+    // Define tipo_prestador para distinguir pintores/construtores de reparadores.
+    // Derivado ANTES da validação de especialidades porque é ele que escolhe a lista
+    // (obra × reparador). tipo_conta ausente segue como sempre: role 'assinante',
+    // tipo_prestador null — nenhum default inventado aqui.
     let tipo_prestador = null
     if (tipo_conta === 'pintor' || tipo_conta === 'construtor') tipo_prestador = 'pintor'
     else if (tipo_conta === 'prestador') tipo_prestador = 'reparador'
+
+    // Validação do vocabulário FECHADO de especialidades (utils/especialidades). Roda aqui,
+    // depois de role E tipo_prestador estarem resolvidos: o mínimo de 1 só vale para
+    // profissional — dono não presta serviço e entra com lista vazia, que segue válida — e
+    // o lado (tipo_prestador) escolhe a lista contra a qual os slugs são conferidos.
+    // Campo ausente vira [] (mesmo default de antes), então dono que não manda nada continua
+    // passando; profissional que não manda nada agora recebe 400, que é o ponto do fechamento.
+    const espCadastro = validarEspecialidades(especialidades || [], role === 'prestador', tipo_prestador)
+    if (espCadastro.erro) {
+      console.log(`[CADASTRO][${ts}] ✗ 400 especialidades | motivo=${espCadastro.erro}`)
+      return res.status(400).json({ erro: espCadastro.erro })
+    }
 
     const verificacaoStatus = role === 'prestador' ? 'pendente' : 'nao_solicitada'
     const planoEscolhido = plano || 'mensal'
@@ -419,7 +423,10 @@ const atualizarPerfil = async (req, res) => {
     const mexeEspecialidades = Object.prototype.hasOwnProperty.call(req.body, 'especialidades')
     let especialidadesValidadas = null
     if (mexeEspecialidades) {
-      const r = validarEspecialidades(req.body.especialidades, req.usuario.role === 'prestador')
+      // Lado = tipo_prestador da linha carregada por `autenticar` (não vem do corpo). NULL
+      // (prestador legado sem tipo) cai na lista de reparador — o mesmo vocabulário que
+      // valia para todo mundo antes do split; nada inventado.
+      const r = validarEspecialidades(req.body.especialidades, req.usuario.role === 'prestador', req.usuario.tipo_prestador)
       if (r.erro) return res.status(400).json({ erro: r.erro })
       especialidadesValidadas = r.valor
     }

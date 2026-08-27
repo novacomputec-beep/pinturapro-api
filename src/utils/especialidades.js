@@ -1,4 +1,7 @@
-// Vocabulário FECHADO das especialidades do profissional (as 21 categorias de SERVIÇO).
+// Vocabulário FECHADO das especialidades do profissional — DUAS listas, uma por lado:
+//   - REPARADOR (tipo_prestador = 'reparador'): as 21 categorias de SERVIÇO doméstico;
+//   - OBRA (tipo_prestador = 'pintor', que cobre pintor E construtor): os 4 papéis de obra.
+// Mesmo estilo de slug nas duas: minúsculas, sem acento, '_' como separador (aula_particular).
 //
 // Mora em src/utils/ porque é a convenção deste repo para constante compartilhada e inerte:
 // mesmo lugar de faixasPrazo.js (FAIXAS/PRAZO_MODO_HOJE), marca.js (MARCA) e localidade.js
@@ -6,15 +9,30 @@
 // (POST /auth/cadastro e PUT /auth/perfil) — duas listas divergiriam no primeiro slug novo.
 //
 // A ordem é a da lista de serviços do app; 'outros' fecha a lista, como nas telas.
-const ESPECIALIDADES_VALIDAS = [
+const ESPECIALIDADES_REPARADOR = [
   'hidraulica', 'eletrica', 'marcenaria', 'alvenaria', 'climatizacao',
   'chaveiro', 'faxina', 'eletronica', 'aula_particular', 'cuidador',
   'jardineiro', 'manicure', 'cabelo', 'massagem', 'mudancas',
   'estofamento', 'baba', 'cozinheiro', 'motorista', 'garcom', 'outros',
 ]
 
-// Set para o teste de pertinência não virar um scan por item a cada validação.
-const ESPECIALIDADES_SET = new Set(ESPECIALIDADES_VALIDAS)
+// Lado da OBRA (pintor/construtor): exatamente estes quatro, na ordem das telas.
+const ESPECIALIDADES_OBRA = ['engenheiro', 'construtor', 'pedreiro_servente', 'pintor']
+
+// Nome antigo mantido como alias da lista de reparador (era a única lista até aqui).
+const ESPECIALIDADES_VALIDAS = ESPECIALIDADES_REPARADOR
+
+// Qual lista vale para um lado. lado = tipo_prestador ('pintor' | 'reparador' | null).
+// Só 'pintor' cai na lista de obra; 'reparador' E null/desconhecido caem na lista de
+// reparador — que é EXATAMENTE o comportamento de antes deste split (uma lista só, a de
+// serviços), então conta sem tipo_prestador (legado, ou cadastro sem tipo_conta) não muda.
+const listaPorLado = (lado) => (lado === 'pintor' ? ESPECIALIDADES_OBRA : ESPECIALIDADES_REPARADOR)
+
+// Sets para o teste de pertinência não virar um scan por item a cada validação.
+const SETS_POR_LISTA = new Map([
+  [ESPECIALIDADES_REPARADOR, new Set(ESPECIALIDADES_REPARADOR)],
+  [ESPECIALIDADES_OBRA, new Set(ESPECIALIDADES_OBRA)],
+])
 
 const ESPECIALIDADES_MIN = 1
 const ESPECIALIDADES_MAX = 5
@@ -35,8 +53,11 @@ const ESPECIALIDADES_MAX = 5
 // interface, não um erro do usuário. A contagem roda DEPOIS do colapso, então
 // ['faxina','faxina'] vale 1 e não estoura o teto.
 //
+// lado = tipo_prestador do usuário (ver listaPorLado): decide CONTRA QUAL lista o valor é
+// validado. MIN/MAX não dependem do lado.
+//
 // Devolve { erro } OU { valor }. Nunca lança.
-const validarEspecialidades = (bruto, ehProfissional) => {
+const validarEspecialidades = (bruto, ehProfissional, lado = null) => {
   if (!Array.isArray(bruto)) {
     return { erro: 'especialidades deve ser uma lista' }
   }
@@ -45,7 +66,8 @@ const validarEspecialidades = (bruto, ehProfissional) => {
   }
 
   const limpas = bruto.map(e => e.trim()).filter(Boolean)
-  const invalidas = [...new Set(limpas.filter(e => !ESPECIALIDADES_SET.has(e)))]
+  const validos = SETS_POR_LISTA.get(listaPorLado(lado))
+  const invalidas = [...new Set(limpas.filter(e => !validos.has(e)))]
   if (invalidas.length > 0) {
     return { erro: `especialidades inválida(s): ${invalidas.join(', ')}` }
   }
@@ -64,6 +86,9 @@ const validarEspecialidades = (bruto, ehProfissional) => {
 
 module.exports = {
   ESPECIALIDADES_VALIDAS,
+  ESPECIALIDADES_REPARADOR,
+  ESPECIALIDADES_OBRA,
+  listaPorLado,
   ESPECIALIDADES_MIN,
   ESPECIALIDADES_MAX,
   validarEspecialidades,
