@@ -1,5 +1,9 @@
 const { pool } = require('../utils/supabase')
-const { notificarNovaObra } = require('../services/notificacaoService')
+// Mesmo broadcast do caminho do dono (aprovarEPublicarObra em routes/index.js): pintores
+// assinantes ATIVOS da MESMA cidade+uf da obra, com push_token. O antigo
+// notificacaoService.notificarNovaObra selecionava role = 'assinante' — papel que não existe
+// em produção (0 linhas) — e por isso a obra criada pelo painel nunca avisava ninguém.
+const { notificarPintoresSobreNovaObra } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
 const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 
@@ -181,8 +185,11 @@ const criar = async (req, res) => {
 
     const obra = result.rows[0]
 
-    // Notifica todos os pintores sobre a nova obra de forma assíncrona
-    notificarNovaObra(pool, obra).catch(err =>
+    // Obra do painel nasce publicada (status 'aberta', status_aprovacao default 'aprovada',
+    // publicado_em = NOW()), então o aviso sai já na criação — o mesmo público-alvo e o
+    // mesmo texto do caminho do dono, que só avisa na aprovação. Assíncrono: a resposta
+    // ao admin não espera o Expo. A função relê cidade/uf da linha recém-inserida.
+    notificarPintoresSobreNovaObra(obra.id).catch(err =>
       console.error('Erro ao enviar notificações:', err)
     )
 
