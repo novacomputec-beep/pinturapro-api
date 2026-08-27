@@ -40,6 +40,10 @@ const SQL_LIMPAR_CHEGADA = `chegada_janela = NULL, chegada_prevista_em = NULL, c
 const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
+// Vocabulário de reparos.categoria = a lista de especialidades do reparador: é contra ela que
+// o broadcast de reparo novo casa categoria × especialidades (alertaService). Só POST
+// /reparos/dono valida; a rota de aprovação não reavalia linha já gravada.
+const { ESPECIALIDADES_REPARADOR } = require('../utils/especialidades')
 const { enviarEmail } = require('../services/emailService')
 const bcrypt = require('bcrypt')
 
@@ -3015,6 +3019,30 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar serviços' })
     }
     const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
+    // titulo — presença apenas (ausente/null/''/só espaços): reparos.titulo é NOT NULL e
+    // sem este guard o INSERT estourava em 500. Sem teto de tamanho e sem trim ao gravar —
+    // o trim aqui é só para o teste de "só espaços".
+    if (typeof titulo !== 'string' || !titulo.trim()) {
+      return res.status(400).json({ erro: 'Título é obrigatório' })
+    }
+    // cidade — presença apenas, mesmo estilo do titulo. Sem cidade a linha era gravada e o
+    // broadcast pulava em silêncio ("Reparo sem cidade/uf"): ninguém era avisado.
+    if (typeof cidade !== 'string' || !cidade.trim()) {
+      return res.status(400).json({ erro: 'Cidade é obrigatória' })
+    }
+    // categoria — dois guards, ANTES de qualquer ida ao banco:
+    //   1) presença (ausente/null/''): mesmo estilo do check de campos obrigatórios do
+    //      POST /obras (obrasController.criar): teste falsy, 400, { erro }.
+    //   2) pertencimento: string não-vazia fora de ESPECIALIDADES_REPARADOR. Comparação
+    //      EXATA — sem trim, sem lowercase, sem tirar acento. Valor que precisa de ajuste é
+    //      bug do cliente e é recusado, não consertado: a coluna é text livre e é ela que o
+    //      broadcast casa com especialidades; um slug "quase certo" gravado avisaria ninguém.
+    if (!categoria) {
+      return res.status(400).json({ erro: 'Categoria é obrigatória' })
+    }
+    if (typeof categoria !== 'string' || !ESPECIALIDADES_REPARADOR.includes(categoria)) {
+      return res.status(400).json({ erro: `Categoria inválida: ${String(categoria)}` })
+    }
     // Mesmo teto do POST /obras/dono e sobre a MESMA contagem (obras + reparos): o limite é por
     // dono, não por tipo de demanda, senão 2 obras + 2 reparos passariam.
     const limiteReparos = await limiteDemandasAtingido('reparos', req.usuario.id, client_request_id)
@@ -3022,6 +3050,12 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
       return res.status(409).json(erroLimiteDemandas(limiteReparos.limite))
     }
     const ufFinal = uf || await ufDeCidade(cidade)  // rede de segurança: deriva uf da cidade
+    // uf pode continuar nula MESMO com cidade presente: ufDeCidade devolve null para cidade
+    // desconhecida, grafada errado ou homônima sem fallback. Sem uf o broadcast (que casa
+    // cidade E uf) pula em silêncio — então é 400 aqui, não linha gravada sem alvo.
+    if (typeof ufFinal !== 'string' || !ufFinal.trim()) {
+      return res.status(400).json({ erro: 'UF é obrigatória: não foi possível determinar o estado da cidade informada' })
+    }
     const { lat: latFinal, lng: lngFinal, origem: coordOrigem } = resolverCoordenadas(cidade, ufFinal, latitude, longitude, '[reparos/dono]')
     // Janela original resolvida UMA vez: mesma base do expira_em e do prazo_atendimento_horas
     // gravado, sem risco de os dois divergirem (mesmo padrão de POST /obras/dono). Antes a

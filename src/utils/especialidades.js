@@ -1,5 +1,5 @@
 // Vocabulário FECHADO das especialidades do profissional — DUAS listas, uma por lado:
-//   - REPARADOR (tipo_prestador = 'reparador'): as 21 categorias de SERVIÇO doméstico;
+//   - REPARADOR (tipo_prestador = 'reparador'): as 24 categorias de SERVIÇO doméstico;
 //   - OBRA (tipo_prestador = 'pintor', que cobre pintor E construtor): os 4 papéis de obra.
 // Mesmo estilo de slug nas duas: minúsculas, sem acento, '_' como separador (aula_particular).
 //
@@ -9,11 +9,15 @@
 // (POST /auth/cadastro e PUT /auth/perfil) — duas listas divergiriam no primeiro slug novo.
 //
 // A ordem é a da lista de serviços do app; 'outros' fecha a lista, como nas telas.
+// Slug novo entra ANTES de 'outros', nunca no meio: a ordem existente é a das telas.
+// Esta lista também é o vocabulário de reparos.categoria — o broadcast de reparo novo
+// (alertaService.notificarPrestadoresSobreNovoReparo) casa categoria × especialidades.
 const ESPECIALIDADES_REPARADOR = [
   'hidraulica', 'eletrica', 'marcenaria', 'alvenaria', 'climatizacao',
   'chaveiro', 'faxina', 'eletronica', 'aula_particular', 'cuidador',
   'jardineiro', 'manicure', 'cabelo', 'massagem', 'mudancas',
-  'estofamento', 'baba', 'cozinheiro', 'motorista', 'garcom', 'outros',
+  'estofamento', 'baba', 'cozinheiro', 'motorista', 'garcom',
+  'dedetizacao', 'montagem_moveis', 'vigia', 'outros',
 ]
 
 // Lado da OBRA (pintor/construtor): exatamente estes quatro, na ordem das telas.
