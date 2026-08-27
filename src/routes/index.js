@@ -3019,6 +3019,12 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar serviços' })
     }
     const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
+    // titulo — presença apenas (ausente/null/''/só espaços): reparos.titulo é NOT NULL e
+    // sem este guard o INSERT estourava em 500. Sem teto de tamanho e sem trim ao gravar —
+    // o trim aqui é só para o teste de "só espaços".
+    if (typeof titulo !== 'string' || !titulo.trim()) {
+      return res.status(400).json({ erro: 'Título é obrigatório' })
+    }
     // categoria — dois guards, ANTES de qualquer ida ao banco:
     //   1) presença (ausente/null/''): mesmo estilo do check de campos obrigatórios do
     //      POST /obras (obrasController.criar): teste falsy, 400, { erro }.
