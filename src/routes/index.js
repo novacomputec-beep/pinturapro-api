@@ -1879,7 +1879,11 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     try {
       const cfgAuto = await pool.query(`SELECT valor FROM configuracoes WHERE chave = 'aprovacao_automatica_obras'`)
       if (cfgAuto.rows[0]?.valor === 'true') {
-        const publicada = await aprovarEPublicarObra(obra.id)
+        // tera_midias=true: o app ainda vai subir fotos/vídeo e chama POST /obras/:id/midias-prontas
+        // ao terminar — o push sai lá (ou pela rede de segurança do job, 10 min depois).
+        // Ausente/false (painel, app antigo): aviso imediato, como sempre.
+        const teraMidias = req.body?.tera_midias === true || req.body?.tera_midias === 'true'
+        const publicada = await aprovarEPublicarObra(obra.id, { avisarPintores: !teraMidias })
         if (publicada) obra = publicada
       }
     } catch (err) {
@@ -1954,7 +1958,12 @@ const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
 //
 // Devolve a linha atualizada na TRANSIÇÃO, ou null quando o UPDATE não mudou nada (já estava
 // aprovada — duplo clique do admin — ou o id não existe).
-const aprovarEPublicarObra = async (obraId) => {
+// avisarPintores (default true): false só quando POST /obras/dono recebeu tera_midias=true —
+// aí quem dispara é POST /obras/:id/midias-prontas (ou a rede de segurança do job). Nos
+// outros chamadores (aprovação manual do admin, aprovação em lote do modo automático) o
+// aviso sai daqui, SEMPRE pelo claim atômico em push_novo_enviado_em: assim nem a rede de
+// segurança nem o midias-prontas conseguem mandar um segundo push depois da aprovação.
+const aprovarEPublicarObra = async (obraId, { avisarPintores = true } = {}) => {
   const atualizada = await pool.query(
     // Faixa "Hoje": o relógio reinicia na APROVAÇÃO (é ela que publica), então "hoje" é o dia
     // em que o admin aprovou, não o dia do rascunho. Sem este CASE, aprovar uma obra "Hoje"
@@ -1971,7 +1980,13 @@ const aprovarEPublicarObra = async (obraId) => {
   // UPDATE não mudou nada: reavisar o dono seria ruído, e rebroadcastar aos pintores
   // anunciaria como "nova" uma obra publicada dias atrás, para até 500 pessoas de uma vez.
   if (atualizada.rowCount === 0) return null
-  notificarPintoresSobreNovaObra(obraId).catch(err => console.error('Erro notificar pintores:', err))
+  if (avisarPintores) {
+    const claim = await pool.query(
+      `UPDATE obras SET push_novo_enviado_em = NOW() WHERE id = $1 AND push_novo_enviado_em IS NULL RETURNING id`,
+      [obraId]
+    )
+    if (claim.rowCount === 1) notificarPintoresSobreNovaObra(obraId).catch(err => console.error('Erro notificar pintores:', err))
+  }
   notificarDonoSobreAnaliseObra(obraId, true)
     .catch(err => console.error('Erro notificar dono (obra aprovada):', err.message))
   return atualizada.rows[0]
@@ -2179,6 +2194,7 @@ router.post('/obras/:id/midias-prontas', autenticar, async (req, res) => {
     const claim = await pool.query(
       `UPDATE obras SET push_novo_enviado_em = NOW()
         WHERE id = $1 AND criado_por = $2 AND push_novo_enviado_em IS NULL
+          AND status = 'aberta' AND status_aprovacao = 'aprovada'
         RETURNING id`,
       [req.params.id, req.usuario.id]
     )
@@ -2186,9 +2202,12 @@ router.post('/obras/:id/midias-prontas', autenticar, async (req, res) => {
       notificarPintoresSobreNovaObra(req.params.id).catch(err => console.error('Erro notificar pintores (midias-prontas):', err))
       return res.json({ mensagem: 'Profissionais avisados', enviado: true })
     }
-    const atual = await pool.query(`SELECT push_novo_enviado_em FROM obras WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+    const atual = await pool.query(`SELECT push_novo_enviado_em, status, status_aprovacao FROM obras WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
     if (atual.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-    res.json({ mensagem: 'Aviso já enviado', enviado: false, push_novo_enviado_em: atual.rows[0].push_novo_enviado_em })
+    const a = atual.rows[0]
+    // Ainda não publicada (fila de aprovação): quem avisa é a aprovação, com o mesmo claim.
+    if (!a.push_novo_enviado_em) return res.json({ mensagem: 'Aguardando aprovação — os profissionais serão avisados na publicação', enviado: false, push_novo_enviado_em: null })
+    res.json({ mensagem: 'Aviso já enviado', enviado: false, push_novo_enviado_em: a.push_novo_enviado_em })
   } catch (err) {
     console.error('[obras/midias-prontas]', err.message)
     res.status(500).json({ erro: 'Erro ao avisar profissionais' })
@@ -3117,7 +3136,22 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     // aprovacao. Remove-lo deixaria o reparo sem nenhum aviso, porque
     // POST /reparos/aprovacao/:id/aprovar nunca chega a rodar para uma linha ja aprovada
     // (e agora, com a guarda de transicao la, nem notificaria).
-    notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
+    // tera_midias=true: o app chama POST /reparos/:id/midias-prontas ao terminar os uploads e o
+    // push sai lá (ou pela rede de segurança do job). Ausente/false: aviso imediato, como sempre,
+    // mas pelo claim atômico — um retry do POST (ON CONFLICT devolve a mesma linha) não reenvia.
+    // try/catch próprio: a resposta 201 já foi enviada, o catch de fora não pode mais responder.
+    try {
+      const teraMidias = req.body?.tera_midias === true || req.body?.tera_midias === 'true'
+      if (!teraMidias) {
+        const claim = await pool.query(
+          `UPDATE reparos SET push_novo_enviado_em = NOW() WHERE id = $1 AND push_novo_enviado_em IS NULL RETURNING id`,
+          [result.rows[0].id]
+        )
+        if (claim.rowCount === 1) notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
+      }
+    } catch (err) {
+      console.error('[reparos/dono] claim do push de novo serviço falhou:', err.message)
+    }
   } catch (err) {
     console.error('[reparos/dono]', err.message)
     res.status(500).json({ erro: 'Erro ao cadastrar serviço' })
@@ -3212,6 +3246,7 @@ router.post('/reparos/:id/midias-prontas', autenticar, async (req, res) => {
     const claim = await pool.query(
       `UPDATE reparos SET push_novo_enviado_em = NOW()
         WHERE id = $1 AND criado_por = $2 AND push_novo_enviado_em IS NULL
+          AND status = 'aberta' AND status_aprovacao = 'aprovada'
         RETURNING id`,
       [req.params.id, req.usuario.id]
     )
@@ -3219,9 +3254,11 @@ router.post('/reparos/:id/midias-prontas', autenticar, async (req, res) => {
       notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores (midias-prontas):', err))
       return res.json({ mensagem: 'Profissionais avisados', enviado: true })
     }
-    const atual = await pool.query(`SELECT push_novo_enviado_em FROM reparos WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+    const atual = await pool.query(`SELECT push_novo_enviado_em, status, status_aprovacao FROM reparos WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
     if (atual.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
-    res.json({ mensagem: 'Aviso já enviado', enviado: false, push_novo_enviado_em: atual.rows[0].push_novo_enviado_em })
+    const a = atual.rows[0]
+    if (!a.push_novo_enviado_em) return res.json({ mensagem: 'Aguardando aprovação — os profissionais serão avisados na publicação', enviado: false, push_novo_enviado_em: null })
+    res.json({ mensagem: 'Aviso já enviado', enviado: false, push_novo_enviado_em: a.push_novo_enviado_em })
   } catch (err) {
     console.error('[reparos/midias-prontas]', err.message)
     res.status(500).json({ erro: 'Erro ao avisar profissionais' })
@@ -3385,7 +3422,17 @@ router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (re
     )
     res.json({ mensagem: 'Reparo aprovado e publicado!' })
     if (atualizado.rowCount === 0) return
-    notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores:', err))
+    // Claim atômico em push_novo_enviado_em (ver aprovarEPublicarObra): a rede de segurança
+    // e o midias-prontas não conseguem reenviar depois desta aprovação.
+    try {
+      const claim = await pool.query(
+        `UPDATE reparos SET push_novo_enviado_em = NOW() WHERE id = $1 AND push_novo_enviado_em IS NULL RETURNING id`,
+        [req.params.id]
+      )
+      if (claim.rowCount === 1) notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores:', err))
+    } catch (err) {
+      console.error('[reparos/aprovar] claim do push de novo serviço falhou:', err.message)
+    }
     // Desfecho ao dono só na TRANSIÇÃO, como no lado obra.
     notificarDonoSobreAnaliseReparo(req.params.id, true)
       .catch(err => console.error('Erro notificar dono (reparo aprovado):', err.message))
