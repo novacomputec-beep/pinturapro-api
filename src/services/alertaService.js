@@ -327,15 +327,12 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
 // INTERVALO_CRONOMETRO = 60 s, e no boot) — nenhum agendador novo.
 // Mesmo claim atômico das rotas: o UPDATE ... WHERE push_novo_enviado_em IS NULL é quem
 // decide; só as linhas devolvidas no RETURNING recebem push, uma vez cada.
-// Janela [60 min, 10 min] atrás, não "qualquer coisa mais velha que 10 min": a coluna nasceu
-// sem backfill, então toda demanda publicada ANTES do deploy tem NULL — sem o limite de 60
-// min a primeira rodada reanunciaria como "nova" cada demanda ativa da base (8 obras e 7
-// reparos no dia do deploy). Quem passou de 60 min sem aviso fica sem aviso: é o mesmo
-// destino que essas demandas já tinham antes desta rede existir.
+// Só o limite inferior (10 min): sem teto, uma demanda que ficou sem aviso porque o servidor
+// esteve fora por horas ainda é anunciada quando ele volta. As demandas anteriores à coluna
+// não entram porque a migração as marcou de uma vez (backfill único em migracaoPronta).
 // Âncora: obras têm publicado_em (a aprovação publica); reparos publicam na criação e não
 // têm essa coluna — criado_em é a âncora deles (mesma convenção do estender).
 const JANELA_PUSH_NOVO_MIN = 10
-const JANELA_PUSH_NOVO_MAX = 60
 const enviarPushNovoPendente = async () => {
   const lados = [
     { tabela: 'obras',   ancora: 'COALESCE(publicado_em, criado_em)', notificar: notificarPintoresSobreNovaObra },
@@ -347,9 +344,9 @@ const enviarPushNovoPendente = async () => {
         `UPDATE ${lado.tabela} SET push_novo_enviado_em = NOW()
           WHERE push_novo_enviado_em IS NULL
             AND status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()
-            AND ${lado.ancora} BETWEEN NOW() - ($1::int * INTERVAL '1 minute') AND NOW() - ($2::int * INTERVAL '1 minute')
+            AND ${lado.ancora} <= NOW() - ($1::int * INTERVAL '1 minute')
           RETURNING id`,
-        [JANELA_PUSH_NOVO_MAX, JANELA_PUSH_NOVO_MIN]
+        [JANELA_PUSH_NOVO_MIN]
       )
       if (claim.rowCount === 0) continue
       console.log(`[PushNovoPendente] ${lado.tabela}: ${claim.rowCount} demanda(s) publicada(s) há mais de ${JANELA_PUSH_NOVO_MIN} min sem aviso — disparando`)

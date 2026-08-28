@@ -364,6 +364,28 @@ const migracaoPronta = (async () => {
     // chama ao terminar o último upload); sem backfill, sem default, sem constraint.
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS push_novo_enviado_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS push_novo_enviado_em TIMESTAMPTZ`)
+    // Backfill ÚNICO: toda demanda que já existia quando a coluna nasceu foi anunciada pelo
+    // código antigo (push imediato na criação/aprovação) — marca como enviada para a rede de
+    // segurança (enviarPushNovoPendente) nunca reanunciá-la. Roda UMA vez: o marcador em
+    // configuracoes é reclamado no mesmo INSERT ... WHERE NOT EXISTS (padrão desta migração)
+    // e só quem o inseriu (rowCount 1) executa os UPDATEs; nos boots seguintes é no-op.
+    // Por que não pega demanda criada DEPOIS: (1) a migração roda ANTES do app.listen
+    // (server.js aguarda migracaoPronta), então nenhuma requisição deste processo cria linha
+    // enquanto ela roda; (2) qualquer linha criada por outra instância nesse instante vem do
+    // código antigo, que já avisou — marcá-la é correto; (3) a partir do 2º boot o marcador
+    // existe e nada aqui toca a tabela — um NULL deixado por tera_midias=true continua NULL
+    // para o midias-prontas / rede de segurança, mesmo que o servidor reinicie no meio.
+    // Um UPDATE "WHERE IS NULL" sem o marcador seria idempotente mas NÃO seguro: a cada
+    // reinício engoliria exatamente os NULLs que a rede de segurança existe para pegar.
+    const backfillPushNovo = await client.query(`INSERT INTO configuracoes (chave, valor)
+                        SELECT 'backfill_push_novo_enviado_em', NOW()::text
+                        WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'backfill_push_novo_enviado_em')
+                        RETURNING chave`)
+    if (backfillPushNovo.rowCount === 1) {
+      const bo = await client.query(`UPDATE obras   SET push_novo_enviado_em = NOW() WHERE push_novo_enviado_em IS NULL`)
+      const br = await client.query(`UPDATE reparos SET push_novo_enviado_em = NOW() WHERE push_novo_enviado_em IS NULL`)
+      console.log(`[migration] backfill push_novo_enviado_em: ${bo.rowCount} obra(s), ${br.rowCount} reparo(s) marcados como já anunciados`)
+    }
     // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o range scan lê
     // só as demandas prestes a expirar. O WHERE parcial (TIME-FREE, sem NOW()) mantém o índice
     // pequeno: exclui match, não-aprovadas (obras) e as que já enviaram os 3 marcos genéricos.
