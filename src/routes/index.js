@@ -359,6 +359,11 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS prazo_timezone TEXT`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_em    TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_horas NUMERIC`)
+    // Instante em que o push "nova obra/novo serviço disponível" foi disparado. NULL = ainda
+    // não avisado. Escrito UMA vez pelo claim atômico de POST /:id/midias-prontas (o app
+    // chama ao terminar o último upload); sem backfill, sem default, sem constraint.
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS push_novo_enviado_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS push_novo_enviado_em TIMESTAMPTZ`)
     // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o range scan lê
     // só as demandas prestes a expirar. O WHERE parcial (TIME-FREE, sem NOW()) mantém o índice
     // pequeno: exclui match, não-aprovadas (obras) e as que já enviaram os 3 marcos genéricos.
@@ -2160,6 +2165,36 @@ const DEDUPE_ESTENDER_OBRA_MINUTOS = 5
 // como expira_em foi empurrado para frente, os 4 alertas precisam re-disparar contra o novo
 // prazo, senão a obra estendida mantém os marcos já gastos e não recebe nova contagem
 // regressiva. (Substitui o antigo clear de alerta_sem_interessados_em, cujo job foi aposentado.)
+// POST /obras/:id/midias-prontas — o app chama depois que o ÚLTIMO upload de mídia terminou.
+// Dispara o push "nova obra disponível" UMA única vez por obra. O claim é o próprio UPDATE:
+// só a chamada cujo UPDATE casa push_novo_enviado_em IS NULL (e criado_por = chamador) grava
+// NOW() e dispara; toda outra — segunda aba, retry, outro aparelho do mesmo dono — não casa a
+// linha e recebe 200 sem reenviar. Não há SELECT-antes-do-UPDATE: a decisão é uma única
+// instrução com lock de linha no Postgres, então duas chamadas simultâneas não passam as duas.
+// rowCount 0 ambíguo (já enviado × não existe/não é do chamador) é resolvido por um SELECT
+// depois, só para escolher entre 200 idempotente e 404.
+router.post('/obras/:id/midias-prontas', autenticar, async (req, res) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ erro: 'Obra não encontrada' })
+    const claim = await pool.query(
+      `UPDATE obras SET push_novo_enviado_em = NOW()
+        WHERE id = $1 AND criado_por = $2 AND push_novo_enviado_em IS NULL
+        RETURNING id`,
+      [req.params.id, req.usuario.id]
+    )
+    if (claim.rowCount === 1) {
+      notificarPintoresSobreNovaObra(req.params.id).catch(err => console.error('Erro notificar pintores (midias-prontas):', err))
+      return res.json({ mensagem: 'Profissionais avisados', enviado: true })
+    }
+    const atual = await pool.query(`SELECT push_novo_enviado_em FROM obras WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+    if (atual.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    res.json({ mensagem: 'Aviso já enviado', enviado: false, push_novo_enviado_em: atual.rows[0].push_novo_enviado_em })
+  } catch (err) {
+    console.error('[obras/midias-prontas]', err.message)
+    res.status(500).json({ erro: 'Erro ao avisar profissionais' })
+  }
+})
+
 router.post('/obras/:id/estender', autenticar, async (req, res) => {
   try {
     const obra = await pool.query(
@@ -3169,6 +3204,30 @@ const DEDUPE_ESTENDER_REPARO_MINUTOS = 5
 // Re-arma TODOS os marcos de expiração (marco_6h/60/30/15_em = NULL), igual à obra: expira_em
 // avança, então os 4 alertas re-disparam contra o novo prazo. (Substitui o clear de
 // alerta_sem_interessados_em, cujo job foi aposentado.)
+// POST /reparos/:id/midias-prontas — espelho exato de POST /obras/:id/midias-prontas (ver lá):
+// claim atômico no UPDATE (push_novo_enviado_em IS NULL AND criado_por = chamador), push uma vez.
+router.post('/reparos/:id/midias-prontas', autenticar, async (req, res) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ erro: 'Serviço não encontrado' })
+    const claim = await pool.query(
+      `UPDATE reparos SET push_novo_enviado_em = NOW()
+        WHERE id = $1 AND criado_por = $2 AND push_novo_enviado_em IS NULL
+        RETURNING id`,
+      [req.params.id, req.usuario.id]
+    )
+    if (claim.rowCount === 1) {
+      notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores (midias-prontas):', err))
+      return res.json({ mensagem: 'Profissionais avisados', enviado: true })
+    }
+    const atual = await pool.query(`SELECT push_novo_enviado_em FROM reparos WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+    if (atual.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
+    res.json({ mensagem: 'Aviso já enviado', enviado: false, push_novo_enviado_em: atual.rows[0].push_novo_enviado_em })
+  } catch (err) {
+    console.error('[reparos/midias-prontas]', err.message)
+    res.status(500).json({ erro: 'Erro ao avisar profissionais' })
+  }
+})
+
 router.post('/reparos/:id/estender', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(
