@@ -320,6 +320,43 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
   }
 }
 
+// Rede de segurança do push "nova obra / novo serviço disponível". O app avisa via
+// POST /:id/midias-prontas quando o último upload termina; se ele nunca chamar (upload
+// falhou, tela abandonada, app antigo que mandou tera_midias=true), a demanda ficaria
+// publicada sem ninguém avisado. Roda dentro de verificarMarcosExpiracao (a cada
+// INTERVALO_CRONOMETRO = 60 s, e no boot) — nenhum agendador novo.
+// Mesmo claim atômico das rotas: o UPDATE ... WHERE push_novo_enviado_em IS NULL é quem
+// decide; só as linhas devolvidas no RETURNING recebem push, uma vez cada.
+// Só o limite inferior (10 min): sem teto, uma demanda que ficou sem aviso porque o servidor
+// esteve fora por horas ainda é anunciada quando ele volta. As demandas anteriores à coluna
+// não entram porque a migração as marcou de uma vez (backfill único em migracaoPronta).
+// Âncora: obras têm publicado_em (a aprovação publica); reparos publicam na criação e não
+// têm essa coluna — criado_em é a âncora deles (mesma convenção do estender).
+const JANELA_PUSH_NOVO_MIN = 10
+const enviarPushNovoPendente = async () => {
+  const lados = [
+    { tabela: 'obras',   ancora: 'COALESCE(publicado_em, criado_em)', notificar: notificarPintoresSobreNovaObra },
+    { tabela: 'reparos', ancora: 'criado_em',                         notificar: notificarPrestadoresSobreNovoReparo },
+  ]
+  for (const lado of lados) {
+    try {
+      const claim = await pool.query(
+        `UPDATE ${lado.tabela} SET push_novo_enviado_em = NOW()
+          WHERE push_novo_enviado_em IS NULL
+            AND status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()
+            AND ${lado.ancora} <= NOW() - ($1::int * INTERVAL '1 minute')
+          RETURNING id`,
+        [JANELA_PUSH_NOVO_MIN]
+      )
+      if (claim.rowCount === 0) continue
+      console.log(`[PushNovoPendente] ${lado.tabela}: ${claim.rowCount} demanda(s) publicada(s) há mais de ${JANELA_PUSH_NOVO_MIN} min sem aviso — disparando`)
+      for (const r of claim.rows) await lado.notificar(r.id)
+    } catch (err) {
+      console.error(`[PushNovoPendente] erro em ${lado.tabela}:`, err.message)
+    }
+  }
+}
+
 const verificarObrasExpirando = async () => {
   try {
     const obras = await pool.query(`
@@ -583,6 +620,8 @@ const verificarMarcosExpiracao = async () => {
   } catch (err) {
     console.error('Erro ao verificar marcos de expiração:', err.message)
   }
+  // Rede de segurança do push de "novo disponível" — mesma cadência deste job, try/catch próprio.
+  await enviarPushNovoPendente()
 }
 
 // Avisa OS DOIS LADOS de um match desfeito pelo cronômetro — antes o ramo (b) dos dois crons
@@ -1084,6 +1123,7 @@ module.exports = {
   enviarBoasVindas,
   notificarPintoresSobreNovaObra,
   notificarPrestadoresSobreNovoReparo,
+  enviarPushNovoPendente,
   verificarObrasExpirando,
   verificarObrasComBaixoEngajamento,
   verificarMarcosExpiracao,

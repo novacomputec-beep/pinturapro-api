@@ -359,6 +359,33 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS prazo_timezone TEXT`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_em    TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_horas NUMERIC`)
+    // Instante em que o push "nova obra/novo serviço disponível" foi disparado. NULL = ainda
+    // não avisado. Escrito UMA vez pelo claim atômico de POST /:id/midias-prontas (o app
+    // chama ao terminar o último upload); sem backfill, sem default, sem constraint.
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS push_novo_enviado_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS push_novo_enviado_em TIMESTAMPTZ`)
+    // Backfill ÚNICO: toda demanda que já existia quando a coluna nasceu foi anunciada pelo
+    // código antigo (push imediato na criação/aprovação) — marca como enviada para a rede de
+    // segurança (enviarPushNovoPendente) nunca reanunciá-la. Roda UMA vez: o marcador em
+    // configuracoes é reclamado no mesmo INSERT ... WHERE NOT EXISTS (padrão desta migração)
+    // e só quem o inseriu (rowCount 1) executa os UPDATEs; nos boots seguintes é no-op.
+    // Por que não pega demanda criada DEPOIS: (1) a migração roda ANTES do app.listen
+    // (server.js aguarda migracaoPronta), então nenhuma requisição deste processo cria linha
+    // enquanto ela roda; (2) qualquer linha criada por outra instância nesse instante vem do
+    // código antigo, que já avisou — marcá-la é correto; (3) a partir do 2º boot o marcador
+    // existe e nada aqui toca a tabela — um NULL deixado por tera_midias=true continua NULL
+    // para o midias-prontas / rede de segurança, mesmo que o servidor reinicie no meio.
+    // Um UPDATE "WHERE IS NULL" sem o marcador seria idempotente mas NÃO seguro: a cada
+    // reinício engoliria exatamente os NULLs que a rede de segurança existe para pegar.
+    const backfillPushNovo = await client.query(`INSERT INTO configuracoes (chave, valor)
+                        SELECT 'backfill_push_novo_enviado_em', NOW()::text
+                        WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'backfill_push_novo_enviado_em')
+                        RETURNING chave`)
+    if (backfillPushNovo.rowCount === 1) {
+      const bo = await client.query(`UPDATE obras   SET push_novo_enviado_em = NOW() WHERE push_novo_enviado_em IS NULL`)
+      const br = await client.query(`UPDATE reparos SET push_novo_enviado_em = NOW() WHERE push_novo_enviado_em IS NULL`)
+      console.log(`[migration] backfill push_novo_enviado_em: ${bo.rowCount} obra(s), ${br.rowCount} reparo(s) marcados como já anunciados`)
+    }
     // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o range scan lê
     // só as demandas prestes a expirar. O WHERE parcial (TIME-FREE, sem NOW()) mantém o índice
     // pequeno: exclui match, não-aprovadas (obras) e as que já enviaram os 3 marcos genéricos.
@@ -1874,7 +1901,11 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     try {
       const cfgAuto = await pool.query(`SELECT valor FROM configuracoes WHERE chave = 'aprovacao_automatica_obras'`)
       if (cfgAuto.rows[0]?.valor === 'true') {
-        const publicada = await aprovarEPublicarObra(obra.id)
+        // tera_midias=true: o app ainda vai subir fotos/vídeo e chama POST /obras/:id/midias-prontas
+        // ao terminar — o push sai lá (ou pela rede de segurança do job, 10 min depois).
+        // Ausente/false (painel, app antigo): aviso imediato, como sempre.
+        const teraMidias = req.body?.tera_midias === true || req.body?.tera_midias === 'true'
+        const publicada = await aprovarEPublicarObra(obra.id, { avisarPintores: !teraMidias })
         if (publicada) obra = publicada
       }
     } catch (err) {
@@ -1949,7 +1980,12 @@ const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
 //
 // Devolve a linha atualizada na TRANSIÇÃO, ou null quando o UPDATE não mudou nada (já estava
 // aprovada — duplo clique do admin — ou o id não existe).
-const aprovarEPublicarObra = async (obraId) => {
+// avisarPintores (default true): false só quando POST /obras/dono recebeu tera_midias=true —
+// aí quem dispara é POST /obras/:id/midias-prontas (ou a rede de segurança do job). Nos
+// outros chamadores (aprovação manual do admin, aprovação em lote do modo automático) o
+// aviso sai daqui, SEMPRE pelo claim atômico em push_novo_enviado_em: assim nem a rede de
+// segurança nem o midias-prontas conseguem mandar um segundo push depois da aprovação.
+const aprovarEPublicarObra = async (obraId, { avisarPintores = true } = {}) => {
   const atualizada = await pool.query(
     // Faixa "Hoje": o relógio reinicia na APROVAÇÃO (é ela que publica), então "hoje" é o dia
     // em que o admin aprovou, não o dia do rascunho. Sem este CASE, aprovar uma obra "Hoje"
@@ -1966,7 +2002,13 @@ const aprovarEPublicarObra = async (obraId) => {
   // UPDATE não mudou nada: reavisar o dono seria ruído, e rebroadcastar aos pintores
   // anunciaria como "nova" uma obra publicada dias atrás, para até 500 pessoas de uma vez.
   if (atualizada.rowCount === 0) return null
-  notificarPintoresSobreNovaObra(obraId).catch(err => console.error('Erro notificar pintores:', err))
+  if (avisarPintores) {
+    const claim = await pool.query(
+      `UPDATE obras SET push_novo_enviado_em = NOW() WHERE id = $1 AND push_novo_enviado_em IS NULL RETURNING id`,
+      [obraId]
+    )
+    if (claim.rowCount === 1) notificarPintoresSobreNovaObra(obraId).catch(err => console.error('Erro notificar pintores:', err))
+  }
   notificarDonoSobreAnaliseObra(obraId, true)
     .catch(err => console.error('Erro notificar dono (obra aprovada):', err.message))
   return atualizada.rows[0]
@@ -2160,6 +2202,40 @@ const DEDUPE_ESTENDER_OBRA_MINUTOS = 5
 // como expira_em foi empurrado para frente, os 4 alertas precisam re-disparar contra o novo
 // prazo, senão a obra estendida mantém os marcos já gastos e não recebe nova contagem
 // regressiva. (Substitui o antigo clear de alerta_sem_interessados_em, cujo job foi aposentado.)
+// POST /obras/:id/midias-prontas — o app chama depois que o ÚLTIMO upload de mídia terminou.
+// Dispara o push "nova obra disponível" UMA única vez por obra. O claim é o próprio UPDATE:
+// só a chamada cujo UPDATE casa push_novo_enviado_em IS NULL (e criado_por = chamador) grava
+// NOW() e dispara; toda outra — segunda aba, retry, outro aparelho do mesmo dono — não casa a
+// linha e recebe 200 sem reenviar. Não há SELECT-antes-do-UPDATE: a decisão é uma única
+// instrução com lock de linha no Postgres, então duas chamadas simultâneas não passam as duas.
+// rowCount 0 ambíguo (já enviado × não existe/não é do chamador) é resolvido por um SELECT
+// depois, só para escolher entre 200 idempotente e 404.
+router.post('/obras/:id/midias-prontas', autenticar, async (req, res) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ erro: 'Obra não encontrada' })
+    const claim = await pool.query(
+      `UPDATE obras SET push_novo_enviado_em = NOW()
+        WHERE id = $1 AND criado_por = $2 AND push_novo_enviado_em IS NULL
+          AND status = 'aberta' AND status_aprovacao = 'aprovada'
+        RETURNING id`,
+      [req.params.id, req.usuario.id]
+    )
+    if (claim.rowCount === 1) {
+      notificarPintoresSobreNovaObra(req.params.id).catch(err => console.error('Erro notificar pintores (midias-prontas):', err))
+      return res.json({ mensagem: 'Profissionais avisados', enviado: true })
+    }
+    const atual = await pool.query(`SELECT push_novo_enviado_em, status, status_aprovacao FROM obras WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+    if (atual.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    const a = atual.rows[0]
+    // Ainda não publicada (fila de aprovação): quem avisa é a aprovação, com o mesmo claim.
+    if (!a.push_novo_enviado_em) return res.json({ mensagem: 'Aguardando aprovação — os profissionais serão avisados na publicação', enviado: false, push_novo_enviado_em: null })
+    res.json({ mensagem: 'Aviso já enviado', enviado: false, push_novo_enviado_em: a.push_novo_enviado_em })
+  } catch (err) {
+    console.error('[obras/midias-prontas]', err.message)
+    res.status(500).json({ erro: 'Erro ao avisar profissionais' })
+  }
+})
+
 router.post('/obras/:id/estender', autenticar, async (req, res) => {
   try {
     const obra = await pool.query(
@@ -3082,7 +3158,22 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     // aprovacao. Remove-lo deixaria o reparo sem nenhum aviso, porque
     // POST /reparos/aprovacao/:id/aprovar nunca chega a rodar para uma linha ja aprovada
     // (e agora, com a guarda de transicao la, nem notificaria).
-    notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
+    // tera_midias=true: o app chama POST /reparos/:id/midias-prontas ao terminar os uploads e o
+    // push sai lá (ou pela rede de segurança do job). Ausente/false: aviso imediato, como sempre,
+    // mas pelo claim atômico — um retry do POST (ON CONFLICT devolve a mesma linha) não reenvia.
+    // try/catch próprio: a resposta 201 já foi enviada, o catch de fora não pode mais responder.
+    try {
+      const teraMidias = req.body?.tera_midias === true || req.body?.tera_midias === 'true'
+      if (!teraMidias) {
+        const claim = await pool.query(
+          `UPDATE reparos SET push_novo_enviado_em = NOW() WHERE id = $1 AND push_novo_enviado_em IS NULL RETURNING id`,
+          [result.rows[0].id]
+        )
+        if (claim.rowCount === 1) notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
+      }
+    } catch (err) {
+      console.error('[reparos/dono] claim do push de novo serviço falhou:', err.message)
+    }
   } catch (err) {
     console.error('[reparos/dono]', err.message)
     res.status(500).json({ erro: 'Erro ao cadastrar serviço' })
@@ -3169,6 +3260,33 @@ const DEDUPE_ESTENDER_REPARO_MINUTOS = 5
 // Re-arma TODOS os marcos de expiração (marco_6h/60/30/15_em = NULL), igual à obra: expira_em
 // avança, então os 4 alertas re-disparam contra o novo prazo. (Substitui o clear de
 // alerta_sem_interessados_em, cujo job foi aposentado.)
+// POST /reparos/:id/midias-prontas — espelho exato de POST /obras/:id/midias-prontas (ver lá):
+// claim atômico no UPDATE (push_novo_enviado_em IS NULL AND criado_por = chamador), push uma vez.
+router.post('/reparos/:id/midias-prontas', autenticar, async (req, res) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ erro: 'Serviço não encontrado' })
+    const claim = await pool.query(
+      `UPDATE reparos SET push_novo_enviado_em = NOW()
+        WHERE id = $1 AND criado_por = $2 AND push_novo_enviado_em IS NULL
+          AND status = 'aberta' AND status_aprovacao = 'aprovada'
+        RETURNING id`,
+      [req.params.id, req.usuario.id]
+    )
+    if (claim.rowCount === 1) {
+      notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores (midias-prontas):', err))
+      return res.json({ mensagem: 'Profissionais avisados', enviado: true })
+    }
+    const atual = await pool.query(`SELECT push_novo_enviado_em, status, status_aprovacao FROM reparos WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+    if (atual.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
+    const a = atual.rows[0]
+    if (!a.push_novo_enviado_em) return res.json({ mensagem: 'Aguardando aprovação — os profissionais serão avisados na publicação', enviado: false, push_novo_enviado_em: null })
+    res.json({ mensagem: 'Aviso já enviado', enviado: false, push_novo_enviado_em: a.push_novo_enviado_em })
+  } catch (err) {
+    console.error('[reparos/midias-prontas]', err.message)
+    res.status(500).json({ erro: 'Erro ao avisar profissionais' })
+  }
+})
+
 router.post('/reparos/:id/estender', autenticar, async (req, res) => {
   try {
     const reparo = await pool.query(
@@ -3326,7 +3444,17 @@ router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (re
     )
     res.json({ mensagem: 'Reparo aprovado e publicado!' })
     if (atualizado.rowCount === 0) return
-    notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores:', err))
+    // Claim atômico em push_novo_enviado_em (ver aprovarEPublicarObra): a rede de segurança
+    // e o midias-prontas não conseguem reenviar depois desta aprovação.
+    try {
+      const claim = await pool.query(
+        `UPDATE reparos SET push_novo_enviado_em = NOW() WHERE id = $1 AND push_novo_enviado_em IS NULL RETURNING id`,
+        [req.params.id]
+      )
+      if (claim.rowCount === 1) notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores:', err))
+    } catch (err) {
+      console.error('[reparos/aprovar] claim do push de novo serviço falhou:', err.message)
+    }
     // Desfecho ao dono só na TRANSIÇÃO, como no lado obra.
     notificarDonoSobreAnaliseReparo(req.params.id, true)
       .catch(err => console.error('Erro notificar dono (reparo aprovado):', err.message))
