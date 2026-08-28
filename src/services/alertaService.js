@@ -320,6 +320,31 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
   }
 }
 
+// Push para o DONO com o desfecho da análise da obra (a obra é a única vertical que passa
+// por aprovação; reparo publica direto). Segue o padrão já usado no aviso de novo candidato
+// (SELECT juntando usuarios pelo criado_por — ver /candidaturas em routes/index.js).
+// Sem push_token cadastrado simplesmente não há o que enviar — não é erro.
+// Quem chama SEMPRE dispara fire-and-forget e só na TRANSIÇÃO de status: o painel do admin
+// não pode esperar nem falhar por causa de uma notificação, e reprocessar não pode reavisar.
+// Vive aqui (e não em routes/index.js) porque a aprovação AUTOMÁTICA adia este aviso: quem
+// o dispara nesse caminho é o claim de push_aprovada_enviado_em em enviarPushNovoPendente.
+const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
+  const info = await pool.query(
+    `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
+    [obraId]
+  )
+  const { push_token, titulo } = info.rows[0] || {}
+  if (!push_token) return
+  await enviarPushNotificacao(
+    push_token,
+    aprovada ? '✅ Obra aprovada!' : '❌ Obra não aprovada',
+    aprovada
+      ? `"${titulo}" já está publicada e visível para os pintores.`
+      : `"${titulo}" não foi publicada desta vez. Toque para rever os detalhes e cadastrar novamente.`,
+    { tipo: aprovada ? 'obra_aprovada' : 'obra_recusada', obra_id: obraId }
+  )
+}
+
 // Rede de segurança do push "nova obra / novo serviço disponível". O app avisa via
 // POST /:id/midias-prontas quando o último upload termina; se ele nunca chamar (upload
 // falhou, tela abandonada, app antigo que mandou tera_midias=true), a demanda ficaria
@@ -333,6 +358,8 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
 // Âncora: obras têm publicado_em (a aprovação publica); reparos publicam na criação e não
 // têm essa coluna — criado_em é a âncora deles (mesma convenção do estender).
 const JANELA_PUSH_NOVO_MIN = 10
+// Atraso do push "obra aprovada" ao dono na aprovação AUTOMÁTICA (segundo claim abaixo).
+const ATRASO_PUSH_APROVADA_MIN = 5
 const enviarPushNovoPendente = async () => {
   const lados = [
     { tabela: 'obras',   ancora: 'COALESCE(publicado_em, criado_em)', notificar: notificarPintoresSobreNovaObra },
@@ -354,6 +381,29 @@ const enviarPushNovoPendente = async () => {
     } catch (err) {
       console.error(`[PushNovoPendente] erro em ${lado.tabela}:`, err.message)
     }
+  }
+
+  // Push "obra aprovada" ao DONO, adiado 5 min na aprovação AUTOMÁTICA. aprovarEPublicarObra
+  // (routes/index.js) deixa push_aprovada_enviado_em NULL nesse caminho; na aprovação manual
+  // carimba NOW() no próprio UPDATE e avisa inline, então nunca cai aqui. Mesmo claim atômico
+  // do bloco acima: só as linhas devolvidas no RETURNING recebem push, uma vez cada. Âncora
+  // COALESCE(publicado_em, criado_em) — a aprovação é o que publica. Sem teto de tempo, pelo
+  // mesmo motivo do claim acima; as obras anteriores à coluna foram marcadas pelo backfill.
+  try {
+    const claim = await pool.query(
+      `UPDATE obras SET push_aprovada_enviado_em = NOW()
+        WHERE push_aprovada_enviado_em IS NULL
+          AND status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()
+          AND COALESCE(publicado_em, criado_em) <= NOW() - ($1::int * INTERVAL '1 minute')
+        RETURNING id`,
+      [ATRASO_PUSH_APROVADA_MIN]
+    )
+    if (claim.rowCount > 0) {
+      console.log(`[PushNovoPendente] obras: ${claim.rowCount} aprovada(s) automaticamente há mais de ${ATRASO_PUSH_APROVADA_MIN} min sem aviso ao dono — disparando`)
+      for (const r of claim.rows) await notificarDonoSobreAnaliseObra(r.id, true)
+    }
+  } catch (err) {
+    console.error('[PushNovoPendente] erro no push "obra aprovada" ao dono:', err.message)
   }
 }
 
@@ -1123,6 +1173,7 @@ module.exports = {
   enviarBoasVindas,
   notificarPintoresSobreNovaObra,
   notificarPrestadoresSobreNovoReparo,
+  notificarDonoSobreAnaliseObra,
   enviarPushNovoPendente,
   verificarObrasExpirando,
   verificarObrasComBaixoEngajamento,
