@@ -14,7 +14,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
+const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
 // America/Sao_Paulo. Compartilhado com alertaService, que reconstrói expira_em nos crons.
@@ -385,6 +385,24 @@ const migracaoPronta = (async () => {
       const bo = await client.query(`UPDATE obras   SET push_novo_enviado_em = NOW() WHERE push_novo_enviado_em IS NULL`)
       const br = await client.query(`UPDATE reparos SET push_novo_enviado_em = NOW() WHERE push_novo_enviado_em IS NULL`)
       console.log(`[migration] backfill push_novo_enviado_em: ${bo.rowCount} obra(s), ${br.rowCount} reparo(s) marcados como já anunciados`)
+    }
+    // Instante em que o push "obra aprovada" foi disparado ao DONO. Aprovação MANUAL (painel
+    // do admin) avisa inline e carimba NOW() no mesmo UPDATE de aprovarEPublicarObra; aprovação
+    // AUTOMÁTICA deixa NULL e a rede de segurança (enviarPushNovoPendente) avisa 5 min depois.
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS push_aprovada_enviado_em TIMESTAMPTZ`)
+    // Backfill ÚNICO, mesmo padrão e mesma justificativa do de push_novo_enviado_em acima: toda
+    // obra que existia quando a coluna nasceu foi avisada pelo código antigo (push inline em
+    // qualquer aprovação) — marca de uma vez para o sweep nunca reavisá-la. Marca TODAS as
+    // linhas (não só as aprovadas): a partir daqui aprovarEPublicarObra grava a coluna
+    // explicitamente em cada transição, então uma pendente antiga aprovada depois recebe o
+    // valor certo (NULL na automática, NOW() na manual) de qualquer forma.
+    const backfillPushAprovada = await client.query(`INSERT INTO configuracoes (chave, valor)
+                        SELECT 'backfill_push_aprovada_enviado_em', NOW()::text
+                        WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'backfill_push_aprovada_enviado_em')
+                        RETURNING chave`)
+    if (backfillPushAprovada.rowCount === 1) {
+      const ba = await client.query(`UPDATE obras SET push_aprovada_enviado_em = NOW() WHERE push_aprovada_enviado_em IS NULL`)
+      console.log(`[migration] backfill push_aprovada_enviado_em: ${ba.rowCount} obra(s) marcadas como já avisadas ao dono`)
     }
     // Índice parcial do job de marcos (roda a cada 1min). Coluna líder expira_em: o range scan lê
     // só as demandas prestes a expirar. O WHERE parcial (TIME-FREE, sem NOW()) mantém o índice
@@ -1905,7 +1923,7 @@ router.post('/obras/dono', autenticar, async (req, res) => {
         // ao terminar — o push sai lá (ou pela rede de segurança do job, 10 min depois).
         // Ausente/false (painel, app antigo): aviso imediato, como sempre.
         const teraMidias = req.body?.tera_midias === true || req.body?.tera_midias === 'true'
-        const publicada = await aprovarEPublicarObra(obra.id, { avisarPintores: !teraMidias })
+        const publicada = await aprovarEPublicarObra(obra.id, { avisarPintores: !teraMidias, automatica: true })
         if (publicada) obra = publicada
       }
     } catch (err) {
@@ -1937,28 +1955,9 @@ router.get('/obras-aprovacao', autenticar, exigirAdmin, async (req, res) => {
   }
 })
 
-// Push para o DONO com o desfecho da análise da obra (a obra é a única vertical que passa
-// por aprovação; reparo publica direto). Segue o padrão já usado no aviso de novo candidato
-// (SELECT juntando usuarios pelo criado_por — ver mais abaixo, no /candidaturas).
-// Sem push_token cadastrado simplesmente não há o que enviar — não é erro.
-// Quem chama SEMPRE dispara fire-and-forget e só na TRANSIÇÃO de status: o painel do admin
-// não pode esperar nem falhar por causa de uma notificação, e reprocessar não pode reavisar.
-const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
-  const info = await pool.query(
-    `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
-    [obraId]
-  )
-  const { push_token, titulo } = info.rows[0] || {}
-  if (!push_token) return
-  await enviarPushNotificacao(
-    push_token,
-    aprovada ? '✅ Obra aprovada!' : '❌ Obra não aprovada',
-    aprovada
-      ? `"${titulo}" já está publicada e visível para os pintores.`
-      : `"${titulo}" não foi publicada desta vez. Toque para rever os detalhes e cadastrar novamente.`,
-    { tipo: aprovada ? 'obra_aprovada' : 'obra_recusada', obra_id: obraId }
-  )
-}
+// notificarDonoSobreAnaliseObra (push ao dono com o desfecho da análise) mora em
+// alertaService: a rede de segurança (enviarPushNovoPendente) também a dispara, para a
+// aprovação automática avisar o dono 5 min depois — mesma função, mesmo texto.
 
 // Aprova e PUBLICA uma obra — fonte ÚNICA do efeito de aprovação. Tudo o que "publicar"
 // significa mora aqui: o UPDATE das duas colunas de status, o reinício de publicado_em/
@@ -1985,7 +1984,14 @@ const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
 // outros chamadores (aprovação manual do admin, aprovação em lote do modo automático) o
 // aviso sai daqui, SEMPRE pelo claim atômico em push_novo_enviado_em: assim nem a rede de
 // segurança nem o midias-prontas conseguem mandar um segundo push depois da aprovação.
-const aprovarEPublicarObra = async (obraId, { avisarPintores = true } = {}) => {
+// automatica (default false): true nos caminhos do modo automático (POST /obras/dono e a
+// varredura da fila ao ligar a flag). Manual → push "obra aprovada" ao dono inline, como
+// sempre, e push_aprovada_enviado_em = NOW() no MESMO UPDATE, para o sweep nunca repeti-lo.
+// Automática → sem push inline e coluna NULL: enviarPushNovoPendente reclama a linha
+// 5 min depois da publicação e avisa o dono. Gravar a coluna no próprio UPDATE (e não em
+// uma query separada) é o que garante que uma re-aprovação (recusada → aprovada) reseta o
+// carimbo junto com o resto da transição.
+const aprovarEPublicarObra = async (obraId, { avisarPintores = true, automatica = false } = {}) => {
   const atualizada = await pool.query(
     // Faixa "Hoje": o relógio reinicia na APROVAÇÃO (é ela que publica), então "hoje" é o dia
     // em que o admin aprovou, não o dia do rascunho. Sem este CASE, aprovar uma obra "Hoje"
@@ -1995,9 +2001,10 @@ const aprovarEPublicarObra = async (obraId, { avisarPintores = true } = {}) => {
     `UPDATE obras SET status_aprovacao = 'aprovada', status = 'aberta',
        publicado_em = NOW(),
        expira_em = CASE WHEN prazo_modo = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia(SQL_ZONA_DA_OBRA)}
-                        ELSE NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour') END
+                        ELSE NOW() + (COALESCE(horas_para_expirar, 720) * INTERVAL '1 hour') END,
+       push_aprovada_enviado_em = CASE WHEN $2::boolean THEN NULL ELSE NOW() END
      WHERE id = $1 AND status_aprovacao <> 'aprovada'
-     RETURNING *`, [obraId])
+     RETURNING *`, [obraId, automatica])
   // Os DOIS avisos só na TRANSIÇÃO pendente/recusada → aprovada. rowCount 0 significa que o
   // UPDATE não mudou nada: reavisar o dono seria ruído, e rebroadcastar aos pintores
   // anunciaria como "nova" uma obra publicada dias atrás, para até 500 pessoas de uma vez.
@@ -2009,8 +2016,10 @@ const aprovarEPublicarObra = async (obraId, { avisarPintores = true } = {}) => {
     )
     if (claim.rowCount === 1) notificarPintoresSobreNovaObra(obraId).catch(err => console.error('Erro notificar pintores:', err))
   }
-  notificarDonoSobreAnaliseObra(obraId, true)
-    .catch(err => console.error('Erro notificar dono (obra aprovada):', err.message))
+  if (!automatica) {
+    notificarDonoSobreAnaliseObra(obraId, true)
+      .catch(err => console.error('Erro notificar dono (obra aprovada):', err.message))
+  }
   return atualizada.rows[0]
 }
 
@@ -5373,7 +5382,7 @@ router.post('/obras-aprovacao/modo-automatico', autenticar, exigirSuperAdmin, as
         // mesmo reinício de publicado_em/expira_em e os mesmos dois avisos. Ela já traz a
         // guarda de idempotência (status_aprovacao <> 'aprovada') e devolve null quando não
         // houve transição, então contar as não-nulas dá o número REAL de aprovações.
-        const publicada = await aprovarEPublicarObra(o.id)
+        const publicada = await aprovarEPublicarObra(o.id, { automatica: true })
         if (publicada) aprovados++
       }
       console.log(`[Modo automático obras] ${aprovados} obra(s) da fila aprovada(s) na ativação`)
