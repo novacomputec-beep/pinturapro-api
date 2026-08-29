@@ -16,6 +16,7 @@ const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrl
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
+const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
 // America/Sao_Paulo. Compartilhado com alertaService, que reconstrói expira_em nos crons.
 const { PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP, FORMATO_ZONA_IANA, sqlZonaSegura } = require('../utils/faixasPrazo')
@@ -2343,7 +2344,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         -- GET /obras/minhas.
         (o.status <> 'encerrada' AND o.expira_em <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
-        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
+        (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa,
+        ${sqlTotalExtensaoObra('o.')} AS total_extensao_horas
        FROM obras o WHERE o.id = $1`,
       [req.params.id]
     )
@@ -3627,6 +3629,7 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
              -- (a lista negra de quem furou NESTE reparo), client_request_id, status_aprovacao,
              -- criado_em e descricao saíam para todo reparador assinante sem nada no app lê-los.
              r.status, r.expira_em, r.prazo_atendimento_horas,
+             ${sqlTotalExtensaoReparo('r.')} AS total_extensao_horas,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM reparos r
@@ -4741,7 +4744,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // servidor) para a tela de detalhe gatear o botão de estender sem comparar com o
     // relógio do aparelho.
     const result = await pool.query(
-      `SELECT *, (status <> 'encerrada' AND expira_em <= NOW()) AS expirada
+      `SELECT *, (status <> 'encerrada' AND expira_em <= NOW()) AS expirada,
+              ${sqlTotalExtensaoReparo()} AS total_extensao_horas
          FROM reparos WHERE id = $1`,
       [req.params.id]
     )
