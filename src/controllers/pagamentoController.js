@@ -349,7 +349,7 @@ const webhookPagbank = async (req, res) => {
     const [usuarioId, plano] = partes
 
     const usuarioResult = await pool.query(
-      `SELECT id, role, nome, tipo_prestador FROM usuarios WHERE id = $1`, [usuarioId]
+      `SELECT id, role, nome, tipo_prestador, verificacao_status FROM usuarios WHERE id = $1`, [usuarioId]
     )
     if (usuarioResult.rows.length === 0) return
 
@@ -371,7 +371,14 @@ const webhookPagbank = async (req, res) => {
     }
 
     // Prestadores ficam pendentes de verificação — donos de obra ativam direto
-    if (usuario.role === 'prestador' || usuario.role === 'pintor' || usuario.role === 'assinante') {
+    if ((usuario.role === 'prestador' || usuario.role === 'pintor' || usuario.role === 'assinante') && usuario.verificacao_status === 'aprovado') {
+      // Profissional JÁ aprovado pelo painel que paga depois (ex.: assinatura pela web): não há
+      // nada a verificar, então ativa direto — o mesmo caminho do ramo não-prestador abaixo.
+      // Antes caía em colocarPendentVerificacao e ficava preso: pago, assinatura em
+      // pendente_verificacao e fora da fila do painel (que filtra verificacao_status = 'pendente').
+      await ativarAssinatura(usuarioId, plano)
+      console.log(`Assinatura ativada via PagBank — prestador já aprovado: ${usuarioId}, plano: ${plano}`)
+    } else if (usuario.role === 'prestador' || usuario.role === 'pintor' || usuario.role === 'assinante') {
       await colocarPendentVerificacao(usuarioId, plano)
       console.log(`Prestador ${usuarioId} aguardando verificação após pagamento`)
 
