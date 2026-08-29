@@ -5,6 +5,7 @@ const { pool } = require('../utils/supabase')
 // em produção (0 linhas) — e por isso a obra criada pelo painel nunca avisava ninguém.
 const { notificarPintoresSobreNovaObra } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
+const { sqlTotalExtensaoObra } = require('../utils/totalExtensao')
 const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 
 const listar = async (req, res) => {
@@ -16,6 +17,7 @@ const listar = async (req, res) => {
       SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.estado, o.bairro, o.uf,
              o.latitude, o.longitude, o.coordenadas_origem,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status, o.horas_para_expirar, o.prazo_modo, o.criado_em, o.ultima_extensao_horas,
+             ${sqlTotalExtensaoObra('o.')} AS total_extensao_horas,
              0 as distancia_metros,
              (SELECT COUNT(*) FROM midias WHERE obra_id = o.id) as total_midias,
              (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
