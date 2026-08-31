@@ -637,6 +637,11 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS marco_1_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS marco_2_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS marco_3_em TIMESTAMPTZ`)
+    // Aviso de fim da gratuidade de lançamento — mesmo padrão de CLAIM dos marcos acima:
+    // NULL = coorte gratuita ainda não avisada; preenchida no mesmo UPDATE que reivindica
+    // o envio, então re-run ou segunda réplica nunca manda duas vezes. Só a coluna por
+    // enquanto — nenhum endpoint/job a lê ou escreve ainda.
+    await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS aviso_fim_gratuidade_em TIMESTAMPTZ`)
     // Índice PARCIAL do predicado do job: só linhas ativas com algum marco pendente entram,
     // que é a minoria — as já avisadas nas três bandas saem do índice sozinhas.
     await client.query(`CREATE INDEX IF NOT EXISTS assinaturas_marcos_vencimento_idx
