@@ -1300,6 +1300,10 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
     if (typeof token !== 'string' || !token.trim()) {
       return res.status(400).json({ erro: 'token é obrigatório — para remover o token use /auth/push-token/clear' })
     }
+    // Um token identifica um DEVICE, não uma conta: se outra conta ainda o tiver (logout
+    // sem /clear — app desinstalado, crash), ela continuaria recebendo os pushes deste
+    // aparelho. Limpa o token nas demais linhas antes de gravá-lo na do chamador.
+    await pool.query('UPDATE usuarios SET push_token = NULL WHERE push_token = $1 AND id <> $2', [token, req.usuario.id])
     await pool.query('UPDATE usuarios SET push_token = $1 WHERE id = $2', [token, req.usuario.id])
     res.json({ mensagem: 'Token registrado' })
   } catch (err) {
