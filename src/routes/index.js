@@ -638,10 +638,12 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS marco_2_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS marco_3_em TIMESTAMPTZ`)
     // Aviso de fim da gratuidade de lançamento — mesmo padrão de CLAIM dos marcos acima:
-    // NULL = coorte gratuita ainda não avisada; preenchida no mesmo UPDATE que reivindica
-    // o envio, então re-run ou segunda réplica nunca manda duas vezes. Só a coluna por
-    // enquanto — nenhum endpoint/job a lê ou escreve ainda.
-    await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS aviso_fim_gratuidade_em TIMESTAMPTZ`)
+    // NULL = pendente de aviso; preenchida no mesmo UPDATE que reivindica o envio, então
+    // re-run ou segunda réplica nunca manda duas vezes. DEFAULT NOW() de propósito: linha
+    // que NUNCA passou pelo backfill do desligamento (assinante pago normal, cadastro
+    // futuro) nasce não-pendente — só o SQL_BACKFILL_LANCAMENTO arma o NULL, então o job
+    // notificarFimGratuidade (server.js) nunca avisa quem nunca foi da coorte gratuita.
+    await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS aviso_fim_gratuidade_em TIMESTAMPTZ DEFAULT NOW()`)
     // Índice PARCIAL do predicado do job: só linhas ativas com algum marco pendente entram,
     // que é a minoria — as já avisadas nas três bandas saem do índice sozinhas.
     await client.query(`CREATE INDEX IF NOT EXISTS assinaturas_marcos_vencimento_idx

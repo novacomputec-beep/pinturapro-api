@@ -13,6 +13,8 @@ const { limparTentativasAntigas } = require('./src/utils/tentativasAuth')
 // Poda de links de assinatura pela web nunca usados (> 7 dias) — mesmo agendamento diário
 // de limparTentativasAntigas, sem mecanismo novo.
 const { limparLinksAssinaturaAntigos } = require('./src/controllers/assinaturaLinkController')
+// Mesmo caminho de e-mail do reset/link de assinatura (SMTP/nodemailer do authController).
+const { transporter } = require('./src/controllers/authController')
 const { MARCA } = require('./src/utils/marca')
 
 const app = express()
@@ -536,6 +538,73 @@ const notificarAssinaturasProximasVencimento = async () => {
   }
 }
 
+// Aviso de fim da gratuidade de lançamento — coorte convertida pelo backfill do
+// desligamento (POST /config/lancamento): lá aviso_fim_gratuidade_em vai a NULL (= pendente)
+// no MESMO UPDATE que converte; aqui o claim-then-send preenche a coluna e envia push + e-mail.
+// Só o backfill arma o NULL (DEFAULT NOW() na migração cobre todo o resto), então o predicado
+// abaixo nunca pega assinante que sempre foi pago. tipo <> 'gratuito' por segurança extra:
+// se a janela religar e alguém voltar à coorte, o aviso espera a PRÓXIMA conversão.
+// E-mail é fire-and-forget como o push: falha depois do claim é logada e NÃO re-tentada —
+// a linha já está reivindicada e não volta ao SELECT (mesma troca dos marcos de vencimento).
+const notificarFimGratuidade = async () => {
+  try {
+    const candidatos = await pool.query(`
+      SELECT a.id, a.proximo_vencimento, u.push_token, u.email, u.nome
+      FROM assinaturas a
+      JOIN usuarios u ON u.id = a.usuario_id
+      WHERE a.status = 'ativa'
+        AND a.aviso_fim_gratuidade_em IS NULL
+        AND (a.tipo IS DISTINCT FROM 'gratuito')
+    `)
+    if (candidatos.rows.length === 0) return
+
+    let enviados = 0
+    for (const sub of candidatos.rows) {
+      // Claim-then-send: reivindica no MESMO UPDATE. Linha já reivindicada por outra
+      // réplica (ou run anterior) não volta no RETURNING e não gera segundo envio.
+      const claim = await pool.query(
+        `UPDATE assinaturas SET aviso_fim_gratuidade_em = NOW()
+          WHERE id = $1 AND aviso_fim_gratuidade_em IS NULL RETURNING id`,
+        [sub.id]
+      )
+      if (claim.rows.length === 0) continue
+
+      const dataVenc = sub.proximo_vencimento
+        ? new Date(sub.proximo_vencimento).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+        : null
+      const corpo = dataVenc
+        ? `O período gratuito de lançamento terminou. Sua assinatura passa a vencer em ${dataVenc}.`
+        : 'O período gratuito de lançamento terminou. Sua assinatura passa a ter vencimento normal.'
+
+      if (sub.push_token) {
+        enviarPushNotificacao(sub.push_token, '⏰ Fim do período gratuito', corpo, { tipo: 'fim_gratuidade' })
+          .catch(() => {})
+      }
+      transporter.sendMail({
+        from: `${MARCA} <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
+        to: sub.email,
+        subject: `${MARCA} — Fim do período gratuito`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
+              <h1 style="color: #0a0a0a; margin: 0;">${MARCA}</h1>
+            </div>
+            <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
+              <h2>Olá, ${(sub.nome || '').split(' ')[0]}!</h2>
+              <p>${corpo}</p>
+              <p>Para continuar com acesso total, mantenha sua assinatura em dia.</p>
+              <p><strong>Equipe ${MARCA}</strong></p>
+            </div>
+          </div>`
+      }).catch(err => console.error(`[FimGratuidade] e-mail falhou (assinatura ${sub.id}, push já enviado se havia token):`, err.message))
+      enviados++
+    }
+    console.log(`[FimGratuidade] ${enviados} aviso(s) de fim de gratuidade enviado(s)`)
+  } catch (err) {
+    console.error('[FimGratuidade] Erro:', err.message)
+  }
+}
+
 // Dois lembretes para o dono avaliar o profissional (1 dia / 3 dias APÓS o encerramento),
 // espelhando notificarAssinaturasProximasVencimento acima: bandas DISJUNTAS (no máximo um
 // lembrete por run e por contrato) e claim-then-send nas colunas aval_marco_N_em.
@@ -681,6 +750,9 @@ const iniciarAgendador = () => {
   // De hora em hora como o job de expiração: as bandas de 12h e 6h não existem numa cadência
   // diária — um tick por dia pularia as duas mais urgentes.
   setInterval(() => { notificarAssinaturasProximasVencimento() }, 60 * 60 * 1000)
+  // Mesma cadência do aviso de vencimento: a coorte só existe após um desligamento da
+  // janela de lançamento, então quase todo tick é um SELECT vazio e indexável.
+  setInterval(() => { notificarFimGratuidade() }, 60 * 60 * 1000)
   // De hora em hora, como o aviso de vencimento. As bandas aqui são de DIAS, então uma
   // cadência horária é folgada de sobra: o lembrete sai no máximo ~1h depois de o contrato
   // completar 1 (ou 3) dia(s) encerrado. Fora do warm-up pelo mesmo motivo que o aviso de
