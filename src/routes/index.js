@@ -5456,6 +5456,12 @@ const SQL_BACKFILL_LANCAMENTO = `
          marco_1_em    = NULL,
          marco_2_em    = NULL,
          marco_3_em    = NULL,
+         -- Aviso de fim da gratuidade: NULL = pendente (padrão de CLAIM da coluna). Zerar
+         -- AQUI, no mesmo UPDATE, garante que o conjunto pendente é EXATAMENTE o conjunto
+         -- convertido — mesma linha, mesmo WHERE, mesma transação; nenhum segundo predicado
+         -- para divergir. Quem já tinha sido avisado num desligamento anterior e voltou à
+         -- coorte (re-ligou a janela e entrou de novo) volta a ficar pendente, que é o certo.
+         aviso_fim_gratuidade_em = NULL,
          atualizado_em = NOW()
     FROM usuarios u
    WHERE u.id = a.usuario_id
