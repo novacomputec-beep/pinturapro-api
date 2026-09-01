@@ -113,7 +113,8 @@ const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}
       channelId: 'default_v3',
       title: titulo,
       body: corpo,
-      data,
+      // data por destinatario (d.data) tem precedencia sobre o data compartilhado da chamada
+      data: d.data || data,
     }))
   const stats = { elegiveis: destinatarios.length, invalidos: destinatarios.length - mensagens.length, enviados: 0, falhos: 0 }
 
@@ -427,10 +428,9 @@ const verificarObrasExpirando = async () => {
         [ids]
       )
       await enviarPushEmLote(
-        obras.rows,
+        obras.rows.map(o => ({ push_token: o.push_token, data: { tipo: 'obra_expirando', obra_id: o.id } })),
         '⏰ Sua obra expira em 24 horas!',
-        'Sua obra será encerrada em breve. Renove para continuar recebendo candidatos.',
-        { tipo: 'obra_expirando' }
+        'Sua obra será encerrada em breve. Renove para continuar recebendo candidatos.'
       )
     }
 
@@ -451,10 +451,9 @@ const verificarObrasExpirando = async () => {
         [ids]
       )
       await enviarPushEmLote(
-        reparos.rows,
+        reparos.rows.map(r => ({ push_token: r.push_token, data: { tipo: 'reparo_expirando', reparo_id: r.id } })),
         '⏰ Seu serviço expira em 24 horas!',
-        'Seu serviço será encerrado em breve.',
-        { tipo: 'reparo_expirando' }
+        'Seu serviço será encerrado em breve.'
       )
     }
 
