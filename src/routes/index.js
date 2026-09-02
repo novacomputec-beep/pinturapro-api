@@ -5097,7 +5097,25 @@ router.post('/admin/limpar-testes', autenticar, exigirSuperAdmin, async (req, re
     // DELETEs vizinhos: as faltas de um admin não são dado de teste.
     // perdoada_por não precisa de limpeza (ON DELETE SET NULL).
     await client.query(`DELETE FROM faltas_profissional WHERE usuario_id IN (SELECT id FROM usuarios WHERE role != 'admin')`)
-    await client.query(`DELETE FROM usuarios WHERE role != 'admin'`)
+    // Fotos de perfil e imagens de verificação dos usuários apagados vão para a fila de
+    // órfãs — mesmo CTE do DELETE /usuarios/:id: 'foto' porque as quatro são imagens, e
+    // DISTINCT + ON CONFLICT deduplicam dentro do lote e contra a fila existente.
+    await client.query(
+      `WITH del AS (
+         DELETE FROM usuarios WHERE role != 'admin'
+         RETURNING foto_url, verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url
+       )
+       INSERT INTO midias_orfas (url, tipo)
+       SELECT DISTINCT u, 'foto'
+         FROM del, unnest(ARRAY[
+                del.foto_url,
+                del.verificacao_doc_frente_url,
+                del.verificacao_doc_verso_url,
+                del.verificacao_selfie_url
+              ]) AS u
+        WHERE u IS NOT NULL AND u <> ''
+       ON CONFLICT (url) DO NOTHING`
+    )
     await client.query('COMMIT')
     res.json({ mensagem: 'Dados de teste removidos com sucesso!' })
   } catch (err) {
@@ -6280,7 +6298,24 @@ router.post('/admin/limpar-usuarios', autenticar, exigirSuperAdmin, async (req, 
     // faltas_profissional.usuario_id: FK sem CASCADE, mesmo 23503 documentado em
     // /admin/limpar-testes e no DELETE /usuarios/:id. perdoada_por é ON DELETE SET NULL.
     await client.query(`DELETE FROM faltas_profissional WHERE usuario_id = ANY($1)`, [ids])
-    await client.query(`DELETE FROM usuarios WHERE role != 'admin'`)
+    // Fotos de perfil e imagens de verificação dos usuários apagados vão para a fila de
+    // órfãs — mesmo CTE do DELETE /usuarios/:id e do /admin/limpar-testes.
+    await client.query(
+      `WITH del AS (
+         DELETE FROM usuarios WHERE role != 'admin'
+         RETURNING foto_url, verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url
+       )
+       INSERT INTO midias_orfas (url, tipo)
+       SELECT DISTINCT u, 'foto'
+         FROM del, unnest(ARRAY[
+                del.foto_url,
+                del.verificacao_doc_frente_url,
+                del.verificacao_doc_verso_url,
+                del.verificacao_selfie_url
+              ]) AS u
+        WHERE u IS NOT NULL AND u <> ''
+       ON CONFLICT (url) DO NOTHING`
+    )
     await client.query('COMMIT')
     res.json({ mensagem: 'Usuários removidos com sucesso' })
   } catch (err) {
