@@ -178,6 +178,13 @@ const migracaoPronta = (async () => {
     // aditivas: nenhuma query existente as lê.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS push_status VARCHAR(50) DEFAULT 'desconhecido'`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS push_status_em TIMESTAMPTZ`)
+    // Aviso de aprovação da verificação — mesmo padrão de CLAIM do aviso_fim_gratuidade_em
+    // (assinaturas): NULL = pendente de aviso; preenchida no mesmo UPDATE que reivindica o
+    // envio, então re-run ou segunda réplica nunca manda duas vezes. DEFAULT NOW() de
+    // propósito: toda linha existente (aprovada ou não) nasce não-pendente — só o fluxo que
+    // vier a armar o NULL torna a linha elegível, então nenhum usuário antigo recebe aviso
+    // retroativo. Coluna aditiva: nenhuma query existente a lê.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS aviso_aprovacao_em TIMESTAMPTZ DEFAULT NOW()`)
     // Flag global "Modo Auto" — garante a existência da linha (tabela já existe em prod).
     // Default 'false' = OFF: novos prestadores aguardam revisão manual do admin.
     await client.query(`CREATE TABLE IF NOT EXISTS configuracoes (chave TEXT PRIMARY KEY, valor TEXT, atualizado_em TIMESTAMPTZ DEFAULT NOW())`)
@@ -1312,6 +1319,27 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
     // aparelho. Limpa o token nas demais linhas antes de gravá-lo na do chamador.
     await pool.query('UPDATE usuarios SET push_token = NULL WHERE push_token = $1 AND id <> $2', [token, req.usuario.id])
     await pool.query('UPDATE usuarios SET push_token = $1 WHERE id = $2', [token, req.usuario.id])
+    // Aviso de aprovação pendente (aprovado sem token no /verificacao/:id/aprovar):
+    // claim-then-send no MESMO UPDATE — segunda réplica/re-registro vê a coluna preenchida
+    // e não manda de novo. try/catch próprio: falha aqui não muda a resposta do registro.
+    try {
+      const claim = await pool.query(
+        `UPDATE usuarios SET aviso_aprovacao_em = NOW()
+          WHERE id = $1 AND aviso_aprovacao_em IS NULL AND verificacao_status = 'aprovado'
+          RETURNING id`,
+        [req.usuario.id]
+      )
+      if (claim.rows.length > 0) {
+        await enviarPushNotificacao(
+          token,
+          '✅ Cadastro aprovado!',
+          `Sua identidade foi verificada. Bem-vindo ao ${MARCA}!`,
+          { tipo: 'verificacao_aprovada' }
+        )
+      }
+    } catch (err) {
+      console.error('[PushToken] aviso de aprovação pendente falhou:', err.message)
+    }
     res.json({ mensagem: 'Token registrado' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao registrar token' })
@@ -5187,7 +5215,8 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
       `
     }).catch(err => console.error('Erro e-mail aprovação:', err))
 
-    // Notificação push
+    // Notificação push. Sem token: arma aviso_aprovacao_em = NULL (= aviso pendente) para
+    // um envio posterior quando o usuário registrar o token; com token: envia e marca NOW().
     const pushToken = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [id])
     if (pushToken.rows[0]?.push_token) {
       await enviarPushNotificacao(
@@ -5196,6 +5225,9 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
         `Sua identidade foi verificada. Bem-vindo ao ${MARCA}!`,
         { tipo: 'verificacao_aprovada' }
       )
+      await pool.query(`UPDATE usuarios SET aviso_aprovacao_em = NOW() WHERE id = $1`, [id])
+    } else {
+      await pool.query(`UPDATE usuarios SET aviso_aprovacao_em = NULL WHERE id = $1`, [id])
     }
 
     res.json({ mensagem: 'Prestador aprovado com sucesso' })
@@ -5345,6 +5377,22 @@ router.post('/verificacao/modo-automatico', autenticar, exigirSuperAdmin, async 
 
         // Aprovação em lote ao ligar o Modo Auto: também é não-revisada → marca automática
         await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
+
+        // Notificação push — mesmo tratamento do /verificacao/:id/aprovar. Sem token: arma
+        // aviso_aprovacao_em = NULL (= aviso pendente, enviado quando o token for registrado);
+        // com token: envia e marca NOW().
+        const pushToken = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [p.id])
+        if (pushToken.rows[0]?.push_token) {
+          await enviarPushNotificacao(
+            pushToken.rows[0].push_token,
+            '✅ Cadastro aprovado!',
+            `Sua identidade foi verificada. Bem-vindo ao ${MARCA}!`,
+            { tipo: 'verificacao_aprovada' }
+          )
+          await pool.query(`UPDATE usuarios SET aviso_aprovacao_em = NOW() WHERE id = $1`, [p.id])
+        } else {
+          await pool.query(`UPDATE usuarios SET aviso_aprovacao_em = NULL WHERE id = $1`, [p.id])
+        }
         aprovados++
       }
       console.log(`[Modo automático] ${aprovados} prestadores aprovados automaticamente`)
