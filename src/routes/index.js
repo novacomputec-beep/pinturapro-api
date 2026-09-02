@@ -1338,7 +1338,7 @@ router.post('/auth/push-token/clear', autenticar, async (req, res) => {
 router.post('/auth/push-status', autenticar, async (req, res) => {
   try {
     const { status } = req.body
-    const permitidos = ['concedida', 'negada', 'bloqueada', 'erro_registro', 'nao_solicitada']
+    const permitidos = ['concedida', 'negada', 'bloqueada', 'erro_registro', 'erro_consulta', 'erro_token', 'erro_envio', 'nao_solicitada']
     if (!permitidos.includes(status)) {
       return res.status(400).json({ erro: 'Status inválido' })
     }
