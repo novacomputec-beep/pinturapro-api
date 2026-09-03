@@ -175,7 +175,7 @@ const gerarContratoPDF = (dados) => {
 }
 
 // Nome do anexo que as duas partes veem no cliente de e-mail — é copy, não caminho de storage.
-const NOME_ARQUIVO_CONTRATO = 'contrato_prolar.pdf'
+const NOME_ARQUIVO_CONTRATO = 'contrato_protudo.pdf'
 
 const enviarContratoPorEmail = async (emailContratante, emailContratado, pdfBuffer, dados) => {
   const assunto = `${MARCA} — Contrato de Serviço: ${dados.servico.descricao}`
