@@ -14,7 +14,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
+const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
@@ -2050,11 +2050,10 @@ const aprovarEPublicarObra = async (obraId, { avisarPintores = true, automatica 
   // anunciaria como "nova" uma obra publicada dias atrás, para até 500 pessoas de uma vez.
   if (atualizada.rowCount === 0) return null
   if (avisarPintores) {
-    const claim = await pool.query(
-      `UPDATE obras SET push_novo_enviado_em = NOW() WHERE id = $1 AND push_novo_enviado_em IS NULL RETURNING id`,
-      [obraId]
-    )
-    if (claim.rowCount === 1) notificarPintoresSobreNovaObra(obraId).catch(err => console.error('Erro notificar pintores:', err))
+    // Send-then-stamp (dispararPushNovoComClaim): push_novo_enviado_em só depois do envio;
+    // falha deixa NULL e a rede de segurança reenvia. Fire-and-forget como antes.
+    dispararPushNovoComClaim('obras', obraId, notificarPintoresSobreNovaObra)
+      .catch(err => console.error('Erro notificar pintores:', err))
   }
   if (!automatica) {
     notificarDonoSobreAnaliseObra(obraId, true)
@@ -2244,25 +2243,24 @@ const DEDUPE_ESTENDER_OBRA_MINUTOS = 5
 // prazo, senão a obra estendida mantém os marcos já gastos e não recebe nova contagem
 // regressiva. (Substitui o antigo clear de alerta_sem_interessados_em, cujo job foi aposentado.)
 // POST /obras/:id/midias-prontas — o app chama depois que o ÚLTIMO upload de mídia terminou.
-// Dispara o push "nova obra disponível" UMA única vez por obra. O claim é o próprio UPDATE:
-// só a chamada cujo UPDATE casa push_novo_enviado_em IS NULL (e criado_por = chamador) grava
-// NOW() e dispara; toda outra — segunda aba, retry, outro aparelho do mesmo dono — não casa a
-// linha e recebe 200 sem reenviar. Não há SELECT-antes-do-UPDATE: a decisão é uma única
-// instrução com lock de linha no Postgres, então duas chamadas simultâneas não passam as duas.
-// rowCount 0 ambíguo (já enviado × não existe/não é do chamador) é resolvido por um SELECT
+// Dispara o push "nova obra disponível" UMA única vez por obra. O claim é
+// dispararPushNovoComClaim (alertaService): só a chamada que prende a linha com
+// push_novo_enviado_em IS NULL (e criado_por = chamador) envia e, DEPOIS do envio, grava NOW();
+// toda outra — segunda aba, retry, outro aparelho do mesmo dono — não obtém a linha e recebe
+// 200 sem reenviar. O lock de linha (FOR UPDATE SKIP LOCKED) na transação do helper é o que
+// impede duas chamadas simultâneas de passarem as duas.
+// false ambíguo (já enviado × não existe/não é do chamador) é resolvido por um SELECT
 // depois, só para escolher entre 200 idempotente e 404.
 router.post('/obras/:id/midias-prontas', autenticar, async (req, res) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(404).json({ erro: 'Obra não encontrada' })
-    const claim = await pool.query(
-      `UPDATE obras SET push_novo_enviado_em = NOW()
-        WHERE id = $1 AND criado_por = $2 AND push_novo_enviado_em IS NULL
-          AND status = 'aberta' AND status_aprovacao = 'aprovada'
-        RETURNING id`,
-      [req.params.id, req.usuario.id]
-    )
-    if (claim.rowCount === 1) {
-      notificarPintoresSobreNovaObra(req.params.id).catch(err => console.error('Erro notificar pintores (midias-prontas):', err))
+    // Send-then-stamp sob lock de linha (dispararPushNovoComClaim), mesmos predicados extras
+    // do UPDATE antigo (criado_por = chamador, aberta + aprovada). Aguarda o envio: enviado:
+    // true passa a significar "enviado e carimbado"; falha cai no catch de fora (500) com a
+    // linha ainda NULL, então o retry do app — ou a rede de segurança — reenvia.
+    const enviado = await dispararPushNovoComClaim('obras', req.params.id, notificarPintoresSobreNovaObra,
+      { criadoPor: req.usuario.id, exigirPublicada: true })
+    if (enviado) {
       return res.json({ mensagem: 'Profissionais avisados', enviado: true })
     }
     const atual = await pool.query(`SELECT push_novo_enviado_em, status, status_aprovacao FROM obras WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
@@ -3192,11 +3190,9 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     try {
       const teraMidias = req.body?.tera_midias === true || req.body?.tera_midias === 'true'
       if (!teraMidias) {
-        const claim = await pool.query(
-          `UPDATE reparos SET push_novo_enviado_em = NOW() WHERE id = $1 AND push_novo_enviado_em IS NULL RETURNING id`,
-          [result.rows[0].id]
-        )
-        if (claim.rowCount === 1) notificarPrestadoresSobreNovoReparo(result.rows[0].id).catch(err => console.error('Erro notificar prestadores:', err))
+        // Send-then-stamp (dispararPushNovoComClaim): a resposta 201 já saiu, então aguardar
+        // o envio não custa ao cliente; falha cai no catch abaixo com a linha ainda NULL.
+        await dispararPushNovoComClaim('reparos', result.rows[0].id, notificarPrestadoresSobreNovoReparo)
       }
     } catch (err) {
       console.error('[reparos/dono] claim do push de novo serviço falhou:', err.message)
@@ -3281,19 +3277,15 @@ const DEDUPE_ESTENDER_REPARO_MINUTOS = 5
 // avança, então os 4 alertas re-disparam contra o novo prazo. (Substitui o clear de
 // alerta_sem_interessados_em, cujo job foi aposentado.)
 // POST /reparos/:id/midias-prontas — espelho exato de POST /obras/:id/midias-prontas (ver lá):
-// claim atômico no UPDATE (push_novo_enviado_em IS NULL AND criado_por = chamador), push uma vez.
+// claim em dispararPushNovoComClaim (push_novo_enviado_em IS NULL AND criado_por = chamador,
+// carimbo DEPOIS do envio), push uma vez.
 router.post('/reparos/:id/midias-prontas', autenticar, async (req, res) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(404).json({ erro: 'Serviço não encontrado' })
-    const claim = await pool.query(
-      `UPDATE reparos SET push_novo_enviado_em = NOW()
-        WHERE id = $1 AND criado_por = $2 AND push_novo_enviado_em IS NULL
-          AND status = 'aberta' AND status_aprovacao = 'aprovada'
-        RETURNING id`,
-      [req.params.id, req.usuario.id]
-    )
-    if (claim.rowCount === 1) {
-      notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores (midias-prontas):', err))
+    // Send-then-stamp — espelho exato de POST /obras/:id/midias-prontas (ver lá).
+    const enviado = await dispararPushNovoComClaim('reparos', req.params.id, notificarPrestadoresSobreNovoReparo,
+      { criadoPor: req.usuario.id, exigirPublicada: true })
+    if (enviado) {
       return res.json({ mensagem: 'Profissionais avisados', enviado: true })
     }
     const atual = await pool.query(`SELECT push_novo_enviado_em, status, status_aprovacao FROM reparos WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
@@ -3458,11 +3450,9 @@ router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (re
     // Claim atômico em push_novo_enviado_em (ver aprovarEPublicarObra): a rede de segurança
     // e o midias-prontas não conseguem reenviar depois desta aprovação.
     try {
-      const claim = await pool.query(
-        `UPDATE reparos SET push_novo_enviado_em = NOW() WHERE id = $1 AND push_novo_enviado_em IS NULL RETURNING id`,
-        [req.params.id]
-      )
-      if (claim.rowCount === 1) notificarPrestadoresSobreNovoReparo(req.params.id).catch(err => console.error('Erro notificar prestadores:', err))
+      // Send-then-stamp (dispararPushNovoComClaim): a resposta já saiu; falha cai no catch
+      // abaixo com a linha ainda NULL e a rede de segurança reenvia.
+      await dispararPushNovoComClaim('reparos', req.params.id, notificarPrestadoresSobreNovoReparo)
     } catch (err) {
       console.error('[reparos/aprovar] claim do push de novo serviço falhou:', err.message)
     }

@@ -227,6 +227,10 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
        WHERE u.role = 'prestador' AND u.tipo_prestador = $1
          AND ${SQL_ASSINATURA_ATIVA}
          AND u.push_token IS NOT NULL
+         -- Suspenso por faltas não recebe isca de trabalho novo — mesmo predicado de QUERY do
+         -- cron de proximidade (server.js, verificarPrestadoresProximos): quem dispara é o
+         -- servidor, não o prestador, então o middleware exigirNaoSuspenso não passa por aqui.
+         AND u.suspenso_em IS NULL
          AND NULLIF(btrim(u.cidade), '') IS NOT NULL
          AND NULLIF(btrim(u.uf), '')     IS NOT NULL
          AND ${SQL_CIDADE_PRESTADOR} = $2
@@ -245,6 +249,13 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
     if (pagina.rows.length < PAGINA_BROADCAST) break
   }
   console.log(`[Broadcast] ${rotulo} | elegíveis: ${total.elegiveis} | enviados: ${total.enviados} | falhos: ${total.falhos} | tokens inválidos: ${total.invalidos} | páginas: ${total.paginas}`)
+  // Envio que não chegou a NINGUÉM apesar de haver alvo (Expo fora do ar, chunk inteiro
+  // estourando) é falha, e precisa subir: o chamador (dispararPushNovoComClaim) só carimba
+  // push_novo_enviado_em quando esta função volta sem erro — assim a rede de segurança
+  // reenvia. Falha PARCIAL não sobe: reenviar duplicaria o aviso para quem já recebeu.
+  if (total.elegiveis > 0 && total.enviados === 0 && total.falhos > 0) {
+    throw new Error(`broadcast ${rotulo}: nenhum envio concluído (${total.falhos} falha(s) em ${total.elegiveis} elegíveis)`)
+  }
   return total
 }
 
@@ -279,7 +290,10 @@ const notificarPintoresSobreNovaObra = async (obraId) => {
       rotulo: `nova obra ${obraId}`,
     })
   } catch (err) {
+    // Loga E propaga: o claim de push_novo_enviado_em (dispararPushNovoComClaim) só grava
+    // depois desta função voltar sem erro — engolir aqui carimbaria um aviso que não saiu.
     console.error('Erro ao notificar pintores:', err)
+    throw err
   }
 }
 
@@ -317,7 +331,9 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
       rotulo: `novo reparo ${reparoId}`,
     })
   } catch (err) {
+    // Loga E propaga — mesmo motivo do lado obra (ver notificarPintoresSobreNovaObra).
     console.error('Erro ao notificar prestadores:', err)
+    throw err
   }
 }
 
@@ -346,13 +362,57 @@ const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
   )
 }
 
+// Claim do push "nova obra / novo serviço disponível" — ÚNICO caminho que grava
+// push_novo_enviado_em fora do backfill de migração. A ordem é send-then-stamp: a coluna só
+// recebe NOW() DEPOIS de notificar() voltar sem erro. Antes o UPDATE vinha primeiro e uma
+// falha no envio (Expo fora do ar, banco indisponível no meio) deixava a linha carimbada
+// sem ninguém avisado — e a rede de segurança abaixo, que só olha NULL, nunca a repescava.
+// Atomicidade: a transação prende a linha com FOR UPDATE SKIP LOCKED enquanto envia. A
+// chamada concorrente (outra réplica, retry do app, midias-prontas × aprovação) não obtém a
+// linha, devolve false e não envia; quem chega depois do COMMIT vê a coluna preenchida e
+// também não envia. Falha em notificar() → ROLLBACK: a coluna segue NULL e
+// enviarPushNovoPendente reenvia a partir de JANELA_PUSH_NOVO_MIN da publicação.
+// criadoPor / exigirPublicada reproduzem os predicados extras que cada rota já punha no
+// UPDATE antigo (midias-prontas: linha do próprio dono, e status aberta + aprovada); as
+// rotas de aprovação e o create de reparo não os passam, como antes.
+// Devolve true quando ESTA chamada enviou e carimbou; false quando não havia o que
+// reivindicar. Erro de notificar() SOBE para o chamador — aqui nunca é engolido.
+const dispararPushNovoComClaim = async (tabela, id, notificar, { criadoPor = null, exigirPublicada = false } = {}) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const lock = await client.query(
+      `SELECT id FROM ${tabela}
+        WHERE id = $1 AND push_novo_enviado_em IS NULL
+          AND ($2::uuid IS NULL OR criado_por = $2::uuid)
+          AND (NOT $3::boolean OR (status = 'aberta' AND status_aprovacao = 'aprovada'))
+        FOR UPDATE SKIP LOCKED`,
+      [id, criadoPor, exigirPublicada]
+    )
+    if (lock.rowCount === 0) {
+      await client.query('ROLLBACK')
+      return false
+    }
+    await notificar(id)
+    await client.query(`UPDATE ${tabela} SET push_novo_enviado_em = NOW() WHERE id = $1`, [id])
+    await client.query('COMMIT')
+    return true
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
 // Rede de segurança do push "nova obra / novo serviço disponível". O app avisa via
 // POST /:id/midias-prontas quando o último upload termina; se ele nunca chamar (upload
 // falhou, tela abandonada, app antigo que mandou tera_midias=true), a demanda ficaria
 // publicada sem ninguém avisado. Roda dentro de verificarMarcosExpiracao (a cada
 // INTERVALO_CRONOMETRO = 60 s, e no boot) — nenhum agendador novo.
-// Mesmo claim atômico das rotas: o UPDATE ... WHERE push_novo_enviado_em IS NULL é quem
-// decide; só as linhas devolvidas no RETURNING recebem push, uma vez cada.
+// Mesmo claim das rotas (dispararPushNovoComClaim), uma linha por vez: o SELECT abaixo só
+// lista candidatas; quem decide e carimba — depois do envio — é o helper, sob lock de linha.
+// Também é ela que repesca o envio que falhou numa rota: a linha voltou a NULL no ROLLBACK.
 // Só o limite inferior (10 min): sem teto, uma demanda que ficou sem aviso porque o servidor
 // esteve fora por horas ainda é anunciada quando ele volta. As demandas anteriores à coluna
 // não entram porque a migração as marcou de uma vez (backfill único em migracaoPronta).
@@ -368,17 +428,25 @@ const enviarPushNovoPendente = async () => {
   ]
   for (const lado of lados) {
     try {
-      const claim = await pool.query(
-        `UPDATE ${lado.tabela} SET push_novo_enviado_em = NOW()
+      const pendentes = await pool.query(
+        `SELECT id FROM ${lado.tabela}
           WHERE push_novo_enviado_em IS NULL
             AND status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()
             AND ${lado.ancora} <= NOW() - ($1::int * INTERVAL '1 minute')
-          RETURNING id`,
+          ORDER BY ${lado.ancora}`,
         [JANELA_PUSH_NOVO_MIN]
       )
-      if (claim.rowCount === 0) continue
-      console.log(`[PushNovoPendente] ${lado.tabela}: ${claim.rowCount} demanda(s) publicada(s) há mais de ${JANELA_PUSH_NOVO_MIN} min sem aviso — disparando`)
-      for (const r of claim.rows) await lado.notificar(r.id)
+      if (pendentes.rowCount === 0) continue
+      console.log(`[PushNovoPendente] ${lado.tabela}: ${pendentes.rowCount} demanda(s) publicada(s) há mais de ${JANELA_PUSH_NOVO_MIN} min sem aviso — disparando`)
+      for (const r of pendentes.rows) {
+        // Uma falha não derruba as demais candidatas do tique: loga e segue. A linha que
+        // falhou continua NULL (ROLLBACK no helper) e volta a ser candidata no próximo tique.
+        try {
+          await dispararPushNovoComClaim(lado.tabela, r.id, lado.notificar, { exigirPublicada: true })
+        } catch (err) {
+          console.error(`[PushNovoPendente] ${lado.tabela} ${r.id}: envio falhou, segue sem carimbo para nova tentativa:`, err.message)
+        }
+      }
     } catch (err) {
       console.error(`[PushNovoPendente] erro em ${lado.tabela}:`, err.message)
     }
@@ -1173,6 +1241,7 @@ module.exports = {
   notificarPintoresSobreNovaObra,
   notificarPrestadoresSobreNovoReparo,
   notificarDonoSobreAnaliseObra,
+  dispararPushNovoComClaim,
   enviarPushNovoPendente,
   verificarObrasExpirando,
   verificarObrasComBaixoEngajamento,
