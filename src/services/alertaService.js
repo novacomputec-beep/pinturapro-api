@@ -582,7 +582,7 @@ const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaix
         await enviarPushNotificacao(
           obra.push_token,
           '💡 Considere aumentar sua oferta',
-          `Sua obra "${obra.titulo}" teve ${obra.total_visitas} visitas e nenhum interessado ainda.`,
+          `Sua obra "${obra.titulo}" teve ${obra.total_visitas} visitas e nenhum profissional se interessou. Considere aumentar o prazo ou revisar o texto.`,
           { tipo: 'baixo_engajamento', obra_id: obra.id }
         )
       }
@@ -617,7 +617,7 @@ const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaix
         await enviarPushNotificacao(
           reparo.push_token,
           '💡 Considere aumentar sua oferta',
-          `Seu serviço "${reparo.titulo}" teve ${reparo.total_visitas} visitas e nenhum interessado ainda.`,
+          `Seu serviço "${reparo.titulo}" teve ${reparo.total_visitas} visitas e nenhum profissional se interessou. Considere aumentar o prazo ou revisar o texto.`,
           { tipo: 'baixo_engajamento_reparo', reparo_id: reparo.id }
         )
       }
