@@ -775,7 +775,7 @@ const iniciarAgendador = () => {
         JOIN assinaturas a ON a.usuario_id = u.id
         WHERE u.verificacao_status = 'pendente'
           AND a.status = 'pendente_verificacao'
-          AND a.atualizado_em < NOW() - INTERVAL '1 hour'
+          AND a.atualizado_em < NOW() - INTERVAL '15 seconds'
       `)
       if (pendentes.rows.length === 0) return
       let aprovados = 0
@@ -805,13 +805,13 @@ const iniciarAgendador = () => {
         }
         aprovados++
       }
-      console.log(`[Timeout] ${aprovados} prestadores auto-aprovados por timeout de 1h (Modo Auto ON)`)
+      console.log(`[Timeout] ${aprovados} prestadores auto-aprovados por timeout de 15s (Modo Auto ON)`)
     } catch (err) {
       console.error('[Timeout verificação] Erro:', err.message)
     }
-  }, 10 * 60 * 1000)
+  }, 20 * 1000)
 
-  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 10min | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
+  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
 }
 
 rotasApp.migracaoPronta
