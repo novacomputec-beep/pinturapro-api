@@ -100,14 +100,28 @@ const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}) => {
 
 // Envia notificações em lote para múltiplos tokens de uma vez
 // Muito mais eficiente que um loop sequencial com await
-// Versão com contadores (A5): devolve { elegiveis, invalidos, enviados, falhos } para o
-// chamador poder logar truncamento/falha em vez de um único número. enviados = ticket 'ok';
-// falhos = ticket 'error' OU chunk inteiro que estourou na chamada HTTP; invalidos = token
-// que nem é Expo. Os chunks de 100 seguem SEQUENCIAIS (um await por chamada HTTP).
+// Devolve UM resultado POR DESTINATÁRIO, na mesma ordem da entrada:
+//   { id, push_token, resultado } com resultado em 'enviado' (ticket 'ok'), 'falha' (ticket
+//   'error' OU chunk inteiro que estourou na chamada HTTP) ou 'invalido' (token que nem é
+//   Expo, incluindo null). Os contadores agregados de antes saem de contarResultados(), para
+//   o log; a lista por pessoa é o que broadcastPaginado grava em push_entregas — antes só
+//   existiam os totais, e quem falhou dentro de uma página não era registrado em lugar nenhum.
+// Os chunks de 100 seguem SEQUENCIAIS (um await por chamada HTTP).
 const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}) => {
-  const mensagens = destinatarios
-    .filter(d => Expo.isExpoPushToken(d.push_token))
-    .map(d => ({
+  const resultados = destinatarios.map(d => ({
+    id: d.id,
+    push_token: d.push_token,
+    resultado: Expo.isExpoPushToken(d.push_token) ? null : 'invalido',
+  }))
+  // Índices (na lista de entrada) dos destinatários com token válido, na ordem em que as
+  // mensagens são montadas: a resposta do Expo vem na ordem do chunk, então chunk[i] casa
+  // com validos[offset + i].
+  const validos = []
+  const mensagens = []
+  destinatarios.forEach((d, i) => {
+    if (resultados[i].resultado !== null) return
+    validos.push(i)
+    mensagens.push({
       to: d.push_token,
       sound: 'default',
       channelId: 'default_v3',
@@ -115,21 +129,23 @@ const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}
       body: corpo,
       // data por destinatario (d.data) tem precedencia sobre o data compartilhado da chamada
       data: d.data || data,
-    }))
-  const stats = { elegiveis: destinatarios.length, invalidos: destinatarios.length - mensagens.length, enviados: 0, falhos: 0 }
+    })
+  })
 
-  if (mensagens.length === 0) return stats
+  if (mensagens.length === 0) return resultados
 
   // Expo recomenda chunks de até 100 mensagens por chamada
   const chunks = expo.chunkPushNotifications(mensagens)
   const ticketsComToken = []
+  let offset = 0
   for (const chunk of chunks) {
     try {
       const tickets = await expo.sendPushNotificationsAsync(chunk)
       tickets.forEach((ticket, i) => {
+        const alvo = resultados[validos[offset + i]]
         const pushToken = chunk[i].to
         if (ticket && ticket.status === 'error') {
-          stats.falhos++
+          alvo.resultado = 'falha'
           console.error(
             '[Push] Falha no envio (lote):', titulo,
             '| erro:', ticket.message,
@@ -137,14 +153,16 @@ const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}
             '→', pushToken.substring(0, 30)
           )
         } else {
-          stats.enviados++
+          alvo.resultado = 'enviado'
           ticketsComToken.push({ ticket, pushToken })
         }
       })
     } catch (err) {
-      stats.falhos += chunk.length
+      // Chunk inteiro sem resposta: todo mundo dele é 'falha' (e agora fica registrado).
+      for (let i = 0; i < chunk.length; i++) resultados[validos[offset + i]].resultado = 'falha'
       console.error('Erro ao enviar chunk de notificações:', err)
     }
+    offset += chunk.length
   }
 
   if (ticketsComToken.length > 0) {
@@ -152,13 +170,24 @@ const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}
       console.error('[Push] Erro no processamento de recibos:', err.message))
   }
 
-  return stats
+  return resultados
+}
+
+// Totais a partir da lista por destinatário — o formato que o log do broadcast sempre usou.
+const contarResultados = (resultados) => {
+  const c = { elegiveis: resultados.length, invalidos: 0, enviados: 0, falhos: 0 }
+  for (const r of resultados) {
+    if (r.resultado === 'enviado') c.enviados++
+    else if (r.resultado === 'falha') c.falhos++
+    else c.invalidos++
+  }
+  return c
 }
 
 // Compatibilidade: os chamadores antigos recebem o mesmo número de sempre (mensagens com
 // token válido, enviadas ou não).
 const enviarPushEmLote = async (destinatarios, titulo, corpo, data = {}) => {
-  const s = await enviarPushEmLoteDetalhado(destinatarios, titulo, corpo, data)
+  const s = contarResultados(await enviarPushEmLoteDetalhado(destinatarios, titulo, corpo, data))
   return s.enviados + s.falhos
 }
 
@@ -216,7 +245,27 @@ const PAGINA_BROADCAST = 500
 //   - 'outros': todo reparador ativo da cidade que tenha AO MENOS UMA especialidade;
 //   - qualquer outra: só quem tem exatamente esse slug no array.
 // Array NULL ou vazio nunca recebe nada, nem 'outros' (cardinality(NULL) é NULL → falso).
-const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null }) => {
+// Registro por destinatário em push_entregas (routes/index.js, migração). Um statement por
+// página. ON CONFLICT: a linha já existe quando é RE-tentativa (rede de segurança) ou quando o
+// claim da demanda deu ROLLBACK e o broadcast inteiro rodou de novo — nos dois casos o
+// resultado vira o da tentativa atual e tentativas soma 1. tipo/demandaId vêm do chamador
+// (nunca do request); usuario_id/resultado vêm do próprio envio.
+const registrarEntregas = async (tipo, demandaId, resultados) => {
+  if (resultados.length === 0) return
+  await pool.query(
+    `INSERT INTO push_entregas (tipo, demanda_id, usuario_id, resultado)
+     SELECT $1, $2, r.usuario_id, r.resultado
+       FROM unnest($3::uuid[], $4::text[]) AS r(usuario_id, resultado)
+     ON CONFLICT (tipo, demanda_id, usuario_id) DO UPDATE
+        SET resultado = EXCLUDED.resultado,
+            tentativas = push_entregas.tentativas + 1,
+            ultima_tentativa_em = NOW()`,
+    [tipo, demandaId, resultados.map(r => r.id), resultados.map(r => r.resultado)]
+  )
+}
+
+// entrega = { tipo: 'obra' | 'reparo', demandaId }: identifica a demanda em push_entregas.
+const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega }) => {
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
   let cursor = null
   for (;;) {
@@ -243,7 +292,11 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
     )
     if (pagina.rows.length === 0) break
     total.paginas++
-    const s = await enviarPushEmLoteDetalhado(pagina.rows, titulo, corpo, data)
+    const resultados = await enviarPushEmLoteDetalhado(pagina.rows, titulo, corpo, data)
+    // Grava ANTES de somar/seguir: se o registro falhar, o erro sobe e o claim da demanda
+    // dá ROLLBACK — melhor reenviar tudo do que ter enviado sem saber para quem.
+    await registrarEntregas(entrega.tipo, entrega.demandaId, resultados)
+    const s = contarResultados(resultados)
     total.elegiveis += s.elegiveis; total.invalidos += s.invalidos; total.enviados += s.enviados; total.falhos += s.falhos
     cursor = pagina.rows[pagina.rows.length - 1].id
     if (pagina.rows.length < PAGINA_BROADCAST) break
@@ -258,6 +311,19 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
   }
   return total
 }
+
+// Texto do push "nova obra" / "novo serviço" num só lugar: o broadcast inicial e a
+// repescagem por destinatário (reenviarEntregasFalhas) mandam a MESMA mensagem.
+const mensagemNovaObra = (obra, obraId) => ({
+  titulo: '🎨 Nova obra disponível!',
+  corpo: `"${obra.titulo}" em ${obra.cidade} acabou de ser publicada!`,
+  data: { tipo: 'nova_obra', obra_id: obraId },
+})
+const mensagemNovoReparo = (reparo, reparoId) => ({
+  titulo: '🔧 Novo serviço disponível!',
+  corpo: `"${reparo.titulo}" em ${reparo.cidade} — categoria: ${reparo.categoria}`,
+  data: { tipo: 'novo_reparo', reparo_id: reparoId },
+})
 
 const notificarPintoresSobreNovaObra = async (obraId) => {
   try {
@@ -284,10 +350,9 @@ const notificarPintoresSobreNovaObra = async (obraId) => {
     // pintores assinantes da cidade recebem, em páginas de 500.
     await broadcastPaginado({
       tipoPrestador: 'pintor', cidade: cidadeObra, uf: ufObra,
-      titulo: '🎨 Nova obra disponível!',
-      corpo: `"${obra.titulo}" em ${obra.cidade} acabou de ser publicada!`,
-      data: { tipo: 'nova_obra', obra_id: obraId },
+      ...mensagemNovaObra(obra, obraId),
       rotulo: `nova obra ${obraId}`,
+      entrega: { tipo: 'obra', demandaId: obraId },
     })
   } catch (err) {
     // Loga E propaga: o claim de push_novo_enviado_em (dispararPushNovoComClaim) só grava
@@ -325,10 +390,9 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     // Os DOIS chamadores (POST /reparos/dono e a rota de aprovação) passam por aqui.
     await broadcastPaginado({
       tipoPrestador: 'reparador', cidade: cidadeReparo, uf: ufReparo, categoria: reparo.categoria,
-      titulo: '🔧 Novo serviço disponível!',
-      corpo: `"${reparo.titulo}" em ${reparo.cidade} — categoria: ${reparo.categoria}`,
-      data: { tipo: 'novo_reparo', reparo_id: reparoId },
+      ...mensagemNovoReparo(reparo, reparoId),
       rotulo: `novo reparo ${reparoId}`,
+      entrega: { tipo: 'reparo', demandaId: reparoId },
     })
   } catch (err) {
     // Loga E propaga — mesmo motivo do lado obra (ver notificarPintoresSobreNovaObra).
@@ -421,6 +485,70 @@ const dispararPushNovoComClaim = async (tabela, id, notificar, { criadoPor = nul
 const JANELA_PUSH_NOVO_MIN = 10
 // Atraso do push "obra aprovada" ao dono na aprovação AUTOMÁTICA (segundo claim abaixo).
 const ATRASO_PUSH_APROVADA_MIN = 5
+
+// Repescagem POR DESTINATÁRIO (push_entregas): quem ficou 'falha' numa demanda já carimbada
+// (push_novo_enviado_em NOT NULL — o claim por demanda segue como está) recebe nova tentativa,
+// até MAX_TENTATIVAS_ENTREGA no total, com ao menos JANELA_PUSH_NOVO_MIN entre tentativas
+// para uma queda do Expo não queimar as três em três tiques de 60 s. Demanda com push_novo_
+// enviado_em NULL NÃO entra aqui: ela ainda vai pelo broadcast completo do bloco abaixo.
+//
+// Fim garantido: cada linha processada vira 'enviado', 'invalido' (token sumiu/não-Expo) ou
+// 'falha' com tentativas + 1 — e o predicado EXISTS só olha 'falha' com tentativas < 3, então
+// uma demanda cujas falhas restantes já esgotaram o teto sai do sweep por conta própria.
+// Só token e id são relidos de usuarios: a elegibilidade (cidade, assinatura, especialidade)
+// foi decidida no broadcast original, cuja consulta continua intocada.
+const MAX_TENTATIVAS_ENTREGA = 3
+const LADOS_ENTREGA = [
+  { tipo: 'obra',   tabela: 'obras',   colunas: 'titulo, cidade, uf',            mensagem: mensagemNovaObra },
+  { tipo: 'reparo', tabela: 'reparos', colunas: 'titulo, cidade, uf, categoria', mensagem: mensagemNovoReparo },
+]
+const reenviarEntregasFalhas = async () => {
+  for (const lado of LADOS_ENTREGA) {
+    try {
+      const candidatas = await pool.query(
+        `SELECT d.id, ${lado.colunas} FROM ${lado.tabela} d
+          WHERE d.push_novo_enviado_em IS NOT NULL
+            AND d.status = 'aberta' AND d.status_aprovacao = 'aprovada' AND d.expira_em > NOW()
+            AND EXISTS (
+              SELECT 1 FROM push_entregas pe
+               WHERE pe.tipo = $1 AND pe.demanda_id = d.id
+                 AND pe.resultado = 'falha' AND pe.tentativas < $2
+                 AND pe.ultima_tentativa_em <= NOW() - ($3::int * INTERVAL '1 minute')
+            )
+          ORDER BY d.criado_em
+          LIMIT 50`,
+        [lado.tipo, MAX_TENTATIVAS_ENTREGA, JANELA_PUSH_NOVO_MIN]
+      )
+      for (const d of candidatas.rows) {
+        try {
+          const alvos = await pool.query(
+            `SELECT u.id, u.push_token
+               FROM push_entregas pe
+               JOIN usuarios u ON u.id = pe.usuario_id
+              WHERE pe.tipo = $1 AND pe.demanda_id = $2
+                AND pe.resultado = 'falha' AND pe.tentativas < $3
+                AND pe.ultima_tentativa_em <= NOW() - ($4::int * INTERVAL '1 minute')
+              ORDER BY u.id`,
+            [lado.tipo, d.id, MAX_TENTATIVAS_ENTREGA, JANELA_PUSH_NOVO_MIN]
+          )
+          if (alvos.rows.length === 0) continue
+          const { titulo, corpo, data } = lado.mensagem(d, d.id)
+          // Token null/não-Expo volta como 'invalido' do próprio lote — terminal, sai do sweep.
+          const resultados = await enviarPushEmLoteDetalhado(alvos.rows, titulo, corpo, data)
+          await registrarEntregas(lado.tipo, d.id, resultados)
+          const s = contarResultados(resultados)
+          console.log(`[PushEntregas] repescagem ${lado.tipo} ${d.id} | alvos: ${s.elegiveis} | enviados: ${s.enviados} | falhos: ${s.falhos} | inválidos: ${s.invalidos}`)
+        } catch (err) {
+          // Uma demanda não derruba as demais; a linha segue 'falha' e volta no próximo tique.
+          console.error(`[PushEntregas] repescagem ${lado.tipo} ${d.id} falhou:`, err.message)
+        }
+      }
+    } catch (err) {
+      console.error(`[PushEntregas] erro em ${lado.tabela}:`, err.message)
+    }
+  }
+}
+
 const enviarPushNovoPendente = async () => {
   const lados = [
     { tabela: 'obras',   ancora: 'COALESCE(publicado_em, criado_em)', notificar: notificarPintoresSobreNovaObra },
@@ -451,6 +579,10 @@ const enviarPushNovoPendente = async () => {
       console.error(`[PushNovoPendente] erro em ${lado.tabela}:`, err.message)
     }
   }
+
+  // Depois do broadcast completo das demandas sem carimbo: repescagem por destinatário das
+  // já carimbadas (push_entregas). Próprio try/catch dentro; nunca derruba o bloco seguinte.
+  await reenviarEntregasFalhas()
 
   // Push "obra aprovada" ao DONO, adiado 5 min na aprovação AUTOMÁTICA. aprovarEPublicarObra
   // (routes/index.js) deixa push_aprovada_enviado_em NULL nesse caminho; na aprovação manual
