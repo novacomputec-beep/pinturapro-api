@@ -1317,8 +1317,12 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
     // Um token identifica um DEVICE, não uma conta: se outra conta ainda o tiver (logout
     // sem /clear — app desinstalado, crash), ela continuaria recebendo os pushes deste
     // aparelho. Limpa o token nas demais linhas antes de gravá-lo na do chamador.
-    await pool.query('UPDATE usuarios SET push_token = NULL WHERE push_token = $1 AND id <> $2', [token, req.usuario.id])
-    await pool.query('UPDATE usuarios SET push_token = $1 WHERE id = $2', [token, req.usuario.id])
+    // push_status acompanha o token no MESMO UPDATE: 'substituida' em quem perdeu o token
+    // para outra conta do aparelho, 'concedida' em quem acabou de registrar. Antes só o app
+    // escrevia push_status, e a linha ficava com o estado anterior mesmo depois de o
+    // servidor mexer no token — diagnóstico mentia.
+    await pool.query(`UPDATE usuarios SET push_token = NULL, push_status = 'substituida', push_status_em = NOW() WHERE push_token = $1 AND id <> $2`, [token, req.usuario.id])
+    await pool.query(`UPDATE usuarios SET push_token = $1, push_status = 'concedida', push_status_em = NOW() WHERE id = $2`, [token, req.usuario.id])
     // Aviso de aprovação pendente (aprovado sem token no /verificacao/:id/aprovar):
     // claim-then-send no MESMO UPDATE — segunda réplica/re-registro vê a coluna preenchida
     // e não manda de novo. try/catch próprio: falha aqui não muda a resposta do registro.
@@ -1348,10 +1352,11 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
 
 // Limpa o push_token da própria conta no logout, evitando que um device que
 // troca de conta continue recebendo notificações do usuário anterior (só mexe
-// na linha do req.usuario.id — nunca em outras contas).
+// na linha do req.usuario.id — nunca em outras contas). push_status vai a 'removida'
+// no mesmo UPDATE, para o diagnóstico distinguir logout de permissão negada.
 router.post('/auth/push-token/clear', autenticar, async (req, res) => {
   try {
-    await pool.query('UPDATE usuarios SET push_token = NULL WHERE id = $1', [req.usuario.id])
+    await pool.query(`UPDATE usuarios SET push_token = NULL, push_status = 'removida', push_status_em = NOW() WHERE id = $1`, [req.usuario.id])
     res.json({ mensagem: 'Token removido' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao remover token' })
@@ -1366,7 +1371,9 @@ router.post('/auth/push-token/clear', autenticar, async (req, res) => {
 router.post('/auth/push-status', autenticar, async (req, res) => {
   try {
     const { status } = req.body
-    const permitidos = ['concedida', 'negada', 'bloqueada', 'erro_registro', 'erro_consulta', 'erro_token', 'erro_envio', 'nao_solicitada']
+    // 'substituida' e 'removida' são escritos pelo servidor (push-token e push-token/clear);
+    // entram aqui só para o app poder reportá-los sem 400 caso os espelhe.
+    const permitidos = ['concedida', 'negada', 'bloqueada', 'erro_registro', 'erro_consulta', 'erro_token', 'erro_envio', 'nao_solicitada', 'substituida', 'removida']
     if (!permitidos.includes(status)) {
       return res.status(400).json({ erro: 'Status inválido' })
     }
