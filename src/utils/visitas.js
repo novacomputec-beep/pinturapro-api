@@ -28,19 +28,65 @@ const MAX_CHAVES = 5000
 // request — registrarVisita só aceita estas duas chaves, e id desconhecido sai fora.
 const buffers = { obras: new Map(), reparos: new Map() }
 
+// Dedupe por (tabela, demanda, usuário): o MESMO usuário reabrindo a MESMA demanda dentro
+// da janela conta UMA visita, não uma por leitura. Mapa INDEPENDENTE do buffer acima: o
+// buffer esvazia a cada flush de 30s e por isso não lembra quem já viu; este guarda o
+// último instante visto por chave e sobrevive aos flushes. É por processo, como os demais
+// caches do projeto: uma releitura que cai em OUTRA réplica ainda conta mais uma vez.
+const JANELA_DEDUPE_MS = 24 * 60 * 60 * 1000
+
+// Teto de chaves do mapa de dedupe. Em operação normal a poda por idade (a cada tique do
+// flush) segura o tamanho; o teto é a garantia de que não cresce sem limite. No teto, chave
+// NOVA não entra e a visita é DESCARTADA (mesmo racional de MAX_CHAVES: sem lugar para
+// lembrar, não conta) — as já presentes seguem sendo consultadas normalmente.
+const MAX_CHAVES_DEDUPE = 50000
+
+const vistos = new Map()
+
 let flushEmAndamento = false
 let descartadosPorLimite = 0
+let descartadosPorLimiteDedupe = 0
+
+const chaveDedupe = (tabela, id, usuarioId) => tabela + ':' + id + ':' + usuarioId
 
 // Chamado no caminho quente: precisa ser síncrono e barato. Sem I/O, sem promise.
-const registrarVisita = (tabela, id) => {
+// usuarioId é quem está lendo; sem ele (chamada legada) não há dedupe e a visita conta.
+const registrarVisita = (tabela, id, usuarioId) => {
   const buffer = buffers[tabela]
   if (!buffer || !id) return
+
+  if (usuarioId) {
+    const chave = chaveDedupe(tabela, id, usuarioId)
+    const agora = Date.now()
+    const ultimo = vistos.get(chave)
+    if (ultimo !== undefined && agora - ultimo < JANELA_DEDUPE_MS) return
+    if (ultimo === undefined && vistos.size >= MAX_CHAVES_DEDUPE) {
+      descartadosPorLimiteDedupe++
+      return
+    }
+    vistos.set(chave, agora)
+  }
+
   const atual = buffer.get(id)
   if (atual === undefined && buffer.size >= MAX_CHAVES) {
     descartadosPorLimite++
     return
   }
   buffer.set(id, (atual || 0) + 1)
+}
+
+// Poda do mapa de dedupe: remove o que já saiu da janela. Roda a cada tique do flush (30s);
+// varrer até 50k chaves nesse intervalo é barato. Devolve quantas saíram, só para o log.
+const podarVistos = () => {
+  const limite = Date.now() - JANELA_DEDUPE_MS
+  let removidos = 0
+  for (const [chave, visto] of vistos) {
+    if (visto < limite) {
+      vistos.delete(chave)
+      removidos++
+    }
+  }
+  return removidos
 }
 
 // Grava o buffer de UMA tabela num único statement e desconta o que foi gravado.
@@ -98,6 +144,15 @@ const flushVisitas = async () => {
       console.warn(`[Visitas] ${descartadosPorLimite} visita(s) descartada(s) por teto de ${MAX_CHAVES} chaves`)
       descartadosPorLimite = 0
     }
+    if (descartadosPorLimiteDedupe > 0) {
+      console.warn('[Visitas] ' + descartadosPorLimiteDedupe + ' visita(s) descartada(s) por teto de ' + MAX_CHAVES_DEDUPE + ' chaves do dedupe')
+      descartadosPorLimiteDedupe = 0
+    }
+    // Poda do dedupe fica no tique do flush para não precisar de um segundo timer.
+    const podados = podarVistos()
+    if (podados > 0) {
+      console.log('[Visitas] dedupe | podados=' + podados + ' restantes=' + vistos.size)
+    }
   } finally {
     flushEmAndamento = false
   }
@@ -105,4 +160,4 @@ const flushVisitas = async () => {
 
 const iniciarFlushVisitas = () => setInterval(() => { flushVisitas() }, INTERVALO_FLUSH_MS)
 
-module.exports = { registrarVisita, flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS }
+module.exports = { registrarVisita, flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS, JANELA_DEDUPE_MS }
