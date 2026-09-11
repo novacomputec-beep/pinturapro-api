@@ -2470,8 +2470,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
-    // conexão do pool no caminho de leitura mais quente da API.
-    if (!ehDono) registrarVisita('obras', req.params.id)
+    // conexão do pool no caminho de leitura mais quente da API. O id do leitor vai junto
+    // para o dedupe: o mesmo usuário reabrindo a mesma obra em 24h conta uma visita só.
+    if (!ehDono) registrarVisita('obras', req.params.id, req.usuario.id)
   } catch (err) {
     console.error('Erro ao buscar obra:', err)
     res.status(500).json({ erro: 'Erro ao buscar obra' })
@@ -4862,9 +4863,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       extensao_maxima_horas,
     })
 
-    // Contador de visitas em memória (mesmo racional do GET /obras/:id).
-    // Só conta visita se for prestador (não dono consultando o próprio reparo).
-    if (!ehDono) registrarVisita('reparos', req.params.id)
+    // Contador de visitas em memória (mesmo racional do GET /obras/:id, inclusive o dedupe
+    // por usuário em 24h). Só conta visita se for prestador (não dono consultando o próprio reparo).
+    if (!ehDono) registrarVisita('reparos', req.params.id, req.usuario.id)
   } catch (err) {
     console.error('Erro ao buscar reparo:', err)
     res.status(500).json({ erro: 'Erro ao buscar serviço' })
