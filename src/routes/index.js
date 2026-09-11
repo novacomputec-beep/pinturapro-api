@@ -967,6 +967,29 @@ const migracaoPronta = (async () => {
       )
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS aberturas_detalhe_reparador_notif_idx ON aberturas_detalhe (reparador_id, notificado)`)
+    // Entrega POR DESTINATÁRIO do push "nova obra / novo serviço" (alertaService.broadcastPaginado).
+    // Uma linha = um destinatário de uma demanda, com o resultado da ÚLTIMA tentativa:
+    // 'enviado' (ticket ok), 'falha' (ticket error ou chunk inteiro que estourou na HTTP),
+    // 'invalido' (token que nem é Expo). tentativas conta TODAS as tentativas, inclusive a
+    // primeira; a rede de segurança (reenviarEntregasFalhas) só repesca 'falha' com
+    // tentativas < 3. Sem FK em demanda_id: é polimórfico (obras OU reparos, por tipo).
+    // Complementa push_novo_enviado_em, que continua sendo o claim POR DEMANDA — aqui é o
+    // detalhe por pessoa que aquele carimbo não tem. Tabela NOVA: sem linhas legadas.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS push_entregas (
+        tipo                  TEXT NOT NULL CHECK (tipo IN ('obra', 'reparo')),
+        demanda_id            UUID NOT NULL,
+        usuario_id            UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        resultado             TEXT NOT NULL CHECK (resultado IN ('enviado', 'falha', 'invalido')),
+        tentativas            INT NOT NULL DEFAULT 1,
+        primeira_tentativa_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ultima_tentativa_em   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (tipo, demanda_id, usuario_id)
+      )
+    `)
+    // Índice PARCIAL só do que a rede de segurança procura: falhas ainda repescáveis. A PK
+    // cobre o lookup por demanda; este evita varrer as linhas 'enviado' (a maioria).
+    await client.query(`CREATE INDEX IF NOT EXISTS push_entregas_falha_idx ON push_entregas (tipo, demanda_id, ultima_tentativa_em) WHERE resultado = 'falha' AND tentativas < 3`)
     // Livro-caixa de eventos do webhook PagBank. Serve a DOIS propósitos:
     //   1) idempotência — o INSERT ... ON CONFLICT DO NOTHING vira CLAIM atômico (mesmo
     //      idioma de contratosController): quem grava a linha processa o evento.
