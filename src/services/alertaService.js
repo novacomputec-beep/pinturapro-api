@@ -9,6 +9,10 @@ const SQL_ZONA_DA_OBRA = sqlZonaSegura('obras.prazo_timezone')
 const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
 const { MARCA } = require('../utils/marca')
 const { normalizar, sqlNormalizarCidade } = require('../utils/localidade')
+// Emoji e rótulo por categoria (cópia verbatim das listas do app): o push "novo serviço" /
+// "nova obra" mostra o mesmo emoji do chip que o prestador vê no feed, e o rótulo acentuado
+// em vez do slug cru. Fallback = emoji fixo de antes + slug cru, para categoria fora da lista.
+const { apresentacaoReparo, apresentacaoObra } = require('../utils/categoriasApp')
 // Cidade dobrada dos DOIS lados com a MESMA regra (ver utils/localidade): a do profissional
 // aqui, a da demanda em JS com normalizar(). uf compara em caixa alta, que e como e gravado.
 const SQL_CIDADE_PRESTADOR = sqlNormalizarCidade('u.cidade')
@@ -314,21 +318,30 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
 
 // Texto do push "nova obra" / "novo serviço" num só lugar: o broadcast inicial e a
 // repescagem por destinatário (reenviarEntregasFalhas) mandam a MESMA mensagem.
-const mensagemNovaObra = (obra, obraId) => ({
-  titulo: '🎨 Nova obra disponível!',
-  corpo: `"${obra.titulo}" em ${obra.cidade} acabou de ser publicada!`,
-  data: { tipo: 'nova_obra', obra_id: obraId },
-})
-const mensagemNovoReparo = (reparo, reparoId) => ({
-  titulo: '🔧 Novo serviço disponível!',
-  corpo: `"${reparo.titulo}" em ${reparo.cidade} — categoria: ${reparo.categoria}`,
-  data: { tipo: 'novo_reparo', reparo_id: reparoId },
-})
+// Emoji do título = o da categoria (🎨 / 🔧 de antes só quando a categoria não está no
+// mapa); rótulo acentuado no corpo (slug cru no mesmo fallback). obras.categoria pode ser
+// NULL (o create não a exige): sem categoria o corpo da obra fica como sempre foi.
+const mensagemNovaObra = (obra, obraId) => {
+  const { emoji, rotulo } = apresentacaoObra(obra.categoria, '🎨')
+  return {
+    titulo: `${emoji} Nova obra disponível!`,
+    corpo: `"${obra.titulo}" em ${obra.cidade} acabou de ser publicada!${rotulo ? ` Categoria: ${rotulo}.` : ''}`,
+    data: { tipo: 'nova_obra', obra_id: obraId },
+  }
+}
+const mensagemNovoReparo = (reparo, reparoId) => {
+  const { emoji, rotulo } = apresentacaoReparo(reparo.categoria, '🔧')
+  return {
+    titulo: `${emoji} Novo serviço disponível!`,
+    corpo: `"${reparo.titulo}" em ${reparo.cidade} — categoria: ${rotulo}`,
+    data: { tipo: 'novo_reparo', reparo_id: reparoId },
+  }
+}
 
 const notificarPintoresSobreNovaObra = async (obraId) => {
   try {
     const obraResult = await pool.query(
-      `SELECT titulo, cidade, uf FROM obras WHERE id = $1`,
+      `SELECT titulo, cidade, uf, categoria FROM obras WHERE id = $1`,
       [obraId]
     )
     if (obraResult.rows.length === 0) return
@@ -499,7 +512,7 @@ const ATRASO_PUSH_APROVADA_MIN = 5
 // foi decidida no broadcast original, cuja consulta continua intocada.
 const MAX_TENTATIVAS_ENTREGA = 3
 const LADOS_ENTREGA = [
-  { tipo: 'obra',   tabela: 'obras',   colunas: 'titulo, cidade, uf',            mensagem: mensagemNovaObra },
+  { tipo: 'obra',   tabela: 'obras',   colunas: 'titulo, cidade, uf, categoria', mensagem: mensagemNovaObra },
   { tipo: 'reparo', tabela: 'reparos', colunas: 'titulo, cidade, uf, categoria', mensagem: mensagemNovoReparo },
 ]
 const reenviarEntregasFalhas = async () => {
