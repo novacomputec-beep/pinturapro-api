@@ -1068,6 +1068,25 @@ const migracaoPronta = (async () => {
         criado_em TIMESTAMPTZ DEFAULT NOW()
       )
     `)
+    // Pedidos de suporte: o usuário deixa um WhatsApp (e uma mensagem opcional) para a equipe
+    // retornar. Tabela NOVA e puramente aditiva, como sugestoes: nada existente lê ou escreve
+    // nela, nenhum ALTER a acompanha, e CREATE TABLE IF NOT EXISTS torna o re-run um no-op.
+    // status fica em aberto até o admin marcar como resolvido (POST /admin/pedidos-suporte/:id/resolver).
+    // usuario_id com ON DELETE CASCADE: o pedido é do autor — sem conta, some junto.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS pedidos_suporte (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        whatsapp TEXT NOT NULL,
+        mensagem TEXT,
+        status TEXT NOT NULL DEFAULT 'aberto' CHECK (status IN ('aberto','resolvido')),
+        criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+    // Fila do admin (status + mais recentes primeiro) e a janela anti-repetição por usuário.
+    await client.query(`CREATE INDEX IF NOT EXISTS pedidos_suporte_status_idx ON pedidos_suporte (status, criado_em DESC)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS pedidos_suporte_usuario_idx ON pedidos_suporte (usuario_id, criado_em DESC)`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -6045,6 +6064,59 @@ router.post('/sugestoes', autenticar, async (req, res) => {
   }
 })
 
+// SUPORTE — pedido de contato via WhatsApp.
+
+const MENSAGEM_SUPORTE_MAX = 2000
+// Janela anti-repetição POR USUÁRIO: um pedido a cada 10 minutos. Checada no banco (não em
+// Map em memória) para sobreviver a redeploy e valer igual em qualquer instância.
+const SUPORTE_JANELA_MIN = 10
+
+// POST /suporte/pedido — registra um pedido de suporte do usuário autenticado.
+// O autor sai de req.usuario.id, nunca do corpo. whatsapp é obrigatório e guardado só com
+// dígitos (10 a 15, cobrindo DDD+número com ou sem DDI); mensagem é opcional e limitada.
+router.post('/suporte/pedido', autenticar, async (req, res) => {
+  try {
+    const { whatsapp, mensagem } = req.body
+    const digitos = typeof whatsapp === 'string' ? whatsapp.replace(/\D/g, '') : ''
+    if (!digitos) {
+      return res.status(400).json({ erro: 'whatsapp é obrigatório' })
+    }
+    if (digitos.length < 10 || digitos.length > 15) {
+      return res.status(400).json({ erro: 'whatsapp inválido: informe DDD e número' })
+    }
+    let texto = null
+    if (mensagem !== undefined && mensagem !== null) {
+      if (typeof mensagem !== 'string') {
+        return res.status(400).json({ erro: 'mensagem deve ser texto' })
+      }
+      texto = mensagem.trim() || null
+      if (texto && texto.length > MENSAGEM_SUPORTE_MAX) {
+        return res.status(400).json({ erro: `mensagem deve ter no máximo ${MENSAGEM_SUPORTE_MAX} caracteres` })
+      }
+    }
+
+    const recente = await pool.query(
+      `SELECT 1 FROM pedidos_suporte
+       WHERE usuario_id = $1 AND criado_em > NOW() - ($2 || ' minutes')::interval
+       LIMIT 1`,
+      [req.usuario.id, String(SUPORTE_JANELA_MIN)]
+    )
+    if (recente.rows.length > 0) {
+      return res.status(429).json({ erro: `Você já enviou um pedido há pouco. Aguarde ${SUPORTE_JANELA_MIN} minutos para enviar outro.` })
+    }
+
+    const result = await pool.query(
+      `INSERT INTO pedidos_suporte (usuario_id, whatsapp, mensagem) VALUES ($1, $2, $3) RETURNING id, status, criado_em`,
+      [req.usuario.id, digitos, texto]
+    )
+
+    res.status(201).json({ mensagem: 'Pedido de suporte registrado. Entraremos em contato pelo WhatsApp.', ...result.rows[0] })
+  } catch (err) {
+    console.error('[Suporte] Erro:', err.message)
+    res.status(500).json({ erro: 'Erro ao registrar pedido de suporte' })
+  }
+})
+
 // FEED — visualizações de proximidade. Rota estática ('/feed/visualizacoes'), sem
 // conflito com padrões /:id, seguindo a convenção de registro dedicado como avaliacoes.
 
@@ -6560,6 +6632,69 @@ router.get('/admin/sugestoes', autenticar, exigirAdmin, async (req, res) => {
   } catch (err) {
     console.error('[Sugestoes] Erro listagem admin:', err.message)
     res.status(500).json({ erro: 'Erro ao buscar sugestões' })
+  }
+})
+
+// GET /admin/pedidos-suporte — fila de pedidos de suporte. Espelha GET /admin/denuncias:
+// autenticar + exigirAdmin, paginacaoAdmin (page/limit, teto 100), mais recentes primeiro,
+// colunas explícitas. ?status=aberto|resolvido filtra; sem filtro, lista todos. A resposta
+// traz a contagem por status para o painel mostrar a fila pendente.
+// JOIN interno em usuarios: usuario_id é NOT NULL e ON DELETE CASCADE, sem linha órfã.
+router.get('/admin/pedidos-suporte', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { page, limit, offset } = paginacaoAdmin(req.query)
+    const STATUS_SUPORTE = ['aberto', 'resolvido']
+    const status = STATUS_SUPORTE.includes(req.query.status) ? req.query.status : null
+
+    const [lista, porStatus] = await Promise.all([
+      pool.query(
+        `SELECT p.id, p.whatsapp, p.mensagem, p.status, p.criado_em, p.atualizado_em,
+                p.usuario_id, u.nome AS usuario_nome, u.email AS usuario_email, u.role AS usuario_role
+         FROM pedidos_suporte p
+         JOIN usuarios u ON u.id = p.usuario_id
+         WHERE ($1::text IS NULL OR p.status = $1)
+         ORDER BY p.criado_em DESC
+         LIMIT $2 OFFSET $3`,
+        [status, limit, offset]
+      ),
+      pool.query(`SELECT status, COUNT(*)::int AS total FROM pedidos_suporte GROUP BY status`)
+    ])
+
+    const contagem = { aberto: 0, resolvido: 0 }
+    for (const r of porStatus.rows) contagem[r.status] = r.total
+
+    res.json({
+      page,
+      limit,
+      status,
+      por_status: contagem,
+      pedidos: lista.rows
+    })
+  } catch (err) {
+    console.error('[Suporte] Erro listagem admin:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar pedidos de suporte' })
+  }
+})
+
+// POST /admin/pedidos-suporte/:id/resolver — marca o pedido como resolvido. Idempotente:
+// resolver de novo só reescreve atualizado_em. 404 se o id não existe.
+router.post('/admin/pedidos-suporte/:id/resolver', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { id } = req.params
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      return res.status(400).json({ erro: 'id inválido' })
+    }
+    const result = await pool.query(
+      `UPDATE pedidos_suporte SET status = 'resolvido', atualizado_em = NOW()
+       WHERE id = $1
+       RETURNING id, status, atualizado_em`,
+      [id]
+    )
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Pedido de suporte não encontrado' })
+    res.json(result.rows[0])
+  } catch (err) {
+    console.error('[Suporte] Erro ao resolver:', err.message)
+    res.status(500).json({ erro: 'Erro ao resolver pedido de suporte' })
   }
 })
 
