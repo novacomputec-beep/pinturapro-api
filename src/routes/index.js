@@ -2428,7 +2428,7 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
 // profissionais que receberiam o push de demanda nova recebem um "oferta aumentada".
 // Regras (todas checadas no banco, relógio do servidor):
 //   - dono da demanda (criado_por), demanda aberta, aprovada e não expirada;
-//   - valor novo estritamente MAIOR que o atual (obras.valor / reparos.valor_estimado);
+//   - valor novo >= atual + 10% (valorMinimoAumento; obras.valor / reparos.valor_estimado);
 //   - sem proposta aceita: match_usuario_id IS NULL e nenhuma candidatura/interesse 'aceito';
 //   - nunca aumentada antes: valor_aumentado_em IS NULL (coluna da migração de boot);
 //   - elegível quando o alerta de baixo engajamento já disparou (alerta_enviado_em — hoje só
@@ -2462,6 +2462,69 @@ const LADOS_AUMENTO_VALOR = {
 const rejeitarAumento = (res, status, codigo, mensagem, extra = {}) =>
   res.status(status).json({ codigo, mensagem, erro: mensagem, ...extra })
 
+// Menor valor novo aceito: o atual + 10% (FATOR_MINIMO_AUMENTO), arredondado ao centavo. Vive
+// aqui, no helper compartilhado, para o endpoint (rejeição VALOR_ABAIXO_MINIMO) e os detalhes
+// GET /obras/:id e GET /reparos/:id (valor_minimo_aumento) usarem exatamente o mesmo número.
+const FATOR_MINIMO_AUMENTO = 1.10
+const valorMinimoAumento = (valorAtual) => Math.round(valorAtual * FATOR_MINIMO_AUMENTO * 100) / 100
+const formatarReais = (v) => `R$ ${Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+// Lê o estado da demanda e aplica as regras do aumento, NA MESMA ORDEM do endpoint. Regra
+// única em dois lugares: POST /:id/aumentar-valor passa valorNovo e responde a rejeição tal
+// qual; os detalhes GET /obras/:id e GET /reparos/:id passam valorNovo = null (a regra do
+// valor depende da entrada, não do estado) e traduzem "sem rejeição" em pode_aumentar_valor.
+// Devolve { d, valorAtual, rejeicao }: d = null quando não há linha do dono; rejeicao = null
+// quando todas as regras passam, senão { status, codigo, mensagem, extra }.
+const avaliarAumentoValor = async (lado, id, donoId, valorNovo = null) => {
+  const atual = await pool.query(
+    `SELECT d.status, d.status_aprovacao, d.match_usuario_id, d.valor_aumentado_em, d.alerta_enviado_em,
+            d.${lado.colunaValor} AS valor_atual,
+            d.expira_em <= NOW() AS expirada,
+            EXISTS (${lado.aceito}) AS tem_aceito,
+            EXISTS (${lado.vivo})   AS tem_interessado,
+            NOW() > ${lado.ancora}
+              + (COALESCE(d.${lado.janelaCol}, 720) * INTERVAL '1 hour') * ($3::int - 1) / $3::int AS janela_quase_fim
+       FROM ${lado.tabela} d
+      WHERE d.id = $1 AND d.criado_por = $2`,
+    [id, donoId, FRACAO_JANELA_AUMENTO]
+  )
+  if (atual.rows.length === 0) {
+    return { d: null, valorAtual: null, rejeicao: { status: 404, codigo: 'NAO_ENCONTRADA', mensagem: lado.naoEncontrada } }
+  }
+  const d = atual.rows[0]
+  const valorAtual = Number(d.valor_atual ?? 0)
+  let rejeicao = null
+
+  if (d.status !== 'aberta' || d.status_aprovacao !== 'aprovada' || d.expirada) {
+    rejeicao = { status: 409, codigo: 'DEMANDA_INATIVA', mensagem: 'Só é possível aumentar a oferta de uma demanda aberta, aprovada e dentro do prazo' }
+  } else if (valorNovo !== null && !(valorNovo >= valorMinimoAumento(valorAtual))) {
+    const valorMinimo = valorMinimoAumento(valorAtual)
+    rejeicao = { status: 400, codigo: 'VALOR_ABAIXO_MINIMO', mensagem: `O valor atual é ${formatarReais(valorAtual)}; o novo valor precisa ser de pelo menos ${formatarReais(valorMinimo)}`, extra: { valor_atual: valorAtual, valor_minimo_aumento: valorMinimo } }
+  } else if (d.match_usuario_id || d.tem_aceito) {
+    rejeicao = { status: 409, codigo: 'PROPOSTA_ACEITA', mensagem: 'Esta demanda já tem um profissional aceito; o valor não pode mais ser alterado' }
+  } else if (d.valor_aumentado_em) {
+    rejeicao = { status: 409, codigo: 'JA_AUMENTADO', mensagem: 'A oferta desta demanda já foi aumentada uma vez', extra: { valor_aumentado_em: d.valor_aumentado_em } }
+  } else if (!(!!d.alerta_enviado_em || (d.janela_quase_fim && !d.tem_interessado))) {
+    rejeicao = { status: 409, codigo: 'AINDA_NAO_ELEGIVEL', mensagem: 'Ainda é cedo para aumentar a oferta: aguarde o aviso de baixo interesse ou o fim de dois terços do prazo sem interessados' }
+  }
+  return { d, valorAtual, rejeicao }
+}
+
+// Par advisory dos detalhes: só o DONO recebe o cálculo; para qualquer outro leitor é
+// { false, null } sem consultar nada. Erro aqui não derruba o detalhe — cai em { false, null }.
+const advisoryAumentoValor = async (lado, id, usuarioId, ehDono) => {
+  const nada = { pode_aumentar_valor: false, valor_minimo_aumento: null }
+  if (!ehDono) return nada
+  try {
+    const { valorAtual, rejeicao } = await avaliarAumentoValor(lado, id, usuarioId)
+    if (rejeicao) return nada
+    return { pode_aumentar_valor: true, valor_minimo_aumento: valorMinimoAumento(valorAtual) }
+  } catch (err) {
+    console.error(`${lado.log} advisory pode_aumentar_valor falhou:`, err.message)
+    return nada
+  }
+}
+
 const aumentarValorDemanda = (lado) => async (req, res) => {
   try {
     if (!UUID_RE.test(req.params.id)) return rejeitarAumento(res, 404, 'NAO_ENCONTRADA', lado.naoEncontrada)
@@ -2470,38 +2533,11 @@ const aumentarValorDemanda = (lado) => async (req, res) => {
       return rejeitarAumento(res, 400, 'VALOR_INVALIDO', 'valor inválido: informe um número maior que zero')
     }
 
-    const atual = await pool.query(
-      `SELECT d.status, d.status_aprovacao, d.match_usuario_id, d.valor_aumentado_em, d.alerta_enviado_em,
-              d.${lado.colunaValor} AS valor_atual,
-              d.expira_em <= NOW() AS expirada,
-              EXISTS (${lado.aceito}) AS tem_aceito,
-              EXISTS (${lado.vivo})   AS tem_interessado,
-              NOW() > ${lado.ancora}
-                + (COALESCE(d.${lado.janelaCol}, 720) * INTERVAL '1 hour') * ($3::int - 1) / $3::int AS janela_quase_fim
-         FROM ${lado.tabela} d
-        WHERE d.id = $1 AND d.criado_por = $2`,
-      [req.params.id, req.usuario.id, FRACAO_JANELA_AUMENTO]
-    )
-    if (atual.rows.length === 0) return rejeitarAumento(res, 404, 'NAO_ENCONTRADA', lado.naoEncontrada)
-    const d = atual.rows[0]
-    const valorAtual = Number(d.valor_atual ?? 0)
-
-    if (d.status !== 'aberta' || d.status_aprovacao !== 'aprovada' || d.expirada) {
-      return rejeitarAumento(res, 409, 'DEMANDA_INATIVA', 'Só é possível aumentar a oferta de uma demanda aberta, aprovada e dentro do prazo')
-    }
-    if (!(valorNovo > valorAtual)) {
-      return rejeitarAumento(res, 400, 'VALOR_NAO_MAIOR', `O novo valor precisa ser maior que o atual (R$ ${valorAtual.toLocaleString('pt-BR')})`, { valor_atual: valorAtual })
-    }
-    if (d.match_usuario_id || d.tem_aceito) {
-      return rejeitarAumento(res, 409, 'PROPOSTA_ACEITA', 'Esta demanda já tem um profissional aceito; o valor não pode mais ser alterado')
-    }
-    if (d.valor_aumentado_em) {
-      return rejeitarAumento(res, 409, 'JA_AUMENTADO', 'A oferta desta demanda já foi aumentada uma vez', { valor_aumentado_em: d.valor_aumentado_em })
-    }
-    const elegivel = !!d.alerta_enviado_em || (d.janela_quase_fim && !d.tem_interessado)
-    if (!elegivel) {
-      return rejeitarAumento(res, 409, 'AINDA_NAO_ELEGIVEL', 'Ainda é cedo para aumentar a oferta: aguarde o aviso de baixo interesse ou o fim de dois terços do prazo sem interessados')
-    }
+    // Regras de estado + valor em avaliarAumentoValor (compartilhada com os detalhes):
+    // mesma ordem e mesmas respostas de sempre — NAO_ENCONTRADA, DEMANDA_INATIVA,
+    // VALOR_ABAIXO_MINIMO, PROPOSTA_ACEITA, JA_AUMENTADO, AINDA_NAO_ELEGIVEL.
+    const { valorAtual, rejeicao } = await avaliarAumentoValor(lado, req.params.id, req.usuario.id, valorNovo)
+    if (rejeicao) return rejeitarAumento(res, rejeicao.status, rejeicao.codigo, rejeicao.mensagem, rejeicao.extra || {})
 
     const upd = await pool.query(
       `UPDATE ${lado.tabela} d SET ${lado.colunaValor} = $1, valor_aumentado_em = NOW()
@@ -2636,8 +2672,11 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // (nunca oferece o que tomaria 400), mas os dois só ficam idênticos quando o endpoint
     // também passar a descontar o acumulado.
     // Regra única (restanteExtensao) — o endpoint devolve o MESMO número após estender.
+    // pode_aumentar_valor / valor_minimo_aumento: MESMAS regras de POST /obras/:id/aumentar-valor
+    // (avaliarAumentoValor), calculadas só para o dono; qualquer outro leitor recebe false/null.
+    const { pode_aumentar_valor, valor_minimo_aumento } = await advisoryAumentoValor(LADOS_AUMENTO_VALOR.obras, req.params.id, req.usuario.id, ehDono)
     const extensao_maxima_horas = restanteExtensao(TETO_ESTENDER_OBRA_HORAS, obra.publicado_em || obra.criado_em, obra.horas_para_expirar, obra.expira_em)
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, extensao_maxima_horas })
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -5029,6 +5068,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // números não divergirem. NÃO reflete a carência de 1h das faixas longas: dentro da
     // primeira hora o app ainda oferece opções que o endpoint recusa com 409.
     // D89: regra única (restanteExtensao), a mesma de GET /obras/:id e dos dois endpoints.
+    // pode_aumentar_valor / valor_minimo_aumento: MESMAS regras de POST /reparos/:id/aumentar-valor
+    // (avaliarAumentoValor), só para o dono; qualquer outro leitor recebe false/null.
+    const { pode_aumentar_valor, valor_minimo_aumento } = await advisoryAumentoValor(LADOS_AUMENTO_VALOR.reparos, req.params.id, req.usuario.id, ehDono)
     const extensao_maxima_horas = restanteExtensao(ADVISORY_ESTENDER_REPARO_HORAS, reparo.criado_em, reparo.prazo_atendimento_horas, reparo.expira_em)
     res.json({
       reparo,
@@ -5036,6 +5078,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       meu_interesse: interesse.rows[0] || null,
       interessados,
       extensao_maxima_horas,
+      pode_aumentar_valor,
+      valor_minimo_aumento,
     })
 
     // Contador de visitas em memória (mesmo racional do GET /obras/:id, inclusive o dedupe
