@@ -14,7 +14,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
+const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
@@ -347,6 +347,8 @@ const migracaoPronta = (async () => {
     // retry do app somava outra extensão inteira — exatamente o que a guarda do reparo já evitava.
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS ultima_extensao_em    TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS ultima_extensao_horas NUMERIC`)
+    // Aumento ÚNICO de oferta pelo dono (POST /reparos/:id/aumentar-valor): NULL = nunca aumentado.
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS valor_aumentado_em TIMESTAMPTZ`)
     // Faixa "Hoje": prazo que vence no FIM DO DIA em Brasília, não N horas depois da publicação.
     // Marcador, não duração — ver PRAZO_MODO_HOJE em src/utils/faixasPrazo.js para o porquê de
     // não usar sentinela nas colunas de horas. NULL = faixa por duração (todo o histórico).
@@ -367,6 +369,8 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS prazo_timezone TEXT`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_em    TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_horas NUMERIC`)
+    // Aumento ÚNICO de oferta pelo dono (POST /obras/:id/aumentar-valor): NULL = nunca aumentado.
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS valor_aumentado_em TIMESTAMPTZ`)
     // Instante em que o push "nova obra/novo serviço disponível" foi disparado. NULL = ainda
     // não avisado. Escrito UMA vez pelo claim atômico de POST /:id/midias-prontas (o app
     // chama ao terminar o último upload); sem backfill, sem default, sem constraint.
@@ -2420,6 +2424,124 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
   }
 })
 
+// AUMENTO DE OFERTA — o dono sobe o valor de uma demanda parada, UMA única vez, e os
+// profissionais que receberiam o push de demanda nova recebem um "oferta aumentada".
+// Regras (todas checadas no banco, relógio do servidor):
+//   - dono da demanda (criado_por), demanda aberta, aprovada e não expirada;
+//   - valor novo estritamente MAIOR que o atual (obras.valor / reparos.valor_estimado);
+//   - sem proposta aceita: match_usuario_id IS NULL e nenhuma candidatura/interesse 'aceito';
+//   - nunca aumentada antes: valor_aumentado_em IS NULL (coluna da migração de boot);
+//   - elegível quando o alerta de baixo engajamento já disparou (alerta_enviado_em — hoje só
+//     verificarObrasComBaixoEngajamento grava essa coluna; verificarObrasExpirando está
+//     aposentado) OU quando resta menos de 1/3 da janela ORIGINAL e não há interessado vivo.
+//     Janela original = âncora de publicação + horas contratadas (mesma âncora e mesmo
+//     COALESCE(..., 720) dos crons de marco: obra publica na aprovação, reparo na criação).
+//     Extensão de prazo não reabre a janela — é a original, não a estendida.
+//   "Interessado vivo" segue o predicado dos crons: status IS DISTINCT FROM 'recusado'.
+// Valores de contrato e de proposta NÃO são tocados: contratos.valor_acordado e
+// valor_proposto/valor_contraproposta continuam como estão.
+// O UPDATE repete os predicados de estado (aumentado, aceito, match, valor menor): quem perde
+// a corrida (aceite simultâneo, duplo clique) não casa a linha e recebe 409 sem gravar nada.
+const FRACAO_JANELA_AUMENTO = 3
+const LADOS_AUMENTO_VALOR = {
+  obras: {
+    tabela: 'obras', colunaValor: 'valor', naoEncontrada: 'Obra não encontrada', log: '[obras/aumentar-valor]',
+    ancora: 'COALESCE(d.publicado_em, d.criado_em)', janelaCol: 'horas_para_expirar',
+    aceito: `SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id AND c.status = 'aceito'`,
+    vivo:   `SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id AND c.status IS DISTINCT FROM 'recusado'`,
+    notificar: notificarOfertaAumentadaObra,
+  },
+  reparos: {
+    tabela: 'reparos', colunaValor: 'valor_estimado', naoEncontrada: 'Serviço não encontrado', log: '[reparos/aumentar-valor]',
+    ancora: 'd.criado_em', janelaCol: 'prazo_atendimento_horas',
+    aceito: `SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = d.id AND ir.status = 'aceito'`,
+    vivo:   `SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = d.id AND ir.status IS DISTINCT FROM 'recusado'`,
+    notificar: notificarOfertaAumentadaReparo,
+  },
+}
+const rejeitarAumento = (res, status, codigo, mensagem, extra = {}) =>
+  res.status(status).json({ codigo, mensagem, erro: mensagem, ...extra })
+
+const aumentarValorDemanda = (lado) => async (req, res) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return rejeitarAumento(res, 404, 'NAO_ENCONTRADA', lado.naoEncontrada)
+    const valorNovo = Number(req.body?.valor)
+    if (!Number.isFinite(valorNovo) || valorNovo <= 0) {
+      return rejeitarAumento(res, 400, 'VALOR_INVALIDO', 'valor inválido: informe um número maior que zero')
+    }
+
+    const atual = await pool.query(
+      `SELECT d.status, d.status_aprovacao, d.match_usuario_id, d.valor_aumentado_em, d.alerta_enviado_em,
+              d.${lado.colunaValor} AS valor_atual,
+              d.expira_em <= NOW() AS expirada,
+              EXISTS (${lado.aceito}) AS tem_aceito,
+              EXISTS (${lado.vivo})   AS tem_interessado,
+              NOW() > ${lado.ancora}
+                + (COALESCE(d.${lado.janelaCol}, 720) * INTERVAL '1 hour') * ($3::int - 1) / $3::int AS janela_quase_fim
+         FROM ${lado.tabela} d
+        WHERE d.id = $1 AND d.criado_por = $2`,
+      [req.params.id, req.usuario.id, FRACAO_JANELA_AUMENTO]
+    )
+    if (atual.rows.length === 0) return rejeitarAumento(res, 404, 'NAO_ENCONTRADA', lado.naoEncontrada)
+    const d = atual.rows[0]
+    const valorAtual = Number(d.valor_atual ?? 0)
+
+    if (d.status !== 'aberta' || d.status_aprovacao !== 'aprovada' || d.expirada) {
+      return rejeitarAumento(res, 409, 'DEMANDA_INATIVA', 'Só é possível aumentar a oferta de uma demanda aberta, aprovada e dentro do prazo')
+    }
+    if (!(valorNovo > valorAtual)) {
+      return rejeitarAumento(res, 400, 'VALOR_NAO_MAIOR', `O novo valor precisa ser maior que o atual (R$ ${valorAtual.toLocaleString('pt-BR')})`, { valor_atual: valorAtual })
+    }
+    if (d.match_usuario_id || d.tem_aceito) {
+      return rejeitarAumento(res, 409, 'PROPOSTA_ACEITA', 'Esta demanda já tem um profissional aceito; o valor não pode mais ser alterado')
+    }
+    if (d.valor_aumentado_em) {
+      return rejeitarAumento(res, 409, 'JA_AUMENTADO', 'A oferta desta demanda já foi aumentada uma vez', { valor_aumentado_em: d.valor_aumentado_em })
+    }
+    const elegivel = !!d.alerta_enviado_em || (d.janela_quase_fim && !d.tem_interessado)
+    if (!elegivel) {
+      return rejeitarAumento(res, 409, 'AINDA_NAO_ELEGIVEL', 'Ainda é cedo para aumentar a oferta: aguarde o aviso de baixo interesse ou o fim de dois terços do prazo sem interessados')
+    }
+
+    const upd = await pool.query(
+      `UPDATE ${lado.tabela} d SET ${lado.colunaValor} = $1, valor_aumentado_em = NOW()
+        WHERE d.id = $2 AND d.criado_por = $3
+          AND d.status = 'aberta' AND d.status_aprovacao = 'aprovada' AND d.expira_em > NOW()
+          AND d.valor_aumentado_em IS NULL
+          AND d.match_usuario_id IS NULL
+          AND NOT EXISTS (${lado.aceito})
+          AND COALESCE(d.${lado.colunaValor}, 0) < $1
+        RETURNING d.${lado.colunaValor} AS valor, d.valor_aumentado_em`,
+      [valorNovo, req.params.id, req.usuario.id]
+    )
+    if (upd.rowCount === 0) {
+      return rejeitarAumento(res, 409, 'CONFLITO', 'A demanda mudou enquanto o pedido era processado. Recarregue e tente novamente.')
+    }
+
+    // Valor já gravado: falha no push não desfaz o aumento — loga e informa no corpo.
+    let push = null
+    try {
+      push = await lado.notificar(req.params.id)
+    } catch (err) {
+      console.error(`${lado.log} push de oferta aumentada falhou:`, err.message)
+      push = { erro: err.message }
+    }
+
+    res.json({
+      mensagem: 'Oferta aumentada. Os profissionais da sua cidade foram avisados.',
+      valor: upd.rows[0].valor,
+      valor_anterior: valorAtual,
+      valor_aumentado_em: upd.rows[0].valor_aumentado_em,
+      push,
+    })
+  } catch (err) {
+    console.error(`${lado.log}`, err.message)
+    res.status(500).json({ erro: 'Erro ao aumentar a oferta' })
+  }
+}
+
+router.post('/obras/:id/aumentar-valor', autenticar, aumentarValorDemanda(LADOS_AUMENTO_VALOR.obras))
+
 router.get('/obras/:id', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
@@ -3431,6 +3553,10 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
     res.status(500).json({ erro: 'Erro ao estender prazo do serviço' })
   }
 })
+
+// POST /reparos/:id/aumentar-valor — espelho de POST /obras/:id/aumentar-valor (ver lá):
+// mesmo handler, lado reparo (valor_estimado, interesse_reparos, âncora criado_em).
+router.post('/reparos/:id/aumentar-valor', autenticar, aumentarValorDemanda(LADOS_AUMENTO_VALOR.reparos))
 
 router.get('/reparos/aprovacao', autenticar, exigirAdmin, async (req, res) => {
   try {

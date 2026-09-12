@@ -269,6 +269,7 @@ const registrarEntregas = async (tipo, demandaId, resultados) => {
 }
 
 // entrega = { tipo: 'obra' | 'reparo', demandaId }: identifica a demanda em push_entregas.
+// null: envia sem registrar (push "oferta aumentada", que não é a entrega da demanda nova).
 const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega }) => {
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
   let cursor = null
@@ -299,7 +300,7 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
     const resultados = await enviarPushEmLoteDetalhado(pagina.rows, titulo, corpo, data)
     // Grava ANTES de somar/seguir: se o registro falhar, o erro sobe e o claim da demanda
     // dá ROLLBACK — melhor reenviar tudo do que ter enviado sem saber para quem.
-    await registrarEntregas(entrega.tipo, entrega.demandaId, resultados)
+    if (entrega) await registrarEntregas(entrega.tipo, entrega.demandaId, resultados)
     const s = contarResultados(resultados)
     total.elegiveis += s.elegiveis; total.invalidos += s.invalidos; total.enviados += s.enviados; total.falhos += s.falhos
     cursor = pagina.rows[pagina.rows.length - 1].id
@@ -412,6 +413,72 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     console.error('Erro ao notificar prestadores:', err)
     throw err
   }
+}
+
+// Push "oferta aumentada" (POST /obras/:id/aumentar-valor e /reparos/:id/aumentar-valor em
+// routes/index.js). MESMOS destinatários do push de demanda nova: o mesmo broadcastPaginado,
+// com o mesmo tipoPrestador, a mesma dobra cidade+uf e, no lado reparo, o mesmo filtro de
+// categoria × especialidades. Emoji e rótulo da categoria saem de apresentacaoObra/Reparo,
+// como em mensagemNovaObra/NovoReparo. data.tipo repete o da demanda nova para o app abrir o
+// mesmo detalhe; oferta_aumentada: true distingue a origem.
+// entrega: null — este aviso NÃO passa por push_entregas: a PK (tipo, demanda_id, usuario_id)
+// é a da entrega do push de demanda nova, e gravar por cima reescreveria aquele resultado e
+// faria reenviarEntregasFalhas repescar a falha DESTE push com o texto de demanda nova.
+const formatarReaisPush = (v) => `R$ ${Number(v).toLocaleString('pt-BR')}`
+const mensagemOfertaAumentadaObra = (obra, obraId) => {
+  const { emoji, rotulo } = apresentacaoObra(obra.categoria, '🎨')
+  return {
+    titulo: `${emoji} Oferta aumentada!`,
+    corpo: `"${obra.titulo}" em ${obra.cidade} agora paga ${formatarReaisPush(obra.valor)}.${rotulo ? ` Categoria: ${rotulo}.` : ''}`,
+    data: { tipo: 'nova_obra', obra_id: obraId, oferta_aumentada: true },
+  }
+}
+const mensagemOfertaAumentadaReparo = (reparo, reparoId) => {
+  const { emoji, rotulo } = apresentacaoReparo(reparo.categoria, '🔧')
+  return {
+    titulo: `${emoji} Oferta aumentada!`,
+    corpo: `"${reparo.titulo}" em ${reparo.cidade} agora paga ${formatarReaisPush(reparo.valor_estimado)}.${rotulo ? ` Categoria: ${rotulo}.` : ''}`,
+    data: { tipo: 'novo_reparo', reparo_id: reparoId, oferta_aumentada: true },
+  }
+}
+
+// Devolvem o total do broadcast ({ elegiveis, enviados, falhos, invalidos, paginas }) ou null
+// quando não há alvo possível (demanda sumiu, ou sem cidade/uf — mesmo silêncio dos
+// notificadores de demanda nova). Erro do broadcast SOBE: o chamador decide o que responder —
+// o valor já foi gravado antes do push, então a rota loga e responde 200 com push: { erro }.
+const notificarOfertaAumentadaObra = async (obraId) => {
+  const r = await pool.query(`SELECT titulo, cidade, uf, categoria, valor FROM obras WHERE id = $1`, [obraId])
+  if (r.rows.length === 0) return null
+  const obra = r.rows[0]
+  const cidade = normalizar(obra.cidade)
+  const uf = String(obra.uf || '').trim().toUpperCase()
+  if (!cidade || !uf) {
+    console.log('[Push] Obra sem cidade/uf — aviso de oferta aumentada não enviado |', obraId)
+    return null
+  }
+  return broadcastPaginado({
+    tipoPrestador: 'pintor', cidade, uf,
+    ...mensagemOfertaAumentadaObra(obra, obraId),
+    rotulo: `oferta aumentada obra ${obraId}`,
+    entrega: null,
+  })
+}
+const notificarOfertaAumentadaReparo = async (reparoId) => {
+  const r = await pool.query(`SELECT titulo, cidade, uf, categoria, valor_estimado FROM reparos WHERE id = $1`, [reparoId])
+  if (r.rows.length === 0) return null
+  const reparo = r.rows[0]
+  const cidade = normalizar(reparo.cidade)
+  const uf = String(reparo.uf || '').trim().toUpperCase()
+  if (!cidade || !uf) {
+    console.log('[Push] Reparo sem cidade/uf — aviso de oferta aumentada não enviado |', reparoId)
+    return null
+  }
+  return broadcastPaginado({
+    tipoPrestador: 'reparador', cidade, uf, categoria: reparo.categoria,
+    ...mensagemOfertaAumentadaReparo(reparo, reparoId),
+    rotulo: `oferta aumentada reparo ${reparoId}`,
+    entrega: null,
+  })
 }
 
 // Push para o DONO com o desfecho da análise da obra (a obra é a única vertical que passa
@@ -1385,6 +1452,8 @@ module.exports = {
   enviarBoasVindas,
   notificarPintoresSobreNovaObra,
   notificarPrestadoresSobreNovoReparo,
+  notificarOfertaAumentadaObra,
+  notificarOfertaAumentadaReparo,
   notificarDonoSobreAnaliseObra,
   dispararPushNovoComClaim,
   enviarPushNovoPendente,
