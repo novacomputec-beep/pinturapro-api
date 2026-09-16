@@ -1,6 +1,6 @@
 const { pool } = require('../utils/supabase')
 const { Expo } = require('expo-server-sdk')
-const { getFaixa, PRAZO_MODO_HOJE, sqlFimDoDia, SQL_FIM_DO_DIA_SP, sqlZonaSegura } = require('../utils/faixasPrazo')
+const { getFaixa, MAX_OFFSET_MARCO_MINUTOS, PRAZO_MODO_HOJE, sqlFimDoDia, SQL_FIM_DO_DIA_SP, sqlZonaSegura } = require('../utils/faixasPrazo')
 // Ver src/routes/index.js: a obra guarda a zona do dono em prazo_timezone, validada contra
 // pg_timezone_names NA HORA DO USO — zona NULL ou que deixou de existir recua para o padrão em
 // vez de derrubar o UPDATE do lote inteiro. Só o lado OBRA tem zona — reparo não tem "Hoje".
@@ -889,7 +889,10 @@ const verificarMarcosExpiracao = async () => {
   try {
     for (const lado of lados) {
       // Candidatos elegíveis com algum marco pendente e expira_em dentro do MAIOR offset possível
-      // (1440min = 24h, faixa 168) — demandas mais distantes que isso não entram em banda nenhuma.
+      // (MAX_OFFSET_MARCO_MINUTOS, derivado de FAIXAS: hoje 10080min = 7 dias, marco 1 da faixa
+      // 720) — demandas mais distantes que isso não entram em banda nenhuma. Literal numérico
+      // vindo da tabela, nunca do request; o predicado segue um range em expira_em, então
+      // obras_marcos_pendentes_idx / reparos_marcos_pendentes_idx continuam cobrindo a leitura.
       // COALESCE(janela, 720): linhas ANTIGAS gravadas com prazo NULL viravam Number(null)=0 no
       // getFaixa, caíam no `faixa desconhecida` e nunca recebiam marco. 720 é o mesmo default que
       // o create usa para o expira_em dessas linhas (e o que os dois crons já usam nas obras).
@@ -905,7 +908,7 @@ const verificarMarcosExpiracao = async () => {
           AND NOT EXISTS (${lado.interesse})
           AND (d.marco_1_em IS NULL OR d.marco_2_em IS NULL OR d.marco_3_em IS NULL)
           AND d.expira_em > NOW()
-          AND d.expira_em <= NOW() + INTERVAL '1440 minutes'
+          AND d.expira_em <= NOW() + INTERVAL '${MAX_OFFSET_MARCO_MINUTOS} minutes'
       `)
 
       for (const d of candidatos.rows) {
