@@ -1,6 +1,6 @@
 // Tabela de faixas de prazo (tiers) das demandas — dicionário compartilhado.
 //
-// Cada demanda (reparo: prazo_atendimento_horas | obra: horas_para_expirar) cai em uma das 8
+// Cada demanda (reparo: prazo_atendimento_horas | obra: horas_para_expirar) cai em uma das 9
 // faixas fixas abaixo. Esta tabela é a ÚNICA fonte de verdade para:
 //   - os 3 marcos de expiração (offsets em MINUTOS antes de expira_em); o job dispara o marco N
 //     quando (expira_em - now) <= offset_N;
@@ -86,14 +86,23 @@ const FAIXAS = {
       { label: '+1 mês',    tipo: 'set', horas: 720 },
     ],
   },
+  1440: {
+    windowHours: 1440,
+    milestones: [20160, 10080, 4320],
+    extend: [
+      { label: '+1 semana', tipo: 'add', horas: 168 },
+      { label: '+1 mês',    tipo: 'add', horas: 720 },
+      { label: '+2 meses',  tipo: 'set', horas: 1440 },
+    ],
+  },
 }
 
 // Chaves em ordem crescente, derivadas de FAIXAS (não uma segunda lista a manter em sincronia).
 const CHAVES_ORDENADAS = Object.keys(FAIXAS).map(Number).sort((a, b) => a - b)
 
 // getFaixa(windowHours) → entrada da faixa para a janela dada.
-// Match exato em {1,2,4,8,12,24,168,720}; fora disso, cai na MAIOR faixa que não excede a janela —
-// 72 → 24, 1440/2160 → 720, e o mesmo para as horas arbitrárias que o estender aceita.
+// Match exato em {1,2,4,8,12,24,168,720,1440}; fora disso, cai na MAIOR faixa que não excede a
+// janela — 72 → 24, 2160 → 1440, e o mesmo para as horas arbitrárias que o estender aceita.
 // Antes o match era exato e todo o resto voltava null, então demanda fora de faixa (inclusive
 // o default de 720h de quem cadastra sem prazo) nunca recebia marco nenhum.
 // Continua null quando não há faixa aplicável: janela < 1 (0 vem de NULL/'' via Number),
@@ -109,8 +118,8 @@ const getFaixa = (windowHours) => {
   return escolhida
 }
 
-// Maior offset de marco (minutos) entre todas as faixas — hoje 10080 (7 dias, marco 1 da faixa
-// 720). É a janela de varredura de verificarMarcosExpiracao: demanda cujo expira_em está mais
+// Maior offset de marco (minutos) entre todas as faixas — hoje 20160 (14 dias, marco 1 da faixa
+// 1440). É a janela de varredura de verificarMarcosExpiracao: demanda cujo expira_em está mais
 // longe que isso não cabe em banda nenhuma, então não precisa ser lida. Derivado de FAIXAS para
 // que uma faixa nova com marco maior alargue a janela sozinha, em vez de ficar sem marco 1.
 const MAX_OFFSET_MARCO_MINUTOS = Math.max(...Object.values(FAIXAS).map((f) => f.milestones[0]))
