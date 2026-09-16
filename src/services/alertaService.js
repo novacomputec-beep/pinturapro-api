@@ -889,8 +889,8 @@ const verificarMarcosExpiracao = async () => {
   try {
     for (const lado of lados) {
       // Candidatos elegíveis com algum marco pendente e expira_em dentro do MAIOR offset possível
-      // (MAX_OFFSET_MARCO_MINUTOS, derivado de FAIXAS: hoje 10080min = 7 dias, marco 1 da faixa
-      // 720) — demandas mais distantes que isso não entram em banda nenhuma. Literal numérico
+      // (MAX_OFFSET_MARCO_MINUTOS, derivado de FAIXAS: hoje 20160min = 14 dias, marco 1 da faixa
+      // 1440) — demandas mais distantes que isso não entram em banda nenhuma. Literal numérico
       // vindo da tabela, nunca do request; o predicado segue um range em expira_em, então
       // obras_marcos_pendentes_idx / reparos_marcos_pendentes_idx continuam cobrindo a leitura.
       // COALESCE(janela, 720): linhas ANTIGAS gravadas com prazo NULL viravam Number(null)=0 no
