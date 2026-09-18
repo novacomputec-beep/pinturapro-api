@@ -46,6 +46,7 @@ const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 // /reparos/dono valida; a rota de aprovação não reavalia linha já gravada.
 const { ESPECIALIDADES_REPARADOR } = require('../utils/especialidades')
 const { enviarEmail } = require('../services/emailService')
+const { sqlTipoConta, tipoDeTipoConta, multiplasContasAtivo } = require('../utils/tipoConta')
 const bcrypt = require('bcrypt')
 
 // Envolve um DELETE de mídia para que, NO MESMO statement, as urls apagadas caiam na fila
@@ -210,6 +211,12 @@ const migracaoPronta = (async () => {
     await client.query(`INSERT INTO configuracoes (chave, valor)
                         SELECT 'limite_demandas_live_sem_historico', '5'
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'limite_demandas_live_sem_historico')`)
+    // Flag global "Múltiplas contas" — o mesmo e-mail + CPF/CNPJ em até 4 contas, uma por
+    // tipo (utils/tipoConta). Default 'false' = OFF: cadastro, login, reset e link respondem
+    // exatamente como antes. Mesma convenção das chaves acima (valor TEXT 'true'/'false').
+    await client.query(`INSERT INTO configuracoes (chave, valor)
+                        SELECT 'multiplas_contas', 'false'
+                        WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'multiplas_contas')`)
     // Resposta da equipe às dúvidas (mensagens): quem respondeu e quando. As DUAS colunas já
     // eram escritas por mensagensController.responder e lidas por porObra, mas nunca existiram
     // na tabela — as duas rotas estouravam 42703 e devolviam 500. Tipos batendo com o que o
@@ -538,7 +545,9 @@ const migracaoPronta = (async () => {
     // ---- Redundantes cujo índice supersedente NÃO é criado por este bloco ----
     // (são índices de CONSTRAINT, nascidos com a tabela, ou índices legados já existentes —
     // então sempre existem antes destes drops, e a ordem "drop depois do create" é atendida.)
-    // usuarios_email_key (UNIQUE em email) supersede — e ainda enforça a constraint.
+    // usuarios_email_key (UNIQUE em email) supersedia. Com as múltiplas contas ela caiu (ver
+    // o bloco de usuarios_email_tipo_unico_idx, mais abaixo), e o índice simples em email
+    // renasce lá como usuarios_email_idx — este nome legado segue sendo só removido.
     await client.query(`DROP INDEX IF EXISTS idx_usuarios_email`)
     // candidaturas_obra_id_usuario_id_key (UNIQUE em (obra_id, usuario_id)) supersede as três:
     // duas são o prefixo (obra_id), a outra é a mesma dupla de colunas. candidaturas_obra_id_idx
@@ -778,20 +787,21 @@ const migracaoPronta = (async () => {
     `)
     // Fail-loud: alargar a coluna NÃO altera valores já gravados, logo nenhum duplicado NOVO
     // pode surgir daqui. Ainda assim asseguramos alto — se por qualquer motivo existirem dois
-    // cpf_cnpj que normalizam igual, aborta a migração (RAISE → catch → ROLLBACK → server não
-    // sobe) com mensagem clara, em vez de deixar o CREATE UNIQUE INDEX abaixo falhar obscuro.
+    // cpf_cnpj que normalizam igual NO MESMO TIPO, aborta a migração (RAISE → catch → ROLLBACK
+    // → server não sobe) com mensagem clara, em vez de deixar o CREATE UNIQUE INDEX abaixo
+    // falhar obscuro. Por tipo (múltiplas contas): o mesmo CPF em tipos diferentes é legítimo.
     await client.query(`
       DO $$
       DECLARE dups int;
       BEGIN
         SELECT count(*) INTO dups FROM (
-          SELECT regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') AS n
+          SELECT regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') AS n, ${sqlTipoConta()} AS t
           FROM usuarios
           WHERE cpf_cnpj IS NOT NULL AND cpf_cnpj <> ''
-          GROUP BY 1 HAVING count(*) > 1
+          GROUP BY 1, 2 HAVING count(*) > 1
         ) d;
         IF dups > 0 THEN
-          RAISE EXCEPTION 'A1: % cpf_cnpj normalizados duplicados — migracao abortada', dups;
+          RAISE EXCEPTION 'A1: % cpf_cnpj normalizados duplicados no mesmo tipo — migracao abortada', dups;
         END IF;
       END $$;
     `)
@@ -804,10 +814,61 @@ const migracaoPronta = (async () => {
     //      entre si. Produção tem 0 duplicados hoje (verificado); se um dia houver, o CREATE
     //      falha alto e derruba a migração (transação → ROLLBACK → server não sobe), em vez
     //      de corromper dados. Nome contém "cpf" p/ o handler 23505 do cadastro casar.
+    //
+    // MÚLTIPLAS CONTAS: a unicidade deixa de ser "um por base" e passa a ser "um por TIPO"
+    // (sqlTipoConta — expressão sobre role/tipo_dono/tipo_prestador; pintor e construtor são o
+    // mesmo tipo). Roda DEPOIS dos backfills de tipo_prestador acima, para o tipo das linhas
+    // legadas já estar resolvido quando o índice é construído. Tudo na transação única desta
+    // migração: a queda de usuarios_email_key e a subida dos índices novos entram juntas ou
+    // nenhuma entra — não existe instante sem unicidade. Não pode falhar em dados de hoje: o
+    // que era único por (email) e por (cpf) é, por definição, único por (email, tipo) e
+    // (cpf, tipo). Com a chave multiplas_contas DESLIGADA o banco já aceitaria o mesmo e-mail
+    // em outro tipo; quem segura a regra antiga é o cadastro (pré-checagem em QUALQUER tipo,
+    // serializada por advisory lock no e-mail e no CPF — ver authController.cadastrar).
+    await client.query(`DROP INDEX IF EXISTS usuarios_cpf_cnpj_normalizado_unico_idx`)
     await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS usuarios_cpf_cnpj_normalizado_unico_idx
-      ON usuarios ((regexp_replace(cpf_cnpj, '[^0-9]', '', 'g')))
+      CREATE UNIQUE INDEX IF NOT EXISTS usuarios_cpf_cnpj_tipo_unico_idx
+      ON usuarios ((regexp_replace(cpf_cnpj, '[^0-9]', '', 'g')), ${sqlTipoConta()})
       WHERE cpf_cnpj IS NOT NULL AND cpf_cnpj <> ''
+    `)
+    // usuarios_email_key nasceu com a tabela como CONSTRAINT (UNIQUE em email); o DROP INDEX
+    // só cobre o caso de ela ter sido criada como índice solto — depois do DROP CONSTRAINT é
+    // sempre no-op. Nomes novos contêm "email" p/ o handler 23505 do cadastro casar.
+    await client.query(`ALTER TABLE usuarios DROP CONSTRAINT IF EXISTS usuarios_email_key`)
+    await client.query(`DROP INDEX IF EXISTS usuarios_email_key`)
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS usuarios_email_tipo_unico_idx
+      ON usuarios (email, ${sqlTipoConta()})
+    `)
+    // Índice simples em email para os lookups `WHERE email = $1` (login, reset, link). Nome
+    // diferente de idx_usuarios_email de propósito: aquele é DROPado mais acima a cada boot.
+    await client.query(`CREATE INDEX IF NOT EXISTS usuarios_email_idx ON usuarios (email)`)
+    // Conta ADMIN nunca divide e-mail com ninguém (nem outro admin, nem conta comum): o login
+    // do admin tem 2FA e sessão de 30 dias, e uma senha compartilhada com contas de app
+    // rebaixaria isso. Índice único não expressa "se QUALQUER das duas linhas é admin", então
+    // é trigger. O advisory lock usa a MESMA chave (1, hashtext(email)) do cadastro: dois
+    // writes concorrentes no mesmo e-mail se serializam, e o EXISTS enxerga o que o outro
+    // commitou. Levanta 23505 com nome contendo "email" → o cadastro responde o 409 de sempre.
+    await client.query(`
+      CREATE OR REPLACE FUNCTION usuarios_email_admin_exclusivo() RETURNS trigger AS $$
+      BEGIN
+        PERFORM pg_advisory_xact_lock(1, hashtext(NEW.email));
+        IF EXISTS (
+          SELECT 1 FROM usuarios o
+          WHERE o.email = NEW.email AND o.id <> NEW.id
+            AND (NEW.role = 'admin' OR o.role = 'admin')
+        ) THEN
+          RAISE EXCEPTION 'e-mail de conta admin nao pode ser compartilhado'
+            USING ERRCODE = 'unique_violation', CONSTRAINT = 'usuarios_email_admin_exclusivo';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql
+    `)
+    await client.query(`DROP TRIGGER IF EXISTS usuarios_email_admin_exclusivo_trg ON usuarios`)
+    await client.query(`
+      CREATE TRIGGER usuarios_email_admin_exclusivo_trg
+      BEFORE INSERT OR UPDATE OF email, role ON usuarios
+      FOR EACH ROW EXECUTE FUNCTION usuarios_email_admin_exclusivo()
     `)
     // Lista de bloqueio global por dono (separada do array per-reparo prestadores_bloqueados).
     await client.query(`
@@ -5129,9 +5190,52 @@ router.post('/auth/verificar-disponibilidade', async (req, res) => {
   }
 
   const ts = new Date().toISOString()
-  const { email, cpf_cnpj } = req.body
+  const { email, cpf_cnpj, tipo_conta } = req.body
   console.log(`[VERIF][${ts}] ▶ inicio | email=${email} cpf_cnpj=${cpf_cnpj}`)
   try {
+    // Múltiplas contas: SÓ quando o app manda tipo_conta (um dos 4 tipos) E a chave está
+    // ligada. Sem tipo_conta (app antigo) ou com a chave desligada, cai no caminho de sempre,
+    // logo abaixo, intocado. Aqui valem as MESMAS regras do cadastro (authController):
+    // conta do mesmo tipo recusa; conta em OUTRO tipo não recusa, e a resposta avisa com
+    // email_em_outro_tipo / cpf_em_outro_tipo — o app então pede a senha da conta existente.
+    // "Mesma pessoa" (e-mail E CPF casando) só é conferível quando os dois vêm juntos; vindo
+    // um só (formulário em etapas), a palavra final fica com o cadastro.
+    const tipoNovo = tipoDeTipoConta(tipo_conta)
+    if (tipoNovo && await multiplasContasAtivo()) {
+      const emailNormalizado = email ? email.toLowerCase().trim() : null
+      const cpfLimpo = cpf_cnpj ? cpf_cnpj.replace(/\D/g, '') : null
+      const recusarEmail = (codigo = 'email_duplicado') => res.status(409).json({
+        erro: codigo === 'tipo_duplicado' ? 'Você já tem uma conta deste tipo com este e-mail.' : 'Este e-mail já está cadastrado.',
+        codigo,
+      })
+      const recusarCpf = () => res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.', codigo: 'cpf_duplicado' })
+      const porEmail = emailNormalizado
+        ? (await pool.query(
+            `SELECT role, ativo, ${sqlTipoConta()} AS tipo,
+                    regexp_replace(COALESCE(cpf_cnpj, ''), '[^0-9]', '', 'g') AS cpf_norm
+               FROM usuarios WHERE email = $1`, [emailNormalizado])).rows
+        : []
+      const porCpf = cpf_cnpj
+        ? (await pool.query(
+            `SELECT email, ${sqlTipoConta()} AS tipo FROM usuarios
+              WHERE regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') = $1`, [cpfLimpo])).rows
+        : []
+      if (porEmail.length > 0) {
+        if (porEmail.some(u => u.role === 'admin' || !u.ativo)) return recusarEmail()
+        if (porEmail.some(u => u.tipo === tipoNovo)) return recusarEmail('tipo_duplicado')
+        if (cpf_cnpj && !porEmail.every(u => u.cpf_norm === cpfLimpo)) return recusarEmail()
+      }
+      if (porCpf.length > 0) {
+        if (porCpf.some(u => u.tipo === tipoNovo)) return recusarCpf()
+        if (emailNormalizado && porCpf.some(u => u.email !== emailNormalizado)) return recusarCpf()
+      }
+      console.log(`[VERIF][${ts}] ✓ disponivel (multiplas contas) | tipo=${tipoNovo} email_em_outro_tipo=${porEmail.length > 0} cpf_em_outro_tipo=${porCpf.length > 0}`)
+      return res.json({
+        disponivel: true,
+        email_em_outro_tipo: porEmail.length > 0,
+        cpf_em_outro_tipo: porCpf.length > 0,
+      })
+    }
     if (email) {
       const emailNormalizado = email.toLowerCase().trim()
       console.log(`[VERIF][${ts}] ▶ checando email no banco | email=${emailNormalizado}`)
@@ -5273,11 +5377,15 @@ router.post('/admin/buscar-usuario', autenticar, exigirAdmin, async (req, res) =
     const { email } = req.body
     if (!email) return res.status(400).json({ erro: 'E-mail obrigatório' })
     const result = await pool.query(
-      `SELECT id, nome, email, role FROM usuarios WHERE email = $1`,
+      `SELECT id, nome, email, role, ativo, ${sqlTipoConta()} AS tipo FROM usuarios
+        WHERE email = $1 ORDER BY criado_em ASC, id ASC`,
       [email.toLowerCase().trim()]
     )
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
-    res.json(result.rows[0])
+    // Múltiplas contas: o e-mail pode ter até 4 linhas (uma por tipo). Os campos de topo
+    // seguem sendo os da conta mais ANTIGA (o painel de hoje lê id/nome/email/role daqui e
+    // continua funcionando); `contas` traz TODAS as linhas, com o tipo de cada uma.
+    res.json({ ...result.rows[0], contas: result.rows })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar usuário' })
   }
@@ -5752,6 +5860,17 @@ const SQL_BACKFILL_LANCAMENTO = `
      AND a.valor_mensal > 0
      AND LOWER(u.email) <> ALL($1::text[])
   RETURNING a.usuario_id`
+
+// Config pública do app — lida PRÉ-LOGIN (cadastro/login), então NÃO exige token. Só flags
+// não-sensíveis. multiplas_contas: o app só oferece "criar outro perfil com este e-mail" e
+// manda tipo_conta/tipo quando isto vem true.
+router.get('/config', async (req, res) => {
+  try {
+    res.json({ multiplas_contas: await multiplasContasAtivo() })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar configurações' })
+  }
+})
 
 // Status público — a tela de cadastro roda PRÉ-LOGIN, então NÃO exige token.
 // Só expõe se a promoção está ativa e até quando (não-sensível).

@@ -14,10 +14,19 @@ const pool = new Pool({
 
 async function reset() {
   const hash = await bcrypt.hash('Admin123', 10)
+  // Só a linha ADMIN. Com as múltiplas contas um e-mail pode ter várias linhas, e o UPDATE
+  // antigo (WHERE email, SET role='admin') promoveria TODAS a admin e trocaria a senha de
+  // todas. Agora o script só REDEFINE a senha/reativa a conta que já é admin; não promove mais
+  // ninguém — 0 linhas = não existe admin com este e-mail, e nada é alterado.
   const result = await pool.query(
-    `UPDATE usuarios SET senha_hash = $1, role = 'admin', ativo = true WHERE email = $2 RETURNING id, nome, email, role`,
+    `UPDATE usuarios SET senha_hash = $1, ativo = true, token_version = token_version + 1
+      WHERE email = $2 AND role = 'admin' RETURNING id, nome, email, role`,
     [hash, 'admin@pinturapro.com.br']
   )
+  if (result.rows.length === 0) {
+    console.error('Nenhuma conta ADMIN com este e-mail — nada foi alterado.')
+    process.exit(1)
+  }
   console.log('Atualizado:', result.rows)
   process.exit(0)
 }

@@ -5,6 +5,7 @@ const { invalidarCacheAssinatura } = require('../middlewares/auth')
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { MARCA } = require('../utils/marca')
 const { validarEspecialidades } = require('../utils/especialidades')
+const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, multiplasContasAtivo } = require('../utils/tipoConta')
 const nodemailer = require('nodemailer')
 const crypto = require('crypto')
 
@@ -65,7 +66,9 @@ const cadastrar = async (req, res) => {
     // bloqueia o event loop), então não seguramos uma conexão/lock do Postgres
     // durante o custo de CPU do hash — a transação abaixo fica curta.
     console.log(`[CADASTRO][${ts}] ▶ gerando hash de senha`)
-    const senha_hash = await bcrypt.hash(senha, 10)
+    // `let`: com múltiplas contas, o novo tipo de um e-mail existente REUSA o hash da conta
+    // que já existe (uma senha por e-mail) — a troca acontece dentro da transação, abaixo.
+    let senha_hash = await bcrypt.hash(senha, 10)
     console.log(`[CADASTRO][${ts}] ✓ senha hash gerada`)
 
     let role = 'assinante'
@@ -121,32 +124,109 @@ const cadastrar = async (req, res) => {
     const dataFimLancamento = cfgLancamento.rows[0]?.valor || null
     const lancamentoGratis = !!dataFimLancamento && new Date(dataFimLancamento) > new Date()
 
+    // Serializa cadastros do MESMO e-mail e do MESMO CPF/CNPJ (advisory lock de transação,
+    // solto no COMMIT/ROLLBACK). Os índices únicos agora são por (email, tipo) e (cpf, tipo),
+    // então sozinhos NÃO barram mais o mesmo e-mail/CPF em outro tipo: com a chave
+    // multiplas_contas desligada, é este lock + as pré-checagens abaixo que mantêm a regra
+    // "um e-mail, um CPF, uma conta" sem corrida; ligada, é ele que mantém corretos o teto de
+    // contas e a checagem de "mesma pessoa". Ordem fixa (e-mail, depois CPF) — sem ciclo, sem
+    // deadlock. Classe 1 = e-mail (a MESMA chave do trigger usuarios_email_admin_exclusivo),
+    // classe 2 = CPF normalizado.
+    const cpfLimpo = cpf_cnpj ? cpf_cnpj.replace(/\D/g, '') : null
+    await client.query('SELECT pg_advisory_xact_lock(1, hashtext($1))', [emailNormalizado])
+    if (cpf_cnpj) await client.query('SELECT pg_advisory_xact_lock(2, hashtext($1))', [cpfLimpo])
+
+    const multiplasContas = await multiplasContasAtivo(client)
+
     // Pré-checagens amigáveis DENTRO da transação (mensagem limpa). Em corrida
-    // real, o índice único (email + cpf_cnpj normalizado) é a garantia final e
+    // real, o índice único (email + cpf_cnpj normalizado, por tipo) é a garantia final e
     // cai no handler de 23505 abaixo.
     console.log(`[CADASTRO][${ts}] ▶ verificando email no banco | email=${emailNormalizado}`)
-    const existente = await client.query('SELECT id FROM usuarios WHERE email = $1', [emailNormalizado])
-    if (existente.rows.length > 0) {
+    const existente = await client.query(
+      `SELECT id, senha_hash, role, ativo, ${sqlTipoConta()} AS tipo,
+              regexp_replace(COALESCE(cpf_cnpj, ''), '[^0-9]', '', 'g') AS cpf_norm
+         FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC`,
+      [emailNormalizado]
+    )
+    // cpfLimpo NÃO entra no log: é CPF/CNPJ em claro. O marcador de etapa basta.
+    if (cpf_cnpj) console.log(`[CADASTRO][${ts}] ▶ verificando cpf_cnpj no banco`)
+    const cpfExistente = cpf_cnpj
+      ? await client.query(
+          `SELECT id, email FROM usuarios WHERE regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') = $1`,
+          [cpfLimpo]
+        )
+      : { rows: [] }
+
+    const recusarEmail = async () => {
       await client.query('ROLLBACK')
       console.log(`[CADASTRO][${ts}] ✗ 409 email duplicado | email=${emailNormalizado}`)
       return res.status(409).json({ erro: 'Este e-mail já está cadastrado.', codigo: 'email_duplicado' })
     }
-    console.log(`[CADASTRO][${ts}] ✓ email disponivel`)
+    const recusarCpf = async () => {
+      await client.query('ROLLBACK')
+      console.log(`[CADASTRO][${ts}] ✗ 409 cpf_cnpj duplicado`)
+      return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.', codigo: 'cpf_duplicado' })
+    }
 
-    if (cpf_cnpj) {
-      const cpfLimpo = cpf_cnpj.replace(/\D/g, '')
-      // cpfLimpo NÃO entra no log: é CPF/CNPJ em claro. O marcador de etapa basta.
-      console.log(`[CADASTRO][${ts}] ▶ verificando cpf_cnpj no banco`)
-      const cpfExistente = await client.query(
-        `SELECT id FROM usuarios WHERE regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') = $1`,
-        [cpfLimpo]
-      )
-      if (cpfExistente.rows.length > 0) {
-        await client.query('ROLLBACK')
-        console.log(`[CADASTRO][${ts}] ✗ 409 cpf_cnpj duplicado`)
-        return res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.', codigo: 'cpf_duplicado' })
+    if (!multiplasContas) {
+      // Chave DESLIGADA: e-mail ou CPF existente em QUALQUER tipo recusa, como sempre foi.
+      if (existente.rows.length > 0) return recusarEmail()
+      console.log(`[CADASTRO][${ts}] ✓ email disponivel`)
+      if (cpfExistente.rows.length > 0) return recusarCpf()
+      if (cpf_cnpj) console.log(`[CADASTRO][${ts}] ✓ cpf_cnpj disponivel`)
+    } else if (existente.rows.length > 0 || cpfExistente.rows.length > 0) {
+      // Chave LIGADA e já existe conta com este e-mail e/ou este CPF: só entra como NOVO TIPO
+      // da MESMA pessoa — e-mail E CPF têm que casar, os dois, com as contas que já existem.
+      // Mesmo e-mail com outro CPF (ou sem CPF de um dos lados) e mesmo CPF com outro e-mail
+      // seguem recusados com os 409 de sempre.
+      const tipoNovo = tipoDeTipoConta(tipo_conta)
+      if (existente.rows.length > 0) {
+        const mesmaPessoa = !!cpfLimpo && existente.rows.every(u => u.cpf_norm === cpfLimpo)
+        // Conta admin nunca divide e-mail (o trigger também barra); conta desativada não
+        // ganha conta nova por outro tipo; cadastro sem tipo_conta ('assinante') não é um dos
+        // 4 tipos. Todos: o mesmo 409 de e-mail duplicado de antes.
+        const bloqueada = existente.rows.some(u => u.role === 'admin' || !u.ativo)
+        if (!mesmaPessoa || bloqueada || !tipoNovo) return recusarEmail()
       }
-      console.log(`[CADASTRO][${ts}] ✓ cpf_cnpj disponivel`)
+      if (cpfExistente.rows.some(u => u.email !== emailNormalizado)) return recusarCpf()
+      if (existente.rows.length === 0) return recusarCpf() // CPF existe, e-mail não: outra pessoa
+
+      if (existente.rows.some(u => u.tipo === tipoNovo)) {
+        await client.query('ROLLBACK')
+        console.log(`[CADASTRO][${ts}] ✗ 409 tipo duplicado | tipo=${tipoNovo}`)
+        return res.status(409).json({ erro: 'Você já tem uma conta deste tipo com este e-mail.', codigo: 'tipo_duplicado' })
+      }
+      if (existente.rows.length >= MAX_CONTAS_POR_EMAIL) {
+        await client.query('ROLLBACK')
+        console.log(`[CADASTRO][${ts}] ✗ 409 limite de contas | contas=${existente.rows.length}`)
+        return res.status(409).json({ erro: 'Este e-mail já atingiu o limite de contas.', codigo: 'limite_contas' })
+      }
+
+      // UMA senha por e-mail: a senha enviada tem que ser a da conta que já existe, e a conta
+      // nova REUSA aquele hash (o hash gerado acima é descartado). Isto é uma conferência de
+      // senha exposta num endpoint público, então conta no MESMO contador por identidade do
+      // login — sem isso o cadastro viraria um login sem teto de tentativas.
+      const tentativa = await registrarTentativa('login', emailNormalizado)
+      if (tentativa.excedeu) {
+        await client.query('ROLLBACK')
+        return res.status(429).json({
+          erro: `Muitas tentativas. Tente novamente em ${Math.ceil(tentativa.segundosRestantes / 60)} minuto(s), ou redefina sua senha.`,
+          codigo: 'MUITAS_TENTATIVAS',
+          retry_apos_segundos: tentativa.segundosRestantes,
+        })
+      }
+      const senhaConfere = await bcrypt.compare(senha, existente.rows[0].senha_hash)
+      if (!senhaConfere) {
+        await client.query('ROLLBACK')
+        console.log(`[CADASTRO][${ts}] ✗ 401 senha nao confere com a conta existente`)
+        return res.status(401).json({
+          erro: 'Este e-mail já tem uma conta. Informe a mesma senha dela para criar este novo perfil.',
+          codigo: 'senha_conta_existente',
+        })
+      }
+      await limparTentativas('login', emailNormalizado)
+      senha_hash = existente.rows[0].senha_hash
+      console.log(`[CADASTRO][${ts}] ✓ novo tipo para pessoa existente | tipo=${tipoNovo} contas_existentes=${existente.rows.length}`)
     }
 
     console.log(`[CADASTRO][${ts}] ▶ INSERT usuarios | role=${role} tipo_dono=${tipo_dono} tipo_prestador=${tipo_prestador} verificacao_status=${verificacaoStatus}`)
@@ -282,7 +362,9 @@ const cadastrar = async (req, res) => {
 
 const login = async (req, res) => {
   try {
-    const { email, senha } = req.body
+    // `tipo` é opcional e só importa quando o e-mail tem 2+ contas ativas (múltiplas contas):
+    // aceita o tipo canônico devolvido em `contas[].tipo` ou o tipo_conta do cadastro.
+    const { email, senha, tipo } = req.body
 
     if (!email || !senha) {
       return res.status(400).json({ erro: 'E-mail e senha são obrigatórios' })
@@ -303,7 +385,8 @@ const login = async (req, res) => {
     }
 
     const result = await pool.query(
-      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version FROM usuarios WHERE email = $1',
+      // Mais ANTIGA primeiro: com 2+ contas e nenhum `tipo` no corpo (app antigo), é ela que entra.
+      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC',
       [emailNormalizado]
     )
 
@@ -319,16 +402,29 @@ const login = async (req, res) => {
       return res.status(401).json({ erro: 'E-mail ou senha incorretos' })
     }
 
-    const usuario = result.rows[0]
-
-    if (!usuario.ativo) {
+    // Só conta ATIVA conta. Nenhuma ativa = o 403 de sempre (com uma linha só, é exatamente o
+    // `!usuario.ativo` de antes). Com 1 ativa nada muda. Com 2+ (múltiplas contas): entra a do
+    // `tipo` pedido, ou a mais antiga quando o corpo não traz tipo.
+    const ativas = result.rows.filter(u => u.ativo)
+    if (ativas.length === 0) {
       return res.status(403).json({ erro: 'Conta desativada' })
     }
+    const tipoPedido = ativas.length > 1 ? tipoDeTipoConta(tipo) : null
+    const escolhida = tipoPedido ? ativas.find(u => tipoDaLinha(u) === tipoPedido) : ativas[0]
 
-    const senhaValida = await bcrypt.compare(senha, usuario.senha_hash)
+    // A senha é UMA por e-mail, então o hash é o mesmo em todas as linhas; compara contra o da
+    // conta escolhida (ou o da mais antiga, quando o tipo pedido não existe — a recusa por
+    // tipo só sai DEPOIS de a senha conferir, para não descrever as contas a quem não a tem).
+    const senhaValida = await bcrypt.compare(senha, (escolhida || ativas[0]).senha_hash)
     if (!senhaValida) {
       return res.status(401).json({ erro: 'E-mail ou senha incorretos' })
     }
+
+    const contas = ativas.map(u => ({ id: u.id, tipo: tipoDaLinha(u), nome: u.nome }))
+    if (!escolhida) {
+      return res.status(404).json({ erro: 'Não há conta deste tipo para este e-mail.', codigo: 'conta_tipo_inexistente', contas })
+    }
+    const usuario = escolhida
 
     // Senha conferiu: apaga a linha (some, não zera — mantém a tabela pequena). Limpa ANTES
     // do 2FA de propósito: este contador defende a SENHA, e ela acabou de ser provada. Um
@@ -375,7 +471,10 @@ const login = async (req, res) => {
         boas_vindas_exibida: usuario.boas_vindas_exibida ?? false
       },
       assinatura: assinaturaResult.rows[0] || null,
-      token
+      token,
+      // Campo EXTRA, só quando o e-mail tem 2+ contas ativas — com uma conta a resposta é
+      // byte a byte a de antes. O app novo usa para oferecer a troca (novo login com `tipo`).
+      ...(contas.length > 1 ? { contas } : {})
     })
 
   } catch (err) {
@@ -488,8 +587,15 @@ const alterarSenha = async (req, res) => {
     }
     const nova_hash = await bcrypt.hash(nova_senha, 10)
     // Incrementa token_version: revoga TODAS as sessões (D51) — inclusive a que trocou a senha.
-    await pool.query('UPDATE usuarios SET senha_hash = $1, token_version = token_version + 1 WHERE id = $2', [nova_hash, req.usuario.id])
-    invalidarCacheAssinatura(req.usuario.id) // revogação imediata nesta réplica; até 30s nas demais
+    // Múltiplas contas: a senha é UMA por e-mail, então vale para TODAS as linhas do e-mail
+    // desta conta (e revoga as sessões de todas). Com uma conta só, é o UPDATE por id de antes.
+    const alteradas = await pool.query(
+      `UPDATE usuarios SET senha_hash = $1, token_version = token_version + 1
+        WHERE email = (SELECT email FROM usuarios WHERE id = $2) RETURNING id`,
+      [nova_hash, req.usuario.id]
+    )
+    // revogação imediata nesta réplica; até 30s nas demais
+    alteradas.rows.forEach(u => invalidarCacheAssinatura(u.id))
     res.json({ mensagem: 'Senha alterada com sucesso' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao alterar senha' })
@@ -515,7 +621,9 @@ const esqueciSenha = async (req, res) => {
       return
     }
 
-    const result = await pool.query('SELECT id, nome, email FROM usuarios WHERE email = $1', [emailNormalizado])
+    // Múltiplas contas: UM código por e-mail, gravado em TODAS as linhas dele. A saudação usa
+    // o nome da conta mais antiga (ORDER BY) — com uma conta só, é a linha de sempre.
+    const result = await pool.query('SELECT id, nome, email FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC', [emailNormalizado])
     if (result.rows.length === 0) return
 
     const usuario = result.rows[0]
@@ -529,8 +637,8 @@ const esqueciSenha = async (req, res) => {
     const expira = new Date(Date.now() + 3600000)
 
     await pool.query(
-      `UPDATE usuarios SET reset_token = $1, reset_token_expira = $2 WHERE id = $3`,
-      [codigoHash, expira, usuario.id]
+      `UPDATE usuarios SET reset_token = $1, reset_token_expira = $2 WHERE email = $3`,
+      [codigoHash, expira, emailNormalizado]
     )
 
     await transporter.sendMail({
@@ -587,9 +695,12 @@ const redefinirSenha = async (req, res) => {
     }
 
     const result = await pool.query(
-      'SELECT id, reset_token, reset_token_expira FROM usuarios WHERE email = $1', [emailNorm]
+      'SELECT id, reset_token, reset_token_expira FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC', [emailNorm]
     )
-    const usuario = result.rows[0]
+    // Múltiplas contas: o código é o mesmo em todas as linhas do e-mail (esqueciSenha grava
+    // em todas). Uma conta criada DEPOIS do pedido nasce sem token, por isso a primeira linha
+    // COM token — com uma conta só, é a rows[0] de antes.
+    const usuario = result.rows.find(u => u.reset_token) || result.rows[0]
     const naoExpirou = usuario?.reset_token_expira && new Date(usuario.reset_token_expira) > new Date()
     const hashAlvo = (usuario?.reset_token && naoExpirou) ? usuario.reset_token : HASH_FICTICIO
     const ok = await bcrypt.compare(codigoNorm, hashAlvo)
@@ -597,12 +708,13 @@ const redefinirSenha = async (req, res) => {
 
     const novaHash = await bcrypt.hash(nova_senha, 10)
     // Limpa o token (uso único), incrementa token_version (revoga sessões antigas — D51).
-    await pool.query(
+    // Em TODAS as linhas do e-mail: uma senha por e-mail (múltiplas contas).
+    const redefinidas = await pool.query(
       `UPDATE usuarios SET senha_hash = $1, reset_token = NULL, reset_token_expira = NULL,
-              token_version = token_version + 1 WHERE id = $2`,
-      [novaHash, usuario.id]
+              token_version = token_version + 1 WHERE email = $2 RETURNING id`,
+      [novaHash, emailNorm]
     )
-    invalidarCacheAssinatura(usuario.id)
+    redefinidas.rows.forEach(u => invalidarCacheAssinatura(u.id))
     await limparTentativas('reset_confirmar', emailNorm)
     res.json({ mensagem: 'Senha redefinida com sucesso. Faça login com a nova senha.' })
   } catch (err) {
@@ -627,12 +739,16 @@ const resetarSenhaUsuario = async (req, res) => {
     const ALFABETO = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789abcdefghijkmnpqrstuvwxyz'
     const novaSenha = Array.from(crypto.randomBytes(12)).map(b => ALFABETO[b % ALFABETO.length]).join('')
     const hash = await bcrypt.hash(novaSenha, 10)
-    await pool.query(
+    // Em TODAS as linhas do e-mail do alvo: uma senha por e-mail (múltiplas contas). Nunca
+    // alcança um admin — conta admin não divide e-mail (trigger usuarios_email_admin_exclusivo)
+    // e o alvo admin já foi recusado acima.
+    const redefinidas = await pool.query(
       `UPDATE usuarios SET senha_hash = $1, reset_token = NULL, reset_token_expira = NULL,
-              token_version = token_version + 1 WHERE id = $2`,
+              token_version = token_version + 1
+        WHERE email = (SELECT email FROM usuarios WHERE id = $2) RETURNING id`,
       [hash, id]
     )
-    invalidarCacheAssinatura(id)
+    redefinidas.rows.forEach(u => invalidarCacheAssinatura(u.id))
     res.json({
       mensagem: 'Senha redefinida. Entregue esta senha ao usuário — ela aparece só uma vez.',
       usuario: alvo.rows[0].nome,

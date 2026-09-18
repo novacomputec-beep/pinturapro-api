@@ -198,7 +198,9 @@ async function run() {
   section(3, 'Login — confirma JWT válido para ambas as contas')
   {
     // Login dono
-    const { status: s1, data: d1 } = await api('POST', '/auth/login', { email: DONO_EMAIL, senha: SENHA })
+    // `tipo` explícito: com as múltiplas contas um e-mail pode ter 2+ contas, e sem tipo o
+    // login entra na mais ANTIGA. Com uma conta só (o caso deste teste) o campo é ignorado.
+    const { status: s1, data: d1 } = await api('POST', '/auth/login', { email: DONO_EMAIL, senha: SENHA, tipo: 'dono_obra' })
     logReq('POST', '/auth/login (dono)', s1, d1)
     assert(s1 === 200,   '3a-status-200',  s1, d1)
     assert(d1.token,     '3a-jwt-dono',    s1, d1)
@@ -206,7 +208,7 @@ async function run() {
     ok('3a', `dono login OK — JWT ${d1.token.slice(0, 20)}...`)
 
     // Login pintor
-    const { status: s2, data: d2 } = await api('POST', '/auth/login', { email: PINTOR_EMAIL, senha: SENHA })
+    const { status: s2, data: d2 } = await api('POST', '/auth/login', { email: PINTOR_EMAIL, senha: SENHA, tipo: 'pintor' })
     logReq('POST', '/auth/login (pintor)', s2, d2)
     assert(s2 === 200,   '3b-status-200',  s2, d2)
     assert(d2.token,     '3b-jwt-pintor',  s2, d2)
