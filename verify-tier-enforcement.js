@@ -42,8 +42,12 @@ async function api(method, path, body, token) {
   return { status: r.status, data }
 }
 
+// `tipo` explícito para reparador/pintor: com as múltiplas contas o MESMO e-mail pode ter as
+// duas contas, e sem tipo o login entra na mais antiga — o teste de tier pegaria a conta
+// errada. Admin nunca divide e-mail, então vai sem tipo.
 async function login(email, senha, rotulo) {
-  const { status, data } = await api('POST', '/auth/login', { email, senha })
+  const tipo = rotulo === 'admin' ? undefined : rotulo
+  const { status, data } = await api('POST', '/auth/login', { email, senha, tipo })
   if (status !== 200 || !data.token) {
     throw new Error(`login ${rotulo} falhou (HTTP ${status}): ${JSON.stringify(data)}`)
   }

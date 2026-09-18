@@ -66,13 +66,29 @@ const solicitarLink = async (req, res) => {
       return
     }
     const r = await pool.query(
-      `SELECT id, nome, email, role, tipo_prestador FROM usuarios WHERE email = $1`, [emailNorm]
+      `SELECT id, nome, email, role, tipo_prestador FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC`, [emailNorm]
     )
-    if (r.rows.length === 0) return
-    const u = r.rows[0]
     // Só profissional com tier precificável recebe link — dono/admin não têm o que assinar.
-    if (u.role !== 'prestador' || !precosReais(u.role, u.tipo_prestador)) return
+    // Múltiplas contas: o e-mail pode ter conta de dono E de profissional (e até as duas de
+    // profissional, pintor + reparador). Filtra para as linhas de prestador e manda UM link
+    // POR conta — cada link é amarrado ao usuario_id, e a assinatura é por conta. Com uma
+    // conta só, é um link e o mesmo e-mail de antes.
+    const alvos = r.rows.filter(u => u.role === 'prestador' && precosReais(u.role, u.tipo_prestador))
+    for (const u of alvos) {
+      await enviarLinkParaConta(u, emailNorm, alvos.length > 1)
+    }
+  } catch (err) {
+    console.error('[LinkAssinatura] Erro ao solicitar link:', err.message)
+  }
+}
 
+// Emite (ou rotaciona) o link de UMA conta e manda o e-mail. `identificarPerfil` só é true
+// quando o mesmo pedido gera 2 links (pintor + reparador no mesmo e-mail): aí o assunto e o
+// corpo dizem de qual perfil é cada um; com um link só, o e-mail sai idêntico ao de sempre.
+// try/catch PRÓPRIO: a falha no link de uma conta não impede o da outra.
+const enviarLinkParaConta = async (u, emailNorm, identificarPerfil) => {
+  try {
+    const perfil = u.tipo_prestador === 'reparador' ? 'Reparador' : 'Pintor/Construtor'
     const segredo = crypto.randomBytes(24).toString('hex')
     const hash = await bcrypt.hash(segredo, 10)
     // UM link vivo por usuário: se já existe linha VIVA e NÃO PAGA, reaproveita a MESMA linha
@@ -105,7 +121,7 @@ const solicitarLink = async (req, res) => {
     await transporter.sendMail({
       from: `${MARCA} <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
       to: emailNorm,
-      subject: `${MARCA} — Seu link para assinar`,
+      subject: identificarPerfil ? `${MARCA} — Seu link para assinar (${perfil})` : `${MARCA} — Seu link para assinar`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
@@ -113,6 +129,7 @@ const solicitarLink = async (req, res) => {
           </div>
           <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
             <h2>Olá, ${primeiroNome(u.nome)}!</h2>
+            ${identificarPerfil ? `<p>Este link é da sua conta de <strong>${perfil}</strong>.</p>` : ''}
             <p>Use o botão abaixo para escolher seu plano e pagar com segurança:</p>
             <p style="text-align: center; margin: 24px 0;">
               <a href="${link}" style="background: #0a0a0a; color: #E8833A; font-size: 18px; font-weight: bold; padding: 14px 28px; border-radius: 8px; text-decoration: none;">Assinar agora</a>

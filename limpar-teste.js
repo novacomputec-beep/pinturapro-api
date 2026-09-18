@@ -62,10 +62,12 @@ async function main() {
        WHERE lower(email) = ANY($1::text[]) ORDER BY email`,
       [PRESERVAR]
     )
-    const encontrados = pres.rows.map(r => r.email)
+    // E-mails DISTINTOS: com as múltiplas contas um e-mail preservado pode ter mais de uma
+    // linha (uma por tipo) — todas são preservadas, e a contagem compara e-mails, não linhas.
+    const encontrados = [...new Set(pres.rows.map(r => r.email))]
     for (const e of PRESERVAR) {
-      const linha = pres.rows.find(r => r.email === e)
-      console.log(`  preservar ${e}: ${linha ? `ENCONTRADO ✓ (role=${linha.role})` : 'NÃO ENCONTRADO ✗'}`)
+      const linhas = pres.rows.filter(r => r.email === e)
+      console.log(`  preservar ${e}: ${linhas.length ? `ENCONTRADO ✓ (${linhas.length} conta(s): role=${linhas.map(l => l.role).join(', ')})` : 'NÃO ENCONTRADO ✗'}`)
     }
     if (encontrados.length !== PRESERVAR.length) {
       console.error('\nABORTANDO: um ou ambos e-mails preservados não existem no banco.')
@@ -78,7 +80,7 @@ async function main() {
     const { rows: [{ n: aDeletar }] } = await client.query(
       `SELECT count(*)::int AS n FROM usuarios WHERE ${ONDE_DELETAR}`, PARAMS)
     console.log(`\n  usuarios no total:     ${total}`)
-    console.log(`  a PRESERVAR:           ${total - aDeletar}   (esperado: ${PRESERVAR.length})`)
+    console.log(`  a PRESERVAR:           ${total - aDeletar}   (esperado: ${pres.rows.length} linha(s) dos ${PRESERVAR.length} e-mails)`)
     console.log(`  a DELETAR:             ${aDeletar}`)
 
     // 3) REDE DE SEGURANÇA — independe da lista PRESERVAR. NENHUM admin pode cair na
@@ -217,7 +219,8 @@ async function main() {
     console.log(`  usuarios restantes: ${restam.rows.length}`)
     restam.rows.forEach(r => console.log(`      - ${r.email}  (role=${r.role})`))
 
-    const restantes = restam.rows.map(r => r.email).sort()
+    // E-mails distintos (um e-mail preservado pode ter várias contas, uma por tipo).
+    const restantes = [...new Set(restam.rows.map(r => r.email))].sort()
     const esperado = [...PRESERVAR].map(e => e.toLowerCase()).sort()
     const ok = restantes.length === esperado.length && esperado.every((e, i) => e === restantes[i])
     console.log(ok
