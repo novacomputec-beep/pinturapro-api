@@ -1452,6 +1452,9 @@ const autoEncerrarPendentes = async () => {
 module.exports = {
   semSobreposicao,
   enviarPushNotificacao,
+  // Exportada para o painel admin (POST /admin/notificacoes/enviar): mesmo lote, recibos e
+  // limpeza de token morto do broadcast de demanda nova.
+  enviarPushEmLoteDetalhado,
   enviarBoasVindas,
   notificarPintoresSobreNovaObra,
   notificarPrestadoresSobreNovoReparo,
