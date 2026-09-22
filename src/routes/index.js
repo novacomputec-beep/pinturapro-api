@@ -14,7 +14,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
+const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
@@ -179,6 +179,28 @@ const migracaoPronta = (async () => {
     // aditivas: nenhuma query existente as lê.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS push_status VARCHAR(50) DEFAULT 'desconhecido'`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS push_status_em TIMESTAMPTZ`)
+    // Plataforma do aparelho dono do push_token ('ios' | 'android'), reportada pelo app em
+    // POST /auth/push-token junto com o token. NULL = app antigo que ainda não reporta —
+    // tratado como iOS pelo envio de promoções (só Android recebe promoção). Colunas aditivas.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS push_plataforma TEXT CHECK (push_plataforma IN ('ios', 'android'))`)
+    // Opt-out de push promocional (PATCH /auth/preferencias). Default true: quem nunca mexeu recebe.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS aceita_promocoes BOOLEAN NOT NULL DEFAULT true`)
+    // Histórico dos envios feitos pelo painel admin (POST /admin/notificacoes/enviar): uma
+    // linha por disparo, com os totais devolvidos por enviarPushEmLoteDetalhado.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS notificacoes_envios (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        criado_em           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        tipo                TEXT NOT NULL CHECK (tipo IN ('aviso', 'promocao')),
+        turmas              TEXT[] NOT NULL DEFAULT '{}',
+        titulo              TEXT NOT NULL,
+        mensagem            TEXT NOT NULL,
+        teste               BOOLEAN NOT NULL DEFAULT false,
+        total_destinatarios INT NOT NULL DEFAULT 0,
+        enviados            INT NOT NULL DEFAULT 0,
+        falhas              INT NOT NULL DEFAULT 0
+      )
+    `)
     // Aviso de aprovação da verificação — mesmo padrão de CLAIM do aviso_fim_gratuidade_em
     // (assinaturas): NULL = pendente de aviso; preenchida no mesmo UPDATE que reivindica o
     // envio, então re-run ou segunda réplica nunca manda duas vezes. DEFAULT NOW() de
@@ -1412,7 +1434,10 @@ router.patch('/auth/foto-perfil', autenticar, async (req, res) => {
 
 router.post('/auth/push-token', autenticar, async (req, res) => {
   try {
-    const { token } = req.body
+    const { token, plataforma } = req.body
+    // plataforma é OPCIONAL ('ios' | 'android'). Ausente ou inválida: a coluna não é tocada
+    // e a rota se comporta exatamente como antes.
+    const plataformaValida = plataforma === 'ios' || plataforma === 'android' ? plataforma : null
     // Esta rota só REGISTRA: token precisa vir e ser uma string não-vazia. Remover é
     // papel exclusivo de /auth/push-token/clear (o logout do app já usa essa rota).
     // Antes, body vazio (ou chave renomeada) gravava push_token = NULL e devolvia 200 —
@@ -1433,7 +1458,11 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
     // DeviceNotRegistered (alertaService) já nula o token em todas as linhas que o tenham.
     // push_status vai a 'concedida' no MESMO UPDATE do token, para o diagnóstico não ficar
     // com o estado anterior depois de o servidor mexer na coluna.
-    await pool.query(`UPDATE usuarios SET push_token = $1, push_status = 'concedida', push_status_em = NOW() WHERE id = $2`, [token, req.usuario.id])
+    if (plataformaValida) {
+      await pool.query(`UPDATE usuarios SET push_token = $1, push_plataforma = $3, push_status = 'concedida', push_status_em = NOW() WHERE id = $2`, [token, req.usuario.id, plataformaValida])
+    } else {
+      await pool.query(`UPDATE usuarios SET push_token = $1, push_status = 'concedida', push_status_em = NOW() WHERE id = $2`, [token, req.usuario.id])
+    }
     // Aviso de aprovação pendente (aprovado sem token no /verificacao/:id/aprovar):
     // claim-then-send no MESMO UPDATE — segunda réplica/re-registro vê a coluna preenchida
     // e não manda de novo. try/catch próprio: falha aqui não muda a resposta do registro.
@@ -1496,6 +1525,24 @@ router.post('/auth/push-status', autenticar, async (req, res) => {
     res.json({ mensagem: 'Status registrado' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao registrar status' })
+  }
+})
+
+// Preferências da própria conta. Hoje só aceita_promocoes (opt-out de push promocional do
+// painel admin). Só a linha do req.usuario.id; body precisa trazer boolean estrito.
+router.patch('/auth/preferencias', autenticar, async (req, res) => {
+  try {
+    const { aceita_promocoes } = req.body
+    if (typeof aceita_promocoes !== 'boolean') {
+      return res.status(400).json({ erro: 'aceita_promocoes deve ser true ou false' })
+    }
+    const upd = await pool.query(
+      'UPDATE usuarios SET aceita_promocoes = $1 WHERE id = $2 RETURNING aceita_promocoes',
+      [aceita_promocoes, req.usuario.id]
+    )
+    res.json({ mensagem: 'Preferências atualizadas', aceita_promocoes: upd.rows[0].aceita_promocoes })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao atualizar preferências' })
   }
 })
 
@@ -7323,6 +7370,116 @@ router.post('/admin/2fa/login-verificar', async (req, res) => {
   } catch (err) {
     console.error('[2FA login-verificar] Erro:', err.message)
     res.status(500).json({ erro: 'Erro ao verificar 2FA' })
+  }
+})
+
+// ============================================================
+// NOTIFICAÇÕES DO PAINEL ADMIN (push em massa por turma)
+// ============================================================
+// turmas = os 4 tipos de conta de sqlTipoConta. Só contas ativas com push_token.
+// 'aviso' vai a toda plataforma; 'promocao' só a push_plataforma = 'android' com
+// aceita_promocoes = true (plataforma NULL conta como iOS e fica de fora).
+// Dedupe por token: o mesmo aparelho com várias contas elegíveis recebe UMA vez.
+// teste_email: só os tokens das contas daquele e-mail, ignorando turmas (a regra de
+// plataforma da promoção continua valendo, para o teste refletir o envio real).
+const TURMAS_NOTIFICACAO = ['reparador', 'pintor', 'dono_reparo', 'dono_obra']
+const TIPOS_NOTIFICACAO = ['aviso', 'promocao']
+
+const validarAlvoNotificacao = (body) => {
+  const { tipo, turmas } = body || {}
+  if (!TIPOS_NOTIFICACAO.includes(tipo)) return { erro: "tipo deve ser 'aviso' ou 'promocao'" }
+  const testeEmail = typeof body.teste_email === 'string' && body.teste_email.trim() ? body.teste_email.trim().toLowerCase() : null
+  let turmasOk = []
+  if (!testeEmail) {
+    if (!Array.isArray(turmas) || turmas.length === 0) return { erro: 'turmas deve ser uma lista com ao menos uma turma' }
+    turmasOk = [...new Set(turmas)]
+    if (turmasOk.some(t => !TURMAS_NOTIFICACAO.includes(t))) {
+      return { erro: `turmas aceitas: ${TURMAS_NOTIFICACAO.join(', ')}` }
+    }
+  } else if (Array.isArray(turmas)) {
+    turmasOk = turmas.filter(t => TURMAS_NOTIFICACAO.includes(t))
+  }
+  return { tipo, turmas: turmasOk, testeEmail }
+}
+
+// Uma linha por token distinto (DISTINCT ON push_token; menor id desempata) — é o que o
+// lote precisa ({ id, push_token }) e o que a prévia conta.
+const selecionarDestinatariosNotificacao = async ({ tipo, turmas, testeEmail }) => {
+  const result = await pool.query(
+    `SELECT DISTINCT ON (u.push_token) u.id, u.push_token
+       FROM usuarios u
+      WHERE u.ativo = true
+        AND u.push_token IS NOT NULL AND u.push_token <> ''
+        AND ($3::text IS NULL OR lower(u.email) = $3::text)
+        AND ($3::text IS NOT NULL OR ${sqlTipoConta('u')} = ANY($1::text[]))
+        AND ($2::text <> 'promocao' OR (u.push_plataforma = 'android' AND u.aceita_promocoes = true))
+      ORDER BY u.push_token, u.id`,
+    [turmas, tipo, testeEmail]
+  )
+  return result.rows
+}
+
+router.post('/admin/notificacoes/previa', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const alvo = validarAlvoNotificacao(req.body)
+    if (alvo.erro) return res.status(400).json({ erro: alvo.erro })
+    const destinatarios = await selecionarDestinatariosNotificacao(alvo)
+    res.json({ tipo: alvo.tipo, turmas: alvo.turmas, teste: !!alvo.testeEmail, total_destinatarios: destinatarios.length })
+  } catch (err) {
+    console.error('[AdminNotificacoes] prévia falhou:', err.message)
+    res.status(500).json({ erro: 'Erro ao calcular prévia' })
+  }
+})
+
+router.post('/admin/notificacoes/enviar', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const alvo = validarAlvoNotificacao(req.body)
+    if (alvo.erro) return res.status(400).json({ erro: alvo.erro })
+    const titulo = typeof req.body.titulo === 'string' ? req.body.titulo.trim() : ''
+    const mensagem = typeof req.body.mensagem === 'string' ? req.body.mensagem.trim() : ''
+    if (!titulo || titulo.length > 50) return res.status(400).json({ erro: 'titulo é obrigatório (máx. 50 caracteres)' })
+    if (!mensagem || mensagem.length > 180) return res.status(400).json({ erro: 'mensagem é obrigatória (máx. 180 caracteres)' })
+    if (req.body.confirmar !== true) return res.status(400).json({ erro: 'confirmar: true é obrigatório' })
+
+    const destinatarios = await selecionarDestinatariosNotificacao(alvo)
+    const data = alvo.tipo === 'promocao' ? { tipo: 'promocao' } : { tipo: 'aviso_admin' }
+    // Lote com recibos e limpeza de DeviceNotRegistered (alertaService). Chunks de 100
+    // sequenciais dentro do helper; a resposta só sai depois de todos os tickets.
+    const resultados = destinatarios.length > 0
+      ? await enviarPushEmLoteDetalhado(destinatarios, titulo, mensagem, data)
+      : []
+    let enviados = 0
+    let falhas = 0
+    for (const r of resultados) {
+      if (r.resultado === 'enviado') enviados++
+      else falhas++ // 'falha' (ticket error / chunk caiu) ou 'invalido' (token que nem é Expo)
+    }
+    const ins = await pool.query(
+      `INSERT INTO notificacoes_envios (tipo, turmas, titulo, mensagem, teste, total_destinatarios, enviados, falhas)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [alvo.tipo, alvo.turmas, titulo, mensagem, !!alvo.testeEmail, destinatarios.length, enviados, falhas]
+    )
+    console.log(`[AdminNotificacoes] ${alvo.tipo}${alvo.testeEmail ? ' (teste)' : ''} "${titulo}": ${enviados} enviado(s), ${falhas} falha(s) de ${destinatarios.length}`)
+    res.json({ mensagem: 'Notificação enviada', envio: ins.rows[0] })
+  } catch (err) {
+    console.error('[AdminNotificacoes] envio falhou:', err.message)
+    res.status(500).json({ erro: 'Erro ao enviar notificação' })
+  }
+})
+
+router.get('/admin/notificacoes/historico', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, criado_em, tipo, turmas, titulo, mensagem, teste, total_destinatarios, enviados, falhas
+         FROM notificacoes_envios
+        ORDER BY criado_em DESC
+        LIMIT 20`
+    )
+    res.json({ envios: result.rows })
+  } catch (err) {
+    console.error('[AdminNotificacoes] histórico falhou:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar histórico' })
   }
 })
 
