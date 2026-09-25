@@ -37,6 +37,15 @@ const CATEGORIAS_SERVICO = [
   { slug: 'maquiagem',       rotulo: 'Maquiagem',          emoji: '💄' },
   { slug: 'costura',         rotulo: 'Costura',            emoji: '🧵' },
   { slug: 'seguranca',       rotulo: 'Segurança',          emoji: '🛡️' },
+  { slug: 'artesanato',      rotulo: 'Artesanato',         emoji: '🧶' },
+  { slug: 'barbeiro',        rotulo: 'Barbeiro',           emoji: '💈' },
+  { slug: 'confeiteiro',     rotulo: 'Confeiteiro',        emoji: '🧁' },
+  { slug: 'editor_video',    rotulo: 'Editor de vídeo',    emoji: '🎬' },
+  { slug: 'filmagem_fotografia', rotulo: 'Filmagem/fotografia', emoji: '📸' },
+  { slug: 'personal_trainer', rotulo: 'Personal trainer',  emoji: '🏋️' },
+  { slug: 'podologo',        rotulo: 'Podólogo',           emoji: '🦶' },
+  { slug: 'profissional_home_office', rotulo: 'Profissional home office', emoji: '💻' },
+  { slug: 'salgadeiro',      rotulo: 'Salgadeiro',         emoji: '🥟' },
   { slug: 'outros',          rotulo: 'Outros',            emoji: '➕' },
 ]
 

@@ -2,6 +2,15 @@ const { pool } = require('../utils/supabase')
 const { gerarContratoPDF } = require('../services/contratoService')
 const { enviarEmailComAnexo } = require('../services/brevoService')
 const { MARCA } = require('../utils/marca')
+const { CATEGORIAS_SERVICO } = require('../utils/categoriasApp')
+
+// Rótulo (sem emoji) de reparos.categoria para o contrato — mesmo mapa que o push usa
+// (apresentacaoReparo). Slug vazio OU fora do mapa cai no padrão do chamador: o PDF nunca
+// imprime slug cru.
+const rotuloCategoriaReparo = (slug, padrao) => {
+  const c = slug != null ? CATEGORIAS_SERVICO.find(x => x.slug === slug) : undefined
+  return c ? c.rotulo : padrao
+}
 
 const formatarData = (data) =>
   new Date(data).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
@@ -80,7 +89,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
 
   <h2>Cláusula 1 — Do Objeto</h2>
   <p>O presente contrato tem como objeto a prestação do seguinte serviço: <strong>${reparo.titulo}</strong>${reparo.descricao ? ` — ${reparo.descricao}` : ''}.</p>
-  <p>Categoria: <strong>${reparo.categoria || 'Serviço geral'}</strong>.</p>
+  <p>Categoria: <strong>${rotuloCategoriaReparo(reparo.categoria, 'Serviço geral')}</strong>.</p>
 
   <h2>Cláusula 2 — Da Execução dos Serviços</h2>
   <p>Os serviços serão executados no endereço indicado pela Contratante, conforme agendamento realizado através do aplicativo ${marca}.</p>
@@ -300,7 +309,7 @@ const enviarContratoReparo = async (reparoId) => {
       contratante: { ...dono, cidade: r.dono_cidade || r.cidade },
       contratado:  { ...prestador, cidade: r.prest_cidade || r.cidade },
       servico: {
-        tipo:       r.categoria || 'serviço',
+        tipo:       rotuloCategoriaReparo(r.categoria, 'serviço'),
         descricao:  r.titulo + (r.descricao ? ` — ${r.descricao}` : ''),
         endereco:   r.endereco_obra || `${r.cidade}${r.bairro ? ', ' + r.bairro : ''}`,
         valor:      r.valor_acordado,

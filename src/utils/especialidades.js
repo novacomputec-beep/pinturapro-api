@@ -18,6 +18,8 @@ const ESPECIALIDADES_REPARADOR = [
   'jardineiro', 'manicure', 'cabelo', 'massagem', 'mudancas',
   'estofamento', 'baba', 'cozinheiro', 'motorista', 'garcom',
   'dedetizacao', 'montagem_moveis', 'vigia', 'maquiagem', 'costura', 'seguranca',
+  'artesanato', 'barbeiro', 'confeiteiro', 'editor_video', 'filmagem_fotografia',
+  'personal_trainer', 'podologo', 'profissional_home_office', 'salgadeiro',
   'outros',
 ]
 
