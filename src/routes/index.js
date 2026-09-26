@@ -15,7 +15,7 @@ const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
-const { ufDeCidade } = require('../utils/localidade')
+const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
 // America/Sao_Paulo. Compartilhado com alertaService, que reconstrói expira_em nos crons.
@@ -7480,6 +7480,37 @@ router.get('/admin/notificacoes/historico', autenticar, exigirSuperAdmin, async 
   } catch (err) {
     console.error('[AdminNotificacoes] histórico falhou:', err.message)
     res.status(500).json({ erro: 'Erro ao buscar histórico' })
+  }
+})
+
+// GET /admin/especialidades-resumo — quantos profissionais ATIVOS declaram cada especialidade,
+// separados por lado (tipo_prestador: 'pintor' = obra, 'reparador' = serviço, null = conta
+// legada sem lado). Uma linha por (tipo_prestador, especialidade). COUNT(DISTINCT u.id) porque
+// unnest gera uma linha por slug e uma linha legada pode carregar o mesmo texto repetido.
+// ?cidade= é opcional e dobrado dos DOIS lados com a regra de utils/localidade (normalizar em
+// JS, sqlNormalizarCidade no banco) — a mesma comparação do broadcast em alertaService.
+// Lê só usuarios: não olha assinatura, então gratuito/sem plano entra desde que ativo.
+router.get('/admin/especialidades-resumo', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const cidadeBruta = typeof req.query.cidade === 'string' ? req.query.cidade.trim() : ''
+    const cidade = cidadeBruta ? normalizar(cidadeBruta) : null
+    const result = await pool.query(
+      `SELECT u.tipo_prestador, e.especialidade, COUNT(DISTINCT u.id)::int AS total
+         FROM usuarios u
+         CROSS JOIN LATERAL unnest(u.especialidades) AS e(especialidade)
+        WHERE u.role IN ('prestador', 'pintor')
+          AND u.ativo = true
+          AND u.suspenso_em IS NULL
+          AND NULLIF(btrim(e.especialidade), '') IS NOT NULL
+          AND ($1::text IS NULL OR ${sqlNormalizarCidade('u.cidade')} = $1::text)
+        GROUP BY u.tipo_prestador, e.especialidade
+        ORDER BY u.tipo_prestador ASC NULLS LAST, total DESC, e.especialidade ASC`,
+      [cidade]
+    )
+    res.json({ cidade: cidadeBruta || null, resumo: result.rows })
+  } catch (err) {
+    console.error('[admin/especialidades-resumo]', err.message)
+    res.status(500).json({ erro: 'Erro ao resumir especialidades' })
   }
 })
 
