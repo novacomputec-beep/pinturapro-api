@@ -2,15 +2,10 @@ const { pool } = require('../utils/supabase')
 const { gerarContratoPDF } = require('../services/contratoService')
 const { enviarEmailComAnexo } = require('../services/brevoService')
 const { MARCA } = require('../utils/marca')
-const { CATEGORIAS_SERVICO } = require('../utils/categoriasApp')
-
-// Rótulo (sem emoji) de reparos.categoria para o contrato — mesmo mapa que o push usa
-// (apresentacaoReparo). Slug vazio OU fora do mapa cai no padrão do chamador: o PDF nunca
-// imprime slug cru.
-const rotuloCategoriaReparo = (slug, padrao) => {
-  const c = slug != null ? CATEGORIAS_SERVICO.find(x => x.slug === slug) : undefined
-  return c ? c.rotulo : padrao
-}
+// Rótulo (sem emoji) da categoria para o contrato — mesmo mapa que o push usa, cobrindo
+// reparos.categoria E obras.categoria. Slug vazio OU fora do mapa cai no padrão do
+// chamador: o contrato nunca imprime slug cru.
+const { rotuloCategoria } = require('../utils/especialidades')
 
 const formatarData = (data) =>
   new Date(data).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
@@ -89,7 +84,7 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
 
   <h2>Cláusula 1 — Do Objeto</h2>
   <p>O presente contrato tem como objeto a prestação do seguinte serviço: <strong>${reparo.titulo}</strong>${reparo.descricao ? ` — ${reparo.descricao}` : ''}.</p>
-  <p>Categoria: <strong>${rotuloCategoriaReparo(reparo.categoria, 'Serviço geral')}</strong>.</p>
+  <p>Categoria: <strong>${rotuloCategoria(reparo.categoria, 'Serviço geral')}</strong>.</p>
 
   <h2>Cláusula 2 — Da Execução dos Serviços</h2>
   <p>Os serviços serão executados no endereço indicado pela Contratante, conforme agendamento realizado através do aplicativo ${marca}.</p>
@@ -187,7 +182,7 @@ const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
   </div>
 
   <h2>Cláusula 2 — Do Objeto</h2>
-  <p>Prestação de serviços de <strong>${obra.categoria || 'pintura e reforma'}</strong> referente à obra <strong>"${obra.titulo}"</strong>, localizada em ${obra.endereco_obra || `${obra.cidade}${obra.bairro ? ', ' + obra.bairro : ''}`}.${obra.descricao ? ` Descrição: ${obra.descricao}` : ''}</p>
+  <p>Prestação de serviços de <strong>${rotuloCategoria(obra.categoria, 'pintura e reforma')}</strong> referente à obra <strong>"${obra.titulo}"</strong>, localizada em ${obra.endereco_obra || `${obra.cidade}${obra.bairro ? ', ' + obra.bairro : ''}`}.${obra.descricao ? ` Descrição: ${obra.descricao}` : ''}</p>
 
   <h2>Cláusula 3 — Do Valor e Pagamento</h2>
   <p>Valor total acordado: <strong>${valor ? formatarValor(valor) : 'a combinar entre as partes'}</strong>, conforme proposta aceita por ambas as partes através do aplicativo ${marca}. Condições de pagamento a serem definidas diretamente entre as partes.</p>
@@ -309,7 +304,9 @@ const enviarContratoReparo = async (reparoId) => {
       contratante: { ...dono, cidade: r.dono_cidade || r.cidade },
       contratado:  { ...prestador, cidade: r.prest_cidade || r.cidade },
       servico: {
-        tipo:       rotuloCategoriaReparo(r.categoria, 'serviço'),
+        tipo:       rotuloCategoria(r.categoria, 'serviço'),
+        // Slug cru para a cláusula de garantia (contratoService decide o prazo pelo slug).
+        categoria:  r.categoria,
         descricao:  r.titulo + (r.descricao ? ` — ${r.descricao}` : ''),
         endereco:   r.endereco_obra || `${r.cidade}${r.bairro ? ', ' + r.bairro : ''}`,
         valor:      r.valor_acordado,
@@ -408,7 +405,9 @@ const enviarContratoObra = async (candidaturaId) => {
       contratante: { ...dono, cidade: r.dono_cidade || r.cidade },
       contratado:  { ...prestador, cidade: r.prest_cidade || r.cidade },
       servico: {
-        tipo:       r.categoria || 'pintura',
+        tipo:       rotuloCategoria(r.categoria, 'pintura'),
+        // Slug cru para a cláusula de garantia; sem categoria vale 'pintura', como antes.
+        categoria:  r.categoria || 'pintura',
         descricao:  r.titulo,
         endereco:   r.endereco_obra || `${r.cidade}${r.bairro ? ', ' + r.bairro : ''}`,
         valor:      r.valor_acordado,

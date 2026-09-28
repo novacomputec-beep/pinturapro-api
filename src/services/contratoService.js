@@ -2,6 +2,7 @@ const PDFDocument = require('pdfkit')
 const { pool } = require('../utils/supabase')
 const { enviarEmailComAnexo } = require('./brevoService')
 const { MARCA, SITE } = require('../utils/marca')
+const { rotuloCategoria } = require('../utils/especialidades')
 
 // Valor do contrato é positivo e finito, ou "a combinar" (D27): sem isto, valor NULL
 // imprimia "R$ 0,00" na linha numérica E "valor não informado" por extenso no MESMO PDF.
@@ -103,8 +104,12 @@ const gerarContratoPDF = (dados) => {
       `5.4 Comunicar alterações no escopo com antecedência mínima de 24 horas.`
     )
 
-    const garantia = servico.tipo === 'pintura' ? '90 (noventa) dias' :
-      servico.tipo === 'hidraulica' || servico.tipo === 'eletrica' ? '60 (sessenta) dias' : '30 (trinta) dias'
+    // A garantia decide pelo SLUG (servico.categoria), nunca pelo rótulo que vai ao texto:
+    // servico.tipo agora é 'Hidráulica', não 'hidraulica'. Fallback em tipo cobre chamador
+    // antigo que não passe categoria.
+    const slugGarantia = servico.categoria ?? servico.tipo
+    const garantia = slugGarantia === 'pintura' ? '90 (noventa) dias' :
+      slugGarantia === 'hidraulica' || slugGarantia === 'eletrica' ? '60 (sessenta) dias' : '30 (trinta) dias'
 
     clausula('6', 'DA GARANTIA',
       `6.1 O CONTRATADO garante os serviços executados pelo prazo de ${garantia} a contar da conclusão.\n\n` +
@@ -263,7 +268,9 @@ const gerarEEnviarContrato = async (candidaturaId) => {
         cidade: row.pintor_cidade
       },
       servico: {
-        tipo: row.categoria || 'pintura',
+        tipo: rotuloCategoria(row.categoria, 'pintura'),
+        // Slug cru para a cláusula de garantia; sem categoria vale 'pintura', como antes.
+        categoria: row.categoria || 'pintura',
         descricao: row.obra_titulo,
         endereco: row.obra_cidade,
         valor: row.obra_valor,

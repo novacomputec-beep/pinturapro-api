@@ -44,6 +44,28 @@ const SETS_POR_LISTA = new Map([
 const ESPECIALIDADES_MIN = 1
 const ESPECIALIDADES_MAX = 5
 
+// Rótulo humano de um slug de categoria/especialidade ('eletrica' → 'Elétrica'), para o
+// que sai ao usuário em texto (contrato em HTML e PDF; o push de demanda nova lê as mesmas
+// listas via apresentacaoReparo/apresentacaoObra, que também devolvem o emoji). Os rótulos
+// vêm de categoriasApp.js, que já é a cópia verbatim das listas do app — NÃO se duplica a
+// lista aqui: duas cópias divergiriam no primeiro rótulo alterado. Um mapa só, com os três
+// lados (serviço, construção, obra): os slugs não colidem entre listas, salvo 'outros',
+// que tem o mesmo rótulo nas duas.
+//
+// Slug fora do mapa (legado, texto livre): com `padrao` informado volta o padrão — é o
+// caso do contrato, que nunca imprime slug cru; sem `padrao` volta o slug CRU. null e
+// undefined caem no `padrao` quando há um, senão voltam como vieram.
+const { CATEGORIAS_SERVICO, CATEGORIAS_CONSTRUCAO, CATEGORIAS_OBRA } = require('./categoriasApp')
+const ROTULO_POR_SLUG = new Map(
+  [...CATEGORIAS_SERVICO, ...CATEGORIAS_CONSTRUCAO, ...CATEGORIAS_OBRA].map(c => [c.slug, c.rotulo])
+)
+const rotuloCategoria = (slug, padrao) => {
+  const rotulo = slug == null ? undefined : ROTULO_POR_SLUG.get(slug)
+  if (rotulo !== undefined) return rotulo
+  if (padrao !== undefined) return padrao
+  return slug == null ? slug : String(slug)
+}
+
 // Valida o que está sendo ESCRITO, nunca o que já está gravado.
 //
 // Ponto crítico desta função: ela só é chamada para um valor que veio no corpo da
@@ -99,4 +121,5 @@ module.exports = {
   ESPECIALIDADES_MIN,
   ESPECIALIDADES_MAX,
   validarEspecialidades,
+  rotuloCategoria,
 }
