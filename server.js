@@ -79,6 +79,7 @@ app.use(helmet())
 // nenhuma outra rota passa a aceitar o site, e o preflight (OPTIONS) segue o mesmo critério.
 const CORS_ORIGENS = [
   'https://pinturapro-painel-production.up.railway.app',
+  'https://painel.protudo.app.br',
   'http://localhost:3000',
   'http://localhost:8081',
   'exp://',
