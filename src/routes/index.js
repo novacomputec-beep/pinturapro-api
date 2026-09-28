@@ -6602,8 +6602,8 @@ router.post('/mensagens/:id/responder',   autenticar, exigirAdmin, mensagensCtrl
 router.post('/pagamentos/criar-assinatura',   autenticar, pagamentoCtrl.criarAssinatura)
 router.post('/pagamentos/webhook-pagbank',    pagamentoCtrl.webhookPagbank)
 router.get('/pagamentos/sucesso',             pagamentoCtrl.sucesso)
-router.get('/pagamentos/falha',               (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
-router.get('/pagamentos/pendente',            (req, res) => res.redirect('https://pinturapro-painel-production.up.railway.app'))
+router.get('/pagamentos/falha',               (req, res) => res.redirect('https://painel.protudo.app.br'))
+router.get('/pagamentos/pendente',            (req, res) => res.redirect('https://painel.protudo.app.br'))
 router.post('/pagamentos/acesso-gratuito',    autenticar, exigirSuperAdmin, pagamentoCtrl.darAcessoGratuito)
 router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamentoCtrl.listarAssinantes)
 

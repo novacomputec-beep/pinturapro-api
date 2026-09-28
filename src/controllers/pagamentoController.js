@@ -124,7 +124,7 @@ const colocarPendentVerificacao = async (usuarioId, plano) => {
         <p><strong>E-mail:</strong> ${email}</p>
         <p><strong>ID:</strong> ${usuarioId}</p>
         <p>Acesse o painel para aprovar ou reprovar em até 1 hora.</p>
-        <a href="https://pinturapro-painel-production.up.railway.app" style="background: #E8833A; color: #000; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold;">Abrir Painel</a>
+        <a href="https://painel.protudo.app.br" style="background: #E8833A; color: #000; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold;">Abrir Painel</a>
       </div>
     `
   }).catch(err => console.error('Erro ao notificar admin:', err))
@@ -252,9 +252,9 @@ const criarAssinatura = async (req, res) => {
 const sucesso = async (req, res) => {
   try {
     console.log(`Redirecionamento de sucesso — ${JSON.stringify(req.query)}`)
-    res.redirect('https://pinturapro-painel-production.up.railway.app')
+    res.redirect('https://painel.protudo.app.br')
   } catch (err) {
-    res.redirect('https://pinturapro-painel-production.up.railway.app')
+    res.redirect('https://painel.protudo.app.br')
   }
 }
 
