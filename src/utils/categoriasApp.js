@@ -46,6 +46,9 @@ const CATEGORIAS_SERVICO = [
   { slug: 'podologo',        rotulo: 'Podólogo',           emoji: '🦶' },
   { slug: 'profissional_home_office', rotulo: 'Profissional home office', emoji: '💻' },
   { slug: 'salgadeiro',      rotulo: 'Salgadeiro',         emoji: '🥟' },
+  { slug: 'tatuagem',        rotulo: 'Tatuagem',           emoji: '🖋️' },
+  { slug: 'depilacao',       rotulo: 'Depilação',          emoji: '🪒' },
+  { slug: 'mecanica',        rotulo: 'Mecânica',           emoji: '🧰' },
   { slug: 'outros',          rotulo: 'Outros',            emoji: '➕' },
 ]
 
