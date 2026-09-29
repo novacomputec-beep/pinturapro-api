@@ -5931,6 +5931,21 @@ router.get('/config/lancamento', async (req, res) => {
   }
 })
 
+// Versões do app para o aviso de atualização — lida PRÉ-LOGIN, então NÃO exige token.
+// minima = abaixo dela o app obriga a atualizar; atual = a publicada na loja (aviso opcional).
+// Vem de env (sem banco): variável ausente, vazia ou fora do formato N.N.N vira '0.0.0',
+// que nenhuma versão instalada fica abaixo — config faltando nunca bloqueia ninguém.
+const versaoApp = (nome) => {
+  const valor = (process.env[nome] || '').trim()
+  return /^\d+(\.\d+){0,2}$/.test(valor) ? valor : '0.0.0'
+}
+router.get('/config/versao-app', (req, res) => {
+  res.json({
+    android: { minima: versaoApp('APP_VERSAO_MINIMA_ANDROID'), atual: versaoApp('APP_VERSAO_ATUAL_ANDROID') },
+    ios:     { minima: versaoApp('APP_VERSAO_MINIMA_IOS'),     atual: versaoApp('APP_VERSAO_ATUAL_IOS') },
+  })
+})
+
 // Admin liga/estende/desliga a janela. data_fim = ISO futuro liga/estende; null desliga.
 // DESLIGAR é porta de mão única: roda o backfill da coorte na MESMA transação do flag —
 // ou os dois entram, ou nenhum. Sem isso a janela desligava e a coorte seguia grátis para
