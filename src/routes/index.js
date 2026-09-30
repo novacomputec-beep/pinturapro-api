@@ -2271,11 +2271,14 @@ router.get('/obras', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigi
   }
 })
 
-// Painel admin — lista obras por situação (finalizadas / canceladas-expiradas).
-// O GET /obras público só devolve obras abertas/aprovadas/não expiradas, então o
-// painel precisa deste endpoint para enxergar o histórico de obras encerradas e
-// canceladas. "Expirada" não é um status no banco: é uma obra ainda 'aberta' cujo
-// expira_em já passou — por isso o filtro 'canceladas' inclui esse caso.
+// Painel admin — lista obras por situação (abertas / finalizadas / canceladas-expiradas).
+// O GET /obras público é o feed do pintor: só devolve obras abertas/aprovadas/não
+// expiradas sem match e NÃO expõe contato do dono ao app. O painel precisa deste
+// endpoint para enxergar o histórico de obras encerradas e canceladas, e também as
+// abertas com dono (nome/email/telefone), criado_em e prazo (horas_para_expirar,
+// prazo_modo, expira_em). 'abertas' usa a mesma definição de GET /reparos/admin
+// (inclui obra com match). "Expirada" não é um status no banco: é uma obra ainda
+// 'aberta' cujo expira_em já passou — por isso o filtro 'canceladas' inclui esse caso.
 router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
   try {
     const filtro = req.query.filtro || 'finalizadas'
@@ -2284,15 +2287,20 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
       where = `o.status = 'encerrada'`
     } else if (filtro === 'canceladas') {
       where = `(o.status IN ('cancelada', 'expirada') OR (o.status = 'aberta' AND o.expira_em <= NOW()))`
+    } else if (filtro === 'abertas') {
+      where = `o.status = 'aberta' AND o.status_aprovacao = 'aprovada' AND o.expira_em > NOW()`
     } else {
       return res.status(400).json({ erro: 'Filtro inválido' })
     }
     const result = await pool.query(`
       SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.uf, o.bairro,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status,
+             o.criado_em, o.horas_para_expirar, o.prazo_modo,
+             u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              (o.status = 'aberta' AND o.expira_em <= NOW()) AS expirada,
              (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) AS total_candidaturas
       FROM obras o
+      LEFT JOIN usuarios u ON u.id = o.criado_por
       WHERE ${where}
       ORDER BY o.expira_em DESC NULLS LAST, o.id DESC
       LIMIT 200
@@ -3828,12 +3836,16 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
     } else {
       return res.status(400).json({ erro: 'Filtro inválido' })
     }
+    // Dono (nome/email/telefone), criado_em e prazo (prazo_atendimento_horas + expira_em) só
+    // aqui, no endpoint admin: o feed público GET /reparos não expõe contato do dono ao app.
     const result = await pool.query(`
       SELECT r.id, r.titulo, r.categoria, r.valor_estimado, r.cidade, r.uf, r.bairro,
-             r.expira_em, r.status,
+             r.expira_em, r.status, r.criado_em, r.prazo_atendimento_horas,
+             u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              (r.status = 'aberta' AND r.expira_em <= NOW()) AS expirada,
              (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) AS total_interessados
       FROM reparos r
+      LEFT JOIN usuarios u ON u.id = r.criado_por
       WHERE ${where}
       ORDER BY r.expira_em DESC NULLS LAST, r.id DESC
       LIMIT 200
@@ -7142,19 +7154,31 @@ const PERIODO_FINALIZADAS_PADRAO = 'mes_atual'
 // Fonte única das duas consultas (lista e totais): um CTE só, escrito uma vez. Duas cópias
 // deste SELECT divergiriam no primeiro ajuste, e aí os totais deixariam de descrever a
 // lista que estão acompanhando.
+// Dono (d = usuarios via criado_por) ao lado do profissional (u = match_usuario_id), mais
+// categoria, criado_em e prazo. O prazo tem coluna diferente em cada vertical, então cada
+// ramo devolve a sua e NULL na outra: obra → horas_para_expirar + prazo_modo; reparo →
+// prazo_atendimento_horas. expira_em existe nas duas.
 const SQL_FINALIZADAS = `
-  SELECT 'obra'::text AS tipo, o.id, o.titulo, o.cidade, o.uf, o.bairro, o.encerrado_em,
+  SELECT 'obra'::text AS tipo, o.id, o.titulo, o.categoria, o.cidade, o.uf, o.bairro,
+         o.criado_em, o.encerrado_em, o.expira_em, o.horas_para_expirar, o.prazo_modo,
+         NULL AS prazo_atendimento_horas,
+         d.nome AS dono_nome, d.email AS dono_email, d.telefone AS dono_telefone,
          u.nome AS profissional_nome,
          COALESCE(cd.valor_contraproposta, cd.valor_proposto) AS valor_acordado
     FROM obras o
+    LEFT JOIN usuarios d      ON d.id = o.criado_por
     LEFT JOIN usuarios u      ON u.id = o.match_usuario_id
     LEFT JOIN candidaturas cd ON cd.obra_id = o.id AND cd.status = 'aceito'
    WHERE o.status = 'encerrada'
   UNION ALL
-  SELECT 'reparo'::text AS tipo, r.id, r.titulo, r.cidade, r.uf, r.bairro, r.encerrado_em,
+  SELECT 'reparo'::text AS tipo, r.id, r.titulo, r.categoria, r.cidade, r.uf, r.bairro,
+         r.criado_em, r.encerrado_em, r.expira_em, NULL AS horas_para_expirar, NULL AS prazo_modo,
+         r.prazo_atendimento_horas,
+         d.nome AS dono_nome, d.email AS dono_email, d.telefone AS dono_telefone,
          u.nome AS profissional_nome,
          COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado
     FROM reparos r
+    LEFT JOIN usuarios d           ON d.id = r.criado_por
     LEFT JOIN usuarios u           ON u.id = r.match_usuario_id
     LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.status = 'aceito'
    WHERE r.status = 'encerrada'
@@ -7176,7 +7200,10 @@ router.get('/admin/finalizadas', autenticar, exigirAdmin, async (req, res) => {
     // paginação. NULLS LAST porque em DESC o padrão do Postgres é NULLS FIRST — sem isso
     // uma linha sem data iria para o topo do painel.
     const lista = await pool.query(
-      `SELECT f.tipo, f.id, f.titulo, f.cidade, f.uf, f.bairro, f.encerrado_em,
+      `SELECT f.tipo, f.id, f.titulo, f.categoria, f.cidade, f.uf, f.bairro,
+              f.criado_em, f.encerrado_em, f.expira_em,
+              f.horas_para_expirar, f.prazo_modo, f.prazo_atendimento_horas,
+              f.dono_nome, f.dono_email, f.dono_telefone,
               f.profissional_nome, f.valor_acordado
          FROM (${SQL_FINALIZADAS}) f
         WHERE ${filtro}
