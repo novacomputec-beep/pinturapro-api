@@ -14,7 +14,7 @@ const CATEGORIAS_SERVICO = [
   { slug: 'hidraulica',      rotulo: 'Hidráulica',        emoji: '🔧' },
   { slug: 'eletrica',        rotulo: 'Elétrica',          emoji: '⚡' },
   { slug: 'marcenaria',      rotulo: 'Marcenaria',        emoji: '🪚' },
-  { slug: 'alvenaria',       rotulo: 'Alvenaria',         emoji: '🧱' },
+  { slug: 'alvenaria',       rotulo: 'Alvenaria – pequenos reparos', emoji: '🧱' },
   { slug: 'climatizacao',    rotulo: 'Refrigeração/climatização', emoji: '❄️' },
   { slug: 'chaveiro',        rotulo: 'Chaveiro',          emoji: '🔑' },
   { slug: 'faxina',          rotulo: 'Faxina',            emoji: '🧹' },
