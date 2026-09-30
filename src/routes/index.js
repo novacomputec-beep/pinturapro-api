@@ -44,9 +44,9 @@ const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 // Vocabulário de reparos.categoria = a lista de especialidades do reparador: é contra ela que
 // o broadcast de reparo novo casa categoria × especialidades (alertaService). Só POST
 // /reparos/dono valida; a rota de aprovação não reavalia linha já gravada.
-const { ESPECIALIDADES_REPARADOR } = require('../utils/especialidades')
+const { ESPECIALIDADES_REPARADOR, validarEspecialidades } = require('../utils/especialidades')
 const { enviarEmail } = require('../services/emailService')
-const { sqlTipoConta, tipoDeTipoConta, multiplasContasAtivo } = require('../utils/tipoConta')
+const { sqlTipoConta, tipoDeTipoConta, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL } = require('../utils/tipoConta')
 const bcrypt = require('bcrypt')
 
 // Envolve um DELETE de mídia para que, NO MESMO statement, as urls apagadas caiam na fila
@@ -5561,15 +5561,15 @@ router.get('/verificacao/pendentes', autenticar, exigirAdmin, async (req, res) =
   }
 })
 
-// Aprovar prestador
-router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
-  try {
-    const { id } = req.params
-
+// Aprovação de prestador — O caminho único que marca verificacao_status = 'aprovado', ativa a
+// assinatura, derruba caches e avisa (e-mail + push). Extraído do handler abaixo para que a
+// conta vinculada (POST /auth/contas/reparador) nascida de um pintor já aprovado passe pelo
+// MESMO código, sem duplicar a regra de proximo_vencimento. Devolve false se o id não existe.
+const aprovarPrestador = async (id) => {
     const usuario = await pool.query(
       `SELECT nome, email, tipo_prestador, tipo_dono FROM usuarios WHERE id = $1`, [id]
     )
-    if (usuario.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
+    if (usuario.rows.length === 0) return false
 
     // Aprova verificação e ativa assinatura (revisão manual → idoneidade confirmada)
     await pool.query(
@@ -5629,10 +5629,146 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
     } else {
       await pool.query(`UPDATE usuarios SET aviso_aprovacao_em = NULL WHERE id = $1`, [id])
     }
+    return true
+}
 
+// Aprovar prestador
+router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const ok = await aprovarPrestador(req.params.id)
+    if (!ok) return res.status(404).json({ erro: 'Usuário não encontrado' })
     res.json({ mensagem: 'Prestador aprovado com sucesso' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao aprovar prestador' })
+  }
+})
+
+// Conta vinculada: pintor logado cria o seu perfil de REPARADOR sem redigitar nada. É o
+// "novo tipo da mesma pessoa" do cadastro (authController.cadastrar, múltiplas contas), só
+// que autenticado: quem chama já provou a senha, então o senha_hash é copiado direto (uma
+// senha por e-mail) e nome/CPF/contato/endereço/documentos vêm da própria linha do pintor.
+// Mesmas guardas do cadastro: chave multiplas_contas ligada, mesmos advisory locks (classe 1
+// = e-mail, classe 2 = CPF normalizado), sem conta reparador para o e-mail/CPF, teto de 4.
+// Só as especialidades (lista do reparador, 1 a 5) e o plano vêm do corpo.
+// Pintor já aprovado → a conta nova nasce aprovada e com assinatura ativa pelo MESMO
+// aprovarPrestador de /verificacao/:id/aprovar; pintor pendente → fila normal.
+// Resposta: a conta nova no formato de login.contas[] ({ id, tipo, nome }).
+router.post('/auth/contas/reparador', autenticar, async (req, res) => {
+  let client
+  try {
+    if (!await multiplasContasAtivo()) {
+      return res.status(403).json({ erro: 'Criação de conta vinculada indisponível', codigo: 'multiplas_contas_desligada' })
+    }
+    const origem = (await pool.query(
+      `SELECT id, nome, email, telefone, cpf_cnpj, rg, rg_orgao, rg_estado, cidade, uf, cep,
+              latitude, longitude, logradouro, numero, complemento, bairro, pix_reembolso,
+              referencias, anos_experiencia, tamanho_equipe, foto_url, senha_hash,
+              verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
+              verificacao_status, role, ativo, tipo_prestador, tipo_dono
+         FROM usuarios WHERE id = $1`, [req.usuario.id]
+    )).rows[0]
+    if (!origem || !origem.ativo || origem.role === 'admin') {
+      return res.status(403).json({ erro: 'Sem permissão para esta ação' })
+    }
+    if (tipoDaLinha(origem) !== 'pintor') {
+      return res.status(403).json({ erro: 'Só uma conta de pintor pode criar o perfil de reparador', codigo: 'origem_nao_pintor' })
+    }
+
+    // Reparador presta serviço: mínimo 1 (ehProfissional) e máximo ESPECIALIDADES_MAX (5),
+    // validados contra a lista do lado 'reparador'.
+    const esp = validarEspecialidades(req.body?.especialidades || [], true, 'reparador')
+    if (esp.erro) return res.status(400).json({ erro: esp.erro })
+    const planoEscolhido = req.body?.plano === 'anual' ? 'anual' : 'mensal'
+    const valorMensal = planoEscolhido === 'anual' ? 499.00 : 49.90
+
+    const emailNormalizado = origem.email.toLowerCase().trim()
+    const cpfLimpo = origem.cpf_cnpj ? origem.cpf_cnpj.replace(/\D/g, '') : null
+
+    client = await pool.connect()
+    await client.query('BEGIN')
+    // Mesma ordem de locks do cadastro (e-mail, depois CPF): serializa com POST /auth/cadastro.
+    await client.query('SELECT pg_advisory_xact_lock(1, hashtext($1))', [emailNormalizado])
+    if (cpfLimpo) await client.query('SELECT pg_advisory_xact_lock(2, hashtext($1))', [cpfLimpo])
+
+    const contasEmail = (await client.query(
+      `SELECT id, role, ativo, ${sqlTipoConta()} AS tipo FROM usuarios WHERE email = $1`, [emailNormalizado]
+    )).rows
+    const contasCpf = cpfLimpo
+      ? (await client.query(
+          `SELECT email, ${sqlTipoConta()} AS tipo FROM usuarios
+            WHERE regexp_replace(cpf_cnpj, '[^0-9]', '', 'g') = $1`, [cpfLimpo])).rows
+      : []
+    const recusar = async (status, erro, codigo) => {
+      await client.query('ROLLBACK')
+      return res.status(status).json({ erro, codigo })
+    }
+    if (contasEmail.some(u => u.role === 'admin' || !u.ativo)) {
+      return recusar(409, 'Este e-mail já está cadastrado.', 'email_duplicado')
+    }
+    if (contasEmail.some(u => u.tipo === 'reparador') || contasCpf.some(u => u.tipo === 'reparador')) {
+      return recusar(409, 'Você já tem uma conta deste tipo com este e-mail.', 'tipo_duplicado')
+    }
+    if (contasCpf.some(u => u.email !== emailNormalizado)) {
+      return recusar(409, 'Este CPF/CNPJ já está cadastrado.', 'cpf_duplicado')
+    }
+    if (contasEmail.length >= MAX_CONTAS_POR_EMAIL) {
+      return recusar(409, 'Este e-mail já atingiu o limite de contas.', 'limite_contas')
+    }
+
+    // Janela de lançamento lida no mesmo client, como no cadastro.
+    const cfgLancamento = await client.query(`SELECT valor FROM configuracoes WHERE chave = 'lancamento_data_fim'`)
+    const dataFimLancamento = cfgLancamento.rows[0]?.valor || null
+    const lancamentoGratis = !!dataFimLancamento && new Date(dataFimLancamento) > new Date()
+
+    const novo = (await client.query(
+      `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade, uf,
+        especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo,
+        tipo_dono, pix_reembolso, referencias,
+        verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
+        verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador, cep, latitude, longitude,
+        logradouro, numero, complemento, bairro, foto_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'prestador',true,NULL,$11,$12,$13,$14,$15,'pendente',
+               $16,$17,$18,'reparador',$19,$20,$21,$22,$23,$24,$25,$26)
+       RETURNING id, nome, role, tipo_prestador, tipo_dono`,
+      [origem.nome, emailNormalizado, origem.telefone, origem.senha_hash, origem.cidade, origem.uf,
+       esp.valor, origem.anos_experiencia || 0, origem.tamanho_equipe || 1, origem.cpf_cnpj,
+       origem.pix_reembolso, JSON.stringify(origem.referencias || []),
+       origem.verificacao_doc_frente_url, origem.verificacao_doc_verso_url, origem.verificacao_selfie_url,
+       origem.rg, origem.rg_orgao, origem.rg_estado,
+       origem.cep, origem.latitude, origem.longitude,
+       origem.logradouro, origem.numero, origem.complemento, origem.bairro, origem.foto_url]
+    )).rows[0]
+
+    // Assinatura igual à do cadastro de reparador; a aprovação (abaixo) é quem ativa.
+    if (lancamentoGratis) {
+      await client.query(
+        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
+         VALUES ($1, $2, $3, 'pendente_verificacao', 'gratuito')`,
+        [novo.id, planoEscolhido, valorMensal]
+      )
+    } else {
+      await client.query(
+        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status)
+         VALUES ($1, $2, $3, 'pendente')`,
+        [novo.id, planoEscolhido, valorMensal]
+      )
+    }
+    await client.query('COMMIT')
+    client.release(); client = null
+
+    // Idoneidade já confirmada na conta de origem: a nova nasce aprovada pelo mesmo caminho
+    // do painel. Fora da transação porque aprovarPrestador usa o pool e envia e-mail/push.
+    const aprovada = origem.verificacao_status === 'aprovado'
+    if (aprovada) await aprovarPrestador(novo.id)
+
+    console.log(`[CONTA VINCULADA] pintor ${origem.id} → reparador ${novo.id} aprovada=${aprovada}`)
+    res.status(201).json({ conta: { id: novo.id, tipo: tipoDaLinha(novo), nome: novo.nome }, aprovada })
+  } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => {})
+    console.error('[CONTA VINCULADA] erro:', err.message)
+    res.status(500).json({ erro: 'Erro ao criar conta de reparador' })
+  } finally {
+    if (client) client.release()
   }
 })
 
