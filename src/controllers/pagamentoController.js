@@ -487,15 +487,26 @@ const listarAssinantes = async (req, res) => {
     const limit  = parseInt(req.query.limit) || 200
     const offset = (page - 1) * limit
 
+    // ?ordem é whitelist: o valor do request só ESCOLHE uma das cláusulas literais abaixo,
+    // nunca é interpolado. Qualquer valor desconhecido (ou ausente) cai em 'recentes'.
+    // u.id desempata para a paginação LIMIT/OFFSET ser estável entre páginas.
+    const ORDENS = {
+      recentes: 'u.criado_em DESC NULLS LAST, u.id DESC',
+      nome:     'LOWER(u.nome) ASC, u.id ASC',
+    }
+    const ordem = Object.prototype.hasOwnProperty.call(ORDENS, req.query.ordem) ? req.query.ordem : 'recentes'
+
+    // cadastrado_em = data de cadastro do USUÁRIO. a.criado_em (abaixo) é a da assinatura
+    // e sai NULL para quem não tem linha em assinaturas — por isso o alias distinto.
     const result = await pool.query(`
-      SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.role,
+      SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.bairro, u.role,
              u.tipo_dono, u.tipo_prestador, u.verificacao_status, u.aprovado_automaticamente,
-             u.referencias, u.especialidades,
+             u.referencias, u.especialidades, u.criado_em AS cadastrado_em,
              a.status, a.plano, a.tipo, a.valor_mensal, a.criado_em
       FROM usuarios u
       LEFT JOIN assinaturas a ON a.usuario_id = u.id
       WHERE u.role IN ('assinante', 'prestador', 'dono_obra', 'pintor')
-      ORDER BY u.role ASC, u.nome ASC
+      ORDER BY ${ORDENS[ordem]}
       LIMIT $1 OFFSET $2
     `, [limit, offset])
 
