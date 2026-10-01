@@ -3,6 +3,8 @@ const express = require('express')
 const cors = require('cors')
 const helmet = require('helmet')
 const rateLimit = require('express-rate-limit')
+const { ipKeyGenerator } = require('express-rate-limit')
+const jwt = require('jsonwebtoken')
 const rotasApp = require('./src/routes')
 const { pool } = require('./src/utils/supabase')
 const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, semSobreposicao } = require('./src/services/alertaService')
@@ -133,23 +135,48 @@ app.use((req, res, next) => {
   })
 })
 
+// Chave do balde global: o USUÁRIO quando a requisição traz um Bearer JWT válido, senão o IP.
+// Por IP puro, todos os aparelhos atrás do mesmo CGNAT do carrier dividiam um contador só.
+// O token é VERIFICADO com o mesmo segredo e a mesma recusa de '2fa_pendente' do middleware
+// `autenticar` — token sem assinatura válida nunca vira chave, senão bastaria inventar ids
+// para ganhar um balde novo a cada requisição. Sem consulta ao banco aqui (ativo/token_version
+// continuam sendo checados só em `autenticar`): o limiter roda antes de tudo, em toda rota.
+// ipKeyGenerator: exigido pelo express-rate-limit 8 para agrupar IPv6 por sub-rede.
+const chaveLimiterGlobal = (req) => {
+  const authHeader = req.headers.authorization
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    try {
+      const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET)
+      if (decoded.tipo !== '2fa_pendente' && decoded.id) return `usuario:${decoded.id}`
+    } catch (err) {
+      // Token inválido ou expirado: cai no IP, como requisição anônima.
+    }
+  }
+  return ipKeyGenerator(req.ip)
+}
+
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 300,
+  max: 3000,
+  keyGenerator: chaveLimiterGlobal,
   standardHeaders: true,
   legacyHeaders: false,
   message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
 }))
 
+// 30/15min contando só as FALHAS (skipSuccessfulRequests): login que deu certo não gasta o
+// balde do IP compartilhado. A adivinhação de senha por conta segue barrada pelo contador
+// por e-mail de tentativasAuth.
 app.use('/api/auth/login',    rateLimit({
-  windowMs: 15 * 60 * 1000, max: 10,
+  windowMs: 15 * 60 * 1000, max: 30,
+  skipSuccessfulRequests: true,
   message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
 }))
-// 20/h (era 5/h): usuários de celular saem por CGNAT do carrier — muitos aparelhos
+// 60/h (era 20/h, antes 5/h): usuários de celular saem por CGNAT do carrier — muitos aparelhos
 // reais compartilham o mesmo IP público, então 5/h bloqueava gente legítima. O limite
 // também era consumido pelos próprios retries que os timeouts de cadastro provocavam.
 app.use('/api/auth/cadastro', rateLimit({
-  windowMs: 60 * 60 * 1000, max: 20,
+  windowMs: 60 * 60 * 1000, max: 60,
   message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
 }))
 
@@ -164,9 +191,9 @@ app.use('/api/auth/esqueci-senha', rateLimit({
   windowMs: 60 * 60 * 1000, max: 20,
   message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
 }))
-// 20/h — não autenticada e aceita upload de arquivo (documentos de verificação).
+// 60/h (era 20/h) — não autenticada e aceita upload de arquivo (documentos de verificação).
 app.use('/api/auth/upload-verificacao', rateLimit({
-  windowMs: 60 * 60 * 1000, max: 20,
+  windowMs: 60 * 60 * 1000, max: 60,
   message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
 }))
 // 60/h — não autenticada e emite assinatura de upload do Cloudinary.
