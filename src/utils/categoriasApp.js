@@ -52,6 +52,9 @@ const CATEGORIAS_SERVICO = [
   { slug: 'pet',             rotulo: 'Pet',                emoji: '🐾' },
   { slug: 'motociclista',    rotulo: 'Motociclista',       emoji: '🏍️' },
   { slug: 'musico',          rotulo: 'Músico',             emoji: '🎸' },
+  { slug: 'churrasqueiro',   rotulo: 'Churrasqueiro',      emoji: '🍖' },
+  { slug: 'lavajato',        rotulo: 'Lava-jato',          emoji: '🧽' },
+  { slug: 'tradutor',        rotulo: 'Tradutor/intérprete', emoji: '🌐' },
   { slug: 'outros',          rotulo: 'Outros',            emoji: '➕' },
 ]
 
