@@ -161,6 +161,30 @@ const exigirNaoSuspenso = (req, res, next) => {
   next()
 }
 
+// Verificação de identidade ADIADA: o profissional pode se cadastrar sem foto do documento e
+// selfie e navegar o feed, mas só envia proposta/interesse com verificacao_status = 'aprovado'.
+// Lê direto do banco (uma linha pela PK), sem o cache de autenticar: a aprovação tem que valer
+// na hora em qualquer réplica, e estas rotas são de escrita, de baixo volume.
+// admin/aprovador nunca são barrados. verificacao_status vai no corpo para o app distinguir
+// "envie os documentos" (nao_solicitada/reprovado) de "em análise" (pendente).
+const exigirVerificado = async (req, res, next) => {
+  if (req.usuario.role === 'admin' || req.usuario.role === 'aprovador') return next()
+  try {
+    const r = await pool.query(`SELECT verificacao_status FROM usuarios WHERE id = $1`, [req.usuario.id])
+    const status = r.rows[0]?.verificacao_status || 'nao_solicitada'
+    if (status === 'aprovado') return next()
+    return res.status(403).json({
+      erro: status === 'pendente'
+        ? 'Seus documentos estão em análise. Você poderá enviar propostas assim que forem aprovados.'
+        : 'Envie a foto do seu documento e uma selfie para poder enviar propostas.',
+      codigo: 'VERIFICACAO_NECESSARIA',
+      verificacao_status: status,
+    })
+  } catch (err) {
+    return res.status(500).json({ erro: 'Erro ao verificar cadastro' })
+  }
+}
+
 const exigirAdmin = (req, res, next) => {
   if (!['admin', 'aprovador'].includes(req.usuario.role)) {
     return res.status(403).json({ erro: 'Acesso negado' })
@@ -175,4 +199,4 @@ const exigirSuperAdmin = (req, res, next) => {
   next()
 }
 
-module.exports = { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada }
+module.exports = { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirVerificado, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada }

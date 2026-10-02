@@ -798,32 +798,41 @@ const iniciarAgendador = () => {
       if (cfg.rows[0]?.valor !== 'true') return
 
       const pendentes = await pool.query(`
-        SELECT u.id, u.nome, u.email, u.push_token
+        SELECT u.id, u.nome, u.email, u.push_token, a.status AS assinatura_status
         FROM usuarios u
         JOIN assinaturas a ON a.usuario_id = u.id
         WHERE u.verificacao_status = 'pendente'
-          AND a.status = 'pendente_verificacao'
-          AND a.atualizado_em < NOW() - INTERVAL '15 seconds'
+          AND ((a.status = 'pendente_verificacao' AND a.atualizado_em < NOW() - INTERVAL '15 seconds')
+            OR (a.status <> 'pendente_verificacao' AND u.verificacao_enviada_em < NOW() - INTERVAL '15 seconds'))
       `)
       if (pendentes.rows.length === 0) return
       let aprovados = 0
       for (const p of pendentes.rows) {
-        // CLAIM primeiro: `AND status = 'pendente_verificacao'` faz a transição acontecer UMA
-        // vez só. Quem perder a corrida (outra réplica, ou este mesmo tique reexecutado) leva
-        // rowCount 0 e sai — por isso o UPDATE de usuarios, os caches e o push ficam TODOS
-        // atrás dele. Antes o push saía de novo a cada passagem.
-        const claim = await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
-          proximo_vencimento = CASE
-            WHEN tipo = 'gratuito' THEN NULL
-            WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
-            ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END,
-          marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
-         WHERE usuario_id = $1 AND status = 'pendente_verificacao'
-         RETURNING id`, [p.id])
-        if (claim.rowCount === 0) continue
+        if (p.assinatura_status === 'pendente_verificacao') {
+          // CLAIM primeiro: `AND status = 'pendente_verificacao'` faz a transição acontecer UMA
+          // vez só. Quem perder a corrida (outra réplica, ou este mesmo tique reexecutado) leva
+          // rowCount 0 e sai — por isso o UPDATE de usuarios, os caches e o push ficam TODOS
+          // atrás dele. Antes o push saía de novo a cada passagem.
+          const claim = await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
+            proximo_vencimento = CASE
+              WHEN tipo = 'gratuito' THEN NULL
+              WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
+              ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END,
+            marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
+           WHERE usuario_id = $1 AND status = 'pendente_verificacao'
+           RETURNING id`, [p.id])
+          if (claim.rowCount === 0) continue
 
-        // aprovado_automaticamente = true → idoneidade ainda não revisada (auditável no painel)
-        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
+          // aprovado_automaticamente = true → idoneidade ainda não revisada (auditável no painel)
+          await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
+        } else {
+          // Verificação ADIADA (documentos enviados depois do cadastro, POST /auth/verificacao):
+          // a assinatura não depende da verificação e não é tocada. O CLAIM é o próprio UPDATE
+          // de usuarios — `AND verificacao_status = 'pendente'` faz a transição UMA vez só.
+          const claim = await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true
+            WHERE id = $1 AND verificacao_status = 'pendente' RETURNING id`, [p.id])
+          if (claim.rowCount === 0) continue
+        }
         // Assinatura recém-ativada: limpa o cache de assinatura (middlewares/auth, TTL 30s)
         // p/ o app não cair na tela de pagamento com um `false` ainda cacheado (B72-07).
         // O bug original vinha de haver DOIS mapas e a invalidação limpar só um; hoje é um só.

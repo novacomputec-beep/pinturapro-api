@@ -349,7 +349,7 @@ const webhookPagbank = async (req, res) => {
     const [usuarioId, plano] = partes
 
     const usuarioResult = await pool.query(
-      `SELECT id, role, nome, tipo_prestador, verificacao_status FROM usuarios WHERE id = $1`, [usuarioId]
+      `SELECT id, role, nome, tipo_prestador, verificacao_status, verificacao_enviada_em FROM usuarios WHERE id = $1`, [usuarioId]
     )
     if (usuarioResult.rows.length === 0) return
 
@@ -378,6 +378,14 @@ const webhookPagbank = async (req, res) => {
       // pendente_verificacao e fora da fila do painel (que filtra verificacao_status = 'pendente').
       await ativarAssinatura(usuarioId, plano)
       console.log(`Assinatura ativada via PagBank — prestador já aprovado: ${usuarioId}, plano: ${plano}`)
+    } else if (usuario.role === 'prestador' && (usuario.verificacao_status === 'nao_solicitada'
+               || (usuario.verificacao_status === 'pendente' && usuario.verificacao_enviada_em))) {
+      // Verificação ADIADA (cadastro sem documentos): o pagamento libera o feed direto; a
+      // idoneidade é cobrada na proposta (exigirVerificado), não no acesso. Sem este ramo o
+      // profissional pagante cairia em pendente_verificacao — sem feed, e, se ainda não enviou
+      // os documentos, também na fila do painel sem nada para revisar.
+      await ativarAssinatura(usuarioId, plano)
+      console.log(`Assinatura ativada via PagBank — prestador com verificação adiada (${usuario.verificacao_status}): ${usuarioId}, plano: ${plano}`)
     } else if (usuario.role === 'prestador' || usuario.role === 'pintor' || usuario.role === 'assinante') {
       await colocarPendentVerificacao(usuarioId, plano)
       console.log(`Prestador ${usuarioId} aguardando verificação após pagamento`)
