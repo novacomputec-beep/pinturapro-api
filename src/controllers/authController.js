@@ -100,7 +100,13 @@ const cadastrar = async (req, res) => {
       return res.status(400).json({ erro: espCadastro.erro })
     }
 
-    const verificacaoStatus = role === 'prestador' ? 'pendente' : 'nao_solicitada'
+    // Verificação ADIADA: profissional que se cadastra SEM nenhuma das três fotos nasce
+    // 'nao_solicitada' — entra, vê o feed e só precisa enviar documento + selfie
+    // (POST /auth/verificacao) antes da primeira proposta/interesse (exigirVerificado).
+    // Com qualquer foto no corpo (apps antigos), o fluxo de sempre: 'pendente' + fila.
+    const semDocs = role === 'prestador'
+      && !verificacao_doc_frente_url && !verificacao_doc_verso_url && !verificacao_selfie_url
+    const verificacaoStatus = role === 'prestador' && !semDocs ? 'pendente' : 'nao_solicitada'
     const planoEscolhido = plano || 'mensal'
 
     // Janela de lançamento: prestador entra SEM pagar mas AINDA aguarda aprovação
@@ -270,7 +276,19 @@ const cadastrar = async (req, res) => {
       const valorMensal = tipo_prestador === 'pintor'
         ? (planoEscolhido === 'anual' ? 999.00 : 99.90)
         : (planoEscolhido === 'anual' ? 499.00 : 49.90)
-      if (lancamentoGratis) {
+      if (lancamentoGratis && semDocs) {
+        // Janela de lançamento + verificação adiada: não há o que aguardar, a assinatura já
+        // nasce 'ativa' (feed liberado). A idoneidade é cobrada na proposta, não aqui.
+        // tipo='gratuito' e valor_mensal REAL como no ramo abaixo, para o backfill do
+        // desligamento da janela (SQL_BACKFILL_LANCAMENTO) pegar esta linha igual às outras.
+        console.log(`[CADASTRO][${ts}] ▶ INSERT assinatura prestador GRATIS sem docs (lançamento) | usuario_id=${usuario.id} plano=${planoEscolhido} valor=${valorMensal}`)
+        await client.query(
+          `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
+           VALUES ($1, $2, $3, 'ativa', 'gratuito')`,
+          [usuario.id, planoEscolhido, valorMensal]
+        )
+        console.log(`[CADASTRO][${ts}] ✓ assinatura ativa gratuita criada (verificação adiada) | valor=${valorMensal}`)
+      } else if (lancamentoGratis) {
         // Janela de lançamento: sem paywall, MAS ainda aguarda aprovação do admin.
         // status='pendente_verificacao' → app mostra tela de verificação (não libera).
         // tipo='gratuito' → a aprovação deixa proximo_vencimento NULL (nunca expira).
@@ -386,7 +404,7 @@ const login = async (req, res) => {
 
     const result = await pool.query(
       // Mais ANTIGA primeiro: com 2+ contas e nenhum `tipo` no corpo (app antigo), é ela que entra.
-      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC',
+      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version, verificacao_status FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC',
       [emailNormalizado]
     )
 
@@ -468,7 +486,8 @@ const login = async (req, res) => {
         foto_url: usuario.foto_url || null,
         tipo_dono: usuario.tipo_dono || null,
         tipo_prestador: usuario.tipo_prestador || null,
-        boas_vindas_exibida: usuario.boas_vindas_exibida ?? false
+        boas_vindas_exibida: usuario.boas_vindas_exibida ?? false,
+        verificacao_status: usuario.verificacao_status || 'nao_solicitada'
       },
       assinatura: assinaturaResult.rows[0] || null,
       token,
@@ -486,7 +505,7 @@ const login = async (req, res) => {
 const perfil = async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, aceita_promocoes FROM usuarios WHERE id = $1',
+      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, aceita_promocoes, verificacao_status FROM usuarios WHERE id = $1',
       [req.usuario.id]
     )
     const assinaturaResult = await pool.query(

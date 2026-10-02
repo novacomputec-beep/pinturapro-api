@@ -1,7 +1,7 @@
 require('dotenv').config()
 const express = require('express')
 const router = express.Router()
-const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada } = require('../middlewares/auth')
+const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirVerificado, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada } = require('../middlewares/auth')
 const { registrarVisita } = require('../utils/visitas')
 const { pool } = require('../utils/supabase')
 const { MARCA } = require('../utils/marca')
@@ -157,6 +157,11 @@ const migracaoPronta = (async () => {
     // Auditoria de aprovação: true = aprovado pelo job automático (Modo Auto ON) sem revisão
     // de idoneidade; false = aprovado/reprovado manualmente por admin; null = legado/não tocado.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS aprovado_automaticamente BOOLEAN`)
+    // Verificação ADIADA: instante em que o profissional enviou documento + selfie DEPOIS do
+    // cadastro (POST /auth/verificacao). NULL = fluxo de sempre (documentos no cadastro) ou
+    // ainda não enviou. É o que separa os dois fluxos na aprovação, no Modo Auto e no webhook:
+    // no adiado a assinatura não depende da verificação, então aprovar não a ativa.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacao_enviada_em TIMESTAMPTZ`)
     // Tela de boas-vindas única do prestador: false = ainda não exibida; true = já dispensada (não exibir de novo).
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS boas_vindas_exibida BOOLEAN DEFAULT false`)
     // Localização do prestador no cadastro (CEP → ViaCEP/Nominatim). Base p/ distância futura.
@@ -2811,7 +2816,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
 })
 
 // POST /obras/:id/candidatura — pintor se candidata a uma obra
-router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
+router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, exigirVerificado, async (req, res) => {
   try {
     const { mensagem, valor_proposto } = req.body
     const existente = await pool.query(
@@ -4082,7 +4087,7 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
   }
 })
 
-router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, async (req, res) => {
+router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, exigirVerificado, async (req, res) => {
   try {
     const { mensagem, valor_proposto } = req.body
     const existente = await pool.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
@@ -5528,6 +5533,55 @@ router.post('/auth/upload-verificacao', upload.single('arquivo'), async (req, re
   }
 })
 
+// Verificação ADIADA: o profissional que se cadastrou sem documentos ('nao_solicitada') envia
+// aqui as URLs da foto do documento e da selfie, já subidas ao Cloudinary pelos mesmos caminhos
+// do cadastro. Vira 'pendente' e entra na fila do painel (GET /verificacao/pendentes) e no
+// Modo Auto. A assinatura NÃO é tocada: no fluxo adiado ela não depende da verificação.
+// Só sai de 'nao_solicitada' — o WHERE do UPDATE é a guarda, então duplo envio não regrava
+// documentos já em análise nem reabre um cadastro aprovado/reprovado.
+const URL_DOC_VERIFICACAO = /^https:\/\/res\.cloudinary\.com\/\S+$/
+router.post('/auth/verificacao', autenticar, async (req, res) => {
+  try {
+    const { verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url } = req.body || {}
+    const urlOk = (u) => typeof u === 'string' && u.length <= 500 && URL_DOC_VERIFICACAO.test(u)
+    if (!urlOk(verificacao_doc_frente_url) || !urlOk(verificacao_selfie_url)) {
+      return res.status(400).json({ erro: 'Envie a foto do documento e a selfie', codigo: 'DOCUMENTOS_OBRIGATORIOS' })
+    }
+    // Verso é opcional (documento de face única), mas se vier tem que ser válido.
+    if (verificacao_doc_verso_url != null && verificacao_doc_verso_url !== '' && !urlOk(verificacao_doc_verso_url)) {
+      return res.status(400).json({ erro: 'Foto do verso do documento inválida', codigo: 'DOCUMENTOS_OBRIGATORIOS' })
+    }
+
+    const r = await pool.query(
+      `UPDATE usuarios
+          SET verificacao_doc_frente_url = $2, verificacao_doc_verso_url = $3, verificacao_selfie_url = $4,
+              verificacao_status = 'pendente', verificacao_enviada_em = NOW()
+        WHERE id = $1 AND role = 'prestador' AND verificacao_status = 'nao_solicitada'
+        RETURNING verificacao_status`,
+      [req.usuario.id, verificacao_doc_frente_url, verificacao_doc_verso_url || null, verificacao_selfie_url]
+    )
+    if (r.rowCount === 0) {
+      const atual = await pool.query(`SELECT role, verificacao_status FROM usuarios WHERE id = $1`, [req.usuario.id])
+      if (atual.rows[0]?.role !== 'prestador') {
+        return res.status(403).json({ erro: 'Verificação de documentos é só para profissionais' })
+      }
+      const status = atual.rows[0].verificacao_status
+      return res.status(409).json({
+        erro: status === 'aprovado' ? 'Seu cadastro já está verificado.'
+          : status === 'pendente' ? 'Seus documentos já foram enviados e estão em análise.'
+          : 'Seu cadastro não pode receber novos documentos. Fale com o suporte.',
+        codigo: 'VERIFICACAO_JA_ENVIADA',
+        verificacao_status: status,
+      })
+    }
+    console.log(`[VERIFICACAO] documentos enviados após o cadastro | usuario_id=${req.usuario.id}`)
+    res.json({ mensagem: 'Documentos enviados. Você será avisado quando forem aprovados.', verificacao_status: 'pendente' })
+  } catch (err) {
+    console.error('Erro ao salvar verificacao:', err.message)
+    res.status(500).json({ erro: 'Erro ao enviar documentos' })
+  }
+})
+
 // Lista prestadores pendentes de verificação (admin)
 router.get('/verificacao/pendentes', autenticar, exigirAdmin, async (req, res) => {
   try {
@@ -5567,7 +5621,7 @@ router.get('/verificacao/pendentes', autenticar, exigirAdmin, async (req, res) =
 // MESMO código, sem duplicar a regra de proximo_vencimento. Devolve false se o id não existe.
 const aprovarPrestador = async (id) => {
     const usuario = await pool.query(
-      `SELECT nome, email, tipo_prestador, tipo_dono FROM usuarios WHERE id = $1`, [id]
+      `SELECT nome, email, tipo_prestador, tipo_dono, verificacao_enviada_em FROM usuarios WHERE id = $1`, [id]
     )
     if (usuario.rows.length === 0) return false
 
@@ -5575,6 +5629,11 @@ const aprovarPrestador = async (id) => {
     await pool.query(
       `UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = false WHERE id = $1`, [id]
     )
+    // Verificação ADIADA ($2 = true, documentos enviados depois do cadastro): a assinatura não
+    // depende da verificação, então aprovar só ativa a que estiver em 'pendente_verificacao'.
+    // Sem isso, quem ainda não pagou (assinatura 'pendente', fora da janela de lançamento)
+    // ganharia um período grátis só por enviar os documentos, e uma assinatura já 'ativa'
+    // teria vencimento e marcos reescritos. Fluxo de sempre ($2 = false): ativa como antes.
     await pool.query(
       `UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
         proximo_vencimento = CASE
@@ -5582,7 +5641,8 @@ const aprovarPrestador = async (id) => {
           WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
           ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END,
         marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
-       WHERE usuario_id = $1`, [id]
+       WHERE usuario_id = $1 AND (NOT $2::boolean OR status = 'pendente_verificacao')`,
+      [id, !!usuario.rows[0].verificacao_enviada_em]
     )
 
     // Assinatura acabou de virar 'ativa' — derruba o cache para o app não cair na
@@ -5720,6 +5780,11 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
     const dataFimLancamento = cfgLancamento.rows[0]?.valor || null
     const lancamentoGratis = !!dataFimLancamento && new Date(dataFimLancamento) > new Date()
 
+    // Verificação ADIADA: pintor que ainda não enviou documentos ('nao_solicitada') não tem o
+    // que copiar — a conta nova nasce no mesmo estado do cadastro sem documentos (fora da fila
+    // do painel, assinatura como no cadastro) em vez de 'pendente' sem nada para revisar.
+    const semDocs = origem.verificacao_status === 'nao_solicitada'
+
     const novo = (await client.query(
       `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade, uf,
         especialidades, anos_experiencia, tamanho_equipe, cpf_cnpj, role, ativo,
@@ -5727,7 +5792,7 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
         verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
         verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador, cep, latitude, longitude,
         logradouro, numero, complemento, bairro, foto_url)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'prestador',true,NULL,$11,$12,$13,$14,$15,'pendente',
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'prestador',true,NULL,$11,$12,$13,$14,$15,$27,
                $16,$17,$18,'reparador',$19,$20,$21,$22,$23,$24,$25,$26)
        RETURNING id, nome, role, tipo_prestador, tipo_dono`,
       [origem.nome, emailNormalizado, origem.telefone, origem.senha_hash, origem.cidade, origem.uf,
@@ -5736,11 +5801,18 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
        origem.verificacao_doc_frente_url, origem.verificacao_doc_verso_url, origem.verificacao_selfie_url,
        origem.rg, origem.rg_orgao, origem.rg_estado,
        origem.cep, origem.latitude, origem.longitude,
-       origem.logradouro, origem.numero, origem.complemento, origem.bairro, origem.foto_url]
+       origem.logradouro, origem.numero, origem.complemento, origem.bairro, origem.foto_url,
+       semDocs ? 'nao_solicitada' : 'pendente']
     )).rows[0]
 
     // Assinatura igual à do cadastro de reparador; a aprovação (abaixo) é quem ativa.
-    if (lancamentoGratis) {
+    if (lancamentoGratis && semDocs) {
+      await client.query(
+        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
+         VALUES ($1, $2, $3, 'ativa', 'gratuito')`,
+        [novo.id, planoEscolhido, valorMensal]
+      )
+    } else if (lancamentoGratis) {
       await client.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
          VALUES ($1, $2, $3, 'pendente_verificacao', 'gratuito')`,
@@ -5890,29 +5962,39 @@ router.post('/verificacao/modo-automatico', autenticar, exigirSuperAdmin, async 
     // Se ligar modo automático, aprova todos os pendentes agora
     if (ativo) {
       const pendentes = await pool.query(
-        `SELECT u.id FROM usuarios u
+        `SELECT u.id, a.status AS assinatura_status FROM usuarios u
          JOIN assinaturas a ON a.usuario_id = u.id
          WHERE u.verificacao_status = 'pendente'
-           AND a.status = 'pendente_verificacao'`
+           AND (a.status = 'pendente_verificacao' OR u.verificacao_enviada_em IS NOT NULL)`
       )
       let aprovados = 0
       for (const p of pendentes.rows) {
-        // CLAIM primeiro (mesmo padrão do cron de timeout em server.js): o
-        // `AND status = 'pendente_verificacao'` garante a transição UMA vez só, e o UPDATE de
-        // usuarios fica atrás do rowCount. Sem isso, dois toggles simultâneos (ou duas
-        // réplicas) reaprovariam o mesmo prestador.
-        const claim = await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
-          proximo_vencimento = CASE
-            WHEN tipo = 'gratuito' THEN NULL
-            WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
-            ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END,
-          marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
-         WHERE usuario_id = $1 AND status = 'pendente_verificacao'
-         RETURNING id`, [p.id])
-        if (claim.rowCount === 0) continue
+        if (p.assinatura_status === 'pendente_verificacao') {
+          // CLAIM primeiro (mesmo padrão do cron de timeout em server.js): o
+          // `AND status = 'pendente_verificacao'` garante a transição UMA vez só, e o UPDATE de
+          // usuarios fica atrás do rowCount. Sem isso, dois toggles simultâneos (ou duas
+          // réplicas) reaprovariam o mesmo prestador.
+          const claim = await pool.query(`UPDATE assinaturas SET status = 'ativa', atualizado_em = NOW(),
+            proximo_vencimento = CASE
+              WHEN tipo = 'gratuito' THEN NULL
+              WHEN plano = 'anual'   THEN GREATEST(proximo_vencimento, NOW() + INTERVAL '365 days')
+              ELSE                        GREATEST(proximo_vencimento, NOW() + INTERVAL '30 days') END,
+            marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL
+           WHERE usuario_id = $1 AND status = 'pendente_verificacao'
+           RETURNING id`, [p.id])
+          if (claim.rowCount === 0) continue
 
-        // Aprovação em lote ao ligar o Modo Auto: também é não-revisada → marca automática
-        await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
+          // Aprovação em lote ao ligar o Modo Auto: também é não-revisada → marca automática
+          await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [p.id])
+        } else {
+          // Verificação ADIADA (documentos enviados depois do cadastro): a assinatura não
+          // depende da verificação e não é tocada. O CLAIM passa a ser o próprio UPDATE de
+          // usuarios — `AND verificacao_status = 'pendente'` faz a transição UMA vez só.
+          const claim = await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true
+            WHERE id = $1 AND verificacao_status = 'pendente' RETURNING id`, [p.id])
+          if (claim.rowCount === 0) continue
+        }
+        invalidarCachesUsuario(p.id)
 
         // Notificação push — mesmo tratamento do /verificacao/:id/aprovar. Sem token: arma
         // aviso_aprovacao_em = NULL (= aviso pendente, enviado quando o token for registrado);
@@ -6234,7 +6316,7 @@ router.post('/upload/dono', autenticar,              upload.single('arquivo'), u
 // ============================================================
 // CANDIDATURAS
 // ============================================================
-router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
+router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, exigirVerificado,async (req, res) => {
   try {
     // D83: este caminho gravava valor_oferta/mensagem_oferta, colunas que NENHUM leitor de
     // preço usa (contrato, finalizadas, minhas, meus-contratos leem valor_proposto/
