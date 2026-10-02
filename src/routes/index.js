@@ -5540,6 +5540,7 @@ router.post('/auth/upload-verificacao', upload.single('arquivo'), async (req, re
 // Só sai de 'nao_solicitada' — o WHERE do UPDATE é a guarda, então duplo envio não regrava
 // documentos já em análise nem reabre um cadastro aprovado/reprovado.
 const URL_DOC_VERIFICACAO = /^https:\/\/res\.cloudinary\.com\/\S+$/
+const REFERENCIAS_VERIFICACAO_MAX = 2
 router.post('/auth/verificacao', autenticar, async (req, res) => {
   try {
     const { verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url } = req.body || {}
@@ -5552,13 +5553,35 @@ router.post('/auth/verificacao', autenticar, async (req, res) => {
       return res.status(400).json({ erro: 'Foto do verso do documento inválida', codigo: 'DOCUMENTOS_OBRIGATORIOS' })
     }
 
+    // PIX e referências: no cadastro sem documentos são opcionais (o cadastro nunca os
+    // validou); a cobrança é AQUI, junto com documento e selfie. Mesmos campos e mesmas
+    // colunas do cadastro (pix_reembolso VARCHAR(200); referencias = JSON de { nome, telefone }).
+    const { pix_reembolso, referencias } = req.body || {}
+    const pix = typeof pix_reembolso === 'string' ? pix_reembolso.trim() : ''
+    if (!pix || pix.length > 200) {
+      return res.status(400).json({ erro: 'Informe a chave PIX', codigo: 'PIX_OBRIGATORIO' })
+    }
+    const texto = (v) => typeof v === 'string' ? v.trim() : ''
+    const refs = Array.isArray(referencias)
+      ? referencias.map(r => ({ nome: texto(r?.nome), telefone: texto(r?.telefone) }))
+      : []
+    if (refs.length < 1 || refs.length > REFERENCIAS_VERIFICACAO_MAX
+        || refs.some(r => !r.nome || !r.telefone || r.nome.length > 200 || r.telefone.length > 30)) {
+      return res.status(400).json({
+        erro: `Informe de 1 a ${REFERENCIAS_VERIFICACAO_MAX} referências, cada uma com nome e telefone`,
+        codigo: 'REFERENCIAS_OBRIGATORIAS',
+      })
+    }
+
     const r = await pool.query(
       `UPDATE usuarios
           SET verificacao_doc_frente_url = $2, verificacao_doc_verso_url = $3, verificacao_selfie_url = $4,
+              pix_reembolso = $5, referencias = $6,
               verificacao_status = 'pendente', verificacao_enviada_em = NOW()
         WHERE id = $1 AND role = 'prestador' AND verificacao_status = 'nao_solicitada'
         RETURNING verificacao_status`,
-      [req.usuario.id, verificacao_doc_frente_url, verificacao_doc_verso_url || null, verificacao_selfie_url]
+      [req.usuario.id, verificacao_doc_frente_url, verificacao_doc_verso_url || null, verificacao_selfie_url,
+       pix, JSON.stringify(refs)]
     )
     if (r.rowCount === 0) {
       const atual = await pool.query(`SELECT role, verificacao_status FROM usuarios WHERE id = $1`, [req.usuario.id])
