@@ -188,6 +188,10 @@ const migracaoPronta = (async () => {
     // POST /auth/push-token junto com o token. NULL = app antigo que ainda não reporta —
     // tratado como iOS pelo envio de promoções (só Android recebe promoção). Colunas aditivas.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS push_plataforma TEXT CHECK (push_plataforma IN ('ios', 'android'))`)
+    // Plataforma do aparelho deduzida do User-Agent/X-Platform em login, cadastro e
+    // GET /auth/perfil (utils/plataforma.js). NULL = ainda não determinada. Independe de
+    // push_plataforma, que só existe para quem concedeu push. Coluna aditiva.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plataforma TEXT CHECK (plataforma IN ('ios', 'android'))`)
     // Opt-out de push promocional (PATCH /auth/preferencias). Default true: quem nunca mexeu recebe.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS aceita_promocoes BOOLEAN NOT NULL DEFAULT true`)
     // Histórico dos envios feitos pelo painel admin (POST /admin/notificacoes/enviar): uma

@@ -6,6 +6,7 @@ const { registrarTentativa, limparTentativas } = require('../utils/tentativasAut
 const { MARCA } = require('../utils/marca')
 const { validarEspecialidades } = require('../utils/especialidades')
 const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, multiplasContasAtivo } = require('../utils/tipoConta')
+const { registrarPlataforma } = require('../utils/plataforma')
 const nodemailer = require('nodemailer')
 const crypto = require('crypto')
 
@@ -332,6 +333,7 @@ const cadastrar = async (req, res) => {
     const token = gerarToken(usuario)
     console.log(`[CADASTRO][${ts}] ✓ commit ok — token gerado | usuario_id=${usuario.id} — respondendo 201`)
     res.status(201).json({ usuario, token, assinatura })
+    registrarPlataforma(usuario.id, req)
 
     // E-mails especiais de teste — aprovação automática imediata (configurar via EMAILS_ESPECIAIS no Railway)
     const emailsEspeciais = (process.env.EMAILS_ESPECIAIS || '')
@@ -474,6 +476,7 @@ const login = async (req, res) => {
     )
 
     const token = gerarToken(usuario)
+    registrarPlataforma(usuario.id, req)
 
     res.json({
       usuario: {
@@ -514,6 +517,7 @@ const perfil = async (req, res) => {
        ORDER BY CASE status WHEN 'ativa' THEN 1 WHEN 'pendente' THEN 2 ELSE 3 END, criado_em DESC LIMIT 1`,
       [req.usuario.id]
     )
+    registrarPlataforma(req.usuario.id, req)
     res.json({ usuario: result.rows[0], assinatura: assinaturaResult.rows[0] || null })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar perfil' })
