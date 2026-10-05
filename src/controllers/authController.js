@@ -7,6 +7,7 @@ const { MARCA } = require('../utils/marca')
 const { validarEspecialidades } = require('../utils/especialidades')
 const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, multiplasContasAtivo } = require('../utils/tipoConta')
 const { registrarPlataforma } = require('../utils/plataforma')
+const { municipioExiste } = require('../utils/geoBusca')
 const nodemailer = require('nodemailer')
 const crypto = require('crypto')
 
@@ -565,6 +566,24 @@ const atualizarPerfil = async (req, res) => {
     const mexeUf = Object.prototype.hasOwnProperty.call(req.body, 'uf')
     if (!mexeNome && !mexeTelefone && !mexeCidade && !mexeUf && !mexeEspecialidades) {
       return res.status(400).json({ erro: 'Nenhum campo para atualizar' })
+    }
+
+    // cidade precisa ser um município brasileiro de verdade (dataset IBGE em memória,
+    // src/data/municipios-br.json — a mesma lista do SeletorLocalidade do app). Antes
+    // qualquer texto não-vazio era gravado, e cidade inexistente tira o usuário do feed e
+    // dos alertas por cidade. Só valida quando vem valor: chave ausente, null ou em branco
+    // continuam significando "não mexe". Com uf no body o par cidade+uf tem de existir;
+    // sem uf basta o nome existir em algum estado.
+    if (mexeCidade && cidade != null && (typeof cidade !== 'string' || cidade.trim())) {
+      const ufInformada = typeof uf === 'string' ? uf.trim() : ''
+      if (typeof cidade !== 'string' || !municipioExiste(cidade, ufInformada)) {
+        return res.status(400).json({
+          erro: ufInformada
+            ? 'Cidade inválida: selecione um município existente no estado informado'
+            : 'Cidade inválida: selecione um município brasileiro existente',
+          codigo: 'cidade_invalida'
+        })
+      }
     }
 
     // Os flags booleanos governam se a coluna é tocada: com a chave ausente o CASE
