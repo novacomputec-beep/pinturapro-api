@@ -119,6 +119,17 @@ const coordsDeCidade = (cidade, uf, pais = 'BR') => {
   return { nome: unico.nome, uf: unico.uf, lat: unico.lat, lng: unico.lng }
 }
 
+// O nome é um município do dataset? Com UF: o par cidade+uf precisa existir (não cai para
+// homônimo de outro estado, ao contrário de coordsDeCidade). Sem UF: basta o nome existir
+// em algum estado — nome ambíguo (null em porCidade) também é município de verdade.
+const municipioExiste = (cidade, uf) => {
+  const chave = normalizar(cidade)
+  if (!chave) return false
+  const ufNorm = String(uf || '').trim().toUpperCase()
+  if (ufNorm) return porCidadeUf.has(`${chave}|${ufNorm}`)
+  return porCidade.has(chave)
+}
+
 // Resolve, ANTES de montar a query, dois conceitos que precisam continuar separados:
 //
 //   escopo — a cidade/uf que define PERTENCIMENTO (o filtro textual e a metade
@@ -276,4 +287,4 @@ const montarFiltroGeo = ({ alias, modo, raio, escopo, ancora, params }) => {
   return { sql: null, meta: meta(modo, false, null) }
 }
 
-module.exports = { coordsDeCidade, resolverBusca, montarFiltroGeo, MUNICIPIOS }
+module.exports = { coordsDeCidade, municipioExiste, resolverBusca, montarFiltroGeo, MUNICIPIOS }
