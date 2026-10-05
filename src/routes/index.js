@@ -192,6 +192,9 @@ const migracaoPronta = (async () => {
     // GET /auth/perfil (utils/plataforma.js). NULL = ainda não determinada. Independe de
     // push_plataforma, que só existe para quem concedeu push. Coluna aditiva.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plataforma TEXT CHECK (plataforma IN ('ios', 'android'))`)
+    // Quando usuarios.plataforma foi gravada/alterada pela última vez (usuarios.atualizado_em
+    // não é mantido). NULL = plataforma nunca gravada, ou gravada antes desta coluna existir.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plataforma_em TIMESTAMPTZ`)
     // Opt-out de push promocional (PATCH /auth/preferencias). Default true: quem nunca mexeu recebe.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS aceita_promocoes BOOLEAN NOT NULL DEFAULT true`)
     // Histórico dos envios feitos pelo painel admin (POST /admin/notificacoes/enviar): uma

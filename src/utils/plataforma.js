@@ -20,12 +20,13 @@ const detectarPlataforma = (req) => {
 
 // Grava usuarios.plataforma SÓ quando foi detectada: null/desconhecida nunca sobrescreve o
 // valor já gravado. Não espera nem propaga erro — é telemetria, não pode atrasar nem
-// derrubar login/cadastro/perfil. IS DISTINCT FROM evita reescrever a linha a cada GET.
+// derrubar login/cadastro/perfil. IS DISTINCT FROM evita reescrever a linha a cada GET —
+// por isso plataforma_em marca a última MUDANÇA de valor, não o último acesso.
 const registrarPlataforma = (usuarioId, req) => {
   const plataforma = detectarPlataforma(req)
   if (!plataforma || !usuarioId) return
   pool.query(
-    `UPDATE usuarios SET plataforma = $1 WHERE id = $2 AND plataforma IS DISTINCT FROM $1`,
+    `UPDATE usuarios SET plataforma = $1, plataforma_em = NOW() WHERE id = $2 AND plataforma IS DISTINCT FROM $1`,
     [plataforma, usuarioId]
   ).catch(err => console.error('Erro ao registrar plataforma:', err.message))
 }
