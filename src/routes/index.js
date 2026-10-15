@@ -1089,6 +1089,23 @@ const migracaoPronta = (async () => {
     // Índice PARCIAL só do que a rede de segurança procura: falhas ainda repescáveis. A PK
     // cobre o lookup por demanda; este evita varrer as linhas 'enviado' (a maioria).
     await client.query(`CREATE INDEX IF NOT EXISTS push_entregas_falha_idx ON push_entregas (tipo, demanda_id, ultima_tentativa_em) WHERE resultado = 'falha' AND tentativas < 3`)
+    // E-mail de RESERVA do aviso "nova obra / novo serviço" (alertaService.enviarEmailsNovaDemanda):
+    // vai ao prestador elegível que NÃO tem push_token (e por isso nunca entra em push_entregas).
+    // Uma linha = um e-mail reivindicado para uma demanda; o INSERT ... ON CONFLICT DO NOTHING
+    // acontece ANTES do envio, então a repetição do caminho (claim que rodou de novo, boot,
+    // réplica) nunca manda o mesmo e-mail duas vezes. created_at é a base do teto diário.
+    // Sem FK em demanda_id: polimórfico (obras OU reparos, por tipo), como push_entregas.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS email_alertas (
+        tipo       TEXT NOT NULL CHECK (tipo IN ('obra', 'reparo')),
+        demanda_id UUID NOT NULL,
+        usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (tipo, demanda_id, usuario_id)
+      )
+    `)
+    // Teto diário conta por created_at: índice só nessa coluna.
+    await client.query(`CREATE INDEX IF NOT EXISTS email_alertas_created_at_idx ON email_alertas (created_at)`)
     // Livro-caixa de eventos do webhook PagBank. Serve a DOIS propósitos:
     //   1) idempotência — o INSERT ... ON CONFLICT DO NOTHING vira CLAIM atômico (mesmo
     //      idioma de contratosController): quem grava a linha processa o evento.

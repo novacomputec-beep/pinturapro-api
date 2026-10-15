@@ -18,6 +18,10 @@ const { apresentacaoReparo, apresentacaoObra } = require('../utils/categoriasApp
 const SQL_CIDADE_PRESTADOR = sqlNormalizarCidade('u.cidade')
 // Sem ciclo: middlewares/auth só importa jsonwebtoken e utils/supabase, nunca este serviço.
 const { invalidarCacheAssinatura } = require('../middlewares/auth')
+// E-mail de reserva do aviso de demanda nova (enviarEmailsNovaDemanda). brevoService só
+// importa o SDK e utils/marca — sem ciclo. Direto no Brevo (e não em emailService) para o
+// erro de cada envio chegar aqui e ser logado por destinatário.
+const { enviarEmail: enviarEmailBrevo } = require('./brevoService')
 
 const expo = new Expo()
 
@@ -481,6 +485,152 @@ const notificarOfertaAumentadaReparo = async (reparoId) => {
   })
 }
 
+// E-mail de RESERVA do aviso "nova obra / novo serviço": vai ao prestador ELEGÍVEL que não tem
+// push_token — o mesmo público do broadcast, menos a exigência de token (e mais a de e-mail).
+// Consulta SEPARADA da do push (broadcastPaginado continua intocado): os predicados abaixo
+// ESPELHAM os de lá (role, tipo_prestador, assinatura ativa, não suspenso, cidade+uf dobrados,
+// categoria × especialidades) e mudar um sem o outro deve saltar aos olhos.
+//
+// Quando roda: SÓ depois do COMMIT do claim (dispararPushNovoComClaim), fire-and-forget, fora de
+// qualquer transação, nunca no caminho "oferta aumentada". Erro aqui é apenas logado — jamais
+// sobe nem desfaz o carimbo do push.
+// Idempotência: INSERT em email_alertas (UNIQUE tipo+demanda+usuário) ANTES do envio; só quem
+// o RETURNING devolve recebe. Repetição do caminho (boot, réplica, claim que rodou de novo)
+// encontra a linha e não reenvia.
+// Teto diário (EMAIL_ALERTAS_TETO_DIA) contado por created_at no dia de São Paulo. A contagem e
+// o INSERT são dois statements, então duas réplicas no mesmo instante podem estourar o teto por
+// algumas unidades — é rede de segurança contra disparo em massa, não cota exata.
+// Um e-mail POR destinatário (nunca vários `to` num envio: exporia os endereços entre si),
+// sequencial, erro de um não derruba os demais.
+const EMAIL_ALERTAS_TETO_DIA = 250
+const EMAIL_ALERTAS_URL_BAIXAR = 'https://protudo.app.br/baixar'
+const LADOS_EMAIL = {
+  obras:   { tipo: 'obra',   tipoPrestador: 'pintor',    comCategoria: false, mensagem: mensagemNovaObra,   aba: 'Obras' },
+  reparos: { tipo: 'reparo', tipoPrestador: 'reparador', comCategoria: true,  mensagem: mensagemNovoReparo, aba: 'Serviços' },
+}
+const escaparHtml = (s) => String(s ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
+const htmlEmailNovaDemanda = ({ nome, titulo, corpo, aba }) => `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
+          <h1 style="color: #0a0a0a; margin: 0;">${MARCA}</h1>
+        </div>
+        <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
+          <h2>Olá, ${escaparHtml(nome)}!</h2>
+          <p><strong>${escaparHtml(titulo)}</strong></p>
+          <p>${escaparHtml(corpo)}</p>
+          <p style="text-align: center; margin: 30px 0;">
+            <a href="${EMAIL_ALERTAS_URL_BAIXAR}" style="background: #E8833A; color: #000; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold;">Ver no app ${MARCA}</a>
+          </p>
+          <p>O pedido está na aba ${aba}</p>
+          <p style="color: #666; font-size: 13px;">Ative as notificações do app ProTudo para receber pedidos na hora</p>
+        </div>
+      </div>
+    `
+
+// Assunto + HTML de UM e-mail, exatamente como o envio de produção monta: assunto = título do
+// push, corpo = texto do push, primeiro nome do destinatário. Exportada para o teste de
+// renderização poder mandar a mesma coisa que a produção mandaria.
+const montarEmailNovaDemanda = (tabela, demanda, demandaId, nome) => {
+  const { titulo, corpo } = LADOS_EMAIL[tabela].mensagem(demanda, demandaId)
+  return {
+    assunto: titulo,
+    html: htmlEmailNovaDemanda({ nome: nome?.split(' ')[0] || 'profissional', titulo, corpo, aba: LADOS_EMAIL[tabela].aba }),
+  }
+}
+
+// Um envio ao Brevo não pode prender a fila: 10 s e o destinatário vira 'falha' (só log).
+const EMAIL_ALERTAS_TIMEOUT_MS = 10000
+const comTimeout = (promessa, ms, rotulo) => {
+  let timer
+  const estouro = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${rotulo}: timeout após ${ms} ms`)), ms) })
+  return Promise.race([promessa, estouro]).finally(() => clearTimeout(timer))
+}
+
+// Fase 1 (banco): elegíveis + teto + claim, num client DEDICADO que é devolvido ao pool no
+// finally — ANTES de qualquer chamada ao Brevo. Devolve o que a fase 2 precisa, ou null.
+const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
+  const client = await pool.connect()
+  try {
+    const dem = await client.query(`SELECT titulo, cidade, uf, categoria FROM ${tabela} WHERE id = $1`, [demandaId])
+    if (dem.rows.length === 0) return null
+    const demanda = dem.rows[0]
+    const cidade = normalizar(demanda.cidade)
+    const uf = String(demanda.uf || '').trim().toUpperCase()
+    if (!cidade || !uf) return null // mesmo silêncio do push: sem lugar não há alvo
+    const categoria = lado.comCategoria ? demanda.categoria : null
+
+    // Elegíveis SEM token (espelho de broadcastPaginado, trocando push_token IS NOT NULL por
+    // IS NULL e exigindo e-mail). Ordem por u.id como lá, para o teto cortar de forma estável.
+    const elegiveis = await client.query(
+      `SELECT u.id, u.nome, u.email
+       FROM usuarios u
+       JOIN assinaturas a ON a.usuario_id = u.id
+       WHERE u.role = 'prestador' AND u.tipo_prestador = $1
+         AND ${SQL_ASSINATURA_ATIVA}
+         AND u.push_token IS NULL
+         AND NULLIF(btrim(u.email), '') IS NOT NULL
+         AND u.suspenso_em IS NULL
+         AND NULLIF(btrim(u.cidade), '') IS NOT NULL
+         AND NULLIF(btrim(u.uf), '')     IS NOT NULL
+         AND ${SQL_CIDADE_PRESTADOR} = $2
+         AND upper(btrim(u.uf)) = $3
+         AND ($4::text IS NULL OR (cardinality(u.especialidades) > 0 AND ($4::text = 'outros' OR $4::text = ANY(u.especialidades))))
+       ORDER BY u.id`,
+      [lado.tipoPrestador, cidade, uf, categoria]
+    )
+    if (elegiveis.rows.length === 0) return null
+
+    const hoje = await client.query(
+      `SELECT count(*)::int AS n FROM email_alertas
+        WHERE created_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')`
+    )
+    const restante = EMAIL_ALERTAS_TETO_DIA - hoje.rows[0].n
+    if (restante <= 0) {
+      console.warn(`[EmailAlerta] ${lado.tipo} ${demandaId}: teto diário de ${EMAIL_ALERTAS_TETO_DIA} e-mails atingido — ${elegiveis.rows.length} elegível(is) sem aviso`)
+      return null
+    }
+    const candidatos = elegiveis.rows.slice(0, restante)
+
+    // Claim por destinatário ANTES de enviar: só quem entrou agora recebe.
+    const claim = await client.query(
+      `INSERT INTO email_alertas (tipo, demanda_id, usuario_id)
+       SELECT $1, $2, x FROM unnest($3::uuid[]) AS x
+       ON CONFLICT (tipo, demanda_id, usuario_id) DO NOTHING
+       RETURNING usuario_id`,
+      [lado.tipo, demandaId, candidatos.map(c => c.id)]
+    )
+    const reivindicados = new Set(claim.rows.map(r => r.usuario_id))
+    const destinatarios = candidatos.filter(c => reivindicados.has(c.id))
+    return { demanda, destinatarios, elegiveis: elegiveis.rows.length, cortados: elegiveis.rows.length - candidatos.length }
+  } finally {
+    client.release()
+  }
+}
+
+const enviarEmailsNovaDemanda = async (tabela, demandaId) => {
+  const lado = LADOS_EMAIL[tabela]
+  if (!lado) return
+  try {
+    const fase1 = await reivindicarEmailsNovaDemanda(tabela, demandaId, lado)
+    if (!fase1 || fase1.destinatarios.length === 0) return
+    // Daqui em diante NENHUM client do pool está preso: só Brevo, um envio por vez.
+    let enviados = 0, falhos = 0
+    for (const d of fase1.destinatarios) {
+      try {
+        const { assunto, html } = montarEmailNovaDemanda(tabela, fase1.demanda, demandaId, d.nome)
+        await comTimeout(enviarEmailBrevo({ para: d.email, assunto, html }), EMAIL_ALERTAS_TIMEOUT_MS, 'Brevo')
+        enviados++
+      } catch (err) {
+        falhos++
+        console.error(`[EmailAlerta] falha ao enviar | ${lado.tipo} ${demandaId} | usuário ${d.id}:`, err.message)
+      }
+    }
+    console.log(`[EmailAlerta] ${lado.tipo} ${demandaId} | elegíveis sem token: ${fase1.elegiveis} | enviados: ${enviados} | falhos: ${falhos} | cortados pelo teto: ${fase1.cortados}`)
+  } catch (err) {
+    console.error(`[EmailAlerta] erro em ${tabela} ${demandaId}:`, err.message)
+  }
+}
+
 // Push para o DONO com o desfecho da análise da obra (a obra é a única vertical que passa
 // por aprovação; reparo publica direto). Segue o padrão já usado no aviso de novo candidato
 // (SELECT juntando usuarios pelo criado_por — ver /candidaturas em routes/index.js).
@@ -540,6 +690,10 @@ const dispararPushNovoComClaim = async (tabela, id, notificar, { criadoPor = nul
     await notificar(id)
     await client.query(`UPDATE ${tabela} SET push_novo_enviado_em = NOW() WHERE id = $1`, [id])
     await client.query('COMMIT')
+    // E-mail de reserva a quem não tem token: só DEPOIS do COMMIT, fire-and-forget, com o pool
+    // (nunca este client). Falha ali é só log — o carimbo acima já está gravado e fica.
+    enviarEmailsNovaDemanda(tabela, id).catch(err =>
+      console.error(`[EmailAlerta] erro inesperado em ${tabela} ${id}:`, err.message))
     return true
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
@@ -1462,6 +1616,9 @@ module.exports = {
   notificarOfertaAumentadaReparo,
   notificarDonoSobreAnaliseObra,
   dispararPushNovoComClaim,
+  enviarEmailsNovaDemanda,
+  montarEmailNovaDemanda,
+  EMAIL_ALERTAS_TETO_DIA,
   enviarPushNovoPendente,
   verificarObrasExpirando,
   verificarObrasComBaixoEngajamento,
