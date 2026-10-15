@@ -16,6 +16,7 @@ const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrl
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
+const { montarResumoCanal } = require('../utils/canalResumo')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
 // America/Sao_Paulo. Compartilhado com alertaService, que reconstrói expira_em nos crons.
@@ -7818,6 +7819,59 @@ router.get('/admin/especialidades-resumo', autenticar, exigirAdmin, async (req, 
   } catch (err) {
     console.error('[admin/especialidades-resumo]', err.message)
     res.status(500).json({ erro: 'Erro ao resumir especialidades' })
+  }
+})
+
+// GET /admin/canal/resumo?cidade=Patos de Minas&uf=MG&servicos=1&obras=1 — texto pronto
+// para o canal de WhatsApp com os pedidos ABERTOS (status 'aberta', aprovados, não
+// expirados) da cidade: { texto, total }. Montagem em utils/canalResumo (mais recentes
+// primeiro, no máximo 15; total = quantos existem antes do corte).
+// cidade é obrigatória e dobrada com a regra de utils/localidade; uf é opcional e compara em
+// caixa alta, como o broadcast. servicos/obras: '0' desliga o lado; ausente = ligado.
+// A consulta seleciona SÓ o que o canal mostra (título, categoria, bairro, valor, data):
+// nome do dono, telefone, endereço, referência e descrição nunca saem daqui.
+router.get('/admin/canal/resumo', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const cidadeBruta = typeof req.query.cidade === 'string' ? req.query.cidade.trim() : ''
+    if (!cidadeBruta) return res.status(400).json({ erro: 'cidade é obrigatória' })
+    const cidade = normalizar(cidadeBruta)
+    const ufBruta = typeof req.query.uf === 'string' ? req.query.uf.trim().toUpperCase() : ''
+    const uf = ufBruta || null
+    const ligado = (v) => v !== '0' && v !== 'false'
+    const comServicos = ligado(req.query.servicos)
+    const comObras = ligado(req.query.obras)
+
+    const itens = []
+    if (comServicos) {
+      const r = await pool.query(
+        `SELECT 'reparo' AS tipo, r.titulo, r.categoria, r.bairro, r.valor_estimado AS valor, r.criado_em
+           FROM reparos r
+          WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()
+            AND ${sqlNormalizarCidade('r.cidade')} = $1
+            AND ($2::text IS NULL OR upper(btrim(r.uf)) = $2)
+          ORDER BY r.criado_em DESC
+          LIMIT 200`,
+        [cidade, uf]
+      )
+      itens.push(...r.rows)
+    }
+    if (comObras) {
+      const o = await pool.query(
+        `SELECT 'obra' AS tipo, o.titulo, o.categoria, o.bairro, o.valor, o.criado_em
+           FROM obras o
+          WHERE o.status = 'aberta' AND o.status_aprovacao = 'aprovada' AND o.expira_em > NOW()
+            AND ${sqlNormalizarCidade('o.cidade')} = $1
+            AND ($2::text IS NULL OR upper(btrim(o.uf)) = $2)
+          ORDER BY o.criado_em DESC
+          LIMIT 200`,
+        [cidade, uf]
+      )
+      itens.push(...o.rows)
+    }
+    res.json(montarResumoCanal({ cidade: cidadeBruta, itens }))
+  } catch (err) {
+    console.error('[admin/canal/resumo]', err.message)
+    res.status(500).json({ erro: 'Erro ao montar resumo do canal' })
   }
 })
 
