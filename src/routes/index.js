@@ -17,6 +17,7 @@ const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { montarResumoCanal } = require('../utils/canalResumo')
+const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
 // America/Sao_Paulo. Compartilhado com alertaService, que reconstrói expira_em nos crons.
@@ -1107,6 +1108,16 @@ const migracaoPronta = (async () => {
     `)
     // Teto diário conta por created_at: índice só nessa coluna.
     await client.query(`CREATE INDEX IF NOT EXISTS email_alertas_created_at_idx ON email_alertas (created_at)`)
+    // Convite para o canal do WhatsApp (services/conviteCanalService): UMA linha por e-mail
+    // (PK em minúsculas), gravada ANTES do envio — 'enviado' ou 'falha'; linha existente
+    // bloqueia repetição para sempre. Backfill da campanha de 15/10/2026 feito por script.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS convites_canal (
+        email      TEXT PRIMARY KEY,
+        status     TEXT NOT NULL CHECK (status IN ('enviado', 'falha')),
+        enviado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
     // Livro-caixa de eventos do webhook PagBank. Serve a DOIS propósitos:
     //   1) idempotência — o INSERT ... ON CONFLICT DO NOTHING vira CLAIM atômico (mesmo
     //      idioma de contratosController): quem grava a linha processa o evento.
@@ -7872,6 +7883,31 @@ router.get('/admin/canal/resumo', autenticar, exigirAdmin, async (req, res) => {
   } catch (err) {
     console.error('[admin/canal/resumo]', err.message)
     res.status(500).json({ erro: 'Erro ao montar resumo do canal' })
+  }
+})
+
+// GET /admin/canal/convites/pendentes — profissionais ativos cujo e-mail ainda não recebeu o
+// convite do canal: { total, lista: [{ nome, email }] }, e-mail MASCARADO (ju***@dominio).
+router.get('/admin/canal/convites/pendentes', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const pendentes = await listarPendentesConviteCanal()
+    res.json({ total: pendentes.length, lista: pendentes.map(p => ({ nome: p.nome, email: mascararEmail(p.email) })) })
+  } catch (err) {
+    console.error('[admin/canal/convites/pendentes]', err.message)
+    res.status(500).json({ erro: 'Erro ao listar convites pendentes' })
+  }
+})
+
+// POST /admin/canal/convites/enviar — manda o convite aos pendentes, sequencial, 10 s por
+// envio, no máximo CONVITES_TETO_DIA linhas por dia: { enviados, falhas, ... }. Síncrono de
+// propósito (o admin espera o resultado); cada e-mail já fica reivindicado antes do envio,
+// então dois cliques não duplicam.
+router.post('/admin/canal/convites/enviar', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    res.json(await enviarConvitesPendentes())
+  } catch (err) {
+    console.error('[admin/canal/convites/enviar]', err.message)
+    res.status(500).json({ erro: 'Erro ao enviar convites' })
   }
 })
 
