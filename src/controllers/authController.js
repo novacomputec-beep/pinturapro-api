@@ -360,15 +360,17 @@ const cadastrar = async (req, res) => {
       }
     })
 
-    // Convite para o canal do WhatsApp — só profissional (reparador ou pintor/construtor),
+    // Convite para o canal do WhatsApp — só profissional (reparador ou pintor/construtor)
+    // da cidade do canal (o serviço compara cidade/UF e pula quem está fora, sem gravar),
     // DEPOIS do COMMIT e da resposta 201, fire-and-forget: o serviço nunca lança (grava
     // convites_canal antes de enviar; e-mail já convidado não recebe de novo), e qualquer
     // erro fica só no log — o cadastro já está feito e respondido.
+    // uf vem do body (o RETURNING do INSERT não o devolve); é o mesmo valor gravado acima.
     if (usuario.role === 'prestador' || usuario.role === 'pintor') {
       setImmediate(async () => {
         try {
           const { enviarConviteCanal } = require('../services/conviteCanalService')
-          const resultado = await enviarConviteCanal(usuario.email, usuario.nome)
+          const resultado = await enviarConviteCanal(usuario.email, usuario.nome, usuario.cidade, uf)
           console.log(`[ConviteCanal] cadastro ${usuario.id}: ${resultado}`)
         } catch (err) {
           console.error('[ConviteCanal] erro no convite pós-cadastro:', err.message)
