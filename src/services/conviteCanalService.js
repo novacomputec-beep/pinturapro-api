@@ -9,11 +9,20 @@
 // Chamadores: authController (fire-and-forget depois do COMMIT do cadastro de profissional)
 // e as rotas /admin/canal/convites/* (lista pendentes; envia em lote, sequencial, com teto
 // diário). O e-mail é o mesmo da campanha de 15/10/2026 (cabeçalho laranja, botão verde).
+//
+// O canal é de UMA cidade (CIDADE_CANAL): só profissional cuja cidade/UF de cadastro casa
+// com ela recebe o convite — mesma dobra do broadcast (utils/localidade: normalizar() no JS,
+// sqlNormalizarCidade() no SQL, UF em caixa alta). Quem está fora é PULADO antes do claim:
+// não ganha linha em convites_canal, então pode ser convidado depois se a cidade dele
+// ganhar canal (ou se a dele mudar para a do canal).
 const { pool } = require('../utils/supabase')
 const { enviarEmail } = require('./brevoService')
 const { MARCA } = require('../utils/marca')
+const { normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 
 const URL_CANAL_WHATSAPP = 'https://whatsapp.com/channel/0029Vb9BoWT17En0RAOw8r1I'
+// Cidade atendida pelo canal acima. Mudar o canal = mudar os dois juntos.
+const CIDADE_CANAL = { cidade: 'Patos de Minas', uf: 'MG' }
 const ASSUNTO_CONVITE = `📋 Siga o canal do ${MARCA} no WhatsApp`
 const CONVITES_TETO_DIA = 250
 const CONVITE_TIMEOUT_MS = 10000
@@ -25,6 +34,12 @@ const normalizarEmail = (e) => String(e || '').trim().toLowerCase()
 const emailPlausivel = (e) => /^[^\s@]+@[^\s@]+$/.test(e)
 // "ju***@gmail.com" — para listas do admin; nunca o endereço inteiro.
 const mascararEmail = (e) => String(e || '').replace(/^(.{2}).*(@.*)$/, '$1***$2')
+// Cidade/UF do profissional casam com a do canal? Mesma comparação do broadcast
+// (alertaService.broadcastPaginado): cidade dobrada por normalizar(), UF em caixa alta,
+// e os DOIS obrigatórios — sem cidade ou sem UF não há alvo.
+const cidadeDoCanal = (cidade, uf) =>
+  normalizar(cidade) === normalizar(CIDADE_CANAL.cidade) &&
+  String(uf || '').trim().toUpperCase() === CIDADE_CANAL.uf
 
 const htmlConviteCanal = (nome) => `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -48,11 +63,14 @@ const comTimeout = (promessa, ms, rotulo) => {
   return Promise.race([promessa, estouro]).finally(() => clearTimeout(timer))
 }
 
-// Devolve 'enviado' | 'falha' | 'ja_convidado' | 'invalido'. Nunca lança: erro de banco ou
-// de envio vira log + resultado. Claim ANTES do envio (ver cabeçalho).
-const enviarConviteCanal = async (email, nome) => {
+// Devolve 'enviado' | 'falha' | 'ja_convidado' | 'invalido' | 'fora_da_cidade'. Nunca lança:
+// erro de banco ou de envio vira log + resultado. Claim ANTES do envio (ver cabeçalho).
+// cidade/uf: os do cadastro do profissional. Fora da cidade do canal → sai ANTES do claim,
+// sem linha em convites_canal (ver cabeçalho).
+const enviarConviteCanal = async (email, nome, cidade, uf) => {
   const e = normalizarEmail(email)
   if (!emailPlausivel(e)) return 'invalido'
+  if (!cidadeDoCanal(cidade, uf)) return 'fora_da_cidade'
   try {
     const claim = await pool.query(
       `INSERT INTO convites_canal (email, status) VALUES ($1, 'enviado')
@@ -75,19 +93,24 @@ const enviarConviteCanal = async (email, nome) => {
   }
 }
 
-// Profissionais ATIVOS (reparador + pintor/construtor), não suspensos, qualquer cidade, cujo
-// e-mail (minúsculo) ainda não tem linha em convites_canal. Um por e-mail (fica o cadastro
-// mais antigo), como na campanha original. Não olha assinatura.
+// Profissionais ATIVOS (reparador + pintor/construtor), não suspensos, da CIDADE DO CANAL
+// (cidade dobrada por sqlNormalizarCidade + UF em caixa alta, como o broadcast), cujo e-mail
+// (minúsculo) ainda não tem linha em convites_canal. Um por e-mail (fica o cadastro mais
+// antigo), como na campanha original. Não olha assinatura. Devolve cidade/uf junto para o
+// envio em lote repetir a checagem (enviarConviteCanal) sem segunda consulta.
 const listarPendentesConviteCanal = async () => {
   const r = await pool.query(`
-    SELECT DISTINCT ON (lower(btrim(u.email))) lower(btrim(u.email)) AS email, u.nome
+    SELECT DISTINCT ON (lower(btrim(u.email))) lower(btrim(u.email)) AS email, u.nome, u.cidade, u.uf
       FROM usuarios u
      WHERE u.role IN ('prestador', 'pintor')
        AND u.ativo = true
        AND u.suspenso_em IS NULL
        AND NULLIF(btrim(u.email), '') IS NOT NULL
+       AND ${sqlNormalizarCidade('u.cidade')} = $1
+       AND upper(btrim(u.uf)) = $2
        AND NOT EXISTS (SELECT 1 FROM convites_canal c WHERE c.email = lower(btrim(u.email)))
-     ORDER BY lower(btrim(u.email)), u.criado_em ASC`)
+     ORDER BY lower(btrim(u.email)), u.criado_em ASC`,
+    [normalizar(CIDADE_CANAL.cidade), CIDADE_CANAL.uf])
   return r.rows
 }
 
@@ -102,20 +125,24 @@ const enviarConvitesPendentes = async () => {
   )
   const restante = Math.max(0, CONVITES_TETO_DIA - hoje.rows[0].n)
   const alvos = pendentes.slice(0, restante)
-  const r = { enviados: 0, falhas: 0, invalidos: 0, ja_convidados: 0, cortados_pelo_teto: pendentes.length - alvos.length }
+  // fora_da_cidade fica no resultado por honestidade: a lista já vem filtrada por cidade no
+  // SQL, então é zero no caminho normal — só sobe se as duas dobras (SQL e JS) divergirem.
+  const r = { enviados: 0, falhas: 0, invalidos: 0, ja_convidados: 0, fora_da_cidade: 0, cortados_pelo_teto: pendentes.length - alvos.length }
   for (const a of alvos) {
-    const res = await enviarConviteCanal(a.email, a.nome)
+    const res = await enviarConviteCanal(a.email, a.nome, a.cidade, a.uf)
     if (res === 'enviado') r.enviados++
     else if (res === 'falha') r.falhas++
     else if (res === 'invalido') r.invalidos++
+    else if (res === 'fora_da_cidade') r.fora_da_cidade++
     else r.ja_convidados++
   }
-  console.log(`[ConviteCanal] lote | pendentes: ${pendentes.length} | enviados: ${r.enviados} | falhas: ${r.falhas} | inválidos: ${r.invalidos} | já convidados: ${r.ja_convidados} | cortados pelo teto: ${r.cortados_pelo_teto}`)
+  console.log(`[ConviteCanal] lote | pendentes: ${pendentes.length} | enviados: ${r.enviados} | falhas: ${r.falhas} | inválidos: ${r.invalidos} | já convidados: ${r.ja_convidados} | fora da cidade: ${r.fora_da_cidade} | cortados pelo teto: ${r.cortados_pelo_teto}`)
   return r
 }
 
 module.exports = {
   URL_CANAL_WHATSAPP,
+  CIDADE_CANAL,
   CONVITES_TETO_DIA,
   enviarConviteCanal,
   listarPendentesConviteCanal,
