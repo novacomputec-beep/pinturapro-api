@@ -16,6 +16,7 @@ const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrl
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
+const { moderarDemanda, avisarModeracao, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
@@ -2115,7 +2116,19 @@ router.post('/obras/dono', autenticar, async (req, res) => {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos de obra podem cadastrar obras' })
     }
-    const { titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
+    const { categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, horas_para_expirar, tags, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
+    // Anti-anúncio (utils/moderacaoDemanda) — mesma regra do POST /reparos/dono: anúncio de
+    // venda com valor zero/vazio é 400; contato (telefone, @, link, "chame no zap") vira
+    // "[contato removido]" ANTES de gravar. Aviso ao moderador fire-and-forget nos dois casos.
+    // Fica ANTES do teto de demandas e de qualquer ida à rede, como o guard de título do reparo.
+    const moderacao = moderarDemanda({ titulo: req.body.titulo, descricao: req.body.descricao, valor })
+    if (moderacao.rejeitar || moderacao.sanitizado.length > 0) {
+      avisarModeracao({ lado: 'obra', dono: req.usuario, original: { titulo: req.body.titulo, descricao: req.body.descricao, valor }, resultado: moderacao })
+    }
+    if (moderacao.rejeitar) {
+      return res.status(400).json({ erro: MENSAGEM_REJEICAO, codigo: CODIGO_REJEICAO })
+    }
+    const { titulo, descricao } = moderacao
     // Antes de qualquer trabalho (geocoding, ufDeCidade): recusar cedo não gasta rede à toa.
     const limiteObras = await limiteDemandasAtingido('obras', req.usuario.id, client_request_id)
     if (limiteObras.atingido) {
@@ -3484,13 +3497,25 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar serviços' })
     }
-    const { titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
+    const { categoria, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
     // titulo — presença apenas (ausente/null/''/só espaços): reparos.titulo é NOT NULL e
     // sem este guard o INSERT estourava em 500. Sem teto de tamanho e sem trim ao gravar —
-    // o trim aqui é só para o teste de "só espaços".
-    if (typeof titulo !== 'string' || !titulo.trim()) {
+    // o trim aqui é só para o teste de "só espaços". Lê o body cru: a moderação abaixo só
+    // sanitiza string, então o tipo é checado aqui primeiro.
+    if (typeof req.body.titulo !== 'string' || !req.body.titulo.trim()) {
       return res.status(400).json({ erro: 'Título é obrigatório' })
     }
+    // Anti-anúncio (utils/moderacaoDemanda): palavra de venda + valor zero/vazio → 400 com a
+    // mensagem que o app já exibe; contato no texto vira "[contato removido]" antes do INSERT.
+    // Aviso ao moderador fire-and-forget nos dois casos. Antes de categoria/teto/rede.
+    const moderacao = moderarDemanda({ titulo: req.body.titulo, descricao: req.body.descricao, valor: valor_estimado })
+    if (moderacao.rejeitar || moderacao.sanitizado.length > 0) {
+      avisarModeracao({ lado: 'reparo', dono: req.usuario, original: { titulo: req.body.titulo, descricao: req.body.descricao, valor: valor_estimado }, resultado: moderacao })
+    }
+    if (moderacao.rejeitar) {
+      return res.status(400).json({ erro: MENSAGEM_REJEICAO, codigo: CODIGO_REJEICAO })
+    }
+    const { titulo, descricao } = moderacao
     // cidade — presença apenas, mesmo estilo do titulo. Sem cidade a linha era gravada e o
     // broadcast pulava em silêncio ("Reparo sem cidade/uf"): ninguém era avisado.
     if (typeof cidade !== 'string' || !cidade.trim()) {
