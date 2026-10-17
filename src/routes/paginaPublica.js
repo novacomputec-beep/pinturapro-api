@@ -49,6 +49,8 @@ const WORDMARK_DATA_URI = `data:image/png;base64,${fs.readFileSync(path.join(__d
 // Laranja da marca (o mesmo --or do site) sobre texto escuro.
 const LARANJA = '#F5891F'
 const TEXTO_ESCURO = '#111'
+// Verde do valor (R$ …) na arte aprovada.
+const VERDE = '#1A9A55'
 
 // Mesmo alfabeto de gerar_codigo_publico() (migração em routes/index.js).
 const RE_CODIGO = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{5}$/
@@ -137,9 +139,9 @@ const CSS = `
   .banner{background:#0a0a0a;padding:16px;display:flex;align-items:center;justify-content:center}
   .banner img{height:64px;width:auto;max-width:100%}
   main{max-width:520px;margin:0 auto;padding:20px 16px 32px}
-  .kicker{display:inline-block;font-size:12px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:${TEXTO_ESCURO};background:${LARANJA};border-radius:6px;padding:4px 8px}
-  .kicker.off{color:#fff;background:#777}
-  h1{font-size:22px;line-height:1.25;margin:6px 0 16px;color:#111}
+  .kicker{text-align:center;font-size:12px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:${LARANJA}}
+  .kicker.off{color:#777}
+  h1{text-align:center;font-size:22px;line-height:1.25;margin:6px 0 16px;color:#111}
   .card{background:#fff;border-radius:14px;padding:18px 16px;box-shadow:0 2px 10px rgba(0,0,0,.06)}
   .card.off{background:#e6e6e6;color:#666;box-shadow:none}
   .chip{display:inline-block;background:#fff1e6;color:#9a4a0a;border-radius:999px;padding:4px 10px;font-size:13px;font-weight:700}
@@ -148,7 +150,7 @@ const CSS = `
   .card.off .titulo{text-decoration:line-through;color:#555}
   .linha{font-size:15px;color:#444;margin:4px 0}
   .card.off .linha{color:#777}
-  .valor{font-size:24px;font-weight:800;color:#111;margin-top:12px}
+  .valor{font-size:24px;font-weight:800;color:${VERDE};margin-top:12px}
   .faixa{margin-top:14px;border:2px dashed ${LARANJA};border-radius:10px;padding:10px 12px;color:#9a4a0a;font-weight:700;font-size:14px;background:#fff8f2}
   .btn{display:block;text-align:center;background:${LARANJA};color:${TEXTO_ESCURO};font-weight:800;font-size:17px;text-decoration:none;border-radius:12px;padding:15px 16px;margin:20px 0 12px}
   .aba{text-align:center;color:#555;font-size:14px}
