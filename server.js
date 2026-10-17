@@ -6,6 +6,7 @@ const rateLimit = require('express-rate-limit')
 const { ipKeyGenerator } = require('express-rate-limit')
 const jwt = require('jsonwebtoken')
 const rotasApp = require('./src/routes')
+const paginaPublica = require('./src/routes/paginaPublica')
 const { pool } = require('./src/utils/supabase')
 const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarDemandasSemResposta, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
@@ -224,6 +225,10 @@ app.use('/api/pagamentos/webhook-pagbank', express.raw({ type: '*/*', limit: '1m
 const LIMITE_CORPO_JSON = '64kb'
 app.use(express.json({ limit: LIMITE_CORPO_JSON }))
 app.use(express.urlencoded({ extended: true, limit: LIMITE_CORPO_JSON }))
+// Página pública da demanda (/p/<codigo>): FORA de /api de propósito — link curto para o
+// WhatsApp, sem JWT, só leitura das colunas seguras. Passa pelo helmet, CORS, shedding e o
+// limiter global como tudo o mais (montado depois deles).
+app.use('/p', paginaPublica)
 app.use('/api', rotasApp)
 
 // Health check
