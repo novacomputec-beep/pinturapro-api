@@ -433,6 +433,45 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS lembretes_enviados INTEGER NOT NULL DEFAULT 0`)
     await client.query(`UPDATE obras   SET lembretes_enviados = 1 WHERE lembrete_enviado_em IS NOT NULL AND lembretes_enviados = 0`)
     await client.query(`UPDATE reparos SET lembretes_enviados = 1 WHERE lembrete_enviado_em IS NOT NULL AND lembretes_enviados = 0`)
+    // Código público curto da demanda — a página /p/<codigo> (routes/paginaPublica.js, montada
+    // em server.js fora de /api) resolve por ele. 5 caracteres de um alfabeto sem ambiguidade
+    // (sem 0/O, 1/I/L), único nas DUAS tabelas para a rota não precisar de prefixo de lado.
+    // gerar_codigo_publico() sorteia e repete enquanto o código existir em obras OU reparos;
+    // vira DEFAULT das duas colunas (cobre todo INSERT: dono, painel, futuros caminhos). O
+    // backfill roda LINHA A LINHA (um UPDATE por id), não num UPDATE só: dentro de um mesmo
+    // statement as linhas já atualizadas não são visíveis à função, e um sorteio repetido
+    // estouraria o índice único. Índice único por tabela criado DEPOIS do backfill.
+    // Corrida residual: dois INSERTs no mesmo instante com o mesmo sorteio (1 em ~28 milhões)
+    // → violação do índice no segundo, que vira o 500 que o app já retenta. Sem retry aqui.
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS codigo_publico TEXT`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS codigo_publico TEXT`)
+    await client.query(`
+      CREATE OR REPLACE FUNCTION gerar_codigo_publico() RETURNS text LANGUAGE plpgsql VOLATILE AS $fn$
+      DECLARE
+        alfabeto CONSTANT text := '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
+        codigo text;
+      BEGIN
+        LOOP
+          codigo := '';
+          FOR i IN 1..5 LOOP
+            codigo := codigo || substr(alfabeto, 1 + floor(random() * length(alfabeto))::int, 1);
+          END LOOP;
+          EXIT WHEN NOT EXISTS (SELECT 1 FROM reparos WHERE codigo_publico = codigo)
+               AND NOT EXISTS (SELECT 1 FROM obras   WHERE codigo_publico = codigo);
+        END LOOP;
+        RETURN codigo;
+      END
+      $fn$
+    `)
+    for (const tabela of ['obras', 'reparos']) {
+      const semCodigo = await client.query(`SELECT id FROM ${tabela} WHERE codigo_publico IS NULL`)
+      for (const { id } of semCodigo.rows) {
+        await client.query(`UPDATE ${tabela} SET codigo_publico = gerar_codigo_publico() WHERE id = $1 AND codigo_publico IS NULL`, [id])
+      }
+      if (semCodigo.rowCount > 0) console.log(`[migration] ${tabela}: ${semCodigo.rowCount} código(s) público(s) gerado(s)`)
+      await client.query(`ALTER TABLE ${tabela} ALTER COLUMN codigo_publico SET DEFAULT gerar_codigo_publico()`)
+      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${tabela}_codigo_publico_idx ON ${tabela} (codigo_publico)`)
+    }
     // Backfill ÚNICO: toda demanda que já existia quando a coluna nasceu foi anunciada pelo
     // código antigo (push imediato na criação/aprovação) — marca como enviada para a rede de
     // segurança (enviarPushNovoPendente) nunca reanunciá-la. Roda UMA vez: o marcador em
