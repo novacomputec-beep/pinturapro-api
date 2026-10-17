@@ -504,6 +504,16 @@ const notificarOfertaAumentadaReparo = async (reparoId) => {
 // sequencial, erro de um não derruba os demais.
 const EMAIL_ALERTAS_TETO_DIA = 250
 const EMAIL_ALERTAS_URL_BAIXAR = 'https://protudo.app.br/baixar'
+// Página pública da demanda (routes/paginaPublica.js, via redirect do site): o botão principal
+// do e-mail aponta para ela quando a linha tem codigo_publico; sem código (linha anterior à
+// migração, ou vazio), o botão volta a ser o de sempre ("Ver no app", página /baixar).
+const EMAIL_ALERTAS_URL_PAGINA_PUBLICA = 'https://protudo.app.br/p/'
+const RE_CODIGO_PUBLICO = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{5}$/
+const botaoEmailDemanda = (codigoPublico) => {
+  const codigo = String(codigoPublico || '').trim().toUpperCase()
+  if (RE_CODIGO_PUBLICO.test(codigo)) return { url: `${EMAIL_ALERTAS_URL_PAGINA_PUBLICA}${codigo}`, texto: 'Ver o pedido' }
+  return { url: EMAIL_ALERTAS_URL_BAIXAR, texto: `Ver no app ${MARCA}` }
+}
 // colunaValor: lida como `valor` no SELECT da demanda — mensagemNovaObra/NovoReparo a ignoram;
 // o lembrete "ainda aberto" (lembrarDemandasSemResposta) a mostra no corpo.
 const LADOS_EMAIL = {
@@ -511,7 +521,7 @@ const LADOS_EMAIL = {
   reparos: { tipo: 'reparo', tipoPrestador: 'reparador', comCategoria: true,  mensagem: mensagemNovoReparo, aba: 'Serviços', colunaValor: 'valor_estimado' },
 }
 const escaparHtml = (s) => String(s ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
-const htmlEmailNovaDemanda = ({ nome, titulo, corpo, aba }) => `
+const htmlEmailNovaDemanda = ({ nome, titulo, corpo, aba, botao = botaoEmailDemanda(null) }) => `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
           <h1 style="color: #0a0a0a; margin: 0;">${MARCA}</h1>
@@ -521,7 +531,7 @@ const htmlEmailNovaDemanda = ({ nome, titulo, corpo, aba }) => `
           <p><strong>${escaparHtml(titulo)}</strong></p>
           <p>${escaparHtml(corpo)}</p>
           <p style="text-align: center; margin: 30px 0;">
-            <a href="${EMAIL_ALERTAS_URL_BAIXAR}" style="background: #E8833A; color: #000; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold;">Ver no app ${MARCA}</a>
+            <a href="${botao.url}" style="background: #E8833A; color: #000; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold;">${escaparHtml(botao.texto)}</a>
           </p>
           <p>O pedido está na aba ${aba}</p>
           <p style="color: #666; font-size: 13px;">Ative as notificações do app ProTudo para receber pedidos na hora</p>
@@ -538,7 +548,7 @@ const montarEmailNovaDemanda = (tabela, demanda, demandaId, nome, lado = LADOS_E
   const { titulo, corpo } = lado.mensagem(demanda, demandaId)
   return {
     assunto: titulo,
-    html: htmlEmailNovaDemanda({ nome: nome?.split(' ')[0] || 'profissional', titulo, corpo, aba: lado.aba }),
+    html: htmlEmailNovaDemanda({ nome: nome?.split(' ')[0] || 'profissional', titulo, corpo, aba: lado.aba, botao: botaoEmailDemanda(demanda.codigo_publico) }),
   }
 }
 
@@ -555,7 +565,7 @@ const comTimeout = (promessa, ms, rotulo) => {
 const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
   const client = await pool.connect()
   try {
-    const dem = await client.query(`SELECT titulo, cidade, uf, categoria, ${lado.colunaValor} AS valor FROM ${tabela} WHERE id = $1`, [demandaId])
+    const dem = await client.query(`SELECT titulo, cidade, uf, categoria, ${lado.colunaValor} AS valor, codigo_publico FROM ${tabela} WHERE id = $1`, [demandaId])
     if (dem.rows.length === 0) return null
     const demanda = dem.rows[0]
     const cidade = normalizar(demanda.cidade)
