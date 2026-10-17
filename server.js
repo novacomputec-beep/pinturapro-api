@@ -7,7 +7,7 @@ const { ipKeyGenerator } = require('express-rate-limit')
 const jwt = require('jsonwebtoken')
 const rotasApp = require('./src/routes')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarDemandasSemResposta, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -734,6 +734,7 @@ const iniciarAgendador = () => {
   const INTERVALO_PROXIMIDADE  = 10 * 60 * 1000
   const INTERVALO_CRONOMETRO   = 60 * 1000
   const INTERVALO_AUTO_ENCERRAR = 5 * 60 * 1000
+  const INTERVALO_LEMBRETE     = 10 * 60 * 1000
 
   setTimeout(() => {
     verificarObrasComBaixoEngajamento()
@@ -775,6 +776,9 @@ const iniciarAgendador = () => {
   // com a cadência mais fina; o custo é apenas o SELECT/UPDATE dos dois lados, indexado e
   // quase sempre vazio.
   setInterval(() => { autoEncerrarPendentes() }, INTERVALO_AUTO_ENCERRAR)
+  // Lembrete único "ainda aberto" (12h+ sem interesse, 08–20h SP): de 10 em 10 min, como a
+  // proximidade. Fora do warm-up: a janela de 12h não precisa de disparo a cada deploy.
+  setInterval(() => { lembrarDemandasSemResposta() }, INTERVALO_LEMBRETE)
   // De hora em hora como o job de expiração: as bandas de 12h e 6h não existem numa cadência
   // diária — um tick por dia pularia as duas mais urgentes.
   setInterval(() => { notificarAssinaturasProximasVencimento() }, 60 * 60 * 1000)
@@ -848,7 +852,7 @@ const iniciarAgendador = () => {
     }
   }, 20 * 1000)
 
-  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
+  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | lembrete demanda sem resposta (12h, 08-20h SP): ${INTERVALO_LEMBRETE / 60000}min | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
 }
 
 rotasApp.migracaoPronta

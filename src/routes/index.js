@@ -420,6 +420,12 @@ const migracaoPronta = (async () => {
     // chama ao terminar o último upload); sem backfill, sem default, sem constraint.
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS push_novo_enviado_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS push_novo_enviado_em TIMESTAMPTZ`)
+    // Lembrete ÚNICO "ainda aberto" (alertaService.lembrarDemandasSemResposta): demanda
+    // publicada há 12h+ sem nenhum interesse recebe um segundo aviso aos mesmos elegíveis do
+    // broadcast original. NULL = nunca lembrada; o cron grava NOW() no próprio claim. Sem
+    // backfill: demanda antiga que ainda estiver sem resposta é lembrada uma vez, de propósito.
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS lembrete_enviado_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS lembrete_enviado_em TIMESTAMPTZ`)
     // Backfill ÚNICO: toda demanda que já existia quando a coluna nasceu foi anunciada pelo
     // código antigo (push imediato na criação/aprovação) — marca como enviada para a rede de
     // segurança (enviarPushNovoPendente) nunca reanunciá-la. Roda UMA vez: o marcador em
@@ -1109,6 +1115,38 @@ const migracaoPronta = (async () => {
     `)
     // Teto diário conta por created_at: índice só nessa coluna.
     await client.query(`CREATE INDEX IF NOT EXISTS email_alertas_created_at_idx ON email_alertas (created_at)`)
+    // O e-mail do lembrete "ainda aberto" (lembrarDemandasSemResposta) reusa esta tabela como
+    // claim, com tipo próprio ('lembrete_obra'/'lembrete_reparo'): com o tipo original, quem
+    // recebeu o e-mail de demanda nova ficaria para sempre bloqueado pelo UNIQUE e o lembrete
+    // não chegaria a ninguém. O CHECK nasceu inline só com os dois tipos originais, com nome
+    // gerado pelo Postgres (em prod: email_alertas_tipo_check). Em vez de confiar no nome:
+    // lê em pg_constraint TODO CHECK da tabela que cite a coluna tipo, pula se algum já
+    // aceita os novos tipos e, senão, derruba cada um pelo nome REAL e recria. Passo isolado
+    // num SAVEPOINT com catch só de log: a migração é UMA transação, e sem o savepoint um
+    // erro aqui deixaria a transação abortada e derrubaria tudo o que vem depois (o lembrete
+    // sem o CHECK novo só perde o e-mail de reserva — o push segue normal).
+    try {
+      await client.query('SAVEPOINT chk_tipo_email')
+      const chksTipoEmail = await client.query(
+        `SELECT conname, pg_get_constraintdef(oid) AS def
+           FROM pg_constraint
+          WHERE conrelid = 'email_alertas'::regclass AND contype = 'c'
+            AND pg_get_constraintdef(oid) ~ '\\mtipo\\M'`
+      )
+      const jaAceita = chksTipoEmail.rows.some(r => /lembrete_obra/.test(r.def) && /lembrete_reparo/.test(r.def))
+      if (!jaAceita) {
+        for (const r of chksTipoEmail.rows) {
+          await client.query(`ALTER TABLE email_alertas DROP CONSTRAINT IF EXISTS ${client.escapeIdentifier(r.conname)}`)
+        }
+        await client.query(`ALTER TABLE email_alertas ADD CONSTRAINT email_alertas_tipo_check
+                            CHECK (tipo IN ('obra', 'reparo', 'lembrete_obra', 'lembrete_reparo'))`)
+        console.log(`[migration] email_alertas: CHECK de tipo recriado (removidos: ${chksTipoEmail.rows.map(r => r.conname).join(', ') || 'nenhum'})`)
+      }
+      await client.query('RELEASE SAVEPOINT chk_tipo_email')
+    } catch (err) {
+      await client.query('ROLLBACK TO SAVEPOINT chk_tipo_email').catch(() => {})
+      console.error('[migration] email_alertas: falha ao ajustar CHECK de tipo (segue sem; e-mail do lembrete pode ficar bloqueado):', err.message)
+    }
     // Convite para o canal do WhatsApp (services/conviteCanalService): UMA linha por e-mail
     // (PK em minúsculas), gravada ANTES do envio — 'enviado' ou 'falha'; linha existente
     // bloqueia repetição para sempre. Backfill da campanha de 15/10/2026 feito por script.
