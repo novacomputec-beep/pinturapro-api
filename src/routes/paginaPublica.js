@@ -32,6 +32,11 @@ const router = express.Router()
 const PACOTE_ANDROID = 'com.pinturapro.app'
 const URL_PLAY = `https://play.google.com/store/apps/details?id=${PACOTE_ANDROID}`
 const URL_APP_STORE = 'https://apps.apple.com/br/app/id6807459250'
+// O app ainda NÃO registra URL scheme/deep link. Enquanto isso, o botão laranja é "Baixar o
+// ProTudo" e vai à LOJA por aparelho; a linha abaixo dele orienta quem já tem o app. Quando o
+// build com scheme sair, virar APP_TEM_SCHEME para true: o botão volta a "Abrir no app" com o
+// intent: do Android (pacote + fallback para a Play Store) — o construtor fica pronto abaixo.
+const APP_TEM_SCHEME = false
 // Sem scheme próprio: action MAIN + category LAUNCHER abre a atividade principal do pacote se
 // instalado; senão o Chrome segue S.browser_fallback_url (Play Store).
 const URL_INTENT_ANDROID = `intent:#Intent;package=${PACOTE_ANDROID};action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;S.browser_fallback_url=${encodeURIComponent(URL_PLAY)};end`
@@ -95,12 +100,23 @@ const tempoRestante = (expira_em) => {
   if (h >= 1) return `faltam ${h}h${min % 60 ? ` ${min % 60}min` : ''}`
   return `faltam ${min} min`
 }
-// Link do botão por aparelho. iOS não tem fallback de loja num link só, então vai direto à App
-// Store (como pedido). Desktop/outros: Play Store na web.
+// Loja por aparelho: iOS → App Store; Android e desktop/outros → Play Store (na web).
+const linkLoja = (ua = '') => (/iPhone|iPad|iPod/i.test(ua) ? URL_APP_STORE : URL_PLAY)
+// Link do botão. Com scheme: Android abre o app via intent: (fallback na Play Store); iOS não
+// tem fallback de loja num link só, então vai à App Store. Sem scheme: sempre a loja.
 const linkAbrirApp = (ua = '') => {
-  if (/iPhone|iPad|iPod/i.test(ua)) return URL_APP_STORE
-  if (/Android/i.test(ua)) return URL_INTENT_ANDROID
-  return URL_PLAY
+  if (APP_TEM_SCHEME && /Android/i.test(ua)) return URL_INTENT_ANDROID
+  return linkLoja(ua)
+}
+// Texto do botão e linha de apoio abaixo dele, por variante. `aba` = 'Serviços' | 'Obras' na
+// aberta; null na encerrada ("veja os pedidos abertos").
+const botaoEApoio = ({ ua, aba }) => {
+  const href = linkAbrirApp(ua)
+  const ondeVer = aba ? `veja na aba ${aba}` : 'veja os pedidos abertos'
+  if (APP_TEM_SCHEME) {
+    return { href, texto: aba ? `Abrir no app ${MARCA}` : 'Ver pedidos abertos no app', apoio: aba ? `O pedido está na aba ${aba}` : null }
+  }
+  return { href, texto: `Baixar o ${MARCA}`, apoio: `Já tem o app? Abra o ${MARCA} e ${ondeVer}` }
 }
 
 const CSS = `
@@ -137,7 +153,7 @@ const badgesLojas = () => `
         <a class="loja" href="${URL_APP_STORE}" rel="noopener"> <span><small>BAIXAR NA</small>App Store</span></a>
       </div>`
 
-const paginaHtml = ({ og, kicker, kickerOff, heading, card, botao, aba, base }) => `<!doctype html>
+const paginaHtml = ({ og, kicker, kickerOff, heading, card, botao, base }) => `<!doctype html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
@@ -160,7 +176,7 @@ const paginaHtml = ({ og, kicker, kickerOff, heading, card, botao, aba, base }) 
     <h1>${escapar(heading)}</h1>
     ${card}
     <a class="btn" href="${botao.href}">${escapar(botao.texto)}</a>
-    ${aba ? `<p class="aba">O pedido está na aba ${escapar(aba)}</p>` : ''}
+    ${botao.apoio ? `<p class="aba">${escapar(botao.apoio)}</p>` : ''}
     ${badgesLojas()}
     <footer>Nome, telefone e endereço do cliente só aparecem no app, depois que vocês combinarem.</footer>
   </main>
@@ -185,8 +201,7 @@ const renderAberta = ({ lado, demanda, base, url, ua }) => {
       <div class="valor">${escapar(valor || 'Valor a combinar')}</div>
       ${demanda.interesses === 0 ? '<div class="faixa">Ninguém respondeu ainda — chegue primeiro!</div>' : ''}
     </div>`,
-    botao: { href: linkAbrirApp(ua), texto: `Abrir no app ${MARCA}` },
-    aba: lado.aba,
+    botao: botaoEApoio({ ua, aba: lado.aba }),
   })
 }
 
@@ -205,8 +220,7 @@ const renderEncerrada = ({ lado, demanda, base, url, ua }) => {
       <div class="titulo">${escapar(titulo)}</div>
       ${cidade ? `<div class="linha">📍 ${escapar(cidade)}</div>` : ''}
     </div>`,
-    botao: { href: linkAbrirApp(ua), texto: 'Ver pedidos abertos no app' },
-    aba: null,
+    botao: botaoEApoio({ ua, aba: null }),
   })
 }
 
@@ -235,4 +249,4 @@ router.get('/:codigo', async (req, res) => {
 
 module.exports = router
 // Só para teste/dry-run (render sem servidor): não são API pública do módulo.
-module.exports._interno = { buscarDemanda, renderAberta, renderEncerrada, linkAbrirApp, RE_CODIGO }
+module.exports._interno = { buscarDemanda, renderAberta, renderEncerrada, linkAbrirApp, botaoEApoio, RE_CODIGO, APP_TEM_SCHEME }
