@@ -734,7 +734,7 @@ const iniciarAgendador = () => {
   const INTERVALO_PROXIMIDADE  = 10 * 60 * 1000
   const INTERVALO_CRONOMETRO   = 60 * 1000
   const INTERVALO_AUTO_ENCERRAR = 5 * 60 * 1000
-  const INTERVALO_LEMBRETE     = 10 * 60 * 1000
+  const INTERVALO_LEMBRETE     = 5 * 60 * 1000
 
   setTimeout(() => {
     verificarObrasComBaixoEngajamento()
@@ -776,8 +776,10 @@ const iniciarAgendador = () => {
   // com a cadência mais fina; o custo é apenas o SELECT/UPDATE dos dois lados, indexado e
   // quase sempre vazio.
   setInterval(() => { autoEncerrarPendentes() }, INTERVALO_AUTO_ENCERRAR)
-  // Lembrete único "ainda aberto" (12h+ sem interesse, 08–20h SP): de 10 em 10 min, como a
-  // proximidade. Fora do warm-up: a janela de 12h não precisa de disparo a cada deploy.
+  // Lembretes "ainda aberto" em fatias pela janela da demanda (W/2 única; diária; semanal →
+  // diária na última semana; 08–20h SP nas repetidas): de 5 em 5 min, como os claims de
+  // cronômetro — a fatia de W=1h cai em 30 min e não pode esperar 10. Fora do warm-up: a
+  // fatia fica devida até acabar, então o próximo tique a pega.
   setInterval(() => { lembrarDemandasSemResposta() }, INTERVALO_LEMBRETE)
   // De hora em hora como o job de expiração: as bandas de 12h e 6h não existem numa cadência
   // diária — um tick por dia pularia as duas mais urgentes.
@@ -852,7 +854,7 @@ const iniciarAgendador = () => {
     }
   }, 20 * 1000)
 
-  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | lembrete demanda sem resposta (12h, 08-20h SP): ${INTERVALO_LEMBRETE / 60000}min | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
+  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | lembrete demanda sem resposta (W/2 | diário | semanal→diário, 08-20h SP): ${INTERVALO_LEMBRETE / 60000}min | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
 }
 
 rotasApp.migracaoPronta
