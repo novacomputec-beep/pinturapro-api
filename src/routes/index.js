@@ -7965,7 +7965,7 @@ router.get('/admin/canal/resumo', autenticar, exigirAdmin, async (req, res) => {
     const itens = []
     if (comServicos) {
       const r = await pool.query(
-        `SELECT 'reparo' AS tipo, r.titulo, r.categoria, r.bairro, r.valor_estimado AS valor, r.criado_em
+        `SELECT 'reparo' AS tipo, r.titulo, r.categoria, r.bairro, r.valor_estimado AS valor, r.criado_em, r.codigo_publico
            FROM reparos r
           WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()
             AND ${sqlNormalizarCidade('r.cidade')} = $1
@@ -7978,7 +7978,7 @@ router.get('/admin/canal/resumo', autenticar, exigirAdmin, async (req, res) => {
     }
     if (comObras) {
       const o = await pool.query(
-        `SELECT 'obra' AS tipo, o.titulo, o.categoria, o.bairro, o.valor, o.criado_em
+        `SELECT 'obra' AS tipo, o.titulo, o.categoria, o.bairro, o.valor, o.criado_em, o.codigo_publico
            FROM obras o
           WHERE o.status = 'aberta' AND o.status_aprovacao = 'aprovada' AND o.expira_em > NOW()
             AND ${sqlNormalizarCidade('o.cidade')} = $1
