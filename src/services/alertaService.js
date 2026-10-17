@@ -638,28 +638,44 @@ const enviarEmailsNovaDemanda = async (tabela, demandaId, ladoOverride = null) =
   }
 }
 
-// Lembrete ÚNICO "ainda aberto" — demanda publicada há LEMBRETE_IDADE_HORAS+ sem NENHUM
-// interesse (candidaturas / interesse_reparos, qualquer status) recebe um segundo aviso aos
+// Lembretes "ainda aberto" — demanda aberta, aprovada, sem match, não expirada e sem NENHUM
+// interesse (candidaturas / interesse_reparos, qualquer status) recebe avisos repetidos aos
 // MESMOS elegíveis do broadcast de demanda nova: mesmo broadcastPaginado (tipoPrestador,
 // cidade+uf dobrados, categoria × especialidades no lado reparo), mesmo data.tipo/id para o
 // toque abrir o mesmo detalhe (lembrete: true distingue a origem, como oferta_aumentada), e o
 // mesmo e-mail de reserva a quem não tem token (enviarEmailsNovaDemanda com tipo próprio).
 //
-// CLAIM atômico (mesmo desenho dos crons de 5 min): o UPDATE grava lembrete_enviado_em = NOW()
-// e devolve via RETURNING só as linhas que ELE reivindicou — duas réplicas ou dois tiques não
-// lembram a mesma demanda. Claim ANTES do envio e nunca desfeito: o lembrete é UMA vez por
-// demanda por definição; falha de envio fica no log, sem repescagem.
-// Só entre LEMBRETE_HORA_INICIO e LEMBRETE_HORA_FIM (hora de São Paulo, no próprio WHERE):
-// fora da janela o claim não acontece e a demanda espera o próximo tique dentro dela.
+// CADÊNCIA pela janela original W da demanda (horas_para_expirar / prazo_atendimento_horas;
+// se NULL, expira_em − âncora), contada desde a MESMA âncora de publicação de sempre (obras
+// COALESCE(publicado_em, criado_em), reparos criado_em — convenção de enviarPushNovoPendente):
+//   W ≤ 24h          fase 'unica'   → UM lembrete em W/2 (1h→30min … 24h→12h), a qualquer hora.
+//   24h < W ≤ 168h   fase 'diaria'  → um por dia: fatias de 24h desde a âncora (k = 1, 2, …).
+//   W > 168h         fase 'semanal' → um por semana (fatias de 7 dias desde a âncora) enquanto
+//                    faltam MAIS de 7 dias para expira_em; depois fase 'final' → um por dia nos
+//                    últimos 7 dias (fatias de 24h contadas de trás, a partir de expira_em).
+// Fases diárias/semanais só entre LEMBRETE_HORA_INICIO e LEMBRETE_HORA_FIM (São Paulo): fora
+// da janela o claim não acontece e a fatia espera o próximo tique dentro dela (a fatia é
+// "devida" enquanto durar, então ninguém perde a vez — só adia). Entre dois lembretes dessas
+// fases vale ainda um intervalo mínimo (LEMBRETE_GAP_MIN_HORAS): cobre a virada semanal→final e
+// a fatia adiada pela janela, sem permitir dois avisos no mesmo dia.
+//
+// CLAIM atômico por FATIA (mesmo desenho dos crons de 5 min): o UPDATE grava
+// lembrete_enviado_em = NOW() e lembretes_enviados + 1 e devolve via RETURNING só as linhas que
+// ELE reivindicou. "Fatia devida" = NOW() ≥ início da fatia atual E o último lembrete é anterior
+// a esse início — duas réplicas/tiques não repetem a mesma fatia (o WHERE é reavaliado sobre a
+// linha atual quando há concorrência). Claim ANTES do envio e nunca desfeito: falha de envio
+// fica no log; a demanda espera a próxima fatia.
 // push_novo_enviado_em IS NOT NULL: lembrar antes do aviso original (tera_midias pendente)
 // seria anunciar duas vezes na ordem errada — a rede de segurança ainda vai mandar o primeiro.
-// Âncora: obras COALESCE(publicado_em, criado_em) (a aprovação publica), reparos criado_em —
-// a mesma convenção de enviarPushNovoPendente.
 // entrega: null — NUNCA passa por push_entregas (mesma razão do push "oferta aumentada": a
 // PK é a da entrega do aviso de demanda nova e a repescagem reenviaria com o texto errado).
-const LEMBRETE_IDADE_HORAS = 12
+// E-mail: tipo em email_alertas leva o número do lembrete (lembrete_reparo#2) — o UNIQUE
+// (tipo, demanda, usuário) é por fatia, então o 2º+ lembrete não fica bloqueado pelo 1º.
 const LEMBRETE_HORA_INICIO = 8
 const LEMBRETE_HORA_FIM = 20
+const LEMBRETE_GAP_MIN_HORAS = 20
+const LEMBRETE_UNICA_MAX_HORAS = 24
+const LEMBRETE_DIARIA_MAX_HORAS = 168
 const SQL_JANELA_LEMBRETE = `EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'America/Sao_Paulo')) >= ${LEMBRETE_HORA_INICIO}
     AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'America/Sao_Paulo')) < ${LEMBRETE_HORA_FIM}`
 const valorLembrete = (v) => (Number(v) > 0 ? formatarReaisPush(v) : 'Valor a combinar')
@@ -681,35 +697,98 @@ const mensagemLembreteReparo = (reparo, reparoId) => {
 }
 const LADOS_LEMBRETE = [
   { tabela: 'obras',   tipoEmail: 'lembrete_obra',   tipoPrestador: 'pintor',    comCategoria: false, colunaValor: 'valor',
-    ancora: 'COALESCE(d.publicado_em, d.criado_em)', semInteresse: `NOT EXISTS (SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id)`,
+    ancora: 'COALESCE(d.publicado_em, d.criado_em)', janelaCol: 'horas_para_expirar',
+    semInteresse: `NOT EXISTS (SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id)`,
     mensagem: mensagemLembreteObra },
   { tabela: 'reparos', tipoEmail: 'lembrete_reparo', tipoPrestador: 'reparador', comCategoria: true,  colunaValor: 'valor_estimado',
-    ancora: 'd.criado_em', semInteresse: `NOT EXISTS (SELECT 1 FROM interesse_reparos i WHERE i.reparo_id = d.id)`,
+    ancora: 'd.criado_em', janelaCol: 'prazo_atendimento_horas',
+    semInteresse: `NOT EXISTS (SELECT 1 FROM interesse_reparos i WHERE i.reparo_id = d.id)`,
     mensagem: mensagemLembreteReparo },
 ]
-// Predicado da demanda candidata — compartilhado pelo claim (UPDATE) e pela prévia sem efeito
-// (listarCandidatosLembrete), para os dois nunca divergirem. `d` é o alias da tabela.
+// Predicado da demanda ELEGÍVEL (estado), sem a parte de tempo — compartilhado pelo claim
+// (UPDATE) e pela prévia sem efeito (listarCandidatosLembrete). `d` é o alias da tabela.
 const predicadoLembrete = (lado) => `
       d.status = 'aberta' AND d.status_aprovacao = 'aprovada'
       AND d.match_usuario_id IS NULL AND d.expira_em > NOW()
-      AND d.lembrete_enviado_em IS NULL
       AND d.push_novo_enviado_em IS NOT NULL
-      AND ${lado.ancora} <= NOW() - (${LEMBRETE_IDADE_HORAS} * INTERVAL '1 hour')
       AND ${lado.semInteresse}`
-const COLUNAS_LEMBRETE = (lado) => `d.id, d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor`
+// Janela W em horas (NUMERIC): a coluna da demanda ou, se NULL, expira_em − âncora.
+const sqlJanelaHoras = (lado) => `COALESCE(d.${lado.janelaCol}, EXTRACT(EPOCH FROM (d.expira_em - ${lado.ancora})) / 3600.0)`
+const sqlFaseLembrete = (lado) => `CASE
+      WHEN ${sqlJanelaHoras(lado)} <= ${LEMBRETE_UNICA_MAX_HORAS}  THEN 'unica'
+      WHEN ${sqlJanelaHoras(lado)} <= ${LEMBRETE_DIARIA_MAX_HORAS} THEN 'diaria'
+      WHEN d.expira_em - NOW() > INTERVAL '7 days'                  THEN 'semanal'
+      ELSE 'final' END`
+// Início da FATIA ATUAL de cada fase (a fatia k=0 é a própria publicação e nunca é devida).
+const sqlInicioFatia = (lado) => `CASE ${sqlFaseLembrete(lado)}
+      WHEN 'unica'   THEN ${lado.ancora} + (${sqlJanelaHoras(lado)} / 2) * INTERVAL '1 hour'
+      WHEN 'diaria'  THEN ${lado.ancora} + floor(EXTRACT(EPOCH FROM (NOW() - ${lado.ancora})) / 86400) * INTERVAL '1 day'
+      WHEN 'semanal' THEN ${lado.ancora} + floor(EXTRACT(EPOCH FROM (NOW() - ${lado.ancora})) / 604800) * INTERVAL '7 days'
+      ELSE d.expira_em - (floor(EXTRACT(EPOCH FROM (d.expira_em - NOW())) / 86400) + 1) * INTERVAL '1 day' END`
+// Subconsulta `s`: elegíveis + fase + início da fatia, calculados UMA vez por linha. O UPDATE e a
+// prévia leem daqui, então claim e dry-run nunca divergem.
+const sqlCalculoLembrete = (lado) => `
+      SELECT d.id, ${sqlFaseLembrete(lado)} AS fase, ${sqlInicioFatia(lado)} AS inicio_fatia,
+             ${sqlJanelaHoras(lado)} AS janela_horas, ${lado.ancora} AS ancora
+        FROM ${lado.tabela} d WHERE ${predicadoLembrete(lado)}`
+// Fatia DEVIDA agora (d = linha atual da tabela, s = cálculo acima). O teste sobre
+// d.lembrete_enviado_em é o que torna o claim idempotente entre réplicas/tiques.
+const sqlFatiaDevida = (lado) => `
+      NOW() >= s.inicio_fatia AND s.inicio_fatia > ${lado.ancora}
+      AND (d.lembrete_enviado_em IS NULL OR d.lembrete_enviado_em < s.inicio_fatia)
+      AND (s.fase <> 'unica' OR d.lembretes_enviados = 0)
+      AND (s.fase = 'unica' OR (${SQL_JANELA_LEMBRETE}
+           AND (d.lembrete_enviado_em IS NULL OR d.lembrete_enviado_em < NOW() - (${LEMBRETE_GAP_MIN_HORAS} * INTERVAL '1 hour'))))`
+const COLUNAS_LEMBRETE = (lado) => `d.id, d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor, d.lembretes_enviados`
+// O claim em si (UPDATE … RETURNING). Exportado só para o dry-run executar o MESMO statement
+// dentro de um BEGIN…ROLLBACK; o cron (lembrarDemandasSemResposta) é o único chamador real.
+const sqlClaimLembrete = (lado) => `
+      UPDATE ${lado.tabela} d
+         SET lembrete_enviado_em = NOW(), lembretes_enviados = d.lembretes_enviados + 1
+        FROM (${sqlCalculoLembrete(lado)}) s
+       WHERE d.id = s.id AND ${sqlFatiaDevida(lado)}
+   RETURNING ${COLUNAS_LEMBRETE(lado)}, s.fase`
 
-// Prévia SEM efeito (dry-run / admin): as demandas que o próximo tique reivindicaria. Devolve
-// { tabela, dentro_da_janela, demandas: [...] } por lado; dentro_da_janela diz se o claim
-// rodaria AGORA (a lista ignora a janela de propósito, para a prévia ser útil fora dela).
-// db (opcional): client/transação do chamador — a prévia em dry-run roda num BEGIN…ROLLBACK.
+// Próximo lembrete previsto (só para prévia/admin; o claim não usa isto). Reproduz a regra em
+// JS a partir do que a subconsulta devolveu: fatia devida → agora; senão início da próxima fatia
+// (ou da fase 'final', se vier antes), adiada para a janela 08–20h SP e para o gap mínimo.
+// SP não tem horário de verão desde 2019: deslocamento fixo de −3h.
+const MS_H = 3600 * 1000, MS_D = 24 * MS_H, SP_OFFSET_MS = -3 * MS_H
+const adiarParaJanela = (t) => {
+  const sp = new Date(t.getTime() + SP_OFFSET_MS)
+  const h = sp.getUTCHours()
+  if (h >= LEMBRETE_HORA_INICIO && h < LEMBRETE_HORA_FIM) return t
+  const dia = Date.UTC(sp.getUTCFullYear(), sp.getUTCMonth(), sp.getUTCDate()) + (h >= LEMBRETE_HORA_FIM ? MS_D : 0)
+  return new Date(dia + LEMBRETE_HORA_INICIO * MS_H - SP_OFFSET_MS)
+}
+const proximoLembrete = ({ fase, inicio_fatia, ancora, expira_em, lembrete_enviado_em, lembretes_enviados, devida_agora, agora }) => {
+  if (devida_agora) return agora
+  const inicio = new Date(inicio_fatia), exp = new Date(expira_em), ult = lembrete_enviado_em ? new Date(lembrete_enviado_em) : null
+  if (fase === 'unica') return (Number(lembretes_enviados) > 0 || ult) ? null : (inicio > agora ? inicio : null)
+  const jaEnviadaNestaFatia = ult && ult >= inicio
+  let prox
+  if (!jaEnviadaNestaFatia && inicio > new Date(ancora)) prox = inicio < agora ? agora : inicio
+  else if (fase === 'diaria' || fase === 'final') prox = new Date(inicio.getTime() + MS_D)
+  else prox = new Date(Math.min(inicio.getTime() + 7 * MS_D, exp.getTime() - 7 * MS_D))
+  if (fase === 'semanal' && prox > new Date(exp.getTime() - 7 * MS_D)) prox = new Date(exp.getTime() - 7 * MS_D)
+  if (ult) prox = new Date(Math.max(prox.getTime(), ult.getTime() + LEMBRETE_GAP_MIN_HORAS * MS_H))
+  prox = adiarParaJanela(prox)
+  return prox < exp ? prox : null
+}
+
+// Prévia SEM efeito (dry-run / admin): toda demanda elegível por estado, com fase, janela W,
+// se a fatia está devida AGORA e o próximo lembrete previsto. Devolve { tabela, demandas }
+// por lado. db (opcional): client/transação do chamador — o dry-run roda num BEGIN…ROLLBACK.
 const listarCandidatosLembrete = async (db = pool) => {
   const saida = []
   for (const lado of LADOS_LEMBRETE) {
     const r = await db.query(
-      `SELECT ${COLUNAS_LEMBRETE(lado)}, ${lado.ancora} AS ancora, (${SQL_JANELA_LEMBRETE}) AS dentro_da_janela
-         FROM ${lado.tabela} d WHERE ${predicadoLembrete(lado)} ORDER BY ${lado.ancora}`
+      `SELECT ${COLUNAS_LEMBRETE(lado)}, d.lembrete_enviado_em, d.expira_em, s.fase, s.inicio_fatia, s.janela_horas, s.ancora,
+              (${sqlFatiaDevida(lado)}) AS devida_agora, NOW() AS agora
+         FROM ${lado.tabela} d JOIN (${sqlCalculoLembrete(lado)}) s ON s.id = d.id
+        ORDER BY s.ancora`
     )
-    saida.push({ tabela: lado.tabela, dentro_da_janela: r.rows[0]?.dentro_da_janela ?? null, demandas: r.rows })
+    saida.push({ tabela: lado.tabela, demandas: r.rows.map(d => ({ ...d, proximo: proximoLembrete(d) })) })
   }
   return saida
 }
@@ -1000,19 +1079,14 @@ const semSobreposicao = (nome, fn) => async (...args) => {
   try { return await fn(...args) } finally { jobsEmExecucao.delete(nome) }
 }
 
-// Lembrete único "ainda aberto" — racional, mensagens e predicado em LADOS_LEMBRETE /
-// predicadoLembrete (acima, junto do e-mail de reserva). Aqui só o claim + envio.
+// Lembretes "ainda aberto" — racional, cadência, mensagens e predicados em LADOS_LEMBRETE /
+// sqlCalculoLembrete / sqlFatiaDevida (acima, junto do e-mail de reserva). Aqui só claim + envio.
 const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta', async () => {
   for (const lado of LADOS_LEMBRETE) {
     try {
-      const claim = await pool.query(
-        `UPDATE ${lado.tabela} d SET lembrete_enviado_em = NOW()
-          WHERE ${predicadoLembrete(lado)}
-            AND ${SQL_JANELA_LEMBRETE}
-          RETURNING ${COLUNAS_LEMBRETE(lado)}`
-      )
+      const claim = await pool.query(sqlClaimLembrete(lado))
       if (claim.rowCount === 0) continue
-      console.log(`[Lembrete] ${lado.tabela}: ${claim.rowCount} demanda(s) sem resposta há ${LEMBRETE_IDADE_HORAS}h+ — lembrando`)
+      console.log(`[Lembrete] ${lado.tabela}: ${claim.rowCount} demanda(s) sem resposta com fatia devida — lembrando (${claim.rows.map(d => `${d.id.slice(0, 8)} ${d.fase} #${d.lembretes_enviados}`).join(', ')})`)
       for (const d of claim.rows) {
         const cidade = normalizar(d.cidade)
         const uf = String(d.uf || '').trim().toUpperCase()
@@ -1021,7 +1095,7 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
           continue
         }
         // try/catch POR demanda: uma falha de broadcast não derruba as demais do tique. O claim
-        // já está gravado — lembrete é uma vez só, sem repescagem (ver cabeçalho).
+        // da fatia já está gravado — sem repescagem; a demanda espera a próxima fatia.
         try {
           await broadcastPaginado({
             tipoPrestador: lado.tipoPrestador, cidade, uf,
@@ -1034,8 +1108,9 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
           console.error(`[Lembrete] push ${lado.tabela} ${d.id} falhou:`, err.message)
         }
         // E-mail de reserva a quem não tem token: mesma função do aviso de demanda nova, com o
-        // tipo do lembrete no claim de email_alertas. Já engole os próprios erros (só log).
-        await enviarEmailsNovaDemanda(lado.tabela, d.id, { tipo: lado.tipoEmail, mensagem: lado.mensagem })
+        // tipo do lembrete + número da fatia no claim de email_alertas (ver cabeçalho: o UNIQUE
+        // é por fatia). Já engole os próprios erros (só log).
+        await enviarEmailsNovaDemanda(lado.tabela, d.id, { tipo: `${lado.tipoEmail}#${d.lembretes_enviados}`, mensagem: lado.mensagem })
       }
     } catch (err) {
       console.error(`[Lembrete] erro em ${lado.tabela}:`, err.message)
@@ -1751,6 +1826,8 @@ module.exports = {
   enviarPushNovoPendente,
   lembrarDemandasSemResposta,
   listarCandidatosLembrete,
+  sqlClaimLembrete,
+  LADOS_LEMBRETE,
   verificarObrasExpirando,
   verificarObrasComBaixoEngajamento,
   verificarMarcosExpiracao,

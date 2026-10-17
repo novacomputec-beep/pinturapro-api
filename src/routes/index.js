@@ -420,12 +420,19 @@ const migracaoPronta = (async () => {
     // chama ao terminar o último upload); sem backfill, sem default, sem constraint.
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS push_novo_enviado_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS push_novo_enviado_em TIMESTAMPTZ`)
-    // Lembrete ÚNICO "ainda aberto" (alertaService.lembrarDemandasSemResposta): demanda
-    // publicada há 12h+ sem nenhum interesse recebe um segundo aviso aos mesmos elegíveis do
-    // broadcast original. NULL = nunca lembrada; o cron grava NOW() no próprio claim. Sem
-    // backfill: demanda antiga que ainda estiver sem resposta é lembrada uma vez, de propósito.
+    // Lembretes "ainda aberto" (alertaService.lembrarDemandasSemResposta): demanda sem nenhum
+    // interesse recebe avisos repetidos aos mesmos elegíveis do broadcast original, em fatias
+    // de tempo pela janela W da demanda (ver cabeçalho lá). lembrete_enviado_em = último envio
+    // (o claim da fatia compara com ele); lembretes_enviados = contador (numera o tipo do e-mail
+    // em email_alertas, para o UNIQUE ser por fatia). Sem backfill de tempo: demanda antiga
+    // ainda sem resposta entra na cadência a partir da fatia atual. O backfill do contador só
+    // cobre as lembradas pela versão de lembrete único (timestamp sem contador), uma vez.
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS lembrete_enviado_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS lembrete_enviado_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS lembretes_enviados INTEGER NOT NULL DEFAULT 0`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS lembretes_enviados INTEGER NOT NULL DEFAULT 0`)
+    await client.query(`UPDATE obras   SET lembretes_enviados = 1 WHERE lembrete_enviado_em IS NOT NULL AND lembretes_enviados = 0`)
+    await client.query(`UPDATE reparos SET lembretes_enviados = 1 WHERE lembrete_enviado_em IS NOT NULL AND lembretes_enviados = 0`)
     // Backfill ÚNICO: toda demanda que já existia quando a coluna nasceu foi anunciada pelo
     // código antigo (push imediato na criação/aprovação) — marca como enviada para a rede de
     // segurança (enviarPushNovoPendente) nunca reanunciá-la. Roda UMA vez: o marcador em
@@ -1116,15 +1123,16 @@ const migracaoPronta = (async () => {
     // Teto diário conta por created_at: índice só nessa coluna.
     await client.query(`CREATE INDEX IF NOT EXISTS email_alertas_created_at_idx ON email_alertas (created_at)`)
     // O e-mail do lembrete "ainda aberto" (lembrarDemandasSemResposta) reusa esta tabela como
-    // claim, com tipo próprio ('lembrete_obra'/'lembrete_reparo'): com o tipo original, quem
-    // recebeu o e-mail de demanda nova ficaria para sempre bloqueado pelo UNIQUE e o lembrete
-    // não chegaria a ninguém. O CHECK nasceu inline só com os dois tipos originais, com nome
-    // gerado pelo Postgres (em prod: email_alertas_tipo_check). Em vez de confiar no nome:
-    // lê em pg_constraint TODO CHECK da tabela que cite a coluna tipo, pula se algum já
-    // aceita os novos tipos e, senão, derruba cada um pelo nome REAL e recria. Passo isolado
-    // num SAVEPOINT com catch só de log: a migração é UMA transação, e sem o savepoint um
-    // erro aqui deixaria a transação abortada e derrubaria tudo o que vem depois (o lembrete
-    // sem o CHECK novo só perde o e-mail de reserva — o push segue normal).
+    // claim, com tipo próprio numerado por fatia ('lembrete_reparo#1', 'lembrete_obra#2', …):
+    // com o tipo original, quem recebeu o e-mail de demanda nova ficaria para sempre bloqueado
+    // pelo UNIQUE; e sem o número, o 2º lembrete ficaria bloqueado pelo 1º. O CHECK nasceu
+    // inline só com os dois tipos originais, com nome gerado pelo Postgres (em prod:
+    // email_alertas_tipo_check); a 1ª versão do lembrete o recriou com os quatro literais. Em
+    // vez de confiar no nome: lê em pg_constraint TODO CHECK da tabela que cite a coluna tipo,
+    // pula se algum já aceita o padrão numerado e, senão, derruba cada um pelo nome REAL e
+    // recria. Passo isolado num SAVEPOINT com catch só de log: a migração é UMA transação, e
+    // sem o savepoint um erro aqui deixaria a transação abortada e derrubaria tudo o que vem
+    // depois (o lembrete sem o CHECK novo só perde o e-mail de reserva — o push segue normal).
     try {
       await client.query('SAVEPOINT chk_tipo_email')
       const chksTipoEmail = await client.query(
@@ -1133,13 +1141,13 @@ const migracaoPronta = (async () => {
           WHERE conrelid = 'email_alertas'::regclass AND contype = 'c'
             AND pg_get_constraintdef(oid) ~ '\\mtipo\\M'`
       )
-      const jaAceita = chksTipoEmail.rows.some(r => /lembrete_obra/.test(r.def) && /lembrete_reparo/.test(r.def))
+      const jaAceita = chksTipoEmail.rows.some(r => r.def.includes('lembrete_(obra|reparo)(#[0-9]+)?'))
       if (!jaAceita) {
         for (const r of chksTipoEmail.rows) {
           await client.query(`ALTER TABLE email_alertas DROP CONSTRAINT IF EXISTS ${client.escapeIdentifier(r.conname)}`)
         }
         await client.query(`ALTER TABLE email_alertas ADD CONSTRAINT email_alertas_tipo_check
-                            CHECK (tipo IN ('obra', 'reparo', 'lembrete_obra', 'lembrete_reparo'))`)
+                            CHECK (tipo IN ('obra', 'reparo') OR tipo ~ '^lembrete_(obra|reparo)(#[0-9]+)?$')`)
         console.log(`[migration] email_alertas: CHECK de tipo recriado (removidos: ${chksTipoEmail.rows.map(r => r.conname).join(', ') || 'nenhum'})`)
       }
       await client.query('RELEASE SAVEPOINT chk_tipo_email')
