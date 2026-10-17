@@ -41,8 +41,14 @@ const APP_TEM_SCHEME = false
 // instalado; senão o Chrome segue S.browser_fallback_url (Play Store).
 const URL_INTENT_ANDROID = `intent:#Intent;package=${PACOTE_ANDROID};action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;S.browser_fallback_url=${encodeURIComponent(URL_PLAY)};end`
 
+// Ícone (quadrado): imagem do preview OG (/p/logo.png). Wordmark completo (ícone + "Pro" azul +
+// "Tudo" laranja + tagline, versão clara para fundo escuro — a mesma do cabeçalho de
+// protudo.app.br): banner da página, inline em base64.
 const LOGO_PNG = fs.readFileSync(path.join(__dirname, '..', 'assets', 'logo-protudo.png'))
-const LOGO_DATA_URI = `data:image/png;base64,${LOGO_PNG.toString('base64')}`
+const WORDMARK_DATA_URI = `data:image/png;base64,${fs.readFileSync(path.join(__dirname, '..', 'assets', 'logo-protudo-wordmark.png')).toString('base64')}`
+// Laranja da marca (o mesmo --or do site) sobre texto escuro.
+const LARANJA = '#F5891F'
+const TEXTO_ESCURO = '#111'
 
 // Mesmo alfabeto de gerar_codigo_publico() (migração em routes/index.js).
 const RE_CODIGO = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{5}$/
@@ -76,6 +82,12 @@ const buscarDemanda = async (codigo, db = pool) => {
 }
 
 const escapar = (s) => String(s ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
+// Chip da categoria como na lista do app: "🧹 Faxina" (emoji + rótulo de categoriasApp, nos
+// dois lados). Slug fora do catálogo: emoji padrão do lado + slug cru; sem slug: só o genérico.
+const chipCategoria = (lado, slug) => {
+  const { emoji, rotulo } = lado.apresentacao(slug, lado.emojiPadrao)
+  return `${emoji} ${rotulo || (lado.tabela === 'obras' ? 'Obra' : 'Serviço')}`
+}
 const formatarValor = (v) => {
   const n = Number(v)
   if (!(n > 0)) return null
@@ -122,12 +134,11 @@ const botaoEApoio = ({ ua, aba }) => {
 const CSS = `
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#f3f3f3;color:#111;-webkit-text-size-adjust:100%}
-  .banner{background:#0a0a0a;padding:18px 16px;display:flex;align-items:center;justify-content:center;gap:12px}
-  .banner img{height:56px;width:auto}
-  .banner span{color:#fff;font-weight:800;font-size:22px;letter-spacing:.3px}
+  .banner{background:#0a0a0a;padding:16px;display:flex;align-items:center;justify-content:center}
+  .banner img{height:64px;width:auto;max-width:100%}
   main{max-width:520px;margin:0 auto;padding:20px 16px 32px}
-  .kicker{font-size:12px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#E8833A}
-  .kicker.off{color:#777}
+  .kicker{display:inline-block;font-size:12px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:${TEXTO_ESCURO};background:${LARANJA};border-radius:6px;padding:4px 8px}
+  .kicker.off{color:#fff;background:#777}
   h1{font-size:22px;line-height:1.25;margin:6px 0 16px;color:#111}
   .card{background:#fff;border-radius:14px;padding:18px 16px;box-shadow:0 2px 10px rgba(0,0,0,.06)}
   .card.off{background:#e6e6e6;color:#666;box-shadow:none}
@@ -138,8 +149,8 @@ const CSS = `
   .linha{font-size:15px;color:#444;margin:4px 0}
   .card.off .linha{color:#777}
   .valor{font-size:24px;font-weight:800;color:#111;margin-top:12px}
-  .faixa{margin-top:14px;border:2px dashed #E8833A;border-radius:10px;padding:10px 12px;color:#9a4a0a;font-weight:700;font-size:14px;background:#fff8f2}
-  .btn{display:block;text-align:center;background:#E8833A;color:#000;font-weight:800;font-size:17px;text-decoration:none;border-radius:12px;padding:15px 16px;margin:20px 0 12px}
+  .faixa{margin-top:14px;border:2px dashed ${LARANJA};border-radius:10px;padding:10px 12px;color:#9a4a0a;font-weight:700;font-size:14px;background:#fff8f2}
+  .btn{display:block;text-align:center;background:${LARANJA};color:${TEXTO_ESCURO};font-weight:800;font-size:17px;text-decoration:none;border-radius:12px;padding:15px 16px;margin:20px 0 12px}
   .aba{text-align:center;color:#555;font-size:14px}
   .lojas{display:flex;gap:10px;justify-content:center;margin:18px 0 6px}
   .loja{flex:1;max-width:190px;display:flex;align-items:center;justify-content:center;gap:8px;background:#0a0a0a;color:#fff;text-decoration:none;border-radius:10px;padding:10px 12px;font-size:13px;font-weight:700}
@@ -170,7 +181,7 @@ const paginaHtml = ({ og, kicker, kickerOff, heading, card, botao, base }) => `<
 <style>${CSS}</style>
 </head>
 <body>
-  <div class="banner"><img src="${LOGO_DATA_URI}" alt="${MARCA}"><span>${MARCA}</span></div>
+  <div class="banner"><img src="${WORDMARK_DATA_URI}" alt="${MARCA} — Profissionais para tudo"></div>
   <main>
     <div class="kicker${kickerOff ? ' off' : ''}">${escapar(kicker)}</div>
     <h1>${escapar(heading)}</h1>
@@ -184,7 +195,6 @@ const paginaHtml = ({ og, kicker, kickerOff, heading, card, botao, base }) => `<
 </html>`
 
 const renderAberta = ({ lado, demanda, base, url, ua }) => {
-  const { rotulo } = lado.apresentacao(demanda.categoria, lado.emojiPadrao)
   const valor = formatarValor(demanda.valor)
   const local = [demanda.bairro, demanda.cidade].filter(s => s && String(s).trim()).join(' · ')
   return paginaHtml({
@@ -194,7 +204,7 @@ const renderAberta = ({ lado, demanda, base, url, ua }) => {
     heading: 'Tem cliente esperando por um profissional!',
     card: `
     <div class="card">
-      <span class="chip">${escapar(rotulo || (lado.tabela === 'obras' ? 'Obra' : 'Serviço'))}</span>
+      <span class="chip">${escapar(chipCategoria(lado, demanda.categoria))}</span>
       <div class="titulo">${escapar(demanda.titulo)}</div>
       <div class="linha">📍 ${escapar(local)}</div>
       <div class="linha">⏱ Prazo: ${escapar(rotuloPrazo(demanda))} · ${escapar(tempoRestante(demanda.expira_em))}</div>
@@ -216,7 +226,7 @@ const renderEncerrada = ({ lado, demanda, base, url, ua }) => {
     heading: 'Este pedido já foi atendido ou expirou.',
     card: `
     <div class="card off">
-      ${lado ? `<span class="chip">${escapar(lado.apresentacao(demanda.categoria, lado.emojiPadrao).rotulo || '')}</span>` : ''}
+      ${lado ? `<span class="chip">${escapar(chipCategoria(lado, demanda.categoria))}</span>` : ''}
       <div class="titulo">${escapar(titulo)}</div>
       ${cidade ? `<div class="linha">📍 ${escapar(cidade)}</div>` : ''}
     </div>`,
