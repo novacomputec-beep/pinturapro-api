@@ -272,9 +272,20 @@ const registrarEntregas = async (tipo, demandaId, resultados) => {
   )
 }
 
+// Quem JÁ se manifestou numa demanda (candidaturas / interesse_reparos, qualquer status — o app
+// não deixa a mesma pessoa manifestar duas vezes) fica FORA dos lembretes dela, no push e no
+// e-mail. `interesse` = { tabela, coluna } do lado (LADOS_LEMBRETE); `param` é o placeholder do
+// id da demanda; `u` é o alias do prestador nas duas consultas de público. Sem `interesse`
+// (demanda nova) devolve '' — ninguém pode ter se manifestado antes do primeiro aviso.
+const sqlSemManifestacao = (interesse, param) => (interesse
+  ? `AND NOT EXISTS (SELECT 1 FROM ${interesse.tabela} x WHERE x.${interesse.coluna} = ${param}::uuid AND x.usuario_id = u.id)`
+  : '')
+
 // entrega = { tipo: 'obra' | 'reparo', demandaId }: identifica a demanda em push_entregas.
 // null: envia sem registrar (push "oferta aumentada", que não é a entrega da demanda nova).
-const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega }) => {
+// excluirManifestados (opcional, só o lembrete passa) = { interesse, demandaId }: tira do público
+// quem já se candidatou / mostrou interesse NESTA demanda (sqlSemManifestacao).
+const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null }) => {
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
   let cursor = null
   for (;;) {
@@ -295,9 +306,10 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
          AND upper(btrim(u.uf)) = $3
          AND ($4::uuid IS NULL OR u.id > $4::uuid)
          AND ($6::text IS NULL OR (cardinality(u.especialidades) > 0 AND ($6::text = 'outros' OR $6::text = ANY(u.especialidades))))
+         ${sqlSemManifestacao(excluirManifestados?.interesse, '$7')}
        ORDER BY u.id
        LIMIT $5`,
-      [tipoPrestador, cidade, uf, cursor, PAGINA_BROADCAST, categoria]
+      [tipoPrestador, cidade, uf, cursor, PAGINA_BROADCAST, categoria, excluirManifestados?.demandaId ?? null]
     )
     if (pagina.rows.length === 0) break
     total.paginas++
@@ -565,7 +577,11 @@ const comTimeout = (promessa, ms, rotulo) => {
 const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
   const client = await pool.connect()
   try {
-    const dem = await client.query(`SELECT titulo, cidade, uf, categoria, ${lado.colunaValor} AS valor, codigo_publico FROM ${tabela} WHERE id = $1`, [demandaId])
+    // `interessados` só no lembrete (lado.interesse): é o que escolhe o texto do corpo.
+    const dem = await client.query(
+      `SELECT d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor, d.codigo_publico
+              ${lado.interesse ? `, (SELECT count(*)::int FROM ${lado.interesse.tabela} x WHERE x.${lado.interesse.coluna} = d.id) AS interessados` : ''}
+         FROM ${tabela} d WHERE d.id = $1`, [demandaId])
     if (dem.rows.length === 0) return null
     const demanda = dem.rows[0]
     const cidade = normalizar(demanda.cidade)
@@ -589,8 +605,9 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          AND ${SQL_CIDADE_PRESTADOR} = $2
          AND upper(btrim(u.uf)) = $3
          AND ($4::text IS NULL OR (cardinality(u.especialidades) > 0 AND ($4::text = 'outros' OR $4::text = ANY(u.especialidades))))
+         ${sqlSemManifestacao(lado.interesse, '$5')}
        ORDER BY u.id`,
-      [lado.tipoPrestador, cidade, uf, categoria]
+      [lado.tipoPrestador, cidade, uf, categoria, demandaId]
     )
     if (elegiveis.rows.length === 0) return null
 
@@ -621,9 +638,10 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
   }
 }
 
-// ladoOverride (opcional): o lembrete "ainda aberto" passa { tipo, mensagem } próprios por cima
-// do lado da tabela — mesmo público (sem token), mesmo claim em email_alertas (com o tipo
-// dele), mesmo teto diário, mesmo HTML. Sem override: demanda nova, como sempre.
+// ladoOverride (opcional): o lembrete "ainda aberto" passa { tipo, mensagem, interesse } próprios
+// por cima do lado da tabela — mesmo público (sem token) MENOS quem já se manifestou na demanda,
+// mesmo claim em email_alertas (com o tipo dele), mesmo teto diário, mesmo HTML. Sem override:
+// demanda nova, como sempre.
 const enviarEmailsNovaDemanda = async (tabela, demandaId, ladoOverride = null) => {
   const lado = LADOS_EMAIL[tabela] ? { ...LADOS_EMAIL[tabela], ...(ladoOverride || {}) } : null
   if (!lado) return
@@ -648,12 +666,18 @@ const enviarEmailsNovaDemanda = async (tabela, demandaId, ladoOverride = null) =
   }
 }
 
-// Lembretes "ainda aberto" — demanda aberta, aprovada, sem match, não expirada e sem NENHUM
-// interesse (candidaturas / interesse_reparos, qualquer status) recebe avisos repetidos aos
-// MESMOS elegíveis do broadcast de demanda nova: mesmo broadcastPaginado (tipoPrestador,
-// cidade+uf dobrados, categoria × especialidades no lado reparo), mesmo data.tipo/id para o
-// toque abrir o mesmo detalhe (lembrete: true distingue a origem, como oferta_aumentada), e o
-// mesmo e-mail de reserva a quem não tem token (enviarEmailsNovaDemanda com tipo próprio).
+// Lembretes "ainda aberto" — demanda aberta, aprovada, SEM MATCH e não expirada recebe avisos
+// repetidos até fechar com alguém (match_usuario_id) ou expirar — ter interesses/candidaturas
+// NÃO a tira da cadência. Público = os MESMOS elegíveis do broadcast de demanda nova (mesmo
+// broadcastPaginado: tipoPrestador, cidade+uf dobrados, categoria × especialidades no lado
+// reparo) MENOS quem já se manifestou nesta demanda (sqlSemManifestacao: candidaturas /
+// interesse_reparos, qualquer status — push e e-mail). Mesmo data.tipo/id para o toque abrir o
+// mesmo detalhe (lembrete: true distingue a origem, como oferta_aumentada), e o mesmo e-mail de
+// reserva a quem não tem token (enviarEmailsNovaDemanda com tipo próprio).
+// Corpo pelo nº de manifestações (`interessados`, contado no claim e de novo no e-mail):
+//   0  → "Ninguém respondeu ainda, chegue primeiro!"
+//   1+ → "Ainda sem profissional definido — mande sua proposta!"
+// A faixa da página pública (routes/paginaPublica.js) NÃO segue esta regra: continua só com zero.
 //
 // CADÊNCIA pela janela original W da demanda (horas_para_expirar / prazo_atendimento_horas;
 // se NULL, expira_em − âncora), contada desde a MESMA âncora de publicação de sempre (obras
@@ -689,11 +713,16 @@ const LEMBRETE_DIARIA_MAX_HORAS = 168
 const SQL_JANELA_LEMBRETE = `EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'America/Sao_Paulo')) >= ${LEMBRETE_HORA_INICIO}
     AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'America/Sao_Paulo')) < ${LEMBRETE_HORA_FIM}`
 const valorLembrete = (v) => (Number(v) > 0 ? formatarReaisPush(v) : 'Valor a combinar')
+// Fecho do corpo pelo nº de manifestações da demanda (ver cabeçalho). `interessados` ausente
+// (NULL/undefined) conta como zero.
+const CHAMADA_LEMBRETE_SEM_RESPOSTA = 'Ninguém respondeu ainda, chegue primeiro!'
+const CHAMADA_LEMBRETE_COM_INTERESSE = 'Ainda sem profissional definido — mande sua proposta!'
+const chamadaLembrete = (d) => (Number(d.interessados) > 0 ? CHAMADA_LEMBRETE_COM_INTERESSE : CHAMADA_LEMBRETE_SEM_RESPOSTA)
 const mensagemLembreteObra = (obra, obraId) => {
   const { rotulo } = apresentacaoObra(obra.categoria, '🎨')
   return {
     titulo: `🔔 Ainda aberto: ${obra.titulo}`,
-    corpo: `${rotulo || 'Obra'} · ${valorLembrete(obra.valor)} · Ninguém respondeu ainda, chegue primeiro!`,
+    corpo: `${rotulo || 'Obra'} · ${valorLembrete(obra.valor)} · ${chamadaLembrete(obra)}`,
     data: { tipo: 'nova_obra', obra_id: obraId, lembrete: true },
   }
 }
@@ -701,27 +730,30 @@ const mensagemLembreteReparo = (reparo, reparoId) => {
   const { rotulo } = apresentacaoReparo(reparo.categoria, '🔧')
   return {
     titulo: `🔔 Ainda aberto: ${reparo.titulo}`,
-    corpo: `${rotulo || 'Serviço'} · ${valorLembrete(reparo.valor)} · Ninguém respondeu ainda, chegue primeiro!`,
+    corpo: `${rotulo || 'Serviço'} · ${valorLembrete(reparo.valor)} · ${chamadaLembrete(reparo)}`,
     data: { tipo: 'novo_reparo', reparo_id: reparoId, lembrete: true },
   }
 }
+// interesse = { tabela, coluna }: onde o prestador se manifesta nesta demanda. Conta os
+// `interessados` (texto do corpo) e exclui do público quem já está lá (sqlSemManifestacao).
 const LADOS_LEMBRETE = [
   { tabela: 'obras',   tipoEmail: 'lembrete_obra',   tipoPrestador: 'pintor',    comCategoria: false, colunaValor: 'valor',
     ancora: 'COALESCE(d.publicado_em, d.criado_em)', janelaCol: 'horas_para_expirar',
-    semInteresse: `NOT EXISTS (SELECT 1 FROM candidaturas c WHERE c.obra_id = d.id)`,
+    interesse: { tabela: 'candidaturas', coluna: 'obra_id' },
     mensagem: mensagemLembreteObra },
   { tabela: 'reparos', tipoEmail: 'lembrete_reparo', tipoPrestador: 'reparador', comCategoria: true,  colunaValor: 'valor_estimado',
     ancora: 'd.criado_em', janelaCol: 'prazo_atendimento_horas',
-    semInteresse: `NOT EXISTS (SELECT 1 FROM interesse_reparos i WHERE i.reparo_id = d.id)`,
+    interesse: { tabela: 'interesse_reparos', coluna: 'reparo_id' },
     mensagem: mensagemLembreteReparo },
 ]
+const sqlInteressados = (lado) => `(SELECT count(*)::int FROM ${lado.interesse.tabela} x WHERE x.${lado.interesse.coluna} = d.id)`
 // Predicado da demanda ELEGÍVEL (estado), sem a parte de tempo — compartilhado pelo claim
 // (UPDATE) e pela prévia sem efeito (listarCandidatosLembrete). `d` é o alias da tabela.
+// Interesses NÃO entram aqui: a cadência só para no match (match_usuario_id) ou na expiração.
 const predicadoLembrete = (lado) => `
       d.status = 'aberta' AND d.status_aprovacao = 'aprovada'
       AND d.match_usuario_id IS NULL AND d.expira_em > NOW()
-      AND d.push_novo_enviado_em IS NOT NULL
-      AND ${lado.semInteresse}`
+      AND d.push_novo_enviado_em IS NOT NULL`
 // Janela W em horas (NUMERIC): a coluna da demanda ou, se NULL, expira_em − âncora.
 const sqlJanelaHoras = (lado) => `COALESCE(d.${lado.janelaCol}, EXTRACT(EPOCH FROM (d.expira_em - ${lado.ancora})) / 3600.0)`
 const sqlFaseLembrete = (lado) => `CASE
@@ -749,7 +781,7 @@ const sqlFatiaDevida = (lado) => `
       AND (s.fase <> 'unica' OR d.lembretes_enviados = 0)
       AND (s.fase = 'unica' OR (${SQL_JANELA_LEMBRETE}
            AND (d.lembrete_enviado_em IS NULL OR d.lembrete_enviado_em < NOW() - (${LEMBRETE_GAP_MIN_HORAS} * INTERVAL '1 hour'))))`
-const COLUNAS_LEMBRETE = (lado) => `d.id, d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor, d.lembretes_enviados`
+const COLUNAS_LEMBRETE = (lado) => `d.id, d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor, d.lembretes_enviados, ${sqlInteressados(lado)} AS interessados`
 // O claim em si (UPDATE … RETURNING). Exportado só para o dry-run executar o MESMO statement
 // dentro de um BEGIN…ROLLBACK; o cron (lembrarDemandasSemResposta) é o único chamador real.
 const sqlClaimLembrete = (lado) => `
@@ -1096,7 +1128,7 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
     try {
       const claim = await pool.query(sqlClaimLembrete(lado))
       if (claim.rowCount === 0) continue
-      console.log(`[Lembrete] ${lado.tabela}: ${claim.rowCount} demanda(s) sem resposta com fatia devida — lembrando (${claim.rows.map(d => `${d.id.slice(0, 8)} ${d.fase} #${d.lembretes_enviados}`).join(', ')})`)
+      console.log(`[Lembrete] ${lado.tabela}: ${claim.rowCount} demanda(s) sem match com fatia devida — lembrando (${claim.rows.map(d => `${d.id.slice(0, 8)} ${d.fase} #${d.lembretes_enviados} interessados=${d.interessados}`).join(', ')})`)
       for (const d of claim.rows) {
         const cidade = normalizar(d.cidade)
         const uf = String(d.uf || '').trim().toUpperCase()
@@ -1113,14 +1145,16 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
             ...lado.mensagem(d, d.id),
             rotulo: `lembrete ${lado.tabela} ${d.id}`,
             entrega: null,
+            excluirManifestados: { interesse: lado.interesse, demandaId: d.id },
           })
         } catch (err) {
           console.error(`[Lembrete] push ${lado.tabela} ${d.id} falhou:`, err.message)
         }
         // E-mail de reserva a quem não tem token: mesma função do aviso de demanda nova, com o
         // tipo do lembrete + número da fatia no claim de email_alertas (ver cabeçalho: o UNIQUE
-        // é por fatia). Já engole os próprios erros (só log).
-        await enviarEmailsNovaDemanda(lado.tabela, d.id, { tipo: `${lado.tipoEmail}#${d.lembretes_enviados}`, mensagem: lado.mensagem })
+        // é por fatia) e o `interesse` do lado (exclui quem já se manifestou; conta os
+        // interessados para o texto). Já engole os próprios erros (só log).
+        await enviarEmailsNovaDemanda(lado.tabela, d.id, { tipo: `${lado.tipoEmail}#${d.lembretes_enviados}`, mensagem: lado.mensagem, interesse: lado.interesse })
       }
     } catch (err) {
       console.error(`[Lembrete] erro em ${lado.tabela}:`, err.message)

@@ -859,7 +859,7 @@ const iniciarAgendador = () => {
     }
   }, 20 * 1000)
 
-  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | lembrete demanda sem resposta (W/2 | diário | semanal→diário, 08-20h SP): ${INTERVALO_LEMBRETE / 60000}min | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
+  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | lembrete demanda sem match (W/2 | diário | semanal→diário, 08-20h SP): ${INTERVALO_LEMBRETE / 60000}min | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
 }
 
 rotasApp.migracaoPronta
