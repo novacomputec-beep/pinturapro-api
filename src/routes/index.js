@@ -55,6 +55,9 @@ const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 const { ESPECIALIDADES_REPARADOR, validarEspecialidades } = require('../utils/especialidades')
 const { enviarEmail } = require('../services/emailService')
 const { sqlTipoConta, tipoDeTipoConta, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL } = require('../utils/tipoConta')
+// Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
+// pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
+const { sqlNaoDemandaPropria, ERRO_DEMANDA_PROPRIA, ehDemandaPropria } = require('../utils/demandaPropria')
 const bcrypt = require('bcrypt')
 
 // Envolve um DELETE de mídia para que, NO MESMO statement, as urls apagadas caiam na fila
@@ -2997,6 +3000,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
 router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, exigirVerificado, async (req, res) => {
   try {
     const { mensagem, valor_proposto } = req.body
+    if (await ehDemandaPropria('obras', req.params.id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
     const existente = await pool.query(
       `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
       [req.params.id, req.usuario.id]
@@ -4215,7 +4219,10 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
         AND NOT EXISTS (
           SELECT 1 FROM interesse_reparos ir
           WHERE ir.reparo_id = r.id AND ir.usuario_id = $1 AND ir.status = 'recusado'
-        )`
+        )
+        -- Pedido criado pela OUTRA conta da mesma pessoa (mesmo CPF normalizado): não aparece
+        -- — POST /reparos/:id/interesse o recusa com 400 demanda_propria. Sem CPF, não filtra.
+        AND ${sqlNaoDemandaPropria('r')}`
 
     if (categoria && categoria !== 'todas') {
       params.push(categoria)
@@ -4283,6 +4290,7 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
 router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, exigirVerificado, async (req, res) => {
   try {
     const { mensagem, valor_proposto } = req.body
+    if (await ehDemandaPropria('reparos', req.params.id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
     const existente = await pool.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
     if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse neste serviço' })
     const result = await pool.query(
@@ -6600,6 +6608,7 @@ router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiv
     const mensagem = req.body.mensagem ?? req.body.mensagem_oferta ?? null
     const obraResult = await pool.query(`SELECT id, titulo, status FROM obras WHERE id = $1 AND status = 'aberta'`, [obra_id])
     if (obraResult.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada ou não está disponível' })
+    if (await ehDemandaPropria('obras', obra_id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
     const existente = await pool.query(`SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`, [obra_id, req.usuario.id])
     if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse nesta obra' })
     const result = await pool.query(
