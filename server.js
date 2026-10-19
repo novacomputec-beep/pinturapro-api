@@ -16,6 +16,8 @@ const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src
 const { limparTentativasAntigas } = require('./src/utils/tentativasAuth')
 // Promoção automática da versão "atual" do app pelo que os aparelhos reportam (utils/versaoApp).
 const { cronPromoverVersaoAtual } = require('./src/utils/versaoApp')
+// Proximidade: a outra conta do criador do reparo (mesmo CPF) não recebe "serviço próximo".
+const { sqlNaoMesmoCpf } = require('./src/utils/demandaPropria')
 // Poda de links de assinatura pela web nunca usados (> 7 dias) — mesmo agendamento diário
 // de limparTentativasAntigas, sem mecanismo novo.
 const { limparLinksAssinaturaAntigos } = require('./src/controllers/assinaturaLinkController')
@@ -334,6 +336,8 @@ const verificarPrestadoresProximos = async () => {
           SELECT 1 FROM interesse_reparos ir
           WHERE ir.reparo_id = r.id AND ir.usuario_id = ad.reparador_id
         )
+        -- Outra conta da mesma pessoa que criou o reparo (mesmo CPF normalizado): sem aviso.
+        AND ${sqlNaoMesmoCpf('r.criado_por', 'u.id')}
     `)
 
     let notifReparos = 0
