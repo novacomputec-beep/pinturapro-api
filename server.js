@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarDemandasSemResposta, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarDemandasSemResposta, lembrarPrazoChegada, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -772,6 +772,10 @@ const iniciarAgendador = () => {
   setInterval(() => { verificarMarcosExpiracao() }, INTERVALO_CRONOMETRO)
   setInterval(() => { verificarCronometroReparos() }, INTERVALO_CRONOMETRO)
   setInterval(() => { verificarCronometroObras() }, INTERVALO_CRONOMETRO)
+  // Lembrete ao profissional antes do prazo de chegada (prazo − min(1h, metade do intervalo
+  // match→prazo)): mesma cadência dos cronômetros, que leem o mesmo prazo. Fora do warm-up: o
+  // lembrete fica devido até o prazo, então o primeiro tique de 1 min o pega.
+  setInterval(() => { lembrarPrazoChegada() }, INTERVALO_CRONOMETRO)
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
   // Poda das tentativas de auth: a tabela acumula linhas de e-mails inexistentes, que é o
   // preço de contar TODOS (o que fecha o oráculo de existência de conta).
@@ -864,7 +868,7 @@ const iniciarAgendador = () => {
     }
   }, 20 * 1000)
 
-  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | lembrete demanda sem match (W/2 | diário | semanal→diário, 08-20h SP): ${INTERVALO_LEMBRETE / 60000}min | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
+  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | lembrete prazo de chegada ao profissional: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | lembrete demanda sem match (W/2 | diário | semanal→diário, 08-20h SP): ${INTERVALO_LEMBRETE / 60000}min | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
 }
 
 rotasApp.migracaoPronta

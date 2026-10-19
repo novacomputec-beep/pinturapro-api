@@ -1,7 +1,7 @@
 const { pool } = require('../utils/supabase')
 const { enviarContratoObra } = require('./contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
-const { enviarPushNotificacao } = require('../services/alertaService')
+const { enviarPushNotificacao, avisarMatchFeito } = require('../services/alertaService')
 
 const minhas = async (req, res) => {
   try {
@@ -183,7 +183,8 @@ const aprovar = async (req, res) => {
     await pool.query(
       `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW(),
               chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
-              chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL, chegada_confirmada_em = NULL
+              chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL, chegada_confirmada_em = NULL,
+              aviso_match_enviado_em = NULL, lembrete_chegada_enviado_em = NULL
        WHERE id = $2 AND match_usuario_id IS NULL`,
       [result.rows[0].usuario_id, result.rows[0].obra_id]
     )
@@ -205,6 +206,7 @@ const aprovar = async (req, res) => {
         `Parabéns! Você fechou negócio em "${obraCheck.rows[0].titulo}"! Toque para ver os detalhes.`,
         { tipo: 'candidatura_aceita', obra_id: result.rows[0].obra_id }).catch(() => {})
     }
+    avisarMatchFeito('obras', result.rows[0].obra_id, result.rows[0].usuario_id)
 
     // Envia contrato por e-mail de forma assíncrona sem bloquear a resposta
     enviarContratoObra(id).catch(err =>
