@@ -1162,6 +1162,138 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
   }
 })
 
+// Avisos ao PROFISSIONAL casado, sobre o prazo de chegada (o do cronômetro):
+//   (1) avisarMatchFeito — logo após o match: "use Pedir mais tempo se combinar outra data".
+//   (2) lembrarPrazoChegada — UM lembrete antes do prazo, em prazo − min(1h, metade do intervalo
+//       match_feito_em → prazo). Cron de 1 min, como os cronômetros.
+// PRAZO = a MESMA expressão dos crons verificarCronometro* (COALESCE(chegada_prevista_em,
+// expira_em)); nada aqui altera o cronômetro — só lê o que ele lê.
+// Pulado (2) enquanto: chegada já declarada/confirmada, match desfeito (match_usuario_id NULL),
+// pedido de tempo em curso (pedido_tempo_status) ou janela de chegada proposta sem resposta do
+// dono (chegada_pendente_em). O predicado é reavaliado a cada tique: pendência resolvida antes do
+// prazo ainda recebe o lembrete, se couber.
+// Idempotência: aviso_match_enviado_em / lembrete_chegada_enviado_em (claim atômico UPDATE ...
+// WHERE IS NULL RETURNING), zeradas no UPDATE que cria o match (SQL_LIMPAR_CHEGADA em routes).
+// data do push = o mesmo dos pushes de match ao profissional (candidatura_aceita / interesse_aceito
+// + id), para o toque abrir o detalhe da demanda. E-mail SÓ a quem não tem push_token, com o mesmo
+// HTML de reserva dos avisos de demanda (htmlEmailNovaDemanda, botão "Ver no app").
+const LADOS_MATCH = {
+  obras:   { tabela: 'obras',   chave: 'obra_id',   tipoPush: 'candidatura_aceita', aba: 'Obras' },
+  reparos: { tabela: 'reparos', chave: 'reparo_id', tipoPush: 'interesse_aceito',   aba: 'Serviços' },
+}
+const SQL_PRAZO_CHEGADA = `COALESCE(d.chegada_prevista_em, d.expira_em)`
+const TEXTO_MATCH_FEITO = {
+  titulo: '🤝 Match feito!',
+  corpo: 'Se combinar outra data com o cliente, use "Pedir mais tempo" no app. Senão o match é desfeito quando o prazo de chegada vencer.',
+}
+const CORPO_LEMBRETE_CHEGADA = 'Já chegou? Confirme no app. Combinou outra data? Toque em "Pedir mais tempo".'
+// "1h" quando resta a hora inteira (antecedência de 1h disparada no tique certo, com até 1 min
+// de cadência); senão os minutos reais que restam — inclusive quando o tique chegou atrasado.
+const rotuloRestante = (restanteMin) =>
+  (Number(restanteMin) >= 59 ? '1h' : `${Math.max(1, Math.round(Number(restanteMin)))} min`)
+const tituloLembreteChegada = (d) => `⏰ Prazo de chegada vence em ${rotuloRestante(d.restante_min)}`
+
+// Push ao profissional ou, sem token, e-mail (nunca os dois). Erro só no log.
+const entregarAoProfissional = async ({ lado, demanda, titulo, corpo, rotulo }) => {
+  const data = { tipo: lado.tipoPush, [lado.chave]: demanda.id }
+  if (demanda.push_token) {
+    await enviarPushNotificacao(demanda.push_token, titulo, corpo, data)
+    return 'push'
+  }
+  if (!demanda.email) return 'sem contato'
+  const html = htmlEmailNovaDemanda({ nome: demanda.nome?.split(' ')[0] || 'profissional', titulo, corpo, aba: lado.aba })
+  await comTimeout(enviarEmailBrevo({ para: demanda.email, assunto: titulo, html }), EMAIL_ALERTAS_TIMEOUT_MS, `Brevo ${rotulo}`)
+  return 'e-mail'
+}
+
+// (1) Chamada fire-and-forget logo depois do UPDATE que cria o match (7 caminhos de aceite/match
+// em routes/index.js e candidaturasController). O claim exige match_usuario_id = usuarioId: um
+// match que já mudou de mãos ou foi desfeito não recebe nada.
+const avisarMatchFeito = (tabela, demandaId, usuarioId) => {
+  const lado = LADOS_MATCH[tabela]
+  if (!lado || !demandaId || !usuarioId) return Promise.resolve()
+  return (async () => {
+    const claim = await pool.query(
+      `UPDATE ${lado.tabela} d SET aviso_match_enviado_em = NOW()
+         FROM usuarios u
+        WHERE d.id = $1 AND d.match_usuario_id = $2 AND u.id = d.match_usuario_id
+          AND d.aviso_match_enviado_em IS NULL
+    RETURNING d.id, d.titulo, u.push_token, u.email, u.nome`,
+      [demandaId, usuarioId]
+    )
+    if (claim.rowCount === 0) return
+    const via = await entregarAoProfissional({ lado, demanda: claim.rows[0], ...TEXTO_MATCH_FEITO, rotulo: `match feito ${tabela} ${demandaId}` })
+    console.log(`[MatchFeito] ${tabela} ${demandaId} → profissional ${usuarioId} via ${via}`)
+  })().catch(err => console.error(`[MatchFeito] ${tabela} ${demandaId}:`, err.message))
+}
+
+// (2) Cálculo por linha: prazo, antecedência (min(1h, metade de match→prazo)) e instante do
+// lembrete. Compartilhado pelo claim e pela prévia (dry-run), para nunca divergirem.
+const sqlCalculoLembreteChegada = (lado) => `
+      SELECT d.id, ${SQL_PRAZO_CHEGADA} AS prazo,
+             LEAST(INTERVAL '1 hour', (${SQL_PRAZO_CHEGADA} - d.match_feito_em) / 2) AS antecedencia,
+             ${SQL_PRAZO_CHEGADA} - LEAST(INTERVAL '1 hour', (${SQL_PRAZO_CHEGADA} - d.match_feito_em) / 2) AS dispara_em
+        FROM ${lado.tabela} d
+       WHERE d.status = 'aberta' AND d.match_usuario_id IS NOT NULL AND d.match_feito_em IS NOT NULL
+         AND d.chegada_declarada_em IS NULL AND d.chegada_confirmada_em IS NULL
+         AND ${SQL_PRAZO_CHEGADA} > NOW()`
+// Devido agora: já passou o instante do lembrete, ainda não enviado, sem pendência em curso.
+const sqlLembreteChegadaDevido = `
+      NOW() >= s.dispara_em AND d.lembrete_chegada_enviado_em IS NULL
+      AND d.pedido_tempo_status IS NULL AND d.chegada_pendente_em IS NULL`
+const COLUNAS_LEMBRETE_CHEGADA = `d.id, d.titulo, d.match_usuario_id, s.prazo,
+      EXTRACT(EPOCH FROM s.antecedencia) / 60 AS antecedencia_min,
+      EXTRACT(EPOCH FROM (s.prazo - NOW())) / 60 AS restante_min`
+const sqlClaimLembreteChegada = (lado) => `
+      UPDATE ${lado.tabela} d SET lembrete_chegada_enviado_em = NOW()
+        FROM (${sqlCalculoLembreteChegada(lado)}) s
+       WHERE d.id = s.id AND ${sqlLembreteChegadaDevido}
+   RETURNING ${COLUNAS_LEMBRETE_CHEGADA}`
+
+// Prévia SEM efeito (dry-run): todo match vivo com prazo à frente, quando o lembrete dispara e
+// por que (ainda) não dispara. db: client/transação do chamador.
+const listarLembretesPrazoChegada = async (db = pool) => {
+  const saida = []
+  for (const lado of Object.values(LADOS_MATCH)) {
+    const r = await db.query(
+      `SELECT ${COLUNAS_LEMBRETE_CHEGADA}, s.dispara_em, d.match_feito_em, d.expira_em, d.chegada_prevista_em,
+              d.pedido_tempo_status, d.chegada_pendente_em, d.lembrete_chegada_enviado_em, d.aviso_match_enviado_em,
+              u.push_token IS NOT NULL AS tem_token, NULLIF(btrim(u.email), '') IS NOT NULL AS tem_email,
+              (${sqlLembreteChegadaDevido}) AS devido_agora, NOW() AS agora
+         FROM ${lado.tabela} d JOIN (${sqlCalculoLembreteChegada(lado)}) s ON s.id = d.id
+         LEFT JOIN usuarios u ON u.id = d.match_usuario_id
+        ORDER BY s.prazo`
+    )
+    saida.push({ tabela: lado.tabela, matches: r.rows })
+  }
+  return saida
+}
+
+const lembrarPrazoChegada = semSobreposicao('lembrarPrazoChegada', async () => {
+  for (const lado of Object.values(LADOS_MATCH)) {
+    try {
+      const claim = await pool.query(sqlClaimLembreteChegada(lado))
+      if (claim.rowCount === 0) continue
+      for (const d of claim.rows) {
+        try {
+          const prof = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [d.match_usuario_id])
+          const via = await entregarAoProfissional({
+            lado, demanda: { ...d, ...(prof.rows[0] || {}) },
+            titulo: tituloLembreteChegada(d), corpo: CORPO_LEMBRETE_CHEGADA,
+            rotulo: `lembrete chegada ${lado.tabela} ${d.id}`,
+          })
+          console.log(`[LembreteChegada] ${lado.tabela} ${d.id} → profissional ${d.match_usuario_id} via ${via} (${rotuloRestante(d.restante_min)} para o prazo)`)
+        } catch (err) {
+          // Claim já gravado: sem repescagem — é UM lembrete por match, e o prazo está perto.
+          console.error(`[LembreteChegada] ${lado.tabela} ${d.id} falhou:`, err.message)
+        }
+      }
+    } catch (err) {
+      console.error(`[LembreteChegada] erro em ${lado.tabela}:`, err.message)
+    }
+  }
+})
+
 const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaixoEngajamento', async () => {
   try {
     console.log('Verificando obras com baixo engajamento...')
@@ -1872,6 +2004,12 @@ module.exports = {
   listarCandidatosLembrete,
   sqlClaimLembrete,
   LADOS_LEMBRETE,
+  avisarMatchFeito,
+  lembrarPrazoChegada,
+  listarLembretesPrazoChegada,
+  sqlClaimLembreteChegada,
+  tituloLembreteChegada,
+  LADOS_MATCH,
   verificarObrasExpirando,
   verificarObrasComBaixoEngajamento,
   verificarMarcosExpiracao,

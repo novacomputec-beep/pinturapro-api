@@ -14,7 +14,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
+const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { moderarDemanda, avisarModeracao, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
@@ -39,8 +39,12 @@ const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
 // aceite quando há lixo, limpa: no instante do aceite match_usuario_id É NULL, então qualquer
 // chegada_* presente pertence a ninguém por definição, e recusar deixaria o dono sem saída
 // (expirar-match exige match). Mesma lista dos un-matches (expirar-match, responder-tempo).
+// aviso_match_enviado_em / lembrete_chegada_enviado_em: os dois avisos ao profissional casado
+// (alertaService.avisarMatchFeito / lembrarPrazoChegada) valem UMA vez por match — zerados aqui
+// para o match novo poder recebê-los; os un-matches não precisam tocá-los.
 const SQL_LIMPAR_CHEGADA = `chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
-              chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL, chegada_confirmada_em = NULL`
+              chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL, chegada_confirmada_em = NULL,
+              aviso_match_enviado_em = NULL, lembrete_chegada_enviado_em = NULL`
 const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
@@ -433,6 +437,16 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS lembretes_enviados INTEGER NOT NULL DEFAULT 0`)
     await client.query(`UPDATE obras   SET lembretes_enviados = 1 WHERE lembrete_enviado_em IS NOT NULL AND lembretes_enviados = 0`)
     await client.query(`UPDATE reparos SET lembretes_enviados = 1 WHERE lembrete_enviado_em IS NOT NULL AND lembretes_enviados = 0`)
+    // Avisos ao PROFISSIONAL casado (alertaService.avisarMatchFeito / lembrarPrazoChegada):
+    // aviso_match_enviado_em = push "Match feito!" logo após o match; lembrete_chegada_enviado_em
+    // = lembrete antes do prazo de chegada. Cada um é um claim atômico (UPDATE ... WHERE IS NULL
+    // RETURNING) e os dois são zerados NO MESMO UPDATE que cria um match (SQL_LIMPAR_CHEGADA),
+    // então valem UMA vez por match. Sem backfill: match já existente no deploy não recebe o
+    // "Match feito!" (não é "logo após"), mas entra no lembrete de prazo se ainda couber.
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS aviso_match_enviado_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS aviso_match_enviado_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS lembrete_chegada_enviado_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS lembrete_chegada_enviado_em TIMESTAMPTZ`)
     // Código público curto da demanda — a página /p/<codigo> (routes/paginaPublica.js, montada
     // em server.js fora de /api) resolve por ele. 5 caracteres de um alfabeto sem ambiguidade
     // (sem 0/O, 1/I/L), único nas DUAS tabelas para a rota não precisar de prefixo de lado.
@@ -3039,6 +3053,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
           `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
       }
+      avisarMatchFeito('obras', obra_id, cand.usuario_id)
       enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
       // Recusa os demais candidatos e os notifica (antes ficava só no /match, que hoje sai
       // no early-return). Fire-and-forget: efeito secundário, não bloqueia a resposta.
@@ -3136,6 +3151,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
           `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
       }
+      avisarMatchFeito('obras', obra_id, req.usuario.id)
       enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
       // Recusa os demais candidatos e os notifica (ver POST .../responder).
       rejeitarConcorrentes('obra', obra_id, req.usuario.id).catch(err => console.error('[obras/pintor-responder] rejeitarConcorrentes:', err.message))
@@ -3195,6 +3211,7 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
         `Um pintor confirmou que está indo até você para "${obra.rows[0].titulo}"`,
         { tipo: 'match_obra', obra_id: req.params.id }).catch(err => console.error('[obras/match] push falhou:', err.message))
     }
+    avisarMatchFeito('obras', req.params.id, req.usuario.id)
     enviarContratoObra(candidaturaAceita.rows[0].id).catch(err => console.error('Erro ao enviar contrato obra:', err))
     // Recusa os demais candidatos e os notifica — pós-resposta, não bloqueia o cliente
     // (Finding 3.1). Mantido aqui para linhas legadas: obras casadas por /match antes de o
@@ -4356,6 +4373,7 @@ router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) 
         { tipo: 'match_reparo', reparo_id: req.params.id }
       ).catch(err => console.error('[reparos/match] push falhou:', err.message))
     }
+    avisarMatchFeito('reparos', req.params.id, req.usuario.id)
     // Envia contrato por e-mail para dono e prestador
     enviarContratoReparo(req.params.id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
     // Recusa os demais interessados e os notifica — pós-resposta, não bloqueia o cliente
@@ -4430,6 +4448,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
           `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
       }
+      avisarMatchFeito('reparos', reparo_id, int.usuario_id)
       // match_usuario_id já foi definido acima, então o contrato pode sair agora — mesmo
       // ponto do fluxo em que a obra envia o dela (POST .../responder).
       enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
@@ -4531,6 +4550,7 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
           `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
       }
+      avisarMatchFeito('reparos', reparo_id, req.usuario.id)
       // match_usuario_id já foi definido acima, então o contrato pode sair agora.
       enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
       // Recusa os demais interessados e os notifica (ver POST .../responder).
