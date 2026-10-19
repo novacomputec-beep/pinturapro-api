@@ -20,6 +20,7 @@ const { moderarDemanda, avisarModeracao, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = 
 const { montarResumoCanal } = require('../utils/canalResumo')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
+const { PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao, normalizarVersao, normalizarTestadores, SQL_VERSAO_INT, versoesPublicas, invalidarCacheVersoes, gravarConfig, lerConfigVersao, candidatosPromocao } = require('../utils/versaoApp')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
 // America/Sao_Paulo. Compartilhado com alertaService, que reconstrói expira_em nos crons.
 const { PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP, FORMATO_ZONA_IANA, sqlZonaSegura } = require('../utils/faixasPrazo')
@@ -258,6 +259,35 @@ const migracaoPronta = (async () => {
     await client.query(`INSERT INTO configuracoes (chave, valor)
                         SELECT 'multiplas_contas', 'false'
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'multiplas_contas')`)
+    // Versões do app (utils/versaoApp): minima/atual por plataforma saem do banco (antes, só
+    // env). Semente na PRIMEIRA vez: o env de sempre (APP_VERSAO_*), ou 0.0.0. Nos boots
+    // seguintes o env só consegue SUBIR a atual (nunca rebaixar) — minima é manual (painel).
+    // N (min_usuarios) = 3; testadores = e-mails das contas admin existentes no primeiro boot.
+    // versoes_app_vistas: uma linha por (usuário, plataforma, versão) reportada nos headers.
+    for (const p of PLATAFORMAS) {
+      for (const tipo of ['minima', 'atual']) {
+        const env = normalizarVersao(process.env[`APP_VERSAO_${tipo.toUpperCase()}_${p.toUpperCase()}`]) || VERSAO_ZERO
+        await client.query(`INSERT INTO configuracoes (chave, valor) SELECT $1, $2
+                             WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`, [chaveVersao(tipo, p), env])
+        if (tipo === 'atual') {
+          await client.query(`UPDATE configuracoes SET valor = $2, atualizado_em = NOW()
+                               WHERE chave = $1 AND ${SQL_VERSAO_INT('valor')} < ${SQL_VERSAO_INT('$2::text')}`, [chaveVersao(tipo, p), env])
+        }
+      }
+    }
+    await client.query(`INSERT INTO configuracoes (chave, valor) SELECT $1, $2
+                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`, [CHAVE_MIN_USUARIOS, String(MIN_USUARIOS_PADRAO)])
+    await client.query(`INSERT INTO configuracoes (chave, valor)
+                         SELECT $1, COALESCE((SELECT string_agg(lower(btrim(email)), ',' ORDER BY email) FROM usuarios WHERE role = 'admin'), '')
+                          WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`, [CHAVE_TESTADORES])
+    await client.query(`CREATE TABLE IF NOT EXISTS versoes_app_vistas (
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      plataforma TEXT NOT NULL,
+      versao     TEXT NOT NULL,
+      primeiro_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ultimo_em   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (usuario_id, plataforma, versao)
+    )`)
     // Resposta da equipe às dúvidas (mensagens): quem respondeu e quando. As DUAS colunas já
     // eram escritas por mensagensController.responder e lidas por porObra, mas nunca existiram
     // na tabela — as duas rotas estouravam 42703 e devolviam 500. Tipos batendo com o que o
@@ -6352,17 +6382,69 @@ router.get('/config/lancamento', async (req, res) => {
 
 // Versões do app para o aviso de atualização — lida PRÉ-LOGIN, então NÃO exige token.
 // minima = abaixo dela o app obriga a atualizar; atual = a publicada na loja (aviso opcional).
-// Vem de env (sem banco): variável ausente, vazia ou fora do formato N.N.N vira '0.0.0',
-// que nenhuma versão instalada fica abaixo — config faltando nunca bloqueia ninguém.
-const versaoApp = (nome) => {
-  const valor = (process.env[nome] || '').trim()
-  return /^\d+(\.\d+){0,2}$/.test(valor) ? valor : '0.0.0'
-}
-router.get('/config/versao-app', (req, res) => {
-  res.json({
-    android: { minima: versaoApp('APP_VERSAO_MINIMA_ANDROID'), atual: versaoApp('APP_VERSAO_ATUAL_ANDROID') },
-    ios:     { minima: versaoApp('APP_VERSAO_MINIMA_IOS'),     atual: versaoApp('APP_VERSAO_ATUAL_IOS') },
-  })
+// Mesma forma de sempre ({ android: { minima, atual }, ios: { minima, atual } }); os valores
+// agora vêm de configuracoes (utils/versaoApp: semente do env na migração, atual sobe sozinha
+// pelo que os aparelhos reportam, minima é manual no painel). Config faltando vira '0.0.0',
+// que nenhuma versão instalada fica abaixo — nunca bloqueia ninguém. Cache de 60s por processo.
+router.get('/config/versao-app', async (req, res) => {
+  try {
+    res.json(await versoesPublicas())
+  } catch (err) {
+    console.error('[versao-app]', err.message)
+    const zero = {}
+    for (const p of PLATAFORMAS) zero[p] = { minima: VERSAO_ZERO, atual: VERSAO_ZERO }
+    res.json(zero)
+  }
+})
+
+// Painel: estado completo das versões + prévia do que a promoção automática faria agora
+// (candidatas por plataforma com nº de usuários não testadores, e a vencedora, se houver).
+router.get('/admin/versao-app', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const prev = await candidatosPromocao()
+    res.json(prev)
+  } catch (err) {
+    console.error('[admin/versao-app]', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar versões do app' })
+  }
+})
+
+// Painel: altera N, a lista de testadores e minima/atual por plataforma. Só o que vier no corpo
+// muda. atual aqui é MANUAL e aceita qualquer versão válida (inclusive menor — é o admin
+// corrigindo); a promoção automática continua só subindo a partir do que ficar gravado.
+// Corpo: { min_usuarios?, testadores?: [emails] | "a@x,b@y", android?: { minima?, atual? }, ios?: {...} }
+router.put('/admin/versao-app', autenticar, exigirSuperAdmin, async (req, res) => {
+  const body = req.body || {}
+  const gravacoes = []
+  if (body.min_usuarios !== undefined) {
+    const n = Number(body.min_usuarios)
+    if (!Number.isInteger(n) || n < 1 || n > 1000) return res.status(400).json({ erro: 'min_usuarios deve ser um inteiro entre 1 e 1000' })
+    gravacoes.push([CHAVE_MIN_USUARIOS, String(n)])
+  }
+  if (body.testadores !== undefined) {
+    if (typeof body.testadores !== 'string' && !Array.isArray(body.testadores)) return res.status(400).json({ erro: 'testadores deve ser lista de e-mails ou texto separado por vírgula' })
+    gravacoes.push([CHAVE_TESTADORES, normalizarTestadores(body.testadores).join(',')])
+  }
+  for (const p of PLATAFORMAS) {
+    if (body[p] === undefined) continue
+    if (typeof body[p] !== 'object' || body[p] === null) return res.status(400).json({ erro: `${p} deve ser um objeto { minima, atual }` })
+    for (const tipo of ['minima', 'atual']) {
+      if (body[p][tipo] === undefined) continue
+      const v = normalizarVersao(body[p][tipo])
+      if (!v) return res.status(400).json({ erro: `${p}.${tipo} inválida: use N.N.N` })
+      gravacoes.push([chaveVersao(tipo, p), v])
+    }
+  }
+  if (gravacoes.length === 0) return res.status(400).json({ erro: 'Nada para alterar' })
+  try {
+    for (const [chave, valor] of gravacoes) await gravarConfig(pool, chave, valor)
+    invalidarCacheVersoes()
+    console.log(`[admin/versao-app] ${req.usuario.id} alterou ${gravacoes.map(([k, v]) => `${k}=${v}`).join(' ')}`)
+    res.json(await lerConfigVersao())
+  } catch (err) {
+    console.error('[admin/versao-app]', err.message)
+    res.status(500).json({ erro: 'Erro ao salvar versões do app' })
+  }
 })
 
 // Admin liga/estende/desliga a janela. data_fim = ISO futuro liga/estende; null desliga.
