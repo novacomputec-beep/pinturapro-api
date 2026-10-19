@@ -1,5 +1,7 @@
 const jwt = require('jsonwebtoken')
 const { pool } = require('../utils/supabase')
+// Só importa utils/supabase — sem ciclo com este middleware.
+const { registrarVersaoVista } = require('../utils/versaoApp')
 
 // Cache simples em memória
 const cacheUsuarios = new Map()
@@ -110,6 +112,10 @@ const autenticar = async (req, res, next) => {
     }
 
     req.usuario = usuario
+    // Versão/plataforma do app que fez a chamada (headers X-App-Version / X-App-Platform):
+    // registro fire-and-forget com dedupe em memória (utils/versaoApp) — síncrono, sem await,
+    // nunca falha a requisição. Sem os headers (painel web, cliente antigo) é no-op.
+    registrarVersaoVista(req)
     next()
   } catch (err) {
     console.error('Erro auth:', err.message)

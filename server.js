@@ -14,6 +14,8 @@ const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
 const { limparTentativasAntigas } = require('./src/utils/tentativasAuth')
+// Promoção automática da versão "atual" do app pelo que os aparelhos reportam (utils/versaoApp).
+const { cronPromoverVersaoAtual } = require('./src/utils/versaoApp')
 // Poda de links de assinatura pela web nunca usados (> 7 dias) — mesmo agendamento diário
 // de limparTentativasAntigas, sem mecanismo novo.
 const { limparLinksAssinaturaAntigos } = require('./src/controllers/assinaturaLinkController')
@@ -795,6 +797,9 @@ const iniciarAgendador = () => {
   // cronômetro — a fatia de W=1h cai em 30 min e não pode esperar 10. Fora do warm-up: a
   // fatia fica devida até acabar, então o próximo tique a pega.
   setInterval(() => { lembrarDemandasSemResposta() }, INTERVALO_LEMBRETE)
+  // Versão "atual" do app: sobe sozinha quando N usuários não testadores já rodam uma maior.
+  // 5 min: o aviso de atualização não é urgente, e a consulta agrupa uma tabela pequena.
+  setInterval(() => { cronPromoverVersaoAtual() }, INTERVALO_LEMBRETE)
   // De hora em hora como o job de expiração: as bandas de 12h e 6h não existem numa cadência
   // diária — um tick por dia pularia as duas mais urgentes.
   setInterval(() => { notificarAssinaturasProximasVencimento() }, 60 * 60 * 1000)
@@ -868,7 +873,7 @@ const iniciarAgendador = () => {
     }
   }, 20 * 1000)
 
-  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | lembrete prazo de chegada ao profissional: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | lembrete demanda sem match (W/2 | diário | semanal→diário, 08-20h SP): ${INTERVALO_LEMBRETE / 60000}min | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
+  console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | lembrete prazo de chegada ao profissional: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | lembrete demanda sem match (W/2 | diário | semanal→diário, 08-20h SP): ${INTERVALO_LEMBRETE / 60000}min | promoção da versão atual do app: ${INTERVALO_LEMBRETE / 60000}min | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
 }
 
 rotasApp.migracaoPronta
