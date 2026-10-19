@@ -7,6 +7,7 @@ const { ipKeyGenerator } = require('express-rate-limit')
 const jwt = require('jsonwebtoken')
 const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
+const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
 const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarDemandasSemResposta, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
@@ -229,6 +230,10 @@ app.use(express.urlencoded({ extended: true, limit: LIMITE_CORPO_JSON }))
 // WhatsApp, sem JWT, só leitura das colunas seguras. Passa pelo helmet, CORS, shedding e o
 // limiter global como tudo o mais (montado depois deles).
 app.use('/p', paginaPublica)
+// Resolução de código público → { tipo, id } (sem JWT, só isso): mesmo tratamento da página
+// acima (helmet, CORS, shedding, limiter global). Montado ANTES de rotasApp para o prefixo
+// /api/publico ser dele, não cair no 404 genérico de lá.
+app.use('/api/publico', publico)
 app.use('/api', rotasApp)
 
 // Health check

@@ -260,5 +260,8 @@ router.get('/:codigo', async (req, res) => {
 })
 
 module.exports = router
+// Validação do código pública do módulo: routes/publico.js (GET /api/publico/demanda/:codigo)
+// usa a MESMA regra, para os dois caminhos aceitarem e recusarem os mesmos códigos.
+module.exports.RE_CODIGO = RE_CODIGO
 // Só para teste/dry-run (render sem servidor): não são API pública do módulo.
 module.exports._interno = { buscarDemanda, renderAberta, renderEncerrada, linkAbrirApp, botaoEApoio, RE_CODIGO, APP_TEM_SCHEME }
