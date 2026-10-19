@@ -22,6 +22,12 @@ const { invalidarCacheAssinatura } = require('../middlewares/auth')
 // importa o SDK e utils/marca — sem ciclo. Direto no Brevo (e não em emailService) para o
 // erro de cada envio chegar aqui e ser logado por destinatário.
 const { enviarEmail: enviarEmailBrevo } = require('./brevoService')
+// A OUTRA conta da mesma pessoa (mesmo CPF normalizado do criador da demanda) fica fora de todo
+// público de notificação de demanda: broadcast de demanda nova / oferta aumentada / lembrete
+// (broadcastPaginado), repescagem por destinatário (reenviarEntregasFalhas) e e-mail de reserva
+// (reivindicarEmailsNovaDemanda). Sem CPF de um dos lados o predicado não filtra. Só leitura:
+// push_entregas nunca é reescrita por causa disto. utils/demandaPropria só importa utils/supabase.
+const { sqlNaoMesmoCpf, sqlNaoMesmoCpfDoCriador } = require('../utils/demandaPropria')
 
 const expo = new Expo()
 
@@ -285,10 +291,26 @@ const sqlSemManifestacao = (interesse, param) => (interesse
 // null: envia sem registrar (push "oferta aumentada", que não é a entrega da demanda nova).
 // excluirManifestados (opcional, só o lembrete passa) = { interesse, demandaId }: tira do público
 // quem já se candidatou / mostrou interesse NESTA demanda (sqlSemManifestacao).
-const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null }) => {
+// demanda = { tabela: 'obras' | 'reparos', id }: a demanda anunciada — tira do público a outra
+// conta do seu criador (sqlNaoMesmoCpfDoCriador). Todos os chamadores passam; sem ela não filtra.
+const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null, demanda = null }) => {
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
   let cursor = null
   for (;;) {
+    // Filtros opcionais entram no SQL E na lista de parâmetros JUNTOS: o pg recusa parâmetro
+    // que a consulta não cita ("bind message supplies N parameters, but prepared statement
+    // requires N-1"), e era isso que o $7 fixo fazia com o broadcast de demanda nova (sem
+    // excluirManifestados o fragmento era '' e o 7º valor sobrava → o claim dava ROLLBACK).
+    const params = [tipoPrestador, cidade, uf, cursor, PAGINA_BROADCAST, categoria]
+    let filtrosOpcionais = ''
+    if (excluirManifestados?.interesse) {
+      params.push(excluirManifestados.demandaId)
+      filtrosOpcionais += `\n         ${sqlSemManifestacao(excluirManifestados.interesse, `$${params.length}`)}`
+    }
+    if (demanda) {
+      params.push(demanda.id)
+      filtrosOpcionais += `\n         AND ${sqlNaoMesmoCpfDoCriador(demanda.tabela, `$${params.length}`)}`
+    }
     const pagina = await pool.query(
       `SELECT u.id, u.push_token
        FROM usuarios u
@@ -305,11 +327,10 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
          AND ${SQL_CIDADE_PRESTADOR} = $2
          AND upper(btrim(u.uf)) = $3
          AND ($4::uuid IS NULL OR u.id > $4::uuid)
-         AND ($6::text IS NULL OR (cardinality(u.especialidades) > 0 AND ($6::text = 'outros' OR $6::text = ANY(u.especialidades))))
-         ${sqlSemManifestacao(excluirManifestados?.interesse, '$7')}
+         AND ($6::text IS NULL OR (cardinality(u.especialidades) > 0 AND ($6::text = 'outros' OR $6::text = ANY(u.especialidades))))${filtrosOpcionais}
        ORDER BY u.id
        LIMIT $5`,
-      [tipoPrestador, cidade, uf, cursor, PAGINA_BROADCAST, categoria, excluirManifestados?.demandaId ?? null]
+      params
     )
     if (pagina.rows.length === 0) break
     total.paginas++
@@ -383,6 +404,7 @@ const notificarPintoresSobreNovaObra = async (obraId) => {
       ...mensagemNovaObra(obra, obraId),
       rotulo: `nova obra ${obraId}`,
       entrega: { tipo: 'obra', demandaId: obraId },
+      demanda: { tabela: 'obras', id: obraId },
     })
   } catch (err) {
     // Loga E propaga: o claim de push_novo_enviado_em (dispararPushNovoComClaim) só grava
@@ -423,6 +445,7 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
       ...mensagemNovoReparo(reparo, reparoId),
       rotulo: `novo reparo ${reparoId}`,
       entrega: { tipo: 'reparo', demandaId: reparoId },
+      demanda: { tabela: 'reparos', id: reparoId },
     })
   } catch (err) {
     // Loga E propaga — mesmo motivo do lado obra (ver notificarPintoresSobreNovaObra).
@@ -477,6 +500,7 @@ const notificarOfertaAumentadaObra = async (obraId) => {
     ...mensagemOfertaAumentadaObra(obra, obraId),
     rotulo: `oferta aumentada obra ${obraId}`,
     entrega: null,
+    demanda: { tabela: 'obras', id: obraId },
   })
 }
 const notificarOfertaAumentadaReparo = async (reparoId) => {
@@ -494,6 +518,7 @@ const notificarOfertaAumentadaReparo = async (reparoId) => {
     ...mensagemOfertaAumentadaReparo(reparo, reparoId),
     rotulo: `oferta aumentada reparo ${reparoId}`,
     entrega: null,
+    demanda: { tabela: 'reparos', id: reparoId },
   })
 }
 
@@ -606,6 +631,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          AND upper(btrim(u.uf)) = $3
          AND ($4::text IS NULL OR (cardinality(u.especialidades) > 0 AND ($4::text = 'outros' OR $4::text = ANY(u.especialidades))))
          ${sqlSemManifestacao(lado.interesse, '$5')}
+         AND ${sqlNaoMesmoCpfDoCriador(tabela, '$5')}
        ORDER BY u.id`,
       [lado.tipoPrestador, cidade, uf, categoria, demandaId]
     )
@@ -937,7 +963,9 @@ const ATRASO_PUSH_APROVADA_MIN = 5
 // 'falha' com tentativas + 1 — e o predicado EXISTS só olha 'falha' com tentativas < 3, então
 // uma demanda cujas falhas restantes já esgotaram o teto sai do sweep por conta própria.
 // Só token e id são relidos de usuarios: a elegibilidade (cidade, assinatura, especialidade)
-// foi decidida no broadcast original, cuja consulta continua intocada.
+// foi decidida no broadcast original, cuja consulta continua intocada. Exceção: a outra conta do
+// criador (mesmo CPF) não é repescada — nas DUAS consultas, para uma linha 'falha' dela não manter
+// a demanda no sweep a cada tique. A linha em push_entregas fica como está (histórico intocado).
 const MAX_TENTATIVAS_ENTREGA = 3
 const LADOS_ENTREGA = [
   { tipo: 'obra',   tabela: 'obras',   colunas: 'titulo, cidade, uf, categoria', mensagem: mensagemNovaObra },
@@ -955,6 +983,7 @@ const reenviarEntregasFalhas = async () => {
                WHERE pe.tipo = $1 AND pe.demanda_id = d.id
                  AND pe.resultado = 'falha' AND pe.tentativas < $2
                  AND pe.ultima_tentativa_em <= NOW() - ($3::int * INTERVAL '1 minute')
+                 AND ${sqlNaoMesmoCpf('d.criado_por', 'pe.usuario_id')}
             )
           ORDER BY d.criado_em
           LIMIT 50`,
@@ -969,6 +998,7 @@ const reenviarEntregasFalhas = async () => {
               WHERE pe.tipo = $1 AND pe.demanda_id = $2
                 AND pe.resultado = 'falha' AND pe.tentativas < $3
                 AND pe.ultima_tentativa_em <= NOW() - ($4::int * INTERVAL '1 minute')
+                AND ${sqlNaoMesmoCpfDoCriador(lado.tabela, '$2')}
               ORDER BY u.id`,
             [lado.tipo, d.id, MAX_TENTATIVAS_ENTREGA, JANELA_PUSH_NOVO_MIN]
           )
@@ -1146,6 +1176,7 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
             rotulo: `lembrete ${lado.tabela} ${d.id}`,
             entrega: null,
             excluirManifestados: { interesse: lado.interesse, demandaId: d.id },
+            demanda: { tabela: lado.tabela, id: d.id },
           })
         } catch (err) {
           console.error(`[Lembrete] push ${lado.tabela} ${d.id} falhou:`, err.message)

@@ -57,7 +57,7 @@ const { enviarEmail } = require('../services/emailService')
 const { sqlTipoConta, tipoDeTipoConta, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL } = require('../utils/tipoConta')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
-const { sqlNaoDemandaPropria, ERRO_DEMANDA_PROPRIA, ehDemandaPropria } = require('../utils/demandaPropria')
+const { sqlNaoDemandaPropria, sqlNaoMesmoCpf, ERRO_DEMANDA_PROPRIA, ehDemandaPropria } = require('../utils/demandaPropria')
 const bcrypt = require('bcrypt')
 
 // Envolve um DELETE de mídia para que, NO MESMO statement, as urls apagadas caiam na fila
@@ -7061,7 +7061,10 @@ router.post('/feed/checar-proximidade', autenticar, exigirNaoSuspenso, exigirPre
          AND NOT ($1::uuid = ANY(COALESCE(r.prestadores_bloqueados, '{}')))
          AND NOT EXISTS (
            SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = r.id AND ir.usuario_id = $1
-         )`,
+         )
+         -- Outra conta da mesma pessoa que criou o reparo (mesmo CPF): sem aviso de proximidade
+         -- (mesmo predicado do cron verificarPrestadoresProximos em server.js).
+         AND ${sqlNaoMesmoCpf('r.criado_por', '$1::uuid')}`,
       [req.usuario.id, lat, lng, RAIO_GRAUS]
     )
 
