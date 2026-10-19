@@ -7,6 +7,7 @@ const { notificarPintoresSobreNovaObra } = require('../services/alertaService')
 const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra } = require('../utils/totalExtensao')
 const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
+const { sqlNaoDemandaPropria } = require('../utils/demandaPropria')
 
 const listar = async (req, res) => {
   try {
@@ -44,6 +45,9 @@ const listar = async (req, res) => {
         SELECT 1 FROM candidaturas c
         WHERE c.obra_id = o.id AND c.usuario_id = $1 AND c.status = 'recusado'
       )
+      -- Obra criada pela OUTRA conta da mesma pessoa (mesmo CPF normalizado): não aparece —
+      -- POST /obras/:id/candidatura a recusa com 400 demanda_propria. Sem CPF, não filtra.
+      AND ${sqlNaoDemandaPropria('o')}
     `
     // $1 reservado para o usuario_id (filtro de bloqueio global por dono)
     const params = [req.usuario.id]
