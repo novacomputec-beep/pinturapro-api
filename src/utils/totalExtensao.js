@@ -1,8 +1,8 @@
 // total_extensao_horas — horas que expira_em já foi empurrado ALÉM do vencimento original
-// (âncora + janela registrada). Mesma aritmética de restanteExtensao (routes/index.js), só que
-// em SQL, para sair no feed e no detalhe dos DOIS lados sem coluna nova. Envelhecer sem
-// estender não conta (GREATEST 0); expira_em NULL devolve 0 (COALESCE). NULLIF(janela, 0)
-// espelha o `Number(janelaHoras) || 720` da função JS. ::float8 para o node-pg entregar número.
+// (âncora + janela registrada), em SQL, para sair no feed e no detalhe dos DOIS lados sem
+// coluna nova. Envelhecer sem estender não conta (GREATEST 0); expira_em NULL devolve 0
+// (COALESCE). NULLIF(janela, 0) → 720 é o mesmo default de janela dos creates e de
+// tetoExtensaoHoras (routes/index.js). ::float8 para o node-pg entregar número.
 const sqlTotalExtensaoHoras = (ancora, janela, expiraEm) =>
   `GREATEST(0, COALESCE(EXTRACT(EPOCH FROM (${expiraEm} - (${ancora} + COALESCE(NULLIF(${janela}, 0), 720) * INTERVAL '1 hour'))) / 3600, 0))::float8`
 
