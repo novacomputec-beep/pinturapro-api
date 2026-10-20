@@ -2573,22 +2573,22 @@ router.patch('/obras/dono/:id/ponto-referencia', autenticar, async (req, res) =>
   }
 })
 
-// Teto de segurança PLANO da extensão de obra: 365 dias. Substitui o antigo teto de 2x a
-// janela original — não há mais orçamento derivado de publicado_em/horas_para_expirar; o
-// único limite é absoluto, para barrar valor absurdo (ex.: um dígito a mais por engano).
-const TETO_ESTENDER_OBRA_HORAS = 8760
-
-// Regra ÚNICA de "quanto ainda dá para estender" (D89), usada pelo endpoint e pelo detalhe
-// dos DOIS lados: teto plano menos as horas que expira_em já foi empurrado ALÉM do vencimento
-// original (âncora + janela). Envelhecer sem estender não consome teto. Antes eram três
-// números: obra-endpoint = 8760 − horas desta request; obra-detalhe = este acumulado;
-// reparo = 8760 constante.
-const restanteExtensao = (teto, ancora, janelaHoras, expiraEm) => {
-  const ancoraMs = new Date(ancora).getTime()
-  const expiraOriginalMs = ancoraMs + (Number(janelaHoras) || 720) * 3600 * 1000
-  const horasUsadas = Math.max(0, (new Date(expiraEm).getTime() - expiraOriginalMs) / 3600000)
-  return Math.max(0, teto - horasUsadas)
+// Teto POR REQUISIÇÃO do estender (obra e reparo): a própria janela original da demanda, em
+// horas — obra: horas_para_expirar; reparo: prazo_atendimento_horas. Quem pediu "Hoje" (24h)
+// estende no máximo 24h por vez; "Mês que vem" (1440h) até 1440h. Substitui o teto plano de
+// 8760h (365 dias), que deixava passar 5377h num reparo de 168h (um dígito a mais no campo
+// livre do app). Validação por requisição, sem somar extensões anteriores.
+// Janela NULL/zero/inválida → 720, o mesmo default dos creates.
+// É também o que extensao_maxima_horas devolve, para o app e o endpoint lerem o mesmo número.
+const tetoExtensaoHoras = (janelaHoras) => {
+  const janela = Number(janelaHoras)
+  return Number.isFinite(janela) && janela > 0 ? janela : 720
 }
+
+// Obra: piso de 24h no teto. O modal de obra estende em DIAS inteiros (manda dias × 24), então
+// uma obra com janela menor que um dia (faixa "Hoje" cadastrada à tarde, data próxima) ainda
+// precisa aceitar o menor pedido possível, 1 dia; sem o piso todo pedido dela tomaria 400.
+const tetoExtensaoObraHoras = (janelaHoras) => Math.max(tetoExtensaoHoras(janelaHoras), 24)
 
 // Janela de dedupe do estender de obra — espelha DEDUPE_ESTENDER_REPARO_MINUTOS. Sem
 // client_request_id no corpo, a chave é (ultima_extensao_em, ultima_extensao_horas): repetir o
@@ -2649,9 +2649,14 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
     if (o.match_usuario_id) return res.status(409).json({ erro: 'Não é possível estender uma obra com pintor a caminho' })
 
     const horas = Number(req.body?.horas)
-    if (!Number.isFinite(horas) || horas < 1) return res.status(400).json({ erro: 'horas inválido: informe um número >= 1' })
-    if (horas > TETO_ESTENDER_OBRA_HORAS) {
-      return res.status(400).json({ erro: `horas inválido: máximo de ${TETO_ESTENDER_OBRA_HORAS} (365 dias)`, extensao_maxima_horas: TETO_ESTENDER_OBRA_HORAS })
+    // Teto por requisição = janela original da obra, piso de 24h (tetoExtensaoObraHoras): nunca
+    // mais que o prazo que o dono escolheu ao cadastrar, por vez. O corpo do 400 traz o teto.
+    const tetoHoras = tetoExtensaoObraHoras(o.horas_para_expirar)
+    if (!Number.isFinite(horas) || horas <= 0) {
+      return res.status(400).json({ erro: 'Prazo inválido: informe um número de horas maior que zero.', extensao_maxima_horas: tetoHoras })
+    }
+    if (horas > tetoHoras) {
+      return res.status(400).json({ erro: `Prazo acima do permitido: cada extensão pode ter no máximo ${tetoHoras}h, o mesmo prazo original da obra.`, extensao_maxima_horas: tetoHoras })
     }
 
     // Obra é SEMPRE estendida em dias inteiros — o modal do app manda dias * 24, mínimo 1 dia.
@@ -2721,10 +2726,10 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
         [req.params.id, req.usuario.id]
       )
       if (atual.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-      return res.json({ expira_em: atual.rows[0].expira_em, extensao_maxima_horas: restanteExtensao(TETO_ESTENDER_OBRA_HORAS, o.publicado_em || o.criado_em, o.horas_para_expirar, atual.rows[0].expira_em) })
+      return res.json({ expira_em: atual.rows[0].expira_em, extensao_maxima_horas: tetoHoras })
     }
 
-    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: restanteExtensao(TETO_ESTENDER_OBRA_HORAS, o.publicado_em || o.criado_em, o.horas_para_expirar, upd.rows[0].expira_em) })
+    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: tetoHoras })
   } catch (err) {
     console.error('[obras/estender]', err.message)
     res.status(500).json({ erro: 'Erro ao estender prazo da obra' })
@@ -2967,22 +2972,14 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       delete obra.ponto_referencia
     }
 
-    // Advisory: quanto o dono ainda pode estender, contra o teto plano de
-    // TETO_ESTENDER_OBRA_HORAS (365 dias) — só p/ o app oferecer opções válidas.
-    // "Horas já usadas" = o quanto expira_em já foi empurrado ALÉM do vencimento original
-    // (âncora + janela), não o tempo decorrido: envelhecer sem estender não consome teto.
-    // Anchor obra: COALESCE(publicado_em, criado_em); janela COALESCE(horas_para_expirar, 720).
-    //
-    // ATENÇÃO — este advisory é CUMULATIVO, mas POST /obras/:id/estender valida por REQUISIÇÃO
-    // (rejeita 400 só se horas > 8760, sem somar extensões anteriores). Ou seja: o app oferece
-    // no máximo o que sobra do total, e o endpoint aceitaria mais. Erra para o lado seguro
-    // (nunca oferece o que tomaria 400), mas os dois só ficam idênticos quando o endpoint
-    // também passar a descontar o acumulado.
-    // Regra única (restanteExtensao) — o endpoint devolve o MESMO número após estender.
+    // Advisory: quanto o dono pode estender POR REQUISIÇÃO — a janela original da obra
+    // (horas_para_expirar, COALESCE 720), com piso de 24h porque o modal manda dias × 24. É o
+    // MESMO número que POST /obras/:id/estender valida (400 acima dele) e devolve após estender
+    // (tetoExtensaoObraHoras); não é cumulativo e não desconta extensões anteriores.
     // pode_aumentar_valor / valor_minimo_aumento: MESMAS regras de POST /obras/:id/aumentar-valor
     // (avaliarAumentoValor), calculadas só para o dono; qualquer outro leitor recebe false/null.
     const { pode_aumentar_valor, valor_minimo_aumento } = await advisoryAumentoValor(LADOS_AUMENTO_VALOR.obras, req.params.id, req.usuario.id, ehDono)
-    const extensao_maxima_horas = restanteExtensao(TETO_ESTENDER_OBRA_HORAS, obra.publicado_em || obra.criado_em, obra.horas_para_expirar, obra.expira_em)
+    const extensao_maxima_horas = tetoExtensaoObraHoras(obra.horas_para_expirar)
     res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
@@ -3791,13 +3788,6 @@ router.patch('/reparos/dono/:id/ponto-referencia', autenticar, async (req, res) 
   }
 })
 
-// Teto de extensão do reparo — o de 2x saiu e por um tempo isto foi só advisory; hoje o
-// endpoint TAMBÉM o enforça (400 quando horas > este valor), espelhando TETO_ESTENDER_OBRA_HORAS.
-// Segue na resposta porque o app filtra as opções por ele (ModalEstenderPrazo). Valor generoso
-// = "não gateia o menu": a maior opção do app é 168h, então isto só barra valor absurdo
-// (ex.: um dígito a mais por engano). O nome ADVISORY_ ficou do período em que não era enforçado.
-const ADVISORY_ESTENDER_REPARO_HORAS = 8760
-
 // Janela de dedupe do estender. Sem client_request_id no corpo, a chave é (ultima_extensao_em,
 // ultima_extensao_horas): repetir o MESMO horas dentro da janela é tratado como retry do mesmo
 // clique — devolve o prazo atual sem somar de novo. Fora da janela, ou com horas diferente, é
@@ -3847,13 +3837,16 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
     if (r.match_usuario_id) return res.status(409).json({ erro: 'Não é possível estender um serviço com prestador a caminho' })
 
     const horas = Number(req.body?.horas)
-    if (!Number.isFinite(horas) || horas < 1) return res.status(400).json({ erro: 'horas inválido: informe um número >= 1' })
-    // Teto plano, espelhando POST /obras/:id/estender: mesma posição (antes da query de
-    // carência e do UPDATE), mesmo `>` estrito (8760 exato passa), mesmo 400 e o mesmo
-    // extensao_maxima_horas no corpo do erro, p/ o cliente aprender o limite pela recusa.
+    // Teto por requisição = janela original do reparo (tetoExtensaoHoras), espelhando
+    // POST /obras/:id/estender: mesma posição (antes da query de carência e do UPDATE), mesmo
+    // `>` estrito (o teto exato passa) e o mesmo extensao_maxima_horas no corpo do erro.
     // Validação POR REQUISIÇÃO, sem somar extensões anteriores — igual à obra.
-    if (horas > ADVISORY_ESTENDER_REPARO_HORAS) {
-      return res.status(400).json({ erro: `horas inválido: máximo de ${ADVISORY_ESTENDER_REPARO_HORAS} (365 dias)`, extensao_maxima_horas: ADVISORY_ESTENDER_REPARO_HORAS })
+    const tetoHoras = tetoExtensaoHoras(r.prazo_atendimento_horas)
+    if (!Number.isFinite(horas) || horas <= 0) {
+      return res.status(400).json({ erro: 'Prazo inválido: informe um número de horas maior que zero.', extensao_maxima_horas: tetoHoras })
+    }
+    if (horas > tetoHoras) {
+      return res.status(400).json({ erro: `Prazo acima do permitido: cada extensão pode ter no máximo ${tetoHoras}h, o mesmo prazo original do serviço.`, extensao_maxima_horas: tetoHoras })
     }
 
     // Carência e novo prazo na MESMA query: as duas comparações precisam do relógio do banco
@@ -3905,11 +3898,11 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
         [req.params.id, req.usuario.id]
       )
       if (atual.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
-      return res.json({ expira_em: atual.rows[0].expira_em, extensao_maxima_horas: restanteExtensao(ADVISORY_ESTENDER_REPARO_HORAS, r.criado_em, r.prazo_atendimento_horas, atual.rows[0].expira_em) })
+      return res.json({ expira_em: atual.rows[0].expira_em, extensao_maxima_horas: tetoHoras })
     }
 
-    // D89: mesma regra única da obra — desconta o já consumido, em vez do 8760 constante.
-    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: restanteExtensao(ADVISORY_ESTENDER_REPARO_HORAS, r.criado_em, r.prazo_atendimento_horas, upd.rows[0].expira_em) })
+    // Mesmo teto da validação acima (janela original), igual ao que GET /reparos/:id devolve.
+    res.json({ expira_em: upd.rows[0].expira_em, extensao_maxima_horas: tetoHoras })
   } catch (err) {
     console.error('[reparos/estender]', err.message)
     res.status(500).json({ erro: 'Erro ao estender prazo do serviço' })
@@ -5396,16 +5389,15 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       delete reparo.ponto_referencia
     }
 
-    // Advisory plano: /reparos/:id/estender não tem mais teto (o de 2x saiu), então não há
-    // orçamento a calcular — nem âncora, nem janela. O campo continua só porque o app filtra
-    // as opções por ele (ModalEstenderPrazo); a MESMA constante do endpoint, para os dois
-    // números não divergirem. NÃO reflete a carência de 1h das faixas longas: dentro da
-    // primeira hora o app ainda oferece opções que o endpoint recusa com 409.
-    // D89: regra única (restanteExtensao), a mesma de GET /obras/:id e dos dois endpoints.
+    // Advisory: quanto o dono pode estender POR REQUISIÇÃO — a janela original do reparo
+    // (prazo_atendimento_horas, COALESCE 720), o MESMO número que POST /reparos/:id/estender
+    // valida (400 acima dele) e devolve após estender (tetoExtensaoHoras); não é cumulativo.
+    // NÃO reflete a carência de 1h das faixas longas: dentro da primeira hora o app ainda
+    // oferece opções que o endpoint recusa com 409.
     // pode_aumentar_valor / valor_minimo_aumento: MESMAS regras de POST /reparos/:id/aumentar-valor
     // (avaliarAumentoValor), só para o dono; qualquer outro leitor recebe false/null.
     const { pode_aumentar_valor, valor_minimo_aumento } = await advisoryAumentoValor(LADOS_AUMENTO_VALOR.reparos, req.params.id, req.usuario.id, ehDono)
-    const extensao_maxima_horas = restanteExtensao(ADVISORY_ESTENDER_REPARO_HORAS, reparo.criado_em, reparo.prazo_atendimento_horas, reparo.expira_em)
+    const extensao_maxima_horas = tetoExtensaoHoras(reparo.prazo_atendimento_horas)
     res.json({
       reparo,
       midias: midias.rows,
