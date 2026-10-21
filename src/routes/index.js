@@ -1348,6 +1348,31 @@ const migracaoPronta = (async () => {
     // Fila do admin (status + mais recentes primeiro) e a janela anti-repetição por usuário.
     await client.query(`CREATE INDEX IF NOT EXISTS pedidos_suporte_status_idx ON pedidos_suporte (status, criado_em DESC)`)
     await client.query(`CREATE INDEX IF NOT EXISTS pedidos_suporte_usuario_idx ON pedidos_suporte (usuario_id, criado_em DESC)`)
+    // Respostas da equipe a uma sugestão ou a um pedido de suporte. Tabela NOVA e puramente
+    // aditiva, como as duas acima: nada existente lê ou escreve nela, nenhum ALTER a acompanha,
+    // e CREATE TABLE IF NOT EXISTS torna o re-run um no-op. Só o admin escreve
+    // (POST /admin/respostas-equipe); o usuário lê as suas (GET /respostas-equipe) e marca
+    // lida (POST /respostas-equipe/:id/lida) — não há endpoint de réplica do usuário.
+    // pergunta = CÓPIA do texto original no momento da resposta (sugestoes.texto ou
+    // pedidos_suporte.mensagem): a resposta continua legível mesmo se a origem for apagada
+    // (DELETE /admin/sugestoes), por isso origem_id é só UUID, sem FK. Pode ser NULL porque
+    // pedidos_suporte.mensagem é opcional. usuario_id com ON DELETE CASCADE: a resposta é do
+    // destinatário — sem conta, some junto. acao = atalho opcional que o app oferece ao ler.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS respostas_equipe (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        origem TEXT NOT NULL CHECK (origem IN ('sugestao','suporte')),
+        origem_id UUID NOT NULL,
+        pergunta TEXT,
+        resposta TEXT NOT NULL,
+        acao TEXT CHECK (acao IS NULL OR acao IN ('novo_servico','completar_perfil','ativar_notificacoes')),
+        lida_em TIMESTAMPTZ,
+        criada_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+    // Caixa de entrada do usuário (as suas, mais recentes primeiro).
+    await client.query(`CREATE INDEX IF NOT EXISTS respostas_equipe_usuario_idx ON respostas_equipe (usuario_id, criada_em DESC)`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -6975,6 +7000,51 @@ router.post('/suporte/pedido', autenticar, async (req, res) => {
   }
 })
 
+// RESPOSTAS DA EQUIPE — o que a equipe respondeu a uma sugestão ou pedido de suporte do
+// usuário. Só leitura e "marcar lida" aqui: quem escreve é o admin (POST /admin/respostas-equipe),
+// e NÃO existe endpoint para o usuário replicar.
+
+// GET /respostas-equipe — as respostas do usuário autenticado, mais recentes primeiro.
+// usuario_id sai de req.usuario.id, nunca da query: ninguém lê a caixa de outro.
+router.get('/respostas-equipe', autenticar, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, origem, origem_id, pergunta, resposta, acao, lida_em, criada_em
+       FROM respostas_equipe
+       WHERE usuario_id = $1
+       ORDER BY criada_em DESC, id DESC`,
+      [req.usuario.id]
+    )
+    res.json({ respostas: result.rows })
+  } catch (err) {
+    console.error('[RespostasEquipe] Erro listagem:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar respostas da equipe' })
+  }
+})
+
+// POST /respostas-equipe/:id/lida — marca a resposta como lida. Idempotente: COALESCE
+// preserva a primeira leitura. O WHERE exige usuario_id = quem chama, então resposta de
+// outro usuário cai no mesmo 404 de id inexistente — sem revelar que existe.
+router.post('/respostas-equipe/:id/lida', autenticar, async (req, res) => {
+  try {
+    const { id } = req.params
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      return res.status(400).json({ erro: 'id inválido' })
+    }
+    const result = await pool.query(
+      `UPDATE respostas_equipe SET lida_em = COALESCE(lida_em, NOW())
+       WHERE id = $1 AND usuario_id = $2
+       RETURNING id, lida_em`,
+      [id, req.usuario.id]
+    )
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Resposta não encontrada' })
+    res.json(result.rows[0])
+  } catch (err) {
+    console.error('[RespostasEquipe] Erro ao marcar lida:', err.message)
+    res.status(500).json({ erro: 'Erro ao marcar resposta como lida' })
+  }
+})
+
 // FEED — visualizações de proximidade. Rota estática ('/feed/visualizacoes'), sem
 // conflito com padrões /:id, seguindo a convenção de registro dedicado como avaliacoes.
 
@@ -7607,6 +7677,90 @@ router.delete('/admin/sugestoes', autenticar, exigirSuperAdmin, async (req, res)
   } catch (err) {
     console.error('[Sugestoes] Erro ao apagar:', err.message)
     res.status(500).json({ erro: 'Erro ao apagar sugestões' })
+  }
+})
+
+// POST /admin/respostas-equipe — a equipe responde a uma sugestão ou a um pedido de suporte.
+// Gate igual ao de resolver suporte (autenticar + exigirAdmin). Corpo: { origem, origem_id,
+// resposta, acao? }. O destinatário NUNCA vem do corpo: é o usuario_id da linha de origem, e
+// o texto original é COPIADO para `pergunta` na mesma transação. Origem 'suporte' também
+// marca o pedido como resolvido (mesmo UPDATE de POST /admin/pedidos-suporte/:id/resolver),
+// tudo dentro de BEGIN…COMMIT: resposta gravada sem resolver (ou vice-versa) não acontece.
+// O push sai DEPOIS do commit e é fire-and-forget (mesmo padrão das demais rotas): falha
+// de Expo não desfaz a resposta, que o usuário vê de todo modo em GET /respostas-equipe.
+const RESPOSTA_EQUIPE_MAX = 2000
+const ORIGENS_RESPOSTA_EQUIPE = {
+  sugestao: { tabela: 'sugestoes', colunaTexto: 'texto', rotulo: 'Sugestão' },
+  suporte: { tabela: 'pedidos_suporte', colunaTexto: 'mensagem', rotulo: 'Pedido de suporte' },
+}
+const ACOES_RESPOSTA_EQUIPE = ['novo_servico', 'completar_perfil', 'ativar_notificacoes']
+
+router.post('/admin/respostas-equipe', autenticar, exigirAdmin, async (req, res) => {
+  const { origem, origem_id, resposta, acao } = req.body || {}
+  const cfg = ORIGENS_RESPOSTA_EQUIPE[origem]
+  if (!cfg) {
+    return res.status(400).json({ erro: `origem deve ser ${Object.keys(ORIGENS_RESPOSTA_EQUIPE).join(' ou ')}` })
+  }
+  if (typeof origem_id !== 'string' || !UUID_RE.test(origem_id)) {
+    return res.status(400).json({ erro: 'origem_id inválido' })
+  }
+  const texto = typeof resposta === 'string' ? resposta.trim() : ''
+  if (!texto) {
+    return res.status(400).json({ erro: 'resposta é obrigatória' })
+  }
+  if (texto.length > RESPOSTA_EQUIPE_MAX) {
+    return res.status(400).json({ erro: `resposta deve ter no máximo ${RESPOSTA_EQUIPE_MAX} caracteres` })
+  }
+  const acaoFinal = (acao === undefined || acao === null || acao === '') ? null : acao
+  if (acaoFinal !== null && !ACOES_RESPOSTA_EQUIPE.includes(acaoFinal)) {
+    return res.status(400).json({ erro: `acao deve ser uma de: ${ACOES_RESPOSTA_EQUIPE.join(', ')}` })
+  }
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    // JOIN interno em usuarios: usuario_id é NOT NULL e ON DELETE CASCADE nas duas origens,
+    // então a origem de um autor excluído já não existe — e o push_token sai na mesma ida.
+    const origemRow = await client.query(
+      `SELECT o.usuario_id, o.${cfg.colunaTexto} AS texto, u.push_token
+       FROM ${cfg.tabela} o
+       JOIN usuarios u ON u.id = o.usuario_id
+       WHERE o.id = $1`,
+      [origem_id]
+    )
+    if (origemRow.rows.length === 0) {
+      await client.query('ROLLBACK')
+      return res.status(404).json({ erro: `${cfg.rotulo} não encontrado(a)` })
+    }
+    const { usuario_id, texto: pergunta, push_token } = origemRow.rows[0]
+
+    const inserida = await client.query(
+      `INSERT INTO respostas_equipe (usuario_id, origem, origem_id, pergunta, resposta, acao)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, usuario_id, origem, origem_id, pergunta, resposta, acao, lida_em, criada_em`,
+      [usuario_id, origem, origem_id, pergunta, texto, acaoFinal]
+    )
+    if (origem === 'suporte') {
+      await client.query(
+        `UPDATE pedidos_suporte SET status = 'resolvido', atualizado_em = NOW() WHERE id = $1`,
+        [origem_id]
+      )
+    }
+    await client.query('COMMIT')
+
+    const criada = inserida.rows[0]
+    res.status(201).json(criada)
+    if (push_token) {
+      enviarPushNotificacao(push_token, '💬 A equipe ProTudo respondeu você',
+        'Toque para ver a resposta à sua mensagem.',
+        { tipo: 'resposta_equipe', id: criada.id }).catch(() => {})
+    }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    console.error('[RespostasEquipe] Erro ao responder:', err.message)
+    res.status(500).json({ erro: 'Erro ao registrar resposta da equipe' })
+  } finally {
+    client.release()
   }
 })
 
