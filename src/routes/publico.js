@@ -9,8 +9,23 @@
 const express = require('express')
 const { pool } = require('../utils/supabase')
 const { RE_CODIGO } = require('./paginaPublica')
+const { lerVideoComoFunciona } = require('../utils/videoComoFunciona')
 
 const router = express.Router()
+
+// GET /api/publico/video-como-funciona → { video_id, capitulos: [{ seg, titulo }] }. Sem JWT:
+// é a tela "Como funciona" antes do login. video_id '' = sem vídeo publicado. Quem grava é o
+// admin (PUT /api/admin/video-como-funciona). Cache curto: muda raramente, mas o admin quer
+// ver a troca sem esperar.
+router.get('/video-como-funciona', async (req, res) => {
+  res.set('Cache-Control', 'public, max-age=60')
+  try {
+    return res.json(await lerVideoComoFunciona(pool))
+  } catch (err) {
+    console.error('[Publico] erro em /video-como-funciona:', err.message)
+    return res.status(500).json({ erro: 'Erro ao carregar o vídeo' })
+  }
+})
 
 // Código único entre as duas tabelas por construção (gerar_codigo_publico), então a primeira
 // que responder é a resposta. Só o id — nada de título, cidade ou status.

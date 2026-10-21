@@ -58,6 +58,9 @@ const { sqlTipoConta, tipoDeTipoConta, tipoDaLinha, multiplasContasAtivo, MAX_CO
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
 const { sqlNaoDemandaPropria, sqlNaoMesmoCpf, ERRO_DEMANDA_PROPRIA, ehDemandaPropria } = require('../utils/demandaPropria')
+// Vídeo "Como funciona" (YouTube) + capítulos: chaves, padrão e validação (seed no boot,
+// PUT /admin/video-como-funciona aqui; leitura pública em routes/publico).
+const { CHAVE_VIDEO_ID, CHAVE_VIDEO_CAPITULOS, VIDEO_ID_RE, CAPITULOS_PADRAO, validarCapitulos, lerVideoComoFunciona } = require('../utils/videoComoFunciona')
 const bcrypt = require('bcrypt')
 
 // Envolve um DELETE de mídia para que, NO MESMO statement, as urls apagadas caiam na fila
@@ -262,6 +265,13 @@ const migracaoPronta = (async () => {
     await client.query(`INSERT INTO configuracoes (chave, valor)
                         SELECT 'multiplas_contas', 'false'
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'multiplas_contas')`)
+    // Vídeo "Como funciona" (utils/videoComoFunciona): id do YouTube ('' = sem vídeo) e os
+    // capítulos em JSON. Seed só na PRIMEIRA vez, como as chaves acima — o que o admin gravar
+    // pelo painel nunca é sobrescrito no boot. valor '' (não NULL), como lancamento_data_fim.
+    await client.query(`INSERT INTO configuracoes (chave, valor) SELECT $1, ''
+                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`, [CHAVE_VIDEO_ID])
+    await client.query(`INSERT INTO configuracoes (chave, valor) SELECT $1, $2
+                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`, [CHAVE_VIDEO_CAPITULOS, JSON.stringify(CAPITULOS_PADRAO)])
     // Versões do app (utils/versaoApp): minima/atual por plataforma saem do banco (antes, só
     // env). Semente na PRIMEIRA vez: o env de sempre (APP_VERSAO_*), ou 0.0.0. Nos boots
     // seguintes o env só consegue SUBIR a atual (nunca rebaixar) — minima é manual (painel).
@@ -6575,6 +6585,47 @@ router.post('/config/limite-demandas', autenticar, exigirSuperAdmin, async (req,
     res.json({ mensagem: 'Limite de demandas atualizado', limite: n })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar limite de demandas' })
+  }
+})
+
+// PUT /admin/video-como-funciona — admin grava o vídeo "Como funciona" e os capítulos.
+// Corpo: { video_id, capitulos }. video_id = id do YouTube (11 chars) ou '' para esconder o
+// vídeo; capitulos = [{ seg, titulo }] validado/normalizado por utils/videoComoFunciona (o
+// mesmo que a leitura pública usa). Os dois campos são obrigatórios e gravados JUNTOS numa
+// transação: um vídeo novo com os capítulos do antigo não acontece. Leitura: GET
+// /api/publico/video-como-funciona (sem JWT). Gate autenticar + exigirAdmin.
+router.put('/admin/video-como-funciona', autenticar, exigirAdmin, async (req, res) => {
+  const { video_id, capitulos } = req.body || {}
+  if (typeof video_id !== 'string') {
+    return res.status(400).json({ erro: 'video_id deve ser texto (id do YouTube ou vazio)' })
+  }
+  const id = video_id.trim()
+  if (id !== '' && !VIDEO_ID_RE.test(id)) {
+    return res.status(400).json({ erro: 'video_id inválido — use o id de 11 caracteres do YouTube ou vazio' })
+  }
+  const v = validarCapitulos(capitulos)
+  if (v.erro) return res.status(400).json({ erro: v.erro })
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    // UPDATE (não INSERT): as duas linhas nascem no seed do boot. rowCount 0 aqui seria um
+    // banco sem a migração — deixa o erro subir, em vez de criar a linha em silêncio.
+    for (const [chave, valor] of [[CHAVE_VIDEO_ID, id], [CHAVE_VIDEO_CAPITULOS, JSON.stringify(v.capitulos)]]) {
+      const r = await client.query(
+        `UPDATE configuracoes SET valor = $2, atualizado_em = NOW() WHERE chave = $1`,
+        [chave, valor]
+      )
+      if (r.rowCount === 0) throw new Error(`chave ${chave} ausente em configuracoes`)
+    }
+    await client.query('COMMIT')
+    res.json({ mensagem: 'Vídeo "Como funciona" atualizado', ...(await lerVideoComoFunciona(pool)) })
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    console.error('[VideoComoFunciona] Erro ao atualizar:', err.message)
+    res.status(500).json({ erro: 'Erro ao atualizar vídeo "Como funciona"' })
+  } finally {
+    client.release()
   }
 })
 
