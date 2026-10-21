@@ -39,9 +39,13 @@ const sqlDataHora = (param, paramTemFuso) =>
 
 // Colunas próprias do agendamento, zeradas junto com as chegada_* em todo match novo e em todo
 // un-match (SQL_LIMPAR_CHEGADA em routes, crons de cronômetro, expirar-match, responder-tempo).
+// a_caminho_em ("Estou a caminho", POST /:id/match) entra na mesma lista: é estado DESTE
+// match — e é o que libera a troca de telefones em GET /:id, que não pode sobreviver ao
+// profissional seguinte. Também cai no 'remarcar' do comparecimento, que usa esta lista.
 const SQL_ZERAR_AGENDA = `chegada_proposta_por = NULL, chegada_pendente_rodada = 0,
               lembrete_agenda_vespera_em = NULL, lembrete_agenda_2h_em = NULL, lembrete_agenda_hora_em = NULL,
-              vigia_comparecimento_em = NULL, comparecimento_resposta = NULL, comparecimento_respondido_em = NULL`
+              vigia_comparecimento_em = NULL, comparecimento_resposta = NULL, comparecimento_respondido_em = NULL,
+              a_caminho_em = NULL`
 
 // Isenção de falta e de bloqueio quando o match morre sem horário valendo: o dono recusou a
 // janela (chegada_recusada_em) OU a proposta que ficou sem resposta era do PROFISSIONAL
