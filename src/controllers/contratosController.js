@@ -67,7 +67,6 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
     <p><strong>Contratante:</strong> ${dono.nome}</p>
     <p><strong>CPF:</strong> ${formatarCpf(dono.cpf_cnpj)}</p>
     <p><strong>Endereço da obra:</strong> ${reparo.endereco_obra || `${reparo.cidade}${reparo.bairro ? ', ' + reparo.bairro : ''}`}</p>
-    ${dono.telefone ? `<p><strong>Telefone:</strong> ${dono.telefone}</p>` : ''}
   </div>
 
   <p>E de outro lado:</p>
@@ -75,7 +74,6 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
   <div class="parte-bloco">
     <p><strong>Contratado:</strong> ${prestador.nome}</p>
     <p><strong>CPF:</strong> ${formatarCpf(prestador.cpf_cnpj)}</p>
-    ${prestador.telefone ? `<p><strong>Telefone:</strong> ${prestador.telefone}</p>` : ''}
   </div>
 
   <p>Têm entre si justo e contratado o seguinte:</p>
@@ -177,8 +175,8 @@ const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
 
   <h2>Cláusula 1 — Das Partes</h2>
   <div class="parte-bloco">
-    <p><strong>Contratante:</strong> ${dono.nome}, CPF: ${formatarCpf(dono.cpf_cnpj)}, e-mail: ${dono.email}${dono.telefone ? `, telefone: ${dono.telefone}` : ''}.</p>
-    <p><strong>Contratado:</strong> ${prestador.nome}, CPF: ${formatarCpf(prestador.cpf_cnpj)}, e-mail: ${prestador.email}${prestador.telefone ? `, telefone: ${prestador.telefone}` : ''}.</p>
+    <p><strong>Contratante:</strong> ${dono.nome}, CPF: ${formatarCpf(dono.cpf_cnpj)}.</p>
+    <p><strong>Contratado:</strong> ${prestador.nome}, CPF: ${formatarCpf(prestador.cpf_cnpj)}.</p>
   </div>
 
   <h2>Cláusula 2 — Do Objeto</h2>

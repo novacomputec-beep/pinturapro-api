@@ -38,16 +38,12 @@ const gerarContratoPDF = (dados) => {
     doc.fontSize(10).font('Helvetica-Bold').text('CONTRATANTE:')
     doc.font('Helvetica').text(`Nome: ${contratante.nome}`)
     doc.text(`CPF/CNPJ: ${contratante.cpf_cnpj || 'Não informado'}`)
-    doc.text(`Telefone: ${contratante.telefone || 'Não informado'}`)
-    doc.text(`E-mail: ${contratante.email}`)
     doc.text(`Cidade: ${contratante.cidade || cidade}`)
     doc.moveDown(0.5)
 
     doc.font('Helvetica-Bold').text('CONTRATADO:')
     doc.font('Helvetica').text(`Nome: ${contratado.nome}`)
     doc.text(`CPF/CNPJ: ${contratado.cpf_cnpj || 'Não informado'}`)
-    doc.text(`Telefone: ${contratado.telefone || 'Não informado'}`)
-    doc.text(`E-mail: ${contratado.email}`)
     doc.text(`Cidade: ${contratado.cidade || cidade}`)
     doc.moveDown(0.5)
 
