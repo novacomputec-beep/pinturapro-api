@@ -28,6 +28,9 @@ const { enviarEmail: enviarEmailBrevo } = require('./brevoService')
 // (reivindicarEmailsNovaDemanda). Sem CPF de um dos lados o predicado não filtra. Só leitura:
 // push_entregas nunca é reescrita por causa disto. utils/demandaPropria só importa utils/supabase.
 const { sqlNaoMesmoCpf, sqlNaoMesmoCpfDoCriador } = require('../utils/demandaPropria')
+// Agendamento livre de chegada (módulo inerte): zeragem das colunas no un-match, isenção de
+// falta (JS + SQL), espera pela resposta à vigia e os lembretes/vigia abaixo de lembrarPrazoChegada.
+const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, isentoDeFalta, SQL_ESPERA_COMPARECIMENTO, formatarDataHoraSP } = require('../utils/agendamento')
 
 const expo = new Expo()
 
@@ -1325,6 +1328,98 @@ const lembrarPrazoChegada = semSobreposicao('lembrarPrazoChegada', async () => {
   }
 })
 
+// Agendamento livre (chegada_janela = 'agendado', utils/agendamento) — dois crons de 1 min:
+//   lembrarAgendamento   → ao PROFISSIONAL com horário aceito: véspera às 18:00 (SP), 2h antes e
+//                          na hora ("Hora de sair"). Um claim por lembrete (lembrete_agenda_*_em,
+//                          UPDATE ... WHERE IS NULL RETURNING), zerados por SQL_ZERAR_AGENDA no
+//                          match/un-match e no aceite de um horário novo. Janela de disparo de
+//                          60 min: horário aceito depois do instante do lembrete não recebe um
+//                          lembrete atrasado. Push ou, sem token, e-mail (entregarAoProfissional).
+//   vigiarComparecimento → ao DONO, 1h depois do horário sem chegada declarada/confirmada:
+//                          "o profissional veio?" (claim vigia_comparecimento_em). A resposta
+//                          entra por POST /:id/confirmar-comparecimento; o cron de cronômetro
+//                          espera por ela até 24h (SQL_ESPERA_COMPARECIMENTO).
+// Base comum: match vivo, horário agendado valendo, chegada ainda não declarada nem confirmada.
+const SQL_BASE_AGENDA = `d.status = 'aberta' AND d.match_usuario_id IS NOT NULL
+        AND d.chegada_janela = '${JANELA_AGENDADO}' AND d.chegada_prevista_em IS NOT NULL
+        AND d.chegada_declarada_em IS NULL AND d.chegada_confirmada_em IS NULL`
+const LEMBRETES_AGENDA = [
+  { coluna: 'lembrete_agenda_vespera_em',
+    dispara: `((((d.chegada_prevista_em AT TIME ZONE '${TZ_AGENDA}')::date - 1) + TIME '18:00') AT TIME ZONE '${TZ_AGENDA}')`,
+    titulo: (d) => `📅 Amanhã: ${formatarDataHoraSP(d.chegada_prevista_em)}`,
+    corpo: (d) => `Lembrete do horário combinado em "${d.titulo}".` },
+  { coluna: 'lembrete_agenda_2h_em',
+    dispara: `(d.chegada_prevista_em - INTERVAL '2 hours')`,
+    titulo: (d) => `⏰ Em 2h: ${formatarDataHoraSP(d.chegada_prevista_em)}`,
+    corpo: (d) => `Seu horário em "${d.titulo}" está chegando. Prepare-se para sair.` },
+  { coluna: 'lembrete_agenda_hora_em',
+    dispara: `d.chegada_prevista_em`,
+    titulo: () => '🚗 Hora de sair: toque em Estou a caminho',
+    corpo: (d) => `Horário combinado em "${d.titulo}": ${formatarDataHoraSP(d.chegada_prevista_em)}.` },
+]
+const lembrarAgendamento = semSobreposicao('lembrarAgendamento', async () => {
+  for (const lado of Object.values(LADOS_MATCH)) {
+    for (const l of LEMBRETES_AGENDA) {
+      try {
+        const claim = await pool.query(
+          `UPDATE ${lado.tabela} d SET ${l.coluna} = NOW()
+             FROM usuarios u
+            WHERE u.id = d.match_usuario_id AND ${SQL_BASE_AGENDA}
+              AND d.${l.coluna} IS NULL
+              AND NOW() >= ${l.dispara}
+              AND NOW() < ${l.dispara} + INTERVAL '${LEMBRETE_AGENDA_JANELA}'
+        RETURNING d.id, d.titulo, d.match_usuario_id, d.chegada_prevista_em, u.push_token, u.email, u.nome`
+        )
+        for (const d of claim.rows) {
+          try {
+            const via = await entregarAoProfissional({
+              lado, demanda: d, titulo: l.titulo(d), corpo: l.corpo(d),
+              rotulo: `agenda ${l.coluna} ${lado.tabela} ${d.id}`,
+            })
+            console.log(`[Agenda] ${l.coluna} ${lado.tabela} ${d.id} → profissional ${d.match_usuario_id} via ${via}`)
+          } catch (err) {
+            // Claim já gravado: sem repescagem (um lembrete por slot).
+            console.error(`[Agenda] ${l.coluna} ${lado.tabela} ${d.id} falhou:`, err.message)
+          }
+        }
+      } catch (err) {
+        console.error(`[Agenda] erro em ${lado.tabela} ${l.coluna}:`, err.message)
+      }
+    }
+  }
+})
+
+const vigiarComparecimento = semSobreposicao('vigiarComparecimento', async () => {
+  for (const lado of Object.values(LADOS_MATCH)) {
+    try {
+      // Sem resposta prévia (comparecimento_resposta IS NULL): o dono responde uma vez por horário.
+      const claim = await pool.query(
+        `UPDATE ${lado.tabela} d SET vigia_comparecimento_em = NOW()
+           FROM usuarios u
+          WHERE u.id = d.criado_por AND ${SQL_BASE_AGENDA}
+            AND d.vigia_comparecimento_em IS NULL AND d.comparecimento_resposta IS NULL
+            AND NOW() >= d.chegada_prevista_em + INTERVAL '${VIGIA_ATRASO}'
+      RETURNING d.id, d.titulo, d.chegada_prevista_em, u.push_token`
+      )
+      for (const d of claim.rows) {
+        if (!d.push_token) {
+          console.log(`[Vigia] ${lado.tabela} ${d.id}: dono sem push_token — sem aviso (o cron espera a resposta até 24h mesmo assim)`)
+          continue
+        }
+        await enviarPushNotificacao(
+          d.push_token,
+          '🤔 O profissional veio?',
+          `O horário combinado em "${d.titulo}" (${formatarDataHoraSP(d.chegada_prevista_em)}) passou há 1h sem chegada registrada. Responda no app.`,
+          { tipo: 'confirmar_comparecimento', [lado.chave]: d.id }
+        )
+      }
+      if (claim.rowCount > 0) console.log(`[Vigia] ${lado.tabela}: ${claim.rowCount} dono(s) perguntado(s)`)
+    } catch (err) {
+      console.error(`[Vigia] erro em ${lado.tabela}:`, err.message)
+    }
+  }
+})
+
 const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaixoEngajamento', async () => {
   try {
     console.log('Verificando obras com baixo engajamento...')
@@ -1565,9 +1660,10 @@ const MOTIVO_SUSPENSAO = `${FALTAS_PARA_SUSPENDER} faltas (não comparecimento) 
 // compromisso firmado, e não comparecer é falta.
 // Espelhada no CASE de prestadores_bloqueados dos dois crons e dos dois expirar-match — as
 // duas punições (falta e bloqueio) andam sempre juntas.
-const isentoPorRecusa = (demanda) =>
-  !demanda.chegada_prevista_em &&
-  (!!demanda.chegada_recusada_em || !!demanda.chegada_pendente_em)
+// Agendamento: a pendência só isenta quando a proposta era DO PROFISSIONAL (aguardava o dono);
+// proposta do dono sem resposta do profissional não isenta. Regra única em utils/agendamento
+// (isentoDeFalta em JS, SQL_ISENCAO_FALTA nos CASE de prestadores_bloqueados).
+const isentoPorRecusa = (demanda) => isentoDeFalta(demanda)
 
 // Registra a falta e, ao cruzar o limite na janela móvel, suspende. `tabela` sai de literal no
 // chamador, nunca do request. Erros são engolidos: uma falha aqui não pode derrubar o cron nem
@@ -1671,18 +1767,23 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
     // o filtro só servia para proteger o rebuild abaixo de "NULL * interval", e isso agora é
     // COALESCE. Com o filtro, um reparo casado com prazo NULL ficava com match eterno: sem
     // aviso de 5 min, sem voltar ao feed e sem falta.
+    // SQL_ESPERA_COMPARECIMENTO (utils/agendamento): horário AGENDADO vencido espera a resposta
+    // do dono à vigia ('nao' libera na hora; sem resposta, 24h depois do horário). Janela de
+    // rótulo antigo ou sem janela: sem espera, como sempre.
     const PRED_EXPIRADOS_REPAROS = `
       status = 'aberta'
         AND match_usuario_id IS NOT NULL
         AND chegada_declarada_em IS NULL
         AND chegada_confirmada_em IS NULL
-        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()`
+        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()
+        AND ${SQL_ESPERA_COMPARECIMENTO}`
 
     // chegada_recusada_em/chegada_prevista_em entram no SELECT para a ISENÇÃO: match que morre
     // depois de o dono recusar a janela, e sem nenhuma outra valendo, não gera falta nem bloqueio.
+    // chegada_proposta_por: de quem era a pendência (só a do profissional isenta).
     const candidatos = await pool.query(`
       SELECT id, titulo, criado_por, match_usuario_id,
-             chegada_recusada_em, chegada_pendente_em, chegada_prevista_em
+             chegada_recusada_em, chegada_pendente_em, chegada_prevista_em, chegada_proposta_por
         FROM reparos WHERE ${PRED_EXPIRADOS_REPAROS}
     `)
 
@@ -1708,11 +1809,11 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
             chegada_pendente_janela = NULL,
             chegada_pendente_em = NULL,
             chegada_recusada_em = NULL,
+            ${SQL_ZERAR_AGENDA},
             prestadores_bloqueados = CASE
-              -- Isenção: janela oferecida que nunca virou compromisso — recusada pelo dono OU
-              -- morta pendente sem resposta — e nenhuma outra valendo. Não bloqueia.
-              WHEN chegada_prevista_em IS NULL
-                   AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
+              -- Isenção (SQL_ISENCAO_FALTA): janela que nunca virou compromisso — recusada pelo
+              -- dono OU proposta DO PROFISSIONAL morta sem resposta — e nenhuma outra valendo.
+              WHEN ${SQL_ISENCAO_FALTA}
               THEN prestadores_bloqueados
               WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
               THEN prestadores_bloqueados
@@ -1813,17 +1914,19 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
     // (expira_em > NOW() nunca casa NULL). 720h = default de criação (mesma base de index.js:960).
     // SELECT antes do UPDATE pelo mesmo motivo do cron de reparos: RETURNING traz a linha nova,
     // com match_usuario_id já NULL, e é ele que precisamos para bloquear e notificar o pintor.
+    // SQL_ESPERA_COMPARECIMENTO: mesma espera pela resposta à vigia do cron de reparos.
     const PRED_EXPIRADOS_OBRAS = `
       status = 'aberta'
         AND match_usuario_id IS NOT NULL
         AND chegada_declarada_em IS NULL
         AND chegada_confirmada_em IS NULL
-        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()`
+        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()
+        AND ${SQL_ESPERA_COMPARECIMENTO}`
 
     // Mesma isenção do cron de reparos (ver isentoPorRecusa).
     const candidatos = await pool.query(`
       SELECT id, titulo, criado_por, match_usuario_id,
-             chegada_recusada_em, chegada_pendente_em, chegada_prevista_em
+             chegada_recusada_em, chegada_pendente_em, chegada_prevista_em, chegada_proposta_por
         FROM obras WHERE ${PRED_EXPIRADOS_OBRAS}
     `)
 
@@ -1855,11 +1958,11 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
             chegada_pendente_janela = NULL,
             chegada_pendente_em = NULL,
             chegada_recusada_em = NULL,
+            ${SQL_ZERAR_AGENDA},
             prestadores_bloqueados = CASE
-              -- Isenção: janela oferecida que nunca virou compromisso — recusada pelo dono OU
-              -- morta pendente sem resposta — e nenhuma outra valendo. Não bloqueia.
-              WHEN chegada_prevista_em IS NULL
-                   AND (chegada_recusada_em IS NOT NULL OR chegada_pendente_em IS NOT NULL)
+              -- Isenção (SQL_ISENCAO_FALTA): janela que nunca virou compromisso — recusada pelo
+              -- dono OU proposta DO PROFISSIONAL morta sem resposta — e nenhuma outra valendo.
+              WHEN ${SQL_ISENCAO_FALTA}
               THEN prestadores_bloqueados
               WHEN match_usuario_id = ANY(COALESCE(prestadores_bloqueados, '{}'))
               THEN prestadores_bloqueados
@@ -2037,6 +2140,8 @@ module.exports = {
   LADOS_LEMBRETE,
   avisarMatchFeito,
   lembrarPrazoChegada,
+  lembrarAgendamento,
+  vigiarComparecimento,
   listarLembretesPrazoChegada,
   sqlClaimLembreteChegada,
   tituloLembreteChegada,

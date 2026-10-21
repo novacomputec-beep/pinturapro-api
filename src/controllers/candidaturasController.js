@@ -2,6 +2,8 @@ const { pool } = require('../utils/supabase')
 const { enviarContratoObra } = require('./contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 const { enviarPushNotificacao, avisarMatchFeito } = require('../services/alertaService')
+// Colunas do agendamento zeradas junto com as chegada_* no match (mesma lista de routes/index.js).
+const { SQL_ZERAR_AGENDA } = require('../utils/agendamento')
 
 const minhas = async (req, res) => {
   try {
@@ -28,6 +30,8 @@ const minhas = async (req, res) => {
               -- seguem NULL) e ainda era barrado de propor outra pelo write-once — sem nada na
               -- tela explicando por quê.
               o.chegada_pendente_janela, o.chegada_pendente_em, o.chegada_recusada_em,
+              -- Agendamento: de quem é a proposta pendente (vez de quem responder) e a rodada.
+              o.chegada_proposta_por, o.chegada_pendente_rodada,
               -- "Expirada" não é status no banco: é uma obra NÃO encerrada cujo expira_em já
               -- passou. Mesma expressão de GET /obras/minhas e GET /obras/:id, calculada no SQL
               -- (relógio do servidor) para o app não comparar expira_em com o relógio do aparelho.
@@ -184,7 +188,7 @@ const aprovar = async (req, res) => {
       `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW(),
               chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
               chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL, chegada_confirmada_em = NULL,
-              aviso_match_enviado_em = NULL, lembrete_chegada_enviado_em = NULL
+              aviso_match_enviado_em = NULL, lembrete_chegada_enviado_em = NULL, ${SQL_ZERAR_AGENDA}
        WHERE id = $2 AND match_usuario_id IS NULL`,
       [result.rows[0].usuario_id, result.rows[0].obra_id]
     )
