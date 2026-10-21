@@ -1347,7 +1347,8 @@ const LEMBRETES_AGENDA = [
   { coluna: 'lembrete_agenda_vespera_em',
     dispara: `((((d.chegada_prevista_em AT TIME ZONE '${TZ_AGENDA}')::date - 1) + TIME '18:00') AT TIME ZONE '${TZ_AGENDA}')`,
     titulo: (d) => `📅 Amanhã: ${formatarDataHoraSP(d.chegada_prevista_em)}`,
-    corpo: (d) => `Lembrete do horário combinado em "${d.titulo}".` },
+    // Só a hora (o "às HH:MM" do formatador): o dia já está no título.
+    corpo: (d) => `Amanhã às ${formatarDataHoraSP(d.chegada_prevista_em).split(' às ')[1]}: ${d.titulo}. Registre a chegada e a conclusão aqui no app.` },
   { coluna: 'lembrete_agenda_2h_em',
     dispara: `(d.chegada_prevista_em - INTERVAL '2 hours')`,
     titulo: (d) => `⏰ Em 2h: ${formatarDataHoraSP(d.chegada_prevista_em)}`,
