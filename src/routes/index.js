@@ -382,6 +382,10 @@ const migracaoPronta = (async () => {
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS vigia_comparecimento_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS comparecimento_resposta TEXT`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS comparecimento_respondido_em TIMESTAMPTZ`)
+      // "Estou a caminho": gravada pelo profissional do match em POST /:id/match (ou, se ainda
+      // nula, ao declarar chegada / dono confirmar comparecimento). Libera telefone ↔ dono_telefone
+      // em GET /:id. Zerada com as demais (SQL_ZERAR_AGENDA) em match novo e un-match.
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS a_caminho_em TIMESTAMPTZ`)
     }
     // Lista negra POR OBRA, espelho de reparos.prestadores_bloqueados (que nasceu fora deste
     // arquivo — não há ALTER dele aqui). Mesmo nome de coluna nas duas tabelas de propósito: as
@@ -2996,20 +3000,29 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         // para o pintor efetivamente casado — nunca no mero aceite (status='aceito').
         // EXCEÇÃO: bairro sai para todos os candidatos, junto de cidade — é granularidade
         // de região (ajuda o dono a julgar deslocamento), não endereço. logradouro, numero
-        // e telefone continuam match-gated: só esses três localizam/contatam o pintor.
+        // e logradouro/numero continuam match-gated. telefone exige ALÉM do match o
+        // "Estou a caminho" (obras.a_caminho_em, $3): antes dele sai NULL até para o pintor casado.
         `SELECT c.id, c.status, c.valor_proposto, c.valor_contraproposta, c.mensagem,
                 u.nome, u.cidade, u.bairro, u.foto_url, c.usuario_id,
                 u.anos_experiencia, u.especialidades, u.tamanho_equipe,
                 CASE WHEN c.usuario_id = $2 THEN u.logradouro ELSE NULL END as logradouro,
                 CASE WHEN c.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
-                CASE WHEN c.usuario_id = $2 THEN u.telefone ELSE NULL END as telefone,
+                CASE WHEN c.usuario_id = $2 AND $3::boolean THEN u.telefone ELSE NULL END as telefone,
                 (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = c.usuario_id) AS avaliacoes_total,
                 (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = c.usuario_id) AS avaliacoes_media
          FROM candidaturas c JOIN usuarios u ON u.id = c.usuario_id
          WHERE c.obra_id = $1 ORDER BY c.criado_em DESC`,
-        [req.params.id, obra.match_usuario_id]
+        [req.params.id, obra.match_usuario_id, !!obra.a_caminho_em]
       )
       candidatos = candidatosResult.rows
+    }
+
+    // dono_telefone: SÓ para o pintor do match e SÓ depois do "Estou a caminho" (a_caminho_em);
+    // null para ele antes disso e para qualquer outro leitor (dono, admin, assinante).
+    let dono_telefone = null
+    if (ehPintorDoMatch && obra.a_caminho_em) {
+      const tel = await pool.query(`SELECT telefone FROM usuarios WHERE id = $1`, [obra.criado_por])
+      dono_telefone = tel.rows[0]?.telefone || null
     }
 
     // Aceite do próprio requester. Procura a linha 'aceito' EXPLICITAMENTE em vez de
@@ -3035,7 +3048,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // (avaliarAumentoValor), calculadas só para o dono; qualquer outro leitor recebe false/null.
     const { pode_aumentar_valor, valor_minimo_aumento } = await advisoryAumentoValor(LADOS_AUMENTO_VALOR.obras, req.params.id, req.usuario.id, ehDono)
     const extensao_maxima_horas = tetoExtensaoObraHoras(obra.horas_para_expirar)
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento })
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -3269,10 +3282,30 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
     // (não reinicia a contagem) e sem reenviar o contrato. 409 fica só para match de outro.
     if (obra.rows[0].match_usuario_id) {
       if (obra.rows[0].match_usuario_id === req.usuario.id) {
-        return res.json({
+        // "Estou a caminho" de fato: grava a_caminho_em UMA vez (IS NULL no WHERE — rechamada
+        // não reescreve nem reavisa) e avisa o dono só nesse primeiro write. A partir daqui
+        // GET /obras/:id libera telefone (ao dono) e dono_telefone (ao pintor).
+        const marcado = await pool.query(
+          `UPDATE obras SET a_caminho_em = NOW()
+            WHERE id = $1 AND match_usuario_id = $2 AND a_caminho_em IS NULL
+            RETURNING a_caminho_em`,
+          [req.params.id, req.usuario.id]
+        )
+        const corpo = {
           mensagem: 'Match confirmado! Contagem regressiva iniciada.',
-          match_feito_em: obra.rows[0].match_feito_em
-        })
+          match_feito_em: obra.rows[0].match_feito_em,
+          a_caminho_em: marcado.rows[0]?.a_caminho_em || obra.rows[0].a_caminho_em,
+        }
+        if (marcado.rowCount === 0) return res.json(corpo)
+        const nome = await primeiroNome(req.usuario.id)
+        const donoTok = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [obra.rows[0].criado_por])
+        res.json(corpo)
+        if (donoTok.rows[0]?.push_token) {
+          enviarPushNotificacao(donoTok.rows[0].push_token, `🚗 ${nome} está a caminho!`,
+            `O pintor saiu para "${obra.rows[0].titulo}". O telefone dele já aparece no app.`,
+            { tipo: 'a_caminho', obra_id: req.params.id }).catch(() => {})
+        }
+        return
       }
       return res.status(409).json({ erro: 'Esta obra já tem um pintor a caminho' })
     }
@@ -3285,6 +3318,12 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
       `UPDATE obras SET match_feito_em = NOW(), match_usuario_id = $1, ${SQL_LIMPAR_CHEGADA}
        WHERE id = $2 AND match_usuario_id IS NULL`,
       [req.usuario.id, req.params.id]
+    )
+    // Caminho legado (match criado aqui, não no aceite): o toque é o próprio "Estou a caminho".
+    // Statement separado porque SQL_LIMPAR_CHEGADA já atribui a_caminho_em = NULL acima.
+    await pool.query(
+      `UPDATE obras SET a_caminho_em = NOW() WHERE id = $1 AND match_usuario_id = $2 AND a_caminho_em IS NULL`,
+      [req.params.id, req.usuario.id]
     )
     const dono = await pool.query(
       `SELECT u.push_token FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
@@ -4429,10 +4468,28 @@ router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) 
     // (não reinicia a contagem) e sem reenviar o contrato. 409 fica só para match de outro.
     if (reparo.rows[0].match_usuario_id) {
       if (reparo.rows[0].match_usuario_id === req.usuario.id) {
-        return res.json({
+        // "Estou a caminho" de fato — ver o mesmo bloco em POST /obras/:id/match.
+        const marcado = await pool.query(
+          `UPDATE reparos SET a_caminho_em = NOW()
+            WHERE id = $1 AND match_usuario_id = $2 AND a_caminho_em IS NULL
+            RETURNING a_caminho_em`,
+          [req.params.id, req.usuario.id]
+        )
+        const corpo = {
           mensagem: 'Match confirmado! Contagem regressiva iniciada.',
-          match_feito_em: reparo.rows[0].match_feito_em
-        })
+          match_feito_em: reparo.rows[0].match_feito_em,
+          a_caminho_em: marcado.rows[0]?.a_caminho_em || reparo.rows[0].a_caminho_em,
+        }
+        if (marcado.rowCount === 0) return res.json(corpo)
+        const nome = await primeiroNome(req.usuario.id)
+        const donoTok = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [reparo.rows[0].criado_por])
+        res.json(corpo)
+        if (donoTok.rows[0]?.push_token) {
+          enviarPushNotificacao(donoTok.rows[0].push_token, `🚗 ${nome} está a caminho!`,
+            `O prestador saiu para "${reparo.rows[0].titulo}". O telefone dele já aparece no app.`,
+            { tipo: 'a_caminho', reparo_id: req.params.id }).catch(() => {})
+        }
+        return
       }
       return res.status(409).json({ erro: 'Este serviço já tem um prestador a caminho' })
     }
@@ -4445,6 +4502,11 @@ router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) 
       `UPDATE reparos SET match_feito_em = NOW(), match_usuario_id = $1, ${SQL_LIMPAR_CHEGADA}
        WHERE id = $2 AND match_usuario_id IS NULL`,
       [req.usuario.id, req.params.id]
+    )
+    // Caminho legado (ver POST /obras/:id/match): statement separado por causa do NULL acima.
+    await pool.query(
+      `UPDATE reparos SET a_caminho_em = NOW() WHERE id = $1 AND match_usuario_id = $2 AND a_caminho_em IS NULL`,
+      [req.params.id, req.usuario.id]
     )
     const dono = await pool.query(
       `SELECT u.push_token FROM reparos r JOIN usuarios u ON r.criado_por = u.id WHERE r.id = $1`,
@@ -5106,6 +5168,9 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
       `UPDATE ${tabela} SET
          chegada_declarada_por = COALESCE(chegada_declarada_por, $2::uuid),
          chegada_declarada_em  = COALESCE(chegada_declarada_em, NOW()),
+         -- Chegou sem ter tocado "Estou a caminho": a_caminho_em nasce aqui (sem push próprio —
+         -- o aviso de chegada já sai abaixo), liberando os telefones em GET /:id.
+         a_caminho_em = COALESCE(a_caminho_em, NOW()),
          chegada_confirmada_em = CASE
            WHEN chegada_confirmada_em IS NOT NULL THEN chegada_confirmada_em
            WHEN $3::boolean THEN NOW()
@@ -5376,6 +5441,7 @@ const criarHandlerConfirmarComparecimento = (tabela) => async (req, res) => {
         `UPDATE ${tabela} SET
            chegada_declarada_por = COALESCE(chegada_declarada_por, $2::uuid),
            chegada_declarada_em = COALESCE(chegada_declarada_em, NOW()),
+           a_caminho_em = COALESCE(a_caminho_em, NOW()),
            chegada_confirmada_em = NOW(),
            comparecimento_resposta = 'sim', comparecimento_respondido_em = NOW()
          ${guard}
@@ -5684,22 +5750,31 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
         // (reparos.match_usuario_id aponta para o prestador que confirmou a ida), e
         // só para o prestador efetivamente casado — nunca no mero aceite (status='aceito').
         // EXCEÇÃO: bairro sai para todos os interessados, junto de cidade — mesma regra do
-        // lado obra. logradouro, numero e telefone continuam match-gated.
+        // lado obra. logradouro e numero continuam match-gated; telefone exige ALÉM do match o
+        // "Estou a caminho" (reparos.a_caminho_em, $3): antes dele sai NULL até para o casado.
         `SELECT ir.id, ir.usuario_id, ir.status, ir.mensagem, ir.criado_em,
                 ir.valor_proposto, ir.valor_contraproposta, ir.rodada,
                 u.nome, u.cidade, u.bairro, u.foto_url, u.anos_experiencia, u.especialidades, u.tamanho_equipe,
                 CASE WHEN ir.usuario_id = $2 THEN u.logradouro ELSE NULL END as logradouro,
                 CASE WHEN ir.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
-                CASE WHEN ir.usuario_id = $2 THEN u.telefone ELSE NULL END as telefone,
+                CASE WHEN ir.usuario_id = $2 AND $3::boolean THEN u.telefone ELSE NULL END as telefone,
                 (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_total,
                 (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_media
          FROM interesse_reparos ir
          JOIN usuarios u ON ir.usuario_id = u.id
          WHERE ir.reparo_id = $1
          ORDER BY ir.criado_em ASC`,
-        [req.params.id, reparo.match_usuario_id]
+        [req.params.id, reparo.match_usuario_id, !!reparo.a_caminho_em]
       )
       interessados = result2.rows
+    }
+
+    // dono_telefone: SÓ para o prestador do match e SÓ depois do "Estou a caminho"
+    // (a_caminho_em); null para ele antes disso e para qualquer outro leitor.
+    let dono_telefone = null
+    if (ehPrestadorDoMatch && reparo.a_caminho_em) {
+      const tel = await pool.query(`SELECT telefone FROM usuarios WHERE id = $1`, [reparo.criado_por])
+      dono_telefone = tel.rows[0]?.telefone || null
     }
 
     // Aceite do próprio requester. Procura a linha 'aceito' EXPLICITAMENTE em vez de
@@ -5730,6 +5805,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       midias: midias.rows,
       meu_interesse: interesse.rows[0] || null,
       interessados,
+      dono_telefone,
       extensao_maxima_horas,
       pode_aumentar_valor,
       valor_minimo_aumento,
