@@ -33,6 +33,12 @@ const transporter = nodemailer.createTransport({
   }
 })
 
+// Nome com '@' é e-mail digitado no campo errado (o padrão de e-mail já contém '@', então
+// um teste só cobre os dois casos). Vale nos DOIS caminhos de escrita de usuarios.nome:
+// cadastro e PUT /auth/perfil.
+const ERRO_NOME_PARECE_EMAIL = 'Digite seu nome, não o e-mail.'
+const nomePareceEmail = (nome) => typeof nome === 'string' && nome.includes('@')
+
 const cadastrar = async (req, res) => {
   const ts = new Date().toISOString()
   let client
@@ -52,6 +58,10 @@ const cadastrar = async (req, res) => {
     if (!nome || !email || !senha) {
       console.log(`[CADASTRO][${ts}] ✗ 400 campos obrigatorios ausentes | nome=${!!nome} email=${!!email} senha=${!!senha}`)
       return res.status(400).json({ erro: 'Nome, e-mail e senha são obrigatórios' })
+    }
+    if (nomePareceEmail(nome)) {
+      console.log(`[CADASTRO][${ts}] ✗ 400 nome parece e-mail`)
+      return res.status(400).json({ erro: ERRO_NOME_PARECE_EMAIL })
     }
     if (senha.length < 8) {
       console.log(`[CADASTRO][${ts}] ✗ 400 senha curta | len=${senha.length}`)
@@ -553,6 +563,9 @@ const atualizarPerfil = async (req, res) => {
     const mexeNome = Object.prototype.hasOwnProperty.call(req.body, 'nome')
     if (mexeNome && (typeof nome !== 'string' || !nome.trim())) {
       return res.status(400).json({ erro: 'Nome é obrigatório' })
+    }
+    if (mexeNome && nomePareceEmail(nome)) {
+      return res.status(400).json({ erro: ERRO_NOME_PARECE_EMAIL })
     }
     const mexeTelefone = Object.prototype.hasOwnProperty.call(req.body, 'telefone')
 
