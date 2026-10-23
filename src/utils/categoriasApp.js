@@ -58,6 +58,9 @@ const CATEGORIAS_SERVICO = [
   { slug: 'dj',              rotulo: 'DJ',                emoji: '🎧' },
   { slug: 'panfletagem',     rotulo: 'Panfletagem',       emoji: '📣' },
   { slug: 'social_midia',    rotulo: 'Social Mídia',      emoji: '📲' },
+  { slug: 'aluguel_festas',  rotulo: 'Aluguel para festas', emoji: '🎪' },
+  { slug: 'decoracao_festas', rotulo: 'Decoração de festas', emoji: '🎈' },
+  { slug: 'recreacao_infantil', rotulo: 'Recreação infantil', emoji: '🎠' },
   { slug: 'outros',          rotulo: 'Outros',            emoji: '➕' },
 ]
 
