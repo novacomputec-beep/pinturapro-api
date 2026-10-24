@@ -14,7 +14,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER } = require('../services/alertaService')
+const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { moderarDemanda, avisarModeracao, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
@@ -407,6 +407,13 @@ const migracaoPronta = (async () => {
       // (não uma coluna por aviso) porque o nº de avisos varia com a faixa (2 a 4). Claim
       // atômico por array_append; zerado em SQL_ZERAR_AGENDA junto com as demais do match.
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agendar_offsets INTEGER[] NOT NULL DEFAULT '{}'`)
+      // Negociação de horário: quando a proposta PENDENTE foi feita (toda escrita de proposta
+      // grava NOW()) e as duas marcas do "Responda o horário proposto"
+      // (alertaService.lembrarRespostaHorario: 1h depois da proposta / 1h antes do horário),
+      // zeradas a cada proposta nova e em SQL_ZERAR_AGENDA.
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS chegada_proposta_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_resposta_1h_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_resposta_antes_em TIMESTAMPTZ`)
     }
     // Lista negra POR OBRA, espelho de reparos.prestadores_bloqueados (que nasceu fora deste
     // arquivo — não há ALTER dele aqui). Mesmo nome de coluna nas duas tabelas de propósito: as
@@ -5018,6 +5025,8 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
            chegada_pendente_janela = $4::text,
            chegada_pendente_em = $2::timestamptz,
            chegada_proposta_por = $3::uuid,
+           chegada_proposta_em = NOW(),
+           lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL,
            chegada_pendente_rodada = d.chegada_pendente_rodada + 1
          WHERE d.id = $1 AND d.match_usuario_id = $3
            AND d.chegada_prevista_em IS NULL AND d.chegada_pendente_em IS NULL
@@ -5029,15 +5038,17 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
       if (upd.rowCount > 0) {
         const { chave } = ROTULOS_CHEGADA[tabela]
         const nome = await primeiroNome(req.usuario.id)
-        const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [alvo.rows[0].criado_por])
+        const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [alvo.rows[0].criado_por])
         res.json(upd.rows[0])
-        if (dono.rows[0]?.push_token) {
-          enviarPushNotificacao(
-            dono.rows[0].push_token,
-            `📅 ${nome} propôs ${formatarDataHoraSP(dh.prevista)}`,
-            `Horário de chegada para "${alvo.rows[0].titulo}". Aceitar ou sugerir outro?`,
-            { tipo: 'chegada_prevista_pendente', [chave]: req.params.id }
-          ).catch(() => {})
+        // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
+        if (dono.rows[0]) {
+          entregarPushOuEmail({
+            ...dono.rows[0],
+            titulo: `📅 ${nome} propôs ${formatarDataHoraSP(dh.prevista)}`,
+            corpo: `Horário de chegada para "${alvo.rows[0].titulo}". Aceitar ou sugerir outro?`,
+            data: { tipo: 'chegada_prevista_pendente', [chave]: req.params.id },
+            rotulo: `proposta horário ${tabela} ${req.params.id}`,
+          }).catch(() => {})
         }
         return
       }
@@ -5107,7 +5118,16 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
            ELSE d.chegada_proposta_por END,
          chegada_pendente_rodada = CASE
            WHEN c.prevista > COALESCE(d.expira_em, 'infinity'::timestamptz) THEN d.chegada_pendente_rodada + 1
-           ELSE d.chegada_pendente_rodada END
+           ELSE d.chegada_pendente_rodada END,
+         chegada_proposta_em = CASE
+           WHEN c.prevista > COALESCE(d.expira_em, 'infinity'::timestamptz) THEN NOW()
+           ELSE d.chegada_proposta_em END,
+         lembrete_resposta_1h_em = CASE
+           WHEN c.prevista > COALESCE(d.expira_em, 'infinity'::timestamptz) THEN NULL
+           ELSE d.lembrete_resposta_1h_em END,
+         lembrete_resposta_antes_em = CASE
+           WHEN c.prevista > COALESCE(d.expira_em, 'infinity'::timestamptz) THEN NULL
+           ELSE d.lembrete_resposta_antes_em END
        FROM calc c
        WHERE d.id = $1 AND d.match_usuario_id = $7
          AND d.chegada_prevista_em IS NULL AND d.chegada_pendente_em IS NULL
@@ -5123,18 +5143,20 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
       // responder duas vezes (mesmo cuidado de candidaturasController.aprovar).
       const { chave, profissional } = ROTULOS_CHEGADA[tabela]
       const pendente = !!upd.rows[0].chegada_pendente_em
-      const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [alvo.rows[0].criado_por])
+      const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [alvo.rows[0].criado_por])
       res.json(upd.rows[0])
-      if (dono.rows[0]?.push_token) {
+      if (dono.rows[0]) {
         // Dois textos porque são duas perguntas diferentes: um informa, o outro PEDE resposta.
-        enviarPushNotificacao(
-          dono.rows[0].push_token,
-          pendente ? '📅 Chegada depois do prazo' : '📅 Previsão de chegada!',
-          pendente
+        // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
+        entregarPushOuEmail({
+          ...dono.rows[0],
+          titulo: pendente ? '📅 Chegada depois do prazo' : '📅 Previsão de chegada!',
+          corpo: pendente
             ? `O ${profissional} só consegue chegar ${rotulo} em "${alvo.rows[0].titulo}", depois do prazo. Aceitar ou recusar?`
             : `O ${profissional} informou que chega ${rotulo} para "${alvo.rows[0].titulo}"`,
-          { tipo: pendente ? 'chegada_prevista_pendente' : 'chegada_prevista', [chave]: req.params.id }
-        ).catch(() => {})
+          data: { tipo: pendente ? 'chegada_prevista_pendente' : 'chegada_prevista', [chave]: req.params.id },
+          rotulo: `janela chegada ${tabela} ${req.params.id}`,
+        }).catch(() => {})
       }
       return
     }
@@ -5340,6 +5362,7 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
            chegada_pendente_janela = NULL,
            chegada_pendente_em = NULL,
            chegada_proposta_por = NULL,
+           chegada_proposta_em = NULL,
            lembrete_agenda_vespera_em = NULL, lembrete_agenda_2h_em = NULL, lembrete_agenda_hora_em = NULL,
            vigia_comparecimento_em = NULL, comparecimento_resposta = NULL, comparecimento_respondido_em = NULL
          ${guard}
@@ -5352,6 +5375,8 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
            chegada_pendente_janela = $4::text,
            chegada_pendente_em = $3::timestamptz,
            chegada_proposta_por = $2::uuid,
+           chegada_proposta_em = NOW(),
+           lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL,
            chegada_pendente_rodada = chegada_pendente_rodada + 1
          ${guard} AND chegada_pendente_rodada < $5::int
          RETURNING chegada_janela, chegada_prevista_em, expira_em,
@@ -5363,7 +5388,7 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
       // horário e ouviu não. Só o ramo da recusa grava — aceitar não deixa marca.
       upd = await pool.query(
         `UPDATE ${tabela} SET chegada_pendente_janela = NULL, chegada_pendente_em = NULL,
-                              chegada_proposta_por = NULL, chegada_recusada_em = NOW()
+                              chegada_proposta_por = NULL, chegada_proposta_em = NULL, chegada_recusada_em = NOW()
          ${guard}
          RETURNING chegada_janela, chegada_prevista_em, expira_em, chegada_pendente_rodada`,
         [req.params.id, req.usuario.id]
@@ -5377,38 +5402,40 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
     const { chave, profissional } = ROTULOS_CHEGADA[tabela]
     const outroId = ehDono ? d.match_usuario_id : d.criado_por
     const outro = outroId
-      ? await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [outroId])
+      ? await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [outroId])
       : { rows: [] }
     const nome = modo === 'contraproposta' ? await primeiroNome(req.usuario.id) : null
     res.json(upd.rows[0])
-    if (!outro.rows[0]?.push_token) return
+    if (!outro.rows[0]) return
 
+    // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
     const rotuloPendente = descreverPendente(d)
+    const entregar = (titulo, corpo, tipo) => entregarPushOuEmail({
+      ...outro.rows[0], titulo, corpo, data: { tipo, [chave]: req.params.id },
+      rotulo: `${modo} horário ${tabela} ${req.params.id}`,
+    }).catch(() => {})
     if (modo === 'aceitar') {
-      enviarPushNotificacao(
-        outro.rows[0].push_token,
+      entregar(
         `✅ Horário confirmado: ${rotuloPendente}`,
         ehDono
           ? `O solicitante aceitou sua chegada ${rotuloPendente} em "${d.titulo}".`
           : `O ${profissional} aceitou o horário ${rotuloPendente} em "${d.titulo}".`,
         // Tipos já conhecidos pelos apps: o profissional recebe 'chegada_prevista_aceita' como na
         // janela fixa; o dono recebe 'chegada_prevista' (horário valendo), como no auto-aceite.
-        { tipo: ehDono ? 'chegada_prevista_aceita' : 'chegada_prevista', [chave]: req.params.id }
-      ).catch(() => {})
+        ehDono ? 'chegada_prevista_aceita' : 'chegada_prevista'
+      )
     } else if (modo === 'contraproposta') {
-      enviarPushNotificacao(
-        outro.rows[0].push_token,
+      entregar(
         `📅 ${nome} sugeriu outro horário`,
         `${formatarDataHoraSP(novaData)} para "${d.titulo}". Aceitar ou propor outro?`,
-        { tipo: 'chegada_contraproposta', [chave]: req.params.id }
-      ).catch(() => {})
+        'chegada_contraproposta'
+      )
     } else {
-      enviarPushNotificacao(
-        outro.rows[0].push_token,
+      entregar(
         '❌ Janela recusada',
         `O solicitante não pode esperar até ${rotuloPendente} em "${d.titulo}". Escolha outra janela no app.`,
-        { tipo: 'chegada_prevista_recusada', [chave]: req.params.id }
-      ).catch(() => {})
+        'chegada_prevista_recusada'
+      )
     }
   } catch (err) {
     console.error(`[${tabela}/chegada-prevista/responder]`, err.message)

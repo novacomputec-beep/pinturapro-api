@@ -83,10 +83,13 @@ const processarRecibos = async (ticketsComToken, delayMs = 15000) => {
   }
 }
 
+// Nunca lança. Devolve 'enviado' (ticket ok), 'falha' (ticket 'error' ou exceção) ou
+// 'invalido' (token ausente/não-Expo) — os chamadores antigos ignoram o retorno; a reserva de
+// e-mail (entregarPushOuEmail) usa-o para decidir se ainda precisa mandar o e-mail.
 const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}) => {
   if (!Expo.isExpoPushToken(pushToken)) {
     console.warn('[Push] Token inválido ou ausente:', pushToken ? pushToken.substring(0, 30) : 'null')
-    return
+    return 'invalido'
   }
   try {
     const tickets = await expo.sendPushNotificationsAsync([{
@@ -105,13 +108,15 @@ const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}) => {
         '| detalhe:', ticket.details?.error || 'n/a',
         '→', pushToken.substring(0, 30)
       )
-    } else {
-      console.log('[Push] Enviado:', titulo, '→', pushToken.substring(0, 30))
-      processarRecibos([{ ticket, pushToken }]).catch(err =>
-        console.error('[Push] Erro no processamento de recibos:', err.message))
+      return 'falha'
     }
+    console.log('[Push] Enviado:', titulo, '→', pushToken.substring(0, 30))
+    processarRecibos([{ ticket, pushToken }]).catch(err =>
+      console.error('[Push] Erro no processamento de recibos:', err.message))
+    return 'enviado'
   } catch (err) {
     console.error('[Push] Erro ao enviar:', err.message)
+    return 'falha'
   }
 }
 
@@ -1240,6 +1245,29 @@ const entregarAoProfissional = async ({ lado, demanda, titulo, corpo, rotulo }) 
   return 'e-mail'
 }
 
+// Push com reserva de e-mail para avisos a QUALQUER lado (dono ou profissional) — negociação de
+// horário em routes (proposta, contraproposta, aceite, recusa) e lembrarRespostaHorario. Push
+// quando há token E o Expo aceitou o ticket; senão (sem token, token inválido, ticket 'error',
+// exceção) e-mail em TEXTO PURO, sem link: assunto = título do push, corpo = texto do push.
+// Nunca lança (erro de e-mail vira log). Devolve 'push' | 'e-mail' | 'sem contato' | 'falha'.
+const entregarPushOuEmail = async ({ push_token, email, nome, titulo, corpo, data, rotulo }) => {
+  try {
+    if (push_token) {
+      const r = await enviarPushNotificacao(push_token, titulo, corpo, data)
+      if (r === 'enviado') return 'push'
+    }
+    const destino = String(email || '').trim()
+    if (!destino) return 'sem contato'
+    const primeiro = String(nome || '').trim().split(/\s+/)[0]
+    const texto = `${primeiro ? `Olá, ${primeiro}!\n\n` : ''}${titulo}\n\n${corpo}\n\nAbra o app ${MARCA} para responder.`
+    await comTimeout(enviarEmailBrevo({ para: destino, assunto: titulo, texto }), EMAIL_ALERTAS_TIMEOUT_MS, `Brevo ${rotulo}`)
+    return 'e-mail'
+  } catch (err) {
+    console.error(`[Entrega] ${rotulo} falhou:`, err.message)
+    return 'falha'
+  }
+}
+
 // (1) Chamada fire-and-forget logo depois do UPDATE que cria o match (7 caminhos de aceite/match
 // em routes/index.js e candidaturasController). O claim exige match_usuario_id = usuarioId: um
 // match que já mudou de mãos ou foi desfeito não recebe nada.
@@ -1496,6 +1524,71 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
         }
       } catch (err) {
         console.error(`[Agendar] erro em ${lado.tabela} ${conjunto}:`, err.message)
+      }
+    }
+  }
+})
+
+// "Responda o horário proposto" — à parte que DEVE RESPONDER uma proposta/contraproposta de
+// horário pendente (chegada_pendente_em): quem NÃO propôs — proposta do profissional
+// (COALESCE(chegada_proposta_por, match_usuario_id) = match_usuario_id) → dono; do dono →
+// profissional. Cron de 1 min. Dois avisos por proposta:
+//   1h depois da proposta (chegada_proposta_em + 1h) e 1h antes do horário proposto
+//   (chegada_pendente_em − 1h). Cada um só dentro de 60 min do seu instante
+//   (LEMBRETE_AGENDA_JANELA): instante já passado (proposta a menos de 1h do horário, processo
+//   parado) não dispara atrasado; nenhum dos dois depois do horário proposto. O "1h antes" tem
+//   de cair ao menos 30 min depois do "1h depois" (proposta ≥ 2h30 antes do horário), senão os
+//   dois sairiam no mesmo minuto.
+// Para (tudo no predicado): resposta (aceite/recusa zeram chegada_pendente_em), proposta trocada
+// (toda escrita de proposta renova chegada_proposta_em e zera as marcas), demanda fora de
+// 'aberta', match desfeito (match_usuario_id NULL / SQL_ZERAR_AGENDA).
+// Idempotência: lembrete_resposta_{1h,antes}_em — claim UPDATE ... WHERE IS NULL RETURNING.
+// data do push = o tipo que cada lado já recebe nesta negociação (dono: chegada_prevista_pendente;
+// profissional: chegada_contraproposta) + obra_id/reparo_id — o toque abre o detalhe.
+// Entrega por entregarPushOuEmail (push; sem token ou push falho, e-mail em texto puro).
+const TITULO_RESPOSTA_HORARIO = '⏳ Responda o horário proposto'
+const SQL_QUEM_PROPOS = `COALESCE(d.chegada_proposta_por, d.match_usuario_id)`
+const SQL_QUEM_RESPONDE = `CASE WHEN ${SQL_QUEM_PROPOS} = d.match_usuario_id THEN d.criado_por ELSE d.match_usuario_id END`
+const LEMBRETES_RESPOSTA = [
+  { coluna: 'lembrete_resposta_1h_em',
+    dispara: `(d.chegada_proposta_em + INTERVAL '1 hour')`,
+    extra: '' },
+  { coluna: 'lembrete_resposta_antes_em',
+    dispara: `(d.chegada_pendente_em - INTERVAL '1 hour')`,
+    extra: `AND d.chegada_pendente_em - INTERVAL '1 hour' >= d.chegada_proposta_em + INTERVAL '90 minutes'` },
+]
+const sqlClaimRespostaHorario = (lado, l) => `
+      UPDATE ${lado.tabela} d SET ${l.coluna} = NOW()
+        FROM usuarios u, usuarios p
+       WHERE d.status = 'aberta' AND d.match_usuario_id IS NOT NULL
+         AND d.chegada_pendente_em IS NOT NULL AND d.chegada_proposta_em IS NOT NULL
+         AND u.id = ${SQL_QUEM_RESPONDE} AND p.id = ${SQL_QUEM_PROPOS}
+         AND d.${l.coluna} IS NULL
+         AND NOW() >= ${l.dispara} AND NOW() < ${l.dispara} + INTERVAL '${LEMBRETE_AGENDA_JANELA}'
+         AND NOW() < d.chegada_pendente_em
+         ${l.extra}
+   RETURNING d.id, d.titulo, d.chegada_pendente_em, (u.id = d.criado_por) AS para_dono,
+             u.push_token, u.email, u.nome, p.nome AS nome_proponente`
+const corpoRespostaHorario = (d) => {
+  const quem = String(d.nome_proponente || '').trim().split(/\s+/)[0] || (d.para_dono ? 'O profissional' : 'O solicitante')
+  return `${quem} propôs ${formatarDataHoraSP(d.chegada_pendente_em)} para "${d.titulo}". Confirme ou sugira outro.`
+}
+const lembrarRespostaHorario = semSobreposicao('lembrarRespostaHorario', async () => {
+  for (const lado of Object.values(LADOS_MATCH)) {
+    for (const l of LEMBRETES_RESPOSTA) {
+      try {
+        const claim = await pool.query(sqlClaimRespostaHorario(lado, l))
+        for (const d of claim.rows) {
+          const via = await entregarPushOuEmail({
+            push_token: d.push_token, email: d.email, nome: d.nome,
+            titulo: TITULO_RESPOSTA_HORARIO, corpo: corpoRespostaHorario(d),
+            data: { tipo: d.para_dono ? 'chegada_prevista_pendente' : 'chegada_contraproposta', [lado.chave]: d.id },
+            rotulo: `resposta horário ${l.coluna} ${lado.tabela} ${d.id}`,
+          })
+          console.log(`[RespostaHorario] ${l.coluna} ${lado.tabela} ${d.id} → ${d.para_dono ? 'dono' : 'profissional'} via ${via}`)
+        }
+      } catch (err) {
+        console.error(`[RespostaHorario] erro em ${lado.tabela} ${l.coluna}:`, err.message)
       }
     }
   }
@@ -2256,6 +2349,10 @@ module.exports = {
   lembrarAgendarAtendimento,
   sqlClaimAgendar,
   OFFSETS_AGENDAR,
+  entregarPushOuEmail,
+  lembrarRespostaHorario,
+  sqlClaimRespostaHorario,
+  LEMBRETES_RESPOSTA,
   vigiarComparecimento,
   listarLembretesPrazoChegada,
   sqlClaimLembreteChegada,
