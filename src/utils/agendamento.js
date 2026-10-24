@@ -4,7 +4,10 @@
 // Fluxo: o profissional casado propõe um instante (POST /:id/chegada-prevista {data_hora});
 // fica em chegada_pendente_em com chegada_pendente_janela = 'agendado', chegada_proposta_por =
 // quem propôs e chegada_pendente_rodada = nº da proposta. O outro lado aceita ou contrapropõe
-// (POST /:id/chegada-prevista/responder {acao}), até RODADAS_MAX propostas. Aceito, o instante
+// (POST /:id/chegada-prevista/responder {acao}); cada LADO tem SUGESTOES_MAX_POR_LADO
+// sugestões (proposta ou contraproposta) por match — a seguinte leva 400 e só resta aceitar
+// (contadores sugestoes_horario_dono / sugestoes_horario_profissional, zerados em
+// SQL_ZERAR_AGENDA: match novo, un-match, remarcar). Aceito, o instante
 // vira chegada_prevista_em — e a partir daí os crons de cronômetro, o lembrete e a falta leem a
 // MESMA coluna que já liam. Os três rótulos antigos ('hoje' | 'amanha_manha' | 'amanha_tarde')
 // continuam valendo para os apps já nas lojas.
@@ -12,7 +15,12 @@
 // Módulo inerte (constantes, regex, fragmentos SQL e um formatador): nada aqui toca o banco.
 const TZ_AGENDA = 'America/Sao_Paulo'
 const JANELA_AGENDADO = 'agendado'
-const RODADAS_MAX = 10
+const SUGESTOES_MAX_POR_LADO = 6
+const ERRO_LIMITE_SUGESTOES = 'Você atingiu o limite de sugestões. Confirme o horário proposto.'
+// Coluna-contador do lado que está sugerindo e quantas sugestões ainda lhe restam (nunca < 0).
+const colunaSugestoes = (ehDono) => (ehDono ? 'sugestoes_horario_dono' : 'sugestoes_horario_profissional')
+const sugestoesRestantes = (linha, ehDono) =>
+  Math.max(0, SUGESTOES_MAX_POR_LADO - (Number(linha?.[colunaSugestoes(ehDono)]) || 0))
 const RESPOSTAS_COMPARECIMENTO = ['sim', 'nao', 'remarcar']
 // Vigia: 1h depois do horário aceito sem chegada declarada, o dono é perguntado; a falta
 // automática espera até 24h depois do horário por essa resposta.
@@ -49,7 +57,8 @@ const SQL_ZERAR_AGENDA = `chegada_proposta_por = NULL, chegada_pendente_rodada =
               lembrete_agenda_vespera_em = NULL, lembrete_agenda_2h_em = NULL, lembrete_agenda_hora_em = NULL,
               vigia_comparecimento_em = NULL, comparecimento_resposta = NULL, comparecimento_respondido_em = NULL,
               a_caminho_em = NULL, lembrete_agendar_offsets = '{}',
-              chegada_proposta_em = NULL, lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL`
+              chegada_proposta_em = NULL, lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL,
+              sugestoes_horario_dono = 0, sugestoes_horario_profissional = 0`
 
 // Isenção de falta e de bloqueio quando o match morre sem horário valendo: o dono recusou a
 // janela (chegada_recusada_em) OU a proposta que ficou sem resposta era do PROFISSIONAL
@@ -88,7 +97,8 @@ const formatarDataHoraSP = (valor) => {
 }
 
 module.exports = {
-  TZ_AGENDA, JANELA_AGENDADO, RODADAS_MAX, RESPOSTAS_COMPARECIMENTO,
+  TZ_AGENDA, JANELA_AGENDADO, SUGESTOES_MAX_POR_LADO, ERRO_LIMITE_SUGESTOES, colunaSugestoes, sugestoesRestantes,
+  RESPOSTAS_COMPARECIMENTO,
   VIGIA_ATRASO, ESPERA_RESPOSTA_COMPARECIMENTO, LEMBRETE_AGENDA_JANELA, PRAZO_MINIMO_REMARCAR,
   RE_DATA_HORA, temFuso, sqlDataHora,
   SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, isentoDeFalta, SQL_ESPERA_COMPARECIMENTO,
