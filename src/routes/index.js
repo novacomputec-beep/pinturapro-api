@@ -291,6 +291,12 @@ const migracaoPronta = (async () => {
         }
       }
     }
+    // Piso da minima do Android (2026-10-24): o proxy público do banco foi removido, então a
+    // elevação sai daqui em vez do painel. Só SOBE (WHERE valor < nova): o admin que gravar
+    // uma minima maior pelo painel não é rebaixado no boot seguinte, e boots repetidos são
+    // no-op. A chave já existe neste ponto (semente do loop acima). iOS e as 'atual' não mudam.
+    await client.query(`UPDATE configuracoes SET valor = $2, atualizado_em = NOW()
+                         WHERE chave = $1 AND ${SQL_VERSAO_INT('valor')} < ${SQL_VERSAO_INT('$2::text')}`, [chaveVersao('minima', 'android'), '1.1.3'])
     await client.query(`INSERT INTO configuracoes (chave, valor) SELECT $1, $2
                          WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`, [CHAVE_MIN_USUARIOS, String(MIN_USUARIOS_PADRAO)])
     await client.query(`INSERT INTO configuracoes (chave, valor)
