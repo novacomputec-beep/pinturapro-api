@@ -36,7 +36,7 @@ const SQL_ZONA_DA_OBRA = sqlZonaSegura('obras.prazo_timezone')
 const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
 // Agendamento livre de chegada (dia + hora) sobre as colunas chegada_*: constantes, regex,
 // fragmentos SQL compartilhados com os crons (alertaService) e o formatador dos pushes.
-const { JANELA_AGENDADO, RODADAS_MAX, RESPOSTAS_COMPARECIMENTO, PRAZO_MINIMO_REMARCAR, RE_DATA_HORA, temFuso, sqlDataHora, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, formatarDataHoraSP } = require('../utils/agendamento')
+const { JANELA_AGENDADO, SUGESTOES_MAX_POR_LADO, ERRO_LIMITE_SUGESTOES, colunaSugestoes, sugestoesRestantes, RESPOSTAS_COMPARECIMENTO, PRAZO_MINIMO_REMARCAR, RE_DATA_HORA, temFuso, sqlDataHora, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, formatarDataHoraSP } = require('../utils/agendamento')
 const { nomeCurto, fotoOtimizada } = require('../utils/donoResumo')
 // Grupo chegada_* zerado NO MESMO UPDATE que cria um match (A1/A2 da auditoria externa): o
 // match novo nasce sem rastro de chegada de uma rodada anterior — uma declaração/confirmação
@@ -385,7 +385,9 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS chegada_recusada_em TIMESTAMPTZ`)
     // Agendamento livre (utils/agendamento) sobre o mesmo par pendente/prevista, nas duas tabelas:
     //   chegada_proposta_por          → quem fez a proposta PENDENTE (dono ou profissional)
-    //   chegada_pendente_rodada       → nº de propostas desta negociação (teto RODADAS_MAX)
+    //   chegada_pendente_rodada       → nº de propostas desta negociação (informativo)
+    //   sugestoes_horario_{dono,profissional} → sugestões (proposta/contraproposta) de cada
+    //                                    lado neste match (teto SUGESTOES_MAX_POR_LADO → 400)
     //   lembrete_agenda_{vespera,2h,hora}_em → claims dos 3 lembretes do horário aceito
     //   vigia_comparecimento_em       → claim do "o profissional veio?" ao dono (1h após o horário)
     //   comparecimento_resposta/_respondido_em → 'sim' | 'nao' | 'remarcar' do dono
@@ -415,6 +417,10 @@ const migracaoPronta = (async () => {
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS chegada_proposta_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_resposta_1h_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_resposta_antes_em TIMESTAMPTZ`)
+      // Teto de sugestões de horário POR LADO no match corrente (utils/agendamento):
+      // incrementados a cada proposta/contraproposta do lado, zerados em SQL_ZERAR_AGENDA.
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS sugestoes_horario_dono INTEGER NOT NULL DEFAULT 0`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS sugestoes_horario_profissional INTEGER NOT NULL DEFAULT 0`)
     }
     // Lista negra POR OBRA, espelho de reparos.prestadores_bloqueados (que nasceu fora deste
     // arquivo — não há ALTER dele aqui). Mesmo nome de coluna nas duas tabelas de propósito: as
@@ -3081,7 +3087,10 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // (avaliarAumentoValor), calculadas só para o dono; qualquer outro leitor recebe false/null.
     const { pode_aumentar_valor, valor_minimo_aumento } = await advisoryAumentoValor(LADOS_AUMENTO_VALOR.obras, req.params.id, req.usuario.id, ehDono)
     const extensao_maxima_horas = tetoExtensaoObraHoras(obra.horas_para_expirar)
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento })
+    // sugestoes_restantes: quantas sugestões de horário o LEITOR ainda tem neste match (dono ou
+    // pintor do match; null para os demais). Teto por lado em utils/agendamento.
+    const sugestoes_restantes = (ehDono || ehPintorDoMatch) ? sugestoesRestantes(obra, ehDono) : null
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -5023,8 +5032,9 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
       if (alvo.rows[0].expira_em && dh.prevista.getTime() > new Date(alvo.rows[0].expira_em).getTime()) {
         return res.status(400).json({ erro: 'data_hora é depois do prazo da demanda', expira_em: alvo.rows[0].expira_em })
       }
-      // Mesmo guard write-once da janela fixa (nada aceito, nada pendente) + teto de rodadas.
-      // A proposta nasce sempre PENDENTE (chegada_pendente_*): é o dono quem confirma.
+      // Mesmo guard write-once da janela fixa (nada aceito, nada pendente) + teto de sugestões
+      // do profissional (SUGESTOES_MAX_POR_LADO, no WHERE para duas chamadas simultâneas não
+      // passarem do teto). A proposta nasce sempre PENDENTE (chegada_pendente_*): é o dono quem confirma.
       const upd = await pool.query(
         `UPDATE ${tabela} d SET
            chegada_pendente_janela = $4::text,
@@ -5032,19 +5042,20 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
            chegada_proposta_por = $3::uuid,
            chegada_proposta_em = NOW(),
            lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL,
-           chegada_pendente_rodada = d.chegada_pendente_rodada + 1
+           chegada_pendente_rodada = d.chegada_pendente_rodada + 1,
+           sugestoes_horario_profissional = d.sugestoes_horario_profissional + 1
          WHERE d.id = $1 AND d.match_usuario_id = $3
            AND d.chegada_prevista_em IS NULL AND d.chegada_pendente_em IS NULL
-           AND d.chegada_pendente_rodada < $5::int
+           AND d.sugestoes_horario_profissional < $5::int
          RETURNING d.chegada_janela, d.chegada_prevista_em, d.chegada_pendente_janela, d.chegada_pendente_em,
-                   d.chegada_proposta_por, d.chegada_pendente_rodada`,
-        [req.params.id, dh.prevista, req.usuario.id, JANELA_AGENDADO, RODADAS_MAX]
+                   d.chegada_proposta_por, d.chegada_pendente_rodada, d.sugestoes_horario_profissional`,
+        [req.params.id, dh.prevista, req.usuario.id, JANELA_AGENDADO, SUGESTOES_MAX_POR_LADO]
       )
       if (upd.rowCount > 0) {
         const { chave } = ROTULOS_CHEGADA[tabela]
         const nome = await primeiroNome(req.usuario.id)
         const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [alvo.rows[0].criado_por])
-        res.json(upd.rows[0])
+        res.json({ ...upd.rows[0], sugestoes_restantes: sugestoesRestantes(upd.rows[0], false) })
         // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
         if (dono.rows[0]) {
           entregarPushOuEmail({
@@ -5058,17 +5069,17 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
         return
       }
       // rowCount = 0: já há horário valendo/pendente (cai no "devolve o que vale" abaixo) ou o
-      // teto de rodadas foi atingido (409 explícito, senão o app veria nulos sem explicação).
+      // teto de sugestões foi atingido (400 explícito, senão o app veria nulos sem explicação).
       const atual = await pool.query(
         `SELECT chegada_janela, chegada_prevista_em, chegada_pendente_janela, chegada_pendente_em,
-                chegada_proposta_por, chegada_pendente_rodada
+                chegada_proposta_por, chegada_pendente_rodada, sugestoes_horario_profissional
            FROM ${tabela} WHERE id = $1`,
         [req.params.id]
       )
       if (atual.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
-      const a = atual.rows[0]
-      if (!a.chegada_prevista_em && !a.chegada_pendente_em && a.chegada_pendente_rodada >= RODADAS_MAX) {
-        return res.status(409).json({ erro: `Limite de ${RODADAS_MAX} propostas de horário atingido — combine diretamente com o cliente`, ...a })
+      const a = { ...atual.rows[0], sugestoes_restantes: sugestoesRestantes(atual.rows[0], false) }
+      if (!a.chegada_prevista_em && !a.chegada_pendente_em && a.sugestoes_restantes === 0) {
+        return res.status(400).json({ erro: ERRO_LIMITE_SUGESTOES, ...a })
       }
       return res.json(a)
     }
@@ -5132,14 +5143,20 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
            ELSE d.lembrete_resposta_1h_em END,
          lembrete_resposta_antes_em = CASE
            WHEN c.prevista > COALESCE(d.expira_em, 'infinity'::timestamptz) THEN NULL
-           ELSE d.lembrete_resposta_antes_em END
+           ELSE d.lembrete_resposta_antes_em END,
+         -- Só a janela que vira PENDENTE é sugestão (conta no teto do profissional); a que cabe
+         -- no prazo é horário valendo, sem o que confirmar.
+         sugestoes_horario_profissional = CASE
+           WHEN c.prevista > COALESCE(d.expira_em, 'infinity'::timestamptz) THEN d.sugestoes_horario_profissional + 1
+           ELSE d.sugestoes_horario_profissional END
        FROM calc c
        WHERE d.id = $1 AND d.match_usuario_id = $7
          AND d.chegada_prevista_em IS NULL AND d.chegada_pendente_em IS NULL
+         AND NOT (c.prevista > COALESCE(d.expira_em, 'infinity'::timestamptz) AND d.sugestoes_horario_profissional >= $8::int)
        RETURNING d.chegada_janela, d.chegada_prevista_em,
                  d.chegada_pendente_janela, d.chegada_pendente_em,
-                 d.chegada_proposta_por, d.chegada_pendente_rodada`,
-      [req.params.id, janela, TZ_CHEGADA, dias, horas, minutos, req.usuario.id]
+                 d.chegada_proposta_por, d.chegada_pendente_rodada, d.sugestoes_horario_profissional`,
+      [req.params.id, janela, TZ_CHEGADA, dias, horas, minutos, req.usuario.id, SUGESTOES_MAX_POR_LADO]
     )
     if (upd.rowCount > 0) {
       // Push só no write REAL: o caminho de baixo (previsão já gravada) é retry/reabertura da
@@ -5149,7 +5166,7 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
       const { chave, profissional } = ROTULOS_CHEGADA[tabela]
       const pendente = !!upd.rows[0].chegada_pendente_em
       const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [alvo.rows[0].criado_por])
-      res.json(upd.rows[0])
+      res.json({ ...upd.rows[0], sugestoes_restantes: sugestoesRestantes(upd.rows[0], false) })
       if (dono.rows[0]) {
         // Dois textos porque são duas perguntas diferentes: um informa, o outro PEDE resposta.
         // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
@@ -5166,15 +5183,20 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
       return
     }
 
-    // rowCount = 0 → já havia previsão (gravada ou pendente). Não é erro: devolve o que vale.
+    // rowCount = 0 → já havia previsão (gravada ou pendente): não é erro, devolve o que vale.
+    // Sem nada valendo nem pendente, foi o teto de sugestões que barrou a janela pendente (400).
     const atual = await pool.query(
       `SELECT chegada_janela, chegada_prevista_em, chegada_pendente_janela, chegada_pendente_em,
-              chegada_proposta_por, chegada_pendente_rodada
+              chegada_proposta_por, chegada_pendente_rodada, sugestoes_horario_profissional
          FROM ${tabela} WHERE id = $1`,
       [req.params.id]
     )
     if (atual.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
-    res.json(atual.rows[0])
+    const a = { ...atual.rows[0], sugestoes_restantes: sugestoesRestantes(atual.rows[0], false) }
+    if (!a.chegada_prevista_em && !a.chegada_pendente_em && a.sugestoes_restantes === 0) {
+      return res.status(400).json({ erro: ERRO_LIMITE_SUGESTOES, ...a })
+    }
+    res.json(a)
   } catch (err) {
     console.error(`[${tabela}/chegada-prevista]`, err.message)
     res.status(500).json({ erro: 'Erro ao registrar previsão de chegada' })
@@ -5295,7 +5317,8 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
 // Agendamento: o lado que NÃO fez a proposta pendente responde com
 //   {acao:'aceitar'}                      → a pendente vira chegada_prevista_em (horário valendo);
 //   {acao:'contraproposta', data_hora}    → troca a pendente, inverte chegada_proposta_por e soma
-//                                           uma rodada (teto RODADAS_MAX);
+//                                           uma rodada e uma sugestão do lado que responde
+//                                           (teto SUGESTOES_MAX_POR_LADO → 400; aceitar segue livre);
 //   {aceito:true|false}                   → compat com os apps nas lojas: true == 'aceitar';
 //                                           false == recusa (só o dono, como antes).
 // A proposta pendente bloqueia nova proposta do MESMO lado (409): quem propôs espera.
@@ -5313,7 +5336,8 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
 
     const alvo = await pool.query(
       `SELECT titulo, criado_por, match_usuario_id, expira_em,
-              chegada_pendente_janela, chegada_pendente_em, chegada_proposta_por, chegada_pendente_rodada
+              chegada_pendente_janela, chegada_pendente_em, chegada_proposta_por, chegada_pendente_rodada,
+              sugestoes_horario_dono, sugestoes_horario_profissional
          FROM ${tabela} WHERE id = $1`,
       [req.params.id]
     )
@@ -5321,6 +5345,8 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
     const d = alvo.rows[0]
     const ehDono = d.criado_por === req.usuario.id
     const ehProfissional = !!d.match_usuario_id && d.match_usuario_id === req.usuario.id
+    // Contador de sugestões de QUEM responde (dono ou profissional); fixo em string de coluna.
+    const colSugestoes = colunaSugestoes(ehDono)
     if (!ehDono && !ehProfissional) {
       return res.status(403).json({ erro: 'Apenas o dono ou o profissional do match podem responder à previsão de chegada' })
     }
@@ -5339,8 +5365,8 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
 
     let novaData = null
     if (modo === 'contraproposta') {
-      if (d.chegada_pendente_rodada >= RODADAS_MAX) {
-        return res.status(409).json({ erro: `Limite de ${RODADAS_MAX} propostas de horário atingido — aceite ou combine diretamente` })
+      if (sugestoesRestantes(d, ehDono) === 0) {
+        return res.status(400).json({ erro: ERRO_LIMITE_SUGESTOES, sugestoes_restantes: 0 })
       }
       const dh = await resolverDataHora(data_hora)
       if (dh.erro) return res.status(400).json({ erro: dh.erro })
@@ -5371,10 +5397,12 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
            lembrete_agenda_vespera_em = NULL, lembrete_agenda_2h_em = NULL, lembrete_agenda_hora_em = NULL,
            vigia_comparecimento_em = NULL, comparecimento_resposta = NULL, comparecimento_respondido_em = NULL
          ${guard}
-         RETURNING chegada_janela, chegada_prevista_em, expira_em, chegada_pendente_rodada`,
+         RETURNING chegada_janela, chegada_prevista_em, expira_em, chegada_pendente_rodada, ${colSugestoes}`,
         [req.params.id, req.usuario.id]
       )
     } else if (modo === 'contraproposta') {
+      // Teto do lado que responde repetido no WHERE: duas contrapropostas simultâneas no último
+      // slot não passam as duas (a segunda volta rowCount = 0 e cai no 400 abaixo).
       upd = await pool.query(
         `UPDATE ${tabela} SET
            chegada_pendente_janela = $4::text,
@@ -5382,11 +5410,12 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
            chegada_proposta_por = $2::uuid,
            chegada_proposta_em = NOW(),
            lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL,
-           chegada_pendente_rodada = chegada_pendente_rodada + 1
-         ${guard} AND chegada_pendente_rodada < $5::int
+           chegada_pendente_rodada = chegada_pendente_rodada + 1,
+           ${colSugestoes} = ${colSugestoes} + 1
+         ${guard} AND ${colSugestoes} < $5::int
          RETURNING chegada_janela, chegada_prevista_em, expira_em,
-                   chegada_pendente_janela, chegada_pendente_em, chegada_proposta_por, chegada_pendente_rodada`,
-        [req.params.id, req.usuario.id, novaData, JANELA_AGENDADO, RODADAS_MAX]
+                   chegada_pendente_janela, chegada_pendente_em, chegada_proposta_por, chegada_pendente_rodada, ${colSugestoes}`,
+        [req.params.id, req.usuario.id, novaData, JANELA_AGENDADO, SUGESTOES_MAX_POR_LADO]
       )
     } else {
       // chegada_recusada_em marca a recusa para o cron não cobrar falta de quem ofereceu
@@ -5395,11 +5424,18 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
         `UPDATE ${tabela} SET chegada_pendente_janela = NULL, chegada_pendente_em = NULL,
                               chegada_proposta_por = NULL, chegada_proposta_em = NULL, chegada_recusada_em = NOW()
          ${guard}
-         RETURNING chegada_janela, chegada_prevista_em, expira_em, chegada_pendente_rodada`,
+         RETURNING chegada_janela, chegada_prevista_em, expira_em, chegada_pendente_rodada, ${colSugestoes}`,
         [req.params.id, req.usuario.id]
       )
     }
     if (upd.rowCount === 0) {
+      if (modo === 'contraproposta') {
+        // Distingue "perdeu a corrida do teto" de "a pendente mudou por baixo": relê o contador.
+        const agora = await pool.query(`SELECT ${colSugestoes} FROM ${tabela} WHERE id = $1`, [req.params.id])
+        if (agora.rows[0] && sugestoesRestantes(agora.rows[0], ehDono) === 0) {
+          return res.status(400).json({ erro: ERRO_LIMITE_SUGESTOES, sugestoes_restantes: 0 })
+        }
+      }
       return res.status(409).json({ erro: 'Não há previsão de chegada aguardando a sua resposta' })
     }
 
@@ -5410,7 +5446,7 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
       ? await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [outroId])
       : { rows: [] }
     const nome = modo === 'contraproposta' ? await primeiroNome(req.usuario.id) : null
-    res.json(upd.rows[0])
+    res.json({ ...upd.rows[0], sugestoes_restantes: sugestoesRestantes(upd.rows[0], ehDono) })
     if (!outro.rows[0]) return
 
     // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
@@ -5857,6 +5893,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // (avaliarAumentoValor), só para o dono; qualquer outro leitor recebe false/null.
     const { pode_aumentar_valor, valor_minimo_aumento } = await advisoryAumentoValor(LADOS_AUMENTO_VALOR.reparos, req.params.id, req.usuario.id, ehDono)
     const extensao_maxima_horas = tetoExtensaoHoras(reparo.prazo_atendimento_horas)
+    // sugestoes_restantes: quantas sugestões de horário o LEITOR ainda tem neste match (dono ou
+    // prestador do match; null para os demais). Teto por lado em utils/agendamento.
+    const sugestoes_restantes = (ehDono || ehPrestadorDoMatch) ? sugestoesRestantes(reparo, ehDono) : null
     res.json({
       reparo,
       midias: midias.rows,
@@ -5865,6 +5904,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       dono_telefone,
       dono_nome,
       dono_foto_url,
+      sugestoes_restantes,
       extensao_maxima_horas,
       pode_aumentar_valor,
       valor_minimo_aumento,
