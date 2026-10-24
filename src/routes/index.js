@@ -37,6 +37,7 @@ const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
 // Agendamento livre de chegada (dia + hora) sobre as colunas chegada_*: constantes, regex,
 // fragmentos SQL compartilhados com os crons (alertaService) e o formatador dos pushes.
 const { JANELA_AGENDADO, RODADAS_MAX, RESPOSTAS_COMPARECIMENTO, PRAZO_MINIMO_REMARCAR, RE_DATA_HORA, temFuso, sqlDataHora, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, formatarDataHoraSP } = require('../utils/agendamento')
+const { nomeCurto, fotoOtimizada } = require('../utils/donoResumo')
 // Grupo chegada_* zerado NO MESMO UPDATE que cria um match (A1/A2 da auditoria externa): o
 // match novo nasce sem rastro de chegada de uma rodada anterior — uma declaração/confirmação
 // órfã congelaria o cronômetro do profissional novo (os crons pulam linha com
@@ -3045,12 +3046,16 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       candidatos = candidatosResult.rows
     }
 
+    // dono_nome ("Luiz M.") e dono_foto_url (avatar otimizado): SÓ para o pintor do match;
+    // null para qualquer outro leitor (dono, admin, assinante). Nunca e-mail nem endereço.
     // dono_telefone: SÓ para o pintor do match e SÓ depois do "Estou a caminho" (a_caminho_em);
-    // null para ele antes disso e para qualquer outro leitor (dono, admin, assinante).
-    let dono_telefone = null
-    if (ehPintorDoMatch && obra.a_caminho_em) {
-      const tel = await pool.query(`SELECT telefone FROM usuarios WHERE id = $1`, [obra.criado_por])
-      dono_telefone = tel.rows[0]?.telefone || null
+    // null para ele antes disso e para qualquer outro leitor.
+    let dono_telefone = null, dono_nome = null, dono_foto_url = null
+    if (ehPintorDoMatch) {
+      const dono = await pool.query(`SELECT nome, foto_url, telefone FROM usuarios WHERE id = $1`, [obra.criado_por])
+      dono_nome = nomeCurto(dono.rows[0]?.nome)
+      dono_foto_url = fotoOtimizada(dono.rows[0]?.foto_url)
+      if (obra.a_caminho_em) dono_telefone = dono.rows[0]?.telefone || null
     }
 
     // Aceite do próprio requester. Procura a linha 'aceito' EXPLICITAMENTE em vez de
@@ -3076,7 +3081,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // (avaliarAumentoValor), calculadas só para o dono; qualquer outro leitor recebe false/null.
     const { pode_aumentar_valor, valor_minimo_aumento } = await advisoryAumentoValor(LADOS_AUMENTO_VALOR.obras, req.params.id, req.usuario.id, ehDono)
     const extensao_maxima_horas = tetoExtensaoObraHoras(obra.horas_para_expirar)
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento })
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -5817,12 +5822,16 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       interessados = result2.rows
     }
 
+    // dono_nome ("Luiz M.") e dono_foto_url (avatar otimizado): SÓ para o prestador do match;
+    // null para qualquer outro leitor (dono, admin, assinante). Nunca e-mail nem endereço.
     // dono_telefone: SÓ para o prestador do match e SÓ depois do "Estou a caminho"
     // (a_caminho_em); null para ele antes disso e para qualquer outro leitor.
-    let dono_telefone = null
-    if (ehPrestadorDoMatch && reparo.a_caminho_em) {
-      const tel = await pool.query(`SELECT telefone FROM usuarios WHERE id = $1`, [reparo.criado_por])
-      dono_telefone = tel.rows[0]?.telefone || null
+    let dono_telefone = null, dono_nome = null, dono_foto_url = null
+    if (ehPrestadorDoMatch) {
+      const dono = await pool.query(`SELECT nome, foto_url, telefone FROM usuarios WHERE id = $1`, [reparo.criado_por])
+      dono_nome = nomeCurto(dono.rows[0]?.nome)
+      dono_foto_url = fotoOtimizada(dono.rows[0]?.foto_url)
+      if (reparo.a_caminho_em) dono_telefone = dono.rows[0]?.telefone || null
     }
 
     // Aceite do próprio requester. Procura a linha 'aceito' EXPLICITAMENTE em vez de
@@ -5854,6 +5863,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       meu_interesse: interesse.rows[0] || null,
       interessados,
       dono_telefone,
+      dono_nome,
+      dono_foto_url,
       extensao_maxima_horas,
       pode_aumentar_valor,
       valor_minimo_aumento,
