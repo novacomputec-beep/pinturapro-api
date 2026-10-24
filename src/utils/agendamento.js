@@ -48,7 +48,8 @@ const sqlDataHora = (param, paramTemFuso) =>
 const SQL_ZERAR_AGENDA = `chegada_proposta_por = NULL, chegada_pendente_rodada = 0,
               lembrete_agenda_vespera_em = NULL, lembrete_agenda_2h_em = NULL, lembrete_agenda_hora_em = NULL,
               vigia_comparecimento_em = NULL, comparecimento_resposta = NULL, comparecimento_respondido_em = NULL,
-              a_caminho_em = NULL, lembrete_agendar_offsets = '{}'`
+              a_caminho_em = NULL, lembrete_agendar_offsets = '{}',
+              chegada_proposta_em = NULL, lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL`
 
 // Isenção de falta e de bloqueio quando o match morre sem horário valendo: o dono recusou a
 // janela (chegada_recusada_em) OU a proposta que ficou sem resposta era do PROFISSIONAL

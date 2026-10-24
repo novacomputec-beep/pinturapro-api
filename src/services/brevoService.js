@@ -21,12 +21,15 @@ const parseSender = (nomeOverride) => {
   return { name: nomeOverride || (match ? match[1].trim() : MARCA), email }
 }
 
-const enviarEmail = async ({ para, assunto, html, remetenteNome }) => {
+// `texto` (opcional): corpo em TEXTO PURO (textContent) para os avisos sem link — usado quando
+// não vem `html`. Com os dois, o Brevo manda multipart e o cliente escolhe.
+const enviarEmail = async ({ para, assunto, html, texto, remetenteNome }) => {
   const email = new SibApiV3Sdk.SendSmtpEmail()
   email.sender = parseSender(remetenteNome)
   email.to = toRecipients(para)
   email.subject = assunto
-  email.htmlContent = html
+  if (html) email.htmlContent = html
+  if (texto) email.textContent = texto
   await getApiInstance().sendTransacEmail(email)
 }
 

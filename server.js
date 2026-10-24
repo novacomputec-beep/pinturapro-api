@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, lembrarRespostaHorario, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -790,6 +790,9 @@ const iniciarAgendador = () => {
   // antecedências fixas antes do prazo de chegada (faixa da demanda). Mesma cadência; fora do
   // warm-up porque a antecedência corrente fica devida até a seguinte — o próximo tique a pega.
   setInterval(() => { lembrarAgendarAtendimento() }, INTERVALO_CRONOMETRO)
+  // "Responda o horário proposto": à parte que deve responder uma proposta de horário pendente,
+  // 1h depois da proposta e 1h antes do horário. Mesma cadência; fora do warm-up (janela de 60 min).
+  setInterval(() => { lembrarRespostaHorario() }, INTERVALO_CRONOMETRO)
   setInterval(() => { vigiarComparecimento() }, INTERVALO_CRONOMETRO)
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
   // Poda das tentativas de auth: a tabela acumula linhas de e-mails inexistentes, que é o
