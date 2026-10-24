@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -786,6 +786,10 @@ const iniciarAgendador = () => {
   // hora) e a vigia "o profissional veio?" ao dono (1h depois do horário). Mesma cadência dos
   // cronômetros; fora do warm-up pelo mesmo motivo do lembrete acima.
   setInterval(() => { lembrarAgendamento() }, INTERVALO_CRONOMETRO)
+  // "Agende seu atendimento": ao profissional casado que ainda não propôs dia/hora, em
+  // antecedências fixas antes do prazo de chegada (faixa da demanda). Mesma cadência; fora do
+  // warm-up porque a antecedência corrente fica devida até a seguinte — o próximo tique a pega.
+  setInterval(() => { lembrarAgendarAtendimento() }, INTERVALO_CRONOMETRO)
   setInterval(() => { vigiarComparecimento() }, INTERVALO_CRONOMETRO)
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
   // Poda das tentativas de auth: a tabela acumula linhas de e-mails inexistentes, que é o

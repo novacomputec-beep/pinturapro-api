@@ -392,6 +392,11 @@ const migracaoPronta = (async () => {
       // nula, ao declarar chegada / dono confirmar comparecimento). Libera telefone ↔ dono_telefone
       // em GET /:id. Zerada com as demais (SQL_ZERAR_AGENDA) em match novo e un-match.
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS a_caminho_em TIMESTAMPTZ`)
+      // "Agende seu atendimento" (alertaService.lembrarAgendarAtendimento): minutos de
+      // antecedência já avisados ao profissional casado que ainda não propôs dia/hora. Array
+      // (não uma coluna por aviso) porque o nº de avisos varia com a faixa (2 a 4). Claim
+      // atômico por array_append; zerado em SQL_ZERAR_AGENDA junto com as demais do match.
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agendar_offsets INTEGER[] NOT NULL DEFAULT '{}'`)
     }
     // Lista negra POR OBRA, espelho de reparos.prestadores_bloqueados (que nasceu fora deste
     // arquivo — não há ALTER dele aqui). Mesmo nome de coluna nas duas tabelas de propósito: as
