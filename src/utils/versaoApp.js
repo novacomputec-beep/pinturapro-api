@@ -9,6 +9,10 @@
 //                                   que a atual para ela virar a atual. Padrão 3.
 //   versao_app_testadores           e-mails (minúsculos, separados por vírgula) que NÃO contam
 //                                   para N — além de toda conta admin/aprovador.
+//   versoes_obrigatorias_<plataforma> JSON de versões (['1.1.3', ...]) que, uma vez ALCANÇADAS
+//                                   pela atual, viram a minima: depois de cada promoção (e uma
+//                                   vez no boot, e ao editar a lista pelo painel) a minima sobe
+//                                   para a MAIOR versão da lista que seja <= atual. Só sobe.
 //
 // REGISTRO: toda requisição AUTENTICADA que traga X-App-Version e X-App-Platform deixa uma linha
 // em versoes_app_vistas (usuario, plataforma, versao) — UPSERT fire-and-forget, fora do caminho
@@ -31,6 +35,9 @@ const MIN_USUARIOS_PADRAO = 3
 const CHAVE_MIN_USUARIOS = 'versao_app_min_usuarios'
 const CHAVE_TESTADORES = 'versao_app_testadores'
 const chaveVersao = (tipo, plataforma) => `versao_app_${tipo}_${plataforma}`
+const chaveObrigatorias = (plataforma) => `versoes_obrigatorias_${plataforma}`
+// Semente da lista de obrigatórias no primeiro boot (a 1.1.3 já era a minima do Android).
+const OBRIGATORIAS_PADRAO = ['1.1.3']
 
 const normalizarVersao = (v) => {
   const s = String(v ?? '').trim()
@@ -53,6 +60,21 @@ const normalizarTestadores = (lista) => {
   const bruto = Array.isArray(lista) ? lista : String(lista ?? '').split(/[,\s;]+/)
   return [...new Set(bruto.map(e => String(e ?? '').trim().toLowerCase()).filter(e => e.includes('@')))]
 }
+// Lista de versões (array, ou texto separado por vírgula/espaço) → normalizada, sem repetição,
+// crescente. null se algum item não for versão válida (o chamador decide o 400).
+const normalizarListaVersoes = (lista) => {
+  const bruto = Array.isArray(lista) ? lista : String(lista ?? '').split(/[,\s;]+/).filter(Boolean)
+  const normalizadas = bruto.map(normalizarVersao)
+  if (normalizadas.some(v => v === null)) return null
+  return [...new Set(normalizadas)].sort(compararVersoes)
+}
+// JSON gravado em configuracoes → lista normalizada; lixo ou ausência viram [] (nunca lança).
+const lerListaVersoes = (texto) => {
+  try { return normalizarListaVersoes(JSON.parse(texto)) || [] } catch { return [] }
+}
+// Maior versão da lista de obrigatórias que a atual já alcançou (<= atual), ou null.
+const minimaObrigatoriaPara = (obrigatorias, atual) =>
+  obrigatorias.filter(v => compararVersoes(v, atual) <= 0).pop() || null
 // Expressão SQL que compara uma coluna/valor de versão como int[] (lexicográfico por parte).
 const SQL_VERSAO_INT = (expr) => `string_to_array(${expr}, '.')::int[]`
 
@@ -92,7 +114,7 @@ const registrarVersaoVista = (req) => {
 
 // ---------- config ----------
 const lerConfigVersao = async (db = pool) => {
-  const r = await db.query(`SELECT chave, valor FROM configuracoes WHERE chave LIKE 'versao_app_%'`)
+  const r = await db.query(`SELECT chave, valor FROM configuracoes WHERE chave LIKE 'versao_app_%' OR chave LIKE 'versoes_obrigatorias_%'`)
   const mapa = Object.fromEntries(r.rows.map(x => [x.chave, x.valor]))
   const n = Number(mapa[CHAVE_MIN_USUARIOS])
   const saida = {
@@ -103,7 +125,53 @@ const lerConfigVersao = async (db = pool) => {
     saida[p] = {
       minima: normalizarVersao(mapa[chaveVersao('minima', p)]) || VERSAO_ZERO,
       atual:  normalizarVersao(mapa[chaveVersao('atual', p)])  || VERSAO_ZERO,
+      obrigatorias: lerListaVersoes(mapa[chaveObrigatorias(p)]),
     }
+  }
+  return saida
+}
+
+// Sobe a minima de cada plataforma pedida para a maior obrigatória <= atual. Só sobe
+// (WHERE valor < nova), então réplicas, boots repetidos e listas editadas para baixo nunca
+// rebaixam uma minima já gravada. Devolve [{ plataforma, de, para }] do que subiu.
+const aplicarMinimaObrigatoria = async (db = pool, plataformas = PLATAFORMAS) => {
+  const cfg = await lerConfigVersao(db)
+  const subidas = []
+  for (const p of plataformas) {
+    const nova = minimaObrigatoriaPara(cfg[p].obrigatorias, cfg[p].atual)
+    if (!nova || compararVersoes(nova, cfg[p].minima) <= 0) continue
+    const upd = await db.query(
+      `UPDATE configuracoes SET valor = $2, atualizado_em = NOW()
+        WHERE chave = $1 AND ${SQL_VERSAO_INT('valor')} < ${SQL_VERSAO_INT('$2::text')}`,
+      [chaveVersao('minima', p), nova]
+    )
+    if (upd.rowCount > 0) {
+      subidas.push({ plataforma: p, de: cfg[p].minima, para: nova })
+      console.log(`[VersaoApp] ${p}: minima ${cfg[p].minima} → ${nova} (obrigatória alcançada pela atual ${cfg[p].atual})`)
+    }
+  }
+  if (subidas.length > 0) invalidarCacheVersoes()
+  return subidas
+}
+
+// Painel: por plataforma, usuários ATIVOS distintos (usuarios.ativo) na versão mais recente
+// que cada um reportou (versoes_app_vistas, última por ultimo_em), partidos em >= minima e
+// < minima. Lê o mesmo registro que a promoção automática.
+const contarUsuariosPorMinima = async (db = pool, cfg) => {
+  const saida = {}
+  for (const p of PLATAFORMAS) {
+    const r = await db.query(
+      `WITH ultima AS (
+         SELECT DISTINCT ON (v.usuario_id) v.usuario_id, v.versao
+           FROM versoes_app_vistas v JOIN usuarios u ON u.id = v.usuario_id
+          WHERE v.plataforma = $1 AND u.ativo = true
+          ORDER BY v.usuario_id, v.ultimo_em DESC)
+       SELECT count(*) FILTER (WHERE ${SQL_VERSAO_INT('versao')} >= ${SQL_VERSAO_INT('$2::text')})::int AS na_minima_ou_acima,
+              count(*) FILTER (WHERE ${SQL_VERSAO_INT('versao')} <  ${SQL_VERSAO_INT('$2::text')})::int AS abaixo_da_minima
+         FROM ultima`,
+      [p, cfg[p].minima]
+    )
+    saida[p] = r.rows[0]
   }
   return saida
 }
@@ -149,7 +217,7 @@ const candidatosPromocao = async (db = pool) => {
       [p, cfg[p].atual, cfg.testadores]
     )
     const vencedora = r.rows.find(x => x.usuarios >= cfg.min_usuarios)?.versao || null
-    saida[p] = { atual: cfg[p].atual, minima: cfg[p].minima, candidatas: r.rows, vencedora }
+    saida[p] = { atual: cfg[p].atual, minima: cfg[p].minima, obrigatorias: cfg[p].obrigatorias, candidatas: r.rows, vencedora }
   }
   return saida
 }
@@ -172,7 +240,11 @@ const promoverVersaoAtual = async (db = pool) => {
       console.log(`[VersaoApp] ${p}: atual ${prev[p].atual} → ${nova} (${prev[p].candidatas.find(c => c.versao === nova)?.usuarios} usuário(s) não testadores, N=${prev.min_usuarios})`)
     }
   }
-  if (promovidas.length > 0) invalidarCacheVersoes()
+  if (promovidas.length > 0) {
+    invalidarCacheVersoes()
+    // A atual subiu: se alcançou uma versão obrigatória, a minima dessa plataforma sobe junto.
+    await aplicarMinimaObrigatoria(db, promovidas.map(x => x.plataforma))
+  }
   return promovidas
 }
 const cronPromoverVersaoAtual = async () => {
@@ -181,7 +253,10 @@ const cronPromoverVersaoAtual = async () => {
 
 module.exports = {
   PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao,
+  chaveObrigatorias, OBRIGATORIAS_PADRAO,
   normalizarVersao, compararVersoes, normalizarPlataforma, normalizarTestadores, SQL_VERSAO_INT,
+  normalizarListaVersoes, lerListaVersoes, minimaObrigatoriaPara,
   registrarVersaoVista, lerConfigVersao, versoesPublicas, invalidarCacheVersoes, gravarConfig,
+  aplicarMinimaObrigatoria, contarUsuariosPorMinima,
   candidatosPromocao, promoverVersaoAtual, cronPromoverVersaoAtual,
 }

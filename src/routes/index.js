@@ -20,7 +20,8 @@ const { moderarDemanda, avisarModeracao, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = 
 const { montarResumoCanal } = require('../utils/canalResumo')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
-const { PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao, normalizarVersao, normalizarTestadores, SQL_VERSAO_INT, versoesPublicas, invalidarCacheVersoes, gravarConfig, lerConfigVersao, candidatosPromocao } = require('../utils/versaoApp')
+const { PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao, normalizarVersao, normalizarTestadores, SQL_VERSAO_INT, versoesPublicas, invalidarCacheVersoes, gravarConfig, lerConfigVersao, candidatosPromocao,
+        chaveObrigatorias, OBRIGATORIAS_PADRAO, normalizarListaVersoes, aplicarMinimaObrigatoria, contarUsuariosPorMinima } = require('../utils/versaoApp')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
 // America/Sao_Paulo. Compartilhado com alertaService, que reconstrói expira_em nos crons.
 const { PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP, FORMATO_ZONA_IANA, sqlZonaSegura } = require('../utils/faixasPrazo')
@@ -302,6 +303,15 @@ const migracaoPronta = (async () => {
     await client.query(`INSERT INTO configuracoes (chave, valor)
                          SELECT $1, COALESCE((SELECT string_agg(lower(btrim(email)), ',' ORDER BY email) FROM usuarios WHERE role = 'admin'), '')
                           WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`, [CHAVE_TESTADORES])
+    // Versões OBRIGATÓRIAS por plataforma (utils/versaoApp): JSON de versões que, alcançadas pela
+    // atual, viram a minima. Semente ['1.1.3'] só na PRIMEIRA vez; depois é o painel que edita.
+    // Em seguida a regra roda UMA vez sobre os valores correntes (só sobe a minima), para um
+    // deploy que troque a lista valer já no boot e não só na próxima promoção automática.
+    for (const p of PLATAFORMAS) {
+      await client.query(`INSERT INTO configuracoes (chave, valor) SELECT $1, $2
+                           WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`, [chaveObrigatorias(p), JSON.stringify(OBRIGATORIAS_PADRAO)])
+    }
+    await aplicarMinimaObrigatoria(client)
     await client.query(`CREATE TABLE IF NOT EXISTS versoes_app_vistas (
       usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
       plataforma TEXT NOT NULL,
@@ -6813,9 +6823,13 @@ router.get('/config/versao-app', async (req, res) => {
 
 // Painel: estado completo das versões + prévia do que a promoção automática faria agora
 // (candidatas por plataforma com nº de usuários não testadores, e a vencedora, se houver).
+// Por plataforma: minima, atual, obrigatorias e { na_minima_ou_acima, abaixo_da_minima } =
+// usuários ATIVOS distintos pela última versão que cada um reportou (contarUsuariosPorMinima).
 router.get('/admin/versao-app', autenticar, exigirAdmin, async (req, res) => {
   try {
     const prev = await candidatosPromocao()
+    const contagens = await contarUsuariosPorMinima(pool, prev)
+    for (const p of PLATAFORMAS) prev[p].usuarios = contagens[p]
     res.json(prev)
   } catch (err) {
     console.error('[admin/versao-app]', err.message)
@@ -6826,10 +6840,13 @@ router.get('/admin/versao-app', autenticar, exigirAdmin, async (req, res) => {
 // Painel: altera N, a lista de testadores e minima/atual por plataforma. Só o que vier no corpo
 // muda. atual aqui é MANUAL e aceita qualquer versão válida (inclusive menor — é o admin
 // corrigindo); a promoção automática continua só subindo a partir do que ficar gravado.
-// Corpo: { min_usuarios?, testadores?: [emails] | "a@x,b@y", android?: { minima?, atual? }, ios?: {...} }
+// Corpo: { min_usuarios?, testadores?: [emails] | "a@x,b@y", android?: { minima?, atual?, obrigatorias? }, ios?: {...} }
+// obrigatorias: lista de versões (array ou texto separado por vírgula; [] limpa). Depois de
+// gravar uma lista, a regra da minima roda na hora para essa plataforma (só sobe).
 router.put('/admin/versao-app', autenticar, exigirSuperAdmin, async (req, res) => {
   const body = req.body || {}
   const gravacoes = []
+  const plataformasComLista = []
   if (body.min_usuarios !== undefined) {
     const n = Number(body.min_usuarios)
     if (!Number.isInteger(n) || n < 1 || n > 1000) return res.status(400).json({ erro: 'min_usuarios deve ser um inteiro entre 1 e 1000' })
@@ -6841,18 +6858,28 @@ router.put('/admin/versao-app', autenticar, exigirSuperAdmin, async (req, res) =
   }
   for (const p of PLATAFORMAS) {
     if (body[p] === undefined) continue
-    if (typeof body[p] !== 'object' || body[p] === null) return res.status(400).json({ erro: `${p} deve ser um objeto { minima, atual }` })
+    if (typeof body[p] !== 'object' || body[p] === null) return res.status(400).json({ erro: `${p} deve ser um objeto { minima, atual, obrigatorias }` })
     for (const tipo of ['minima', 'atual']) {
       if (body[p][tipo] === undefined) continue
       const v = normalizarVersao(body[p][tipo])
       if (!v) return res.status(400).json({ erro: `${p}.${tipo} inválida: use N.N.N` })
       gravacoes.push([chaveVersao(tipo, p), v])
     }
+    if (body[p].obrigatorias !== undefined) {
+      if (typeof body[p].obrigatorias !== 'string' && !Array.isArray(body[p].obrigatorias)) {
+        return res.status(400).json({ erro: `${p}.obrigatorias deve ser lista de versões ou texto separado por vírgula` })
+      }
+      const lista = normalizarListaVersoes(body[p].obrigatorias)
+      if (!lista) return res.status(400).json({ erro: `${p}.obrigatorias contém versão inválida: use N.N.N` })
+      gravacoes.push([chaveObrigatorias(p), JSON.stringify(lista)])
+      plataformasComLista.push(p)
+    }
   }
   if (gravacoes.length === 0) return res.status(400).json({ erro: 'Nada para alterar' })
   try {
     for (const [chave, valor] of gravacoes) await gravarConfig(pool, chave, valor)
     invalidarCacheVersoes()
+    if (plataformasComLista.length > 0) await aplicarMinimaObrigatoria(pool, plataformasComLista)
     console.log(`[admin/versao-app] ${req.usuario.id} alterou ${gravacoes.map(([k, v]) => `${k}=${v}`).join(' ')}`)
     res.json(await lerConfigVersao())
   } catch (err) {
