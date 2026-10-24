@@ -42,10 +42,13 @@ const sqlDataHora = (param, paramTemFuso) =>
 // a_caminho_em ("Estou a caminho", POST /:id/match) entra na mesma lista: é estado DESTE
 // match — e é o que libera a troca de telefones em GET /:id, que não pode sobreviver ao
 // profissional seguinte. Também cai no 'remarcar' do comparecimento, que usa esta lista.
+// lembrete_agendar_offsets (alertaService.lembrarAgendarAtendimento): antecedências já
+// avisadas do "Agende seu atendimento" — estado DESTE match, então o profissional seguinte
+// (ou o mesmo, após 'remarcar') começa com a lista vazia.
 const SQL_ZERAR_AGENDA = `chegada_proposta_por = NULL, chegada_pendente_rodada = 0,
               lembrete_agenda_vespera_em = NULL, lembrete_agenda_2h_em = NULL, lembrete_agenda_hora_em = NULL,
               vigia_comparecimento_em = NULL, comparecimento_resposta = NULL, comparecimento_respondido_em = NULL,
-              a_caminho_em = NULL`
+              a_caminho_em = NULL, lembrete_agendar_offsets = '{}'`
 
 // Isenção de falta e de bloqueio quando o match morre sem horário valendo: o dono recusou a
 // janela (chegada_recusada_em) OU a proposta que ficou sem resposta era do PROFISSIONAL

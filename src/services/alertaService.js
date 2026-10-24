@@ -1390,6 +1390,117 @@ const lembrarAgendamento = semSobreposicao('lembrarAgendamento', async () => {
   }
 })
 
+// "Agende seu atendimento" — ao PROFISSIONAL casado enquanto NINGUÉM propôs dia/hora
+// (chegada_pendente_em e chegada_prevista_em nulos). Cron de 1 min, como os demais do match.
+// PRAZO = SQL_PRAZO_CHEGADA, o mesmo do "Prazo para chegar" dos cronômetros (com a prevista
+// nula, é expira_em — que na obra é o prazo de INÍCIO). Antecedências, pela janela W da
+// demanda (sqlJanelaHoras: prazo_atendimento_horas/horas_para_expirar ou expira_em − âncora):
+//   reparo W < 4h (1h, 2h)              → 30 min, 15 min
+//   reparo 4h ≤ W < 8h                  → 1h, 30 min
+//   reparo 8h ≤ W < 168h e "Hoje"       → 2h, 1h          (8h, 12h, Hoje, Amanhã)
+//   reparo 168h ≤ W < 720h              → 1 dia, 6h, 1h   (Esta semana)
+//   reparo W ≥ 720h e TODA obra         → 1 semana, 3 dias, 1 dia, 2h  (Este mês, Mês que vem)
+// Para (tudo no predicado, reavaliado a cada tique): proposta de horário em curso (de qualquer
+// lado), horário aceito, chegada declarada/confirmada, "Estou a caminho", demanda fora de
+// 'aberta' (encerrada/cancelada), match desfeito (match_usuario_id NULL).
+// Antecedência cujo instante já tinha passado no momento do match NÃO dispara (match_feito_em
+// tem de ser anterior a prazo − antecedência). Só a antecedência CORRENTE é devida: a janela
+// de cada uma vai do seu instante até o da seguinte (a última, até o prazo) — depois de uma
+// parada do processo sai UM aviso, não a fila atrasada.
+// Idempotência entre réplicas e restarts: lembrete_agendar_offsets (INTEGER[] de minutos, nas
+// duas tabelas). O claim é UPDATE ... array_append ... WHERE NOT (coluna @> ARRAY[off])
+// RETURNING — a mesma antecedência nunca sai duas vezes; a coluna é zerada em SQL_ZERAR_AGENDA
+// (match novo, un-match, remarcar), então o profissional seguinte recebe os seus.
+// Entrega por entregarAoProfissional: push com data { tipo, reparo_id | obra_id } (o toque abre
+// o detalhe, como os outros pushes do match); sem token, o e-mail de reserva.
+const TITULO_AGENDAR = '📅 Agende seu atendimento'
+const CORPO_AGENDAR = {
+  reparoCurto: 'Você ainda não agendou o horário do serviço conquistado',
+  reparo:      'Você ainda não agendou o dia e o horário do serviço conquistado',
+  obra:        'Você ainda não agendou o dia e o horário de início da obra conquistada',
+}
+// Antecedências em MINUTOS, decrescentes (a ordem é a das janelas de disparo).
+const OFFSETS_AGENDAR = {
+  curtissimo: [30, 15],
+  curto:      [60, 30],
+  dia:        [120, 60],
+  semana:     [1440, 360, 60],
+  longo:      [10080, 4320, 1440, 120],
+}
+// Conjunto de antecedências da linha. Obra: sempre 'longo'. Reparo: "Hoje" cai com 8h/12h/Amanhã;
+// o resto é pela janela W. `d` é o alias da tabela.
+const sqlConjuntoAgendar = (lado) => {
+  if (lado.tabela === 'obras') return `'longo'`
+  const w = sqlJanelaHoras(LADOS_LEMBRETE.find(l => l.tabela === lado.tabela))
+  return `CASE WHEN d.prazo_modo = '${PRAZO_MODO_HOJE}' THEN 'dia'
+               WHEN ${w} < 4   THEN 'curtissimo'
+               WHEN ${w} < 8   THEN 'curto'
+               WHEN ${w} < 168 THEN 'dia'
+               WHEN ${w} < 720 THEN 'semana'
+               ELSE 'longo' END`
+}
+// Reparo com prazo abaixo de 24h (ou "Hoje"): só a HORA faz sentido no texto.
+const sqlReparoCurto = (lado) => {
+  if (lado.tabela === 'obras') return 'false'
+  const w = sqlJanelaHoras(LADOS_LEMBRETE.find(l => l.tabela === lado.tabela))
+  // COALESCE: prazo_modo NULL (o caso normal) daria NULL OR false = NULL, não false.
+  return `(COALESCE(d.prazo_modo = '${PRAZO_MODO_HOJE}', false) OR ${w} < 24)`
+}
+// Antecedência devida AGORA dentro de um conjunto: a de maior janela cujo instante já passou e
+// cuja seguinte ainda não chegou (a última vale até o prazo). NULL = nenhuma devida.
+const sqlOffsetDevido = (offsets) => {
+  const inst = (min) => `(${SQL_PRAZO_CHEGADA} - INTERVAL '${min} minutes')`
+  const ramos = offsets.map((off, i) => {
+    const proximo = offsets[i + 1]
+    const ateProximo = proximo === undefined ? '' : ` AND NOW() < ${inst(proximo)}`
+    return `WHEN NOW() >= ${inst(off)}${ateProximo} THEN ${off}`
+  })
+  return `CASE ${ramos.join(' ')} END`
+}
+const SQL_BASE_AGENDAR = `d.status = 'aberta' AND d.match_usuario_id IS NOT NULL AND d.match_feito_em IS NOT NULL
+        AND d.chegada_prevista_em IS NULL AND d.chegada_pendente_em IS NULL
+        AND d.chegada_declarada_em IS NULL AND d.chegada_confirmada_em IS NULL
+        AND d.a_caminho_em IS NULL`
+const sqlClaimAgendar = (lado, conjunto, offsets) => `
+      UPDATE ${lado.tabela} d SET lembrete_agendar_offsets = array_append(d.lembrete_agendar_offsets, s.off)
+        FROM (SELECT d.id, ${SQL_PRAZO_CHEGADA} AS prazo, ${sqlOffsetDevido(offsets)} AS off, ${sqlReparoCurto(lado)} AS curto
+                FROM ${lado.tabela} d
+               WHERE ${SQL_BASE_AGENDAR} AND ${SQL_PRAZO_CHEGADA} > NOW()
+                 AND (${sqlConjuntoAgendar(lado)}) = '${conjunto}') s,
+             usuarios u
+       WHERE d.id = s.id AND u.id = d.match_usuario_id
+         AND s.off IS NOT NULL
+         AND d.match_feito_em <= s.prazo - s.off * INTERVAL '1 minute'
+         AND NOT (d.lembrete_agendar_offsets @> ARRAY[s.off])
+         AND ${SQL_BASE_AGENDAR}
+   RETURNING d.id, d.titulo, d.match_usuario_id, s.off, s.curto, u.push_token, u.email, u.nome`
+const corpoAgendar = (lado, d) =>
+  lado.tabela === 'obras' ? CORPO_AGENDAR.obra : (d.curto ? CORPO_AGENDAR.reparoCurto : CORPO_AGENDAR.reparo)
+const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', async () => {
+  for (const lado of Object.values(LADOS_MATCH)) {
+    for (const [conjunto, offsets] of Object.entries(OFFSETS_AGENDAR)) {
+      if (lado.tabela === 'obras' && conjunto !== 'longo') continue
+      try {
+        const claim = await pool.query(sqlClaimAgendar(lado, conjunto, offsets))
+        for (const d of claim.rows) {
+          try {
+            const via = await entregarAoProfissional({
+              lado, demanda: d, titulo: TITULO_AGENDAR, corpo: corpoAgendar(lado, d),
+              rotulo: `agendar ${lado.tabela} ${d.id} ${d.off}min`,
+            })
+            console.log(`[Agendar] ${lado.tabela} ${d.id} (${conjunto}, ${d.off} min antes) → profissional ${d.match_usuario_id} via ${via}`)
+          } catch (err) {
+            // Claim já gravado: sem repescagem (uma antecedência, um aviso).
+            console.error(`[Agendar] ${lado.tabela} ${d.id} ${d.off}min falhou:`, err.message)
+          }
+        }
+      } catch (err) {
+        console.error(`[Agendar] erro em ${lado.tabela} ${conjunto}:`, err.message)
+      }
+    }
+  }
+})
+
 const vigiarComparecimento = semSobreposicao('vigiarComparecimento', async () => {
   for (const lado of Object.values(LADOS_MATCH)) {
     try {
@@ -2142,6 +2253,9 @@ module.exports = {
   avisarMatchFeito,
   lembrarPrazoChegada,
   lembrarAgendamento,
+  lembrarAgendarAtendimento,
+  sqlClaimAgendar,
+  OFFSETS_AGENDAR,
   vigiarComparecimento,
   listarLembretesPrazoChegada,
   sqlClaimLembreteChegada,
