@@ -54,11 +54,32 @@ const RE_CHAME = new RegExp(
   `(?:\\s+(?:uma\\s+)?(?:mensagem|msg|mens))?\\s+(?:no|na|pelo|pela|via|por|em)\\s+(?:o\\s+|a\\s+)?${CANAIS}\\b`, 'gi')
 const RE_CANAL_DOIS_PONTOS = new RegExp(`\\b${CANAIS}\\s*[:：]`, 'gi')
 
-// Telefone: trecho de dígitos com separadores opcionais, 8+ dígitos no total. O lookbehind
-// recusa "R$ 15.000.000" (valor) e o teste de CEP recusa "38700-000".
+// Telefone: trecho de dígitos com separadores opcionais, 8+ dígitos no total — cobre
+// "(34)99881-7102", "34 9 9881 7102", "9.9.8.8.1.7.1.0.2". O lookbehind recusa "R$ 15.000.000"
+// (valor), o teste de CEP recusa "38700-000" e RE_MILHAR recusa o número de 8 dígitos
+// formatado em milhares ("15.000.000", preço sem R$) — 9+ dígitos em milhares ("998.817.102")
+// é telefone disfarçado e cai. Ano (4 dígitos), medida ("3x4", "120m²") e preço com centavos
+// ("1.500,00": a vírgula barra o fim do trecho) nunca chegam a 8 dígitos seguidos.
 const RE_TELEFONE = /(?<!R\$\s{0,3})(?<![\d,.])\+?\(?\d(?:[\d\s().-]*\d)?(?![\d,.])/g
 const RE_CEP = /^\d{5}-?\d{3}$/
+const RE_MILHAR = /^\d{2}\.\d{3}\.\d{3}$/
 const contarDigitos = (s) => (s.match(/\d/g) || []).length
+const ehTelefone = (trecho) => {
+  const limpo = trecho.trim()
+  return contarDigitos(limpo) >= 8 && !RE_CEP.test(limpo) && !RE_MILHAR.test(limpo)
+}
+// Dígitos POR EXTENSO ("nove nove oito oito um sete um zero dois", "meia" = 6), inclusive
+// misturados com algarismos ("34 nove nove 881 7102"): cada palavra vale um dígito e o trecho
+// precisa somar 8+. Palavra só conta inteira (\b): "novela", "umbigo" ficam de fora.
+const PALAVRAS_DIGITO = 'zero|uma?|duas|dois|tr[eê]s|quatro|cinco|seis|meia|sete|oito|nove'
+const RE_PALAVRA_DIGITO = new RegExp(`\\b(?:${PALAVRAS_DIGITO})\\b`, 'gi')
+const RE_TEM_PALAVRA_DIGITO = new RegExp(`\\b(?:${PALAVRAS_DIGITO})\\b`, 'i')
+const RE_TELEFONE_EXTENSO = new RegExp(
+  `(?<![\\w,.])(?:\\d+|(?:${PALAVRAS_DIGITO})\\b)(?:[\\s().,-]{0,3}(?:\\d+|(?:${PALAVRAS_DIGITO})\\b))*(?!\\d|[,.]\\d)`, 'gi')
+const contarDigitosExtenso = (s) => contarDigitos(s) + (s.match(RE_PALAVRA_DIGITO) || []).length
+// "whats 9881 7102", "zap: 34 99881-7102", "wpp 98817102" — o canal nomeado logo antes do
+// número baixa a exigência para 6+ dígitos (número truncado de propósito ainda é contato).
+const RE_CANAL_NUMERO = new RegExp(`\\b${CANAIS}\\b[\\s:：.,-]{0,4}\\+?\\(?\\d(?:[\\d\\s().-]*\\d)?(?![\\d,.])`, 'gi')
 
 const removerContatos = (texto) => {
   let t = texto
@@ -67,12 +88,13 @@ const removerContatos = (texto) => {
   t = t.replace(RE_URL, MARCA_CONTATO)
   t = t.replace(RE_DOMINIO, MARCA_CONTATO)
   t = t.replace(RE_CHAME, MARCA_CONTATO)
+  t = t.replace(RE_CANAL_NUMERO, (m) => (contarDigitos(m) >= 6 ? MARCA_CONTATO : m))
   t = t.replace(RE_CANAL_DOIS_PONTOS, MARCA_CONTATO)
-  t = t.replace(RE_TELEFONE, (m) => {
-    const limpo = m.trim()
-    if (contarDigitos(limpo) < 8) return m
-    if (RE_CEP.test(limpo)) return m
-    return MARCA_CONTATO
+  t = t.replace(RE_TELEFONE, (m) => (ehTelefone(m) ? MARCA_CONTATO : m))
+  t = t.replace(RE_TELEFONE_EXTENSO, (m) => {
+    // Só algarismos: já passou por RE_TELEFONE (ficou porque é valor/CEP/curto) — não mexe.
+    if (!RE_TEM_PALAVRA_DIGITO.test(m)) return m
+    return contarDigitosExtenso(m) >= 8 ? MARCA_CONTATO : m
   })
   return t
 }
