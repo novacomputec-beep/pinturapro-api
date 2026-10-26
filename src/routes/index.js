@@ -23,6 +23,9 @@ const { montarResumoCanal } = require('../utils/canalResumo')
 // na leitura das linhas antigas — utils/tentativasContato.
 const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaContato,
         JANELA_PENALIDADE_DIAS, AVISOS_ANTES_DE_SUSPENDER, DIAS_SUSPENSAO_CONTATO } = require('../utils/tentativasContato')
+// Cancelamento justo de match pelas partes (antecedência, acordo mútuo, falta no tardio) —
+// substitui o uso de POST /:id/expirar-match por dono/profissional.
+const { handlers: cancelamentoHandlers, pedidoCancelamento } = require('../services/cancelamentoMatchService')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 const { PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao, normalizarVersao, normalizarTestadores, SQL_VERSAO_INT, versoesPublicas, invalidarCacheVersoes, gravarConfig, lerConfigVersao, candidatosPromocao,
@@ -1513,6 +1516,25 @@ const migracaoPronta = (async () => {
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS tentativas_contato_criado_em_idx ON tentativas_contato (criado_em DESC)`)
     await client.query(`CREATE INDEX IF NOT EXISTS tentativas_contato_usuario_idx ON tentativas_contato (usuario_id, criado_em DESC)`)
+    // Cancelamento de match (services/cancelamentoMatchService): pedido de acordo pendente na
+    // demanda (quem pediu, motivo, detalhe, quando, validade de 2h) e, na proposta vencedora,
+    // o registro do cancelamento (status 'cancelado' + quem, motivo, detalhe, quando, acordo).
+    // Índice por (cancelado_por, cancelado_em) para a contagem de 90 dias por usuário.
+    for (const tabela of ['obras', 'reparos']) {
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelamento_pedido_por UUID`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelamento_pedido_motivo TEXT`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelamento_pedido_detalhe TEXT`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelamento_pedido_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelamento_pedido_expira_em TIMESTAMPTZ`)
+    }
+    for (const tabela of ['candidaturas', 'interesse_reparos']) {
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelado_por UUID`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelado_motivo TEXT`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelado_detalhe TEXT`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelado_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelado_acordo BOOLEAN NOT NULL DEFAULT false`)
+      await client.query(`CREATE INDEX IF NOT EXISTS ${tabela}_cancelado_por_idx ON ${tabela} (cancelado_por, cancelado_em DESC) WHERE cancelado_por IS NOT NULL`)
+    }
     // Indicações (utils/indicacoes): código único de 6 caracteres por profissional, quem o
     // indicou, e os dois agregados por indicador (meses de bônus com teto, embaixador).
     // Colunas ADD IF NOT EXISTS; a função é CREATE OR REPLACE; o backfill só toca prestador
@@ -3235,6 +3257,20 @@ router.post('/reparos/:id/perguntas', autenticar, exigirNaoSuspenso, exigirPrest
 router.post('/obras/:id/perguntas/:pid/resposta',   autenticar, criarHandlerResposta('obras'))
 router.post('/reparos/:id/perguntas/:pid/resposta', autenticar, criarHandlerResposta('reparos'))
 
+// ───────────────────────── Cancelamento de match pelas partes ─────────────────────────
+// services/cancelamentoMatchService: dono ou profissional casado, antes do "Estou a caminho".
+//   POST /:tabela/:id/cancelar-match {motivo, detalhe?, manter_aberta?}  (?simular=1 só classifica)
+//   POST /:tabela/:id/cancelamento-acordo {motivo, detalhe?}              (pedido de acordo, 2h)
+//   POST /:tabela/:id/cancelamento-acordo/responder {aceitar}             (o outro lado)
+// Só autenticar: a posse (dono / profissional do match) é checada no serviço; suspenso pode
+// cancelar — é saída de trabalho, não entrada.
+for (const tabela of ['obras', 'reparos']) {
+  const h = cancelamentoHandlers(tabela)
+  router.post(`/${tabela}/:id/cancelar-match`, autenticar, h.cancelar)
+  router.post(`/${tabela}/:id/cancelamento-acordo`, autenticar, h.pedirAcordo)
+  router.post(`/${tabela}/:id/cancelamento-acordo/responder`, autenticar, h.responderAcordo)
+}
+
 router.get('/obras/:id', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
@@ -3348,7 +3384,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // qualquer leitor que passou a guarda acima; minha = true só na do próprio leitor, nunca
     // nome ou id do autor (listarPerguntas).
     const perguntas = await listarPerguntas('obra', req.params.id, req.usuario.id)
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas })
+    // pedido_cancelamento: pedido de acordo vigente (quem, motivo, expira_em) — só dono e pintor do match.
+    const pedido_cancelamento = pedidoCancelamento(obra, req.usuario.id)
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, pedido_cancelamento })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -3758,6 +3796,12 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     const donoContesta = ehDono
       && o.chegada_declarada_por !== req.usuario.id
       && o.status !== 'encerrada'
+    // Pelas PARTES este caminho só resta para a contestação de chegada do dono (acima): o
+    // cancelamento comum é POST /obras/:id/cancelar-match (antecedência, acordo, falta justa).
+    // Admin e cron seguem usando o expirar-match.
+    if (!ehAdmin && !(donoContesta && o.chegada_declarada_em)) {
+      return res.status(403).json({ erro: 'Para desfazer o atendimento, use o cancelamento no app.', codigo: 'USE_CANCELAR_MATCH' })
+    }
     if ((o.chegada_declarada_em || o.chegada_confirmada_em) && !donoContesta) {
       return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
     }
@@ -4501,7 +4545,7 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
     // 'expirada' contam junto com 'encerrada'; sem elas um reparo vencido voltava para
     // ativos assim que o status saía de 'aberta'. A checagem por data continua valendo
     // só enquanto o status ainda é 'aberta', para o vencimento que ninguém processou.
-    const INTERESSE_MORTO = ['recusado', 'expirado']
+    const INTERESSE_MORTO = ['recusado', 'expirado', 'cancelado']
     const REPARO_MORTO    = ['encerrada', 'cancelada', 'expirada']
     const eArquivado = item =>
       INTERESSE_MORTO.includes(item.status) ||
@@ -5136,6 +5180,11 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     const donoContesta = ehDono
       && r.chegada_declarada_por !== req.usuario.id
       && r.status !== 'encerrada'
+    // Pelas PARTES só resta a contestação de chegada do dono; o cancelamento comum é
+    // POST /reparos/:id/cancelar-match (ver o lado obra). Admin e cron seguem aqui.
+    if (!ehAdmin && !(donoContesta && r.chegada_declarada_em)) {
+      return res.status(403).json({ erro: 'Para desfazer o atendimento, use o cancelamento no app.', codigo: 'USE_CANCELAR_MATCH' })
+    }
     if ((r.chegada_declarada_em || r.chegada_confirmada_em) && !donoContesta) {
       return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
     }
@@ -6184,6 +6233,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       midias: midias.rows,
       meu_interesse: interesse.rows[0] || null,
       interessados,
+      // Pedido de acordo de cancelamento vigente (quem, motivo, expira_em) — só dono e prestador do match.
+      pedido_cancelamento: pedidoCancelamento(reparo, req.usuario.id),
       dono_telefone,
       dono_nome,
       dono_foto_url,

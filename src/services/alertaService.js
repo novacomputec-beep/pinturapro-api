@@ -1868,6 +1868,43 @@ const notificarMatchDesfeito = async (tabela, demanda) => {
   }
 }
 
+// Reanúncio de demanda que VOLTOU ao feed por cancelamento de match (cancelamentoMatchService):
+// o mesmo aviso de demanda nova (texto, público, categoria × especialidades) a quem ainda NÃO se
+// manifestou nela (sqlSemManifestacao — quem já se candidatou não pode de novo pela unicidade).
+// entrega: null (push_entregas é a entrega original; a repescagem reenviaria o texto errado);
+// e-mail de reserva com tipo próprio (reaberta_<tipo>), para o UNIQUE de email_alertas não
+// barrar quem recebeu o primeiro aviso. Só age se a demanda está aberta, sem match e no prazo.
+const reanunciarDemanda = async (tabela, demandaId) => {
+  const lado = LADOS_EMAIL[tabela]
+  const lembrete = LADOS_LEMBRETE.find(l => l.tabela === tabela)
+  if (!lado || !lembrete) return
+  try {
+    const r = await pool.query(
+      `SELECT titulo, cidade, uf, categoria${lado.comCategoria ? ', categorias' : ''} FROM ${tabela}
+        WHERE id = $1 AND status = 'aberta' AND match_usuario_id IS NULL AND expira_em > NOW()`,
+      [demandaId]
+    )
+    if (r.rows.length === 0) return
+    const d = r.rows[0]
+    const cidade = normalizar(d.cidade)
+    const uf = String(d.uf || '').trim().toUpperCase()
+    if (!cidade || !uf) return
+    const msg = lado.mensagem(d, demandaId)
+    await broadcastPaginado({
+      tipoPrestador: lado.tipoPrestador, cidade, uf,
+      categoria: lado.comCategoria ? categoriasDoReparo(d) : null,
+      titulo: msg.titulo, corpo: msg.corpo, data: { ...msg.data, reaberta: true },
+      rotulo: `reanúncio ${lado.tipo} ${demandaId}`,
+      entrega: null,
+      excluirManifestados: { interesse: lembrete.interesse, demandaId },
+      demanda: { tabela, id: demandaId },
+    })
+    await enviarEmailsNovaDemanda(tabela, demandaId, { tipo: `reaberta_${lado.tipo}`, interesse: lembrete.interesse })
+  } catch (err) {
+    console.error(`[Reanuncio] ${tabela} ${demandaId}:`, err.message)
+  }
+}
+
 // Faltas: só o CRONÔMETRO registra. Os handlers POST /:id/expirar-match e as recusas de tempo
 // extra também desfazem match, mas ali há um humano decidindo (dono ou admin, e o próprio
 // profissional pode chamar expirar-match) — contar aquilo como falta deixaria a suspensão ao
@@ -1893,12 +1930,16 @@ const isentoPorRecusa = (demanda) => isentoDeFalta(demanda)
 // Registra a falta e, ao cruzar o limite na janela móvel, suspende. `tabela` sai de literal no
 // chamador, nunca do request. Erros são engolidos: uma falha aqui não pode derrubar o cron nem
 // impedir que a demanda volte ao feed — o un-match já foi commitado quando isto roda.
-const registrarFalta = async (tabela, demanda) => {
-  if (!demanda.match_usuario_id) return
+// Mesma régua por USUÁRIO (não só pelo profissional do match): o cancelamento tardio de um
+// atendimento (cancelamentoMatchService) conta falta para quem cancelou — dono ou profissional.
+const registrarFalta = (tabela, demanda) =>
+  (demanda.match_usuario_id ? registrarFaltaUsuario(tabela, demanda.id, demanda.match_usuario_id) : Promise.resolve())
+const registrarFaltaUsuario = async (tabela, demandaId, usuarioId) => {
+  if (!usuarioId) return
   try {
     await pool.query(
       `INSERT INTO faltas_profissional (usuario_id, tabela, demanda_id) VALUES ($1, $2, $3)`,
-      [demanda.match_usuario_id, tabela, demanda.id]
+      [usuarioId, tabela, demandaId]
     )
     // perdoada_em IS NULL: falta perdoada por um admin continua no histórico mas não conta.
     const c = await pool.query(
@@ -1906,7 +1947,7 @@ const registrarFalta = async (tabela, demanda) => {
         WHERE usuario_id = $1
           AND perdoada_em IS NULL
           AND criado_em > NOW() - INTERVAL '${JANELA_FALTAS}'`,
-      [demanda.match_usuario_id]
+      [usuarioId]
     )
     if (c.rows[0].n < FALTAS_PARA_SUSPENDER) return
 
@@ -1917,15 +1958,15 @@ const registrarFalta = async (tabela, demanda) => {
       `UPDATE usuarios SET suspenso_em = NOW(), suspenso_motivo = $2
         WHERE id = $1 AND suspenso_em IS NULL
         RETURNING push_token`,
-      [demanda.match_usuario_id, MOTIVO_SUSPENSAO]
+      [usuarioId, MOTIVO_SUSPENSAO]
     )
     if (upd.rowCount === 0) return
     // Derruba o usuário do cache de 30s de autenticar. Sem isto, quem estivesse com sessão
     // quente continuaria passando por exigirNaoSuspenso (que lê req.usuario) por até 30
     // segundos depois de suspenso — janela para pegar mais um trabalho. Os aceites já
     // consultam o banco direto, mas os feeds e a criação de proposta dependem do cache.
-    invalidarCacheAssinatura(demanda.match_usuario_id)
-    console.log(`[Faltas] usuario ${demanda.match_usuario_id} suspenso — ${c.rows[0].n} faltas em ${JANELA_FALTAS}`)
+    invalidarCacheAssinatura(usuarioId)
+    console.log(`[Faltas] usuario ${usuarioId} suspenso — ${c.rows[0].n} faltas em ${JANELA_FALTAS}`)
     if (upd.rows[0]?.push_token) {
       enviarPushNotificacao(upd.rows[0].push_token, '🚫 Conta suspensa',
         `Sua conta foi suspensa por ${MOTIVO_SUSPENSAO}. Fale com o suporte para regularizar.`,
@@ -2344,6 +2385,9 @@ const autoEncerrarPendentes = async () => {
 
 module.exports = {
   semSobreposicao,
+  // Cancelamento de match (cancelamentoMatchService): falta por usuário e reanúncio da demanda.
+  registrarFaltaUsuario,
+  reanunciarDemanda,
   enviarPushNotificacao,
   // Exportada para o painel admin (POST /admin/notificacoes/enviar): mesmo lote, recibos e
   // limpeza de token morto do broadcast de demanda nova.
