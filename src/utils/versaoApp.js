@@ -36,8 +36,10 @@ const CHAVE_MIN_USUARIOS = 'versao_app_min_usuarios'
 const CHAVE_TESTADORES = 'versao_app_testadores'
 const chaveVersao = (tipo, plataforma) => `versao_app_${tipo}_${plataforma}`
 const chaveObrigatorias = (plataforma) => `versoes_obrigatorias_${plataforma}`
-// Semente da lista de obrigatórias no primeiro boot (a 1.1.3 já era a minima do Android).
-const OBRIGATORIAS_PADRAO = ['1.1.3']
+// Piso da lista de obrigatórias: semente no primeiro boot e, nos seguintes, UNIDA à lista
+// gravada (routes/index.js) — uma versão daqui nunca some da lista pelo painel, mas o painel
+// pode acrescentar outras. A 1.1.3 já era a minima do Android; a 1.1.4 entrou em 2026-10-26.
+const OBRIGATORIAS_PADRAO = ['1.1.3', '1.1.4']
 
 const normalizarVersao = (v) => {
   const s = String(v ?? '').trim()

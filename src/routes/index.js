@@ -21,7 +21,7 @@ const { montarResumoCanal } = require('../utils/canalResumo')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 const { PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao, normalizarVersao, normalizarTestadores, SQL_VERSAO_INT, versoesPublicas, invalidarCacheVersoes, gravarConfig, lerConfigVersao, candidatosPromocao,
-        chaveObrigatorias, OBRIGATORIAS_PADRAO, normalizarListaVersoes, aplicarMinimaObrigatoria, contarUsuariosPorMinima } = require('../utils/versaoApp')
+        chaveObrigatorias, OBRIGATORIAS_PADRAO, normalizarListaVersoes, lerListaVersoes, aplicarMinimaObrigatoria, contarUsuariosPorMinima } = require('../utils/versaoApp')
 // Módulo inerte (dados puros): o marcador da faixa "Hoje" e a expressão SQL do fim do dia em
 // America/Sao_Paulo. Compartilhado com alertaService, que reconstrói expira_em nos crons.
 const { PRAZO_MODO_HOJE, TZ_PADRAO, sqlFimDoDia, SQL_FIM_DO_DIA_SP, FORMATO_ZONA_IANA, sqlZonaSegura } = require('../utils/faixasPrazo')
@@ -318,12 +318,21 @@ const migracaoPronta = (async () => {
                          SELECT $1, COALESCE((SELECT string_agg(lower(btrim(email)), ',' ORDER BY email) FROM usuarios WHERE role = 'admin'), '')
                           WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`, [CHAVE_TESTADORES])
     // Versões OBRIGATÓRIAS por plataforma (utils/versaoApp): JSON de versões que, alcançadas pela
-    // atual, viram a minima. Semente ['1.1.3'] só na PRIMEIRA vez; depois é o painel que edita.
-    // Em seguida a regra roda UMA vez sobre os valores correntes (só sobe a minima), para um
-    // deploy que troque a lista valer já no boot e não só na próxima promoção automática.
+    // atual, viram a minima. OBRIGATORIAS_PADRAO é o PISO da lista: semente na primeira vez e,
+    // quando a chave já existe, UNIÃO com o que está gravado (só escreve se faltar alguma; boot
+    // repetido é no-op; o que o painel acrescentou fica). Em seguida a regra roda UMA vez sobre
+    // os valores correntes (só sobe a minima, e só até a maior obrigatória <= atual), para um
+    // deploy que amplie a lista valer já no boot e não só na próxima promoção automática.
     for (const p of PLATAFORMAS) {
       await client.query(`INSERT INTO configuracoes (chave, valor) SELECT $1, $2
                            WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`, [chaveObrigatorias(p), JSON.stringify(OBRIGATORIAS_PADRAO)])
+      const atual = await client.query(`SELECT valor FROM configuracoes WHERE chave = $1`, [chaveObrigatorias(p)])
+      const gravada = lerListaVersoes(atual.rows[0]?.valor)
+      const unida = normalizarListaVersoes([...gravada, ...OBRIGATORIAS_PADRAO])
+      if (unida.length !== gravada.length) {
+        await client.query(`UPDATE configuracoes SET valor = $2, atualizado_em = NOW() WHERE chave = $1`, [chaveObrigatorias(p), JSON.stringify(unida)])
+        console.log(`[VersaoApp] ${p}: obrigatórias ${JSON.stringify(gravada)} → ${JSON.stringify(unida)} (piso do deploy)`)
+      }
     }
     await aplicarMinimaObrigatoria(client)
     await client.query(`CREATE TABLE IF NOT EXISTS versoes_app_vistas (
