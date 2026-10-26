@@ -37,7 +37,7 @@ const rejeitarConcorrentes = async (tipoDemanda, demandaId, vencedorUsuarioId) =
   // a interpolação no SQL é segura pelo mesmo motivo do POST /avaliacoes.
   const rejeitados = await pool.query(
     `UPDATE ${cfg.tabela} SET status = 'recusado'
-     WHERE ${cfg.coluna} = $1 AND usuario_id != $2 AND status NOT IN ('recusado', 'expirado')
+     WHERE ${cfg.coluna} = $1 AND usuario_id != $2 AND status NOT IN ('recusado', 'expirado', 'cancelado')
      RETURNING usuario_id`,
     [demandaId, vencedorUsuarioId]
   )
