@@ -21,7 +21,8 @@ const { montarResumoCanal } = require('../utils/canalResumo')
 // Contato em texto livre entre as partes (mensagem de candidatura/interesse, referências,
 // pergunta/resposta, denúncia): limpo na escrita (+ linha em tentativas_contato) e mascarado
 // na leitura das linhas antigas — utils/tentativasContato.
-const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaContato } = require('../utils/tentativasContato')
+const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaContato,
+        JANELA_PENALIDADE_DIAS, AVISOS_ANTES_DE_SUSPENDER, DIAS_SUSPENSAO_CONTATO } = require('../utils/tentativasContato')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 const { PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao, normalizarVersao, normalizarTestadores, SQL_VERSAO_INT, versoesPublicas, invalidarCacheVersoes, gravarConfig, lerConfigVersao, candidatosPromocao,
@@ -2442,7 +2443,9 @@ const resolverZonaCliente = async (bruto) => {
   }
 }
 
-router.post('/obras/dono', autenticar, async (req, res) => {
+// exigirNaoSuspenso: dono suspenso (3ª tentativa de compartilhar contato — utils/tentativasContato)
+// não publica pedido novo enquanto durar a suspensão; o que já está em andamento segue.
+router.post('/obras/dono', autenticar, exigirNaoSuspenso, async (req, res) => {
   try {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos de obra podem cadastrar obras' })
@@ -4017,7 +4020,8 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
   }
 })
 
-router.post('/reparos/dono', autenticar, async (req, res) => {
+// exigirNaoSuspenso: mesma regra de POST /obras/dono (dono suspenso por contato não publica).
+router.post('/reparos/dono', autenticar, exigirNaoSuspenso, async (req, res) => {
   try {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar serviços' })
@@ -8363,9 +8367,11 @@ router.post('/admin/suspensos/:id/liberar', autenticar, exigirAdmin, async (req,
 // reparos), então não há FK única para seguir. denunciado_nome pode vir NULL quando o
 // denunciado excluiu a conta — a denúncia sobrevive anonimizada (ON DELETE SET NULL).
 // GET /admin/tentativas-contato?dias=30&usuario_id=&page=&limit= — só leitura. Cada linha é
-// um campo de texto livre em que o filtro removeu contato na escrita (utils/tentativasContato):
+// um ENVIO de texto livre em que o filtro removeu contato na escrita (utils/tentativasContato):
 // quem, em que tipo de texto, em qual demanda (título via LEFT JOIN nas duas tabelas — o id
-// é UUID, só uma casa) e quando. por_usuario = quem mais tentou na janela (top 20).
+// é UUID, só uma casa), quando, e o estado da penalidade desse usuário: tentativas na janela
+// de 90 dias (a que decide aviso/suspensão), última tentativa e suspensão vigente.
+// por_usuario = quem mais tentou na janela pedida (top 20), com os mesmos campos.
 router.get('/admin/tentativas-contato', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { page, limit, offset } = paginacaoAdmin(req.query)
@@ -8373,10 +8379,15 @@ router.get('/admin/tentativas-contato', autenticar, exigirAdmin, async (req, res
     const dias = Number.isInteger(diasBruto) && diasBruto > 0 ? Math.min(diasBruto, 365) : 30
     const usuarioId = typeof req.query.usuario_id === 'string' && UUID_RE.test(req.query.usuario_id) ? req.query.usuario_id : null
     const filtro = `WHERE t.criado_em >= NOW() - ($1::int * INTERVAL '1 day') AND ($2::uuid IS NULL OR t.usuario_id = $2::uuid)`
+    const SQL_PENALIDADE = `
+              (SELECT COUNT(*)::int FROM tentativas_contato x
+                WHERE x.usuario_id = t.usuario_id AND x.criado_em > NOW() - (${JANELA_PENALIDADE_DIAS} * INTERVAL '1 day')) AS tentativas_janela,
+              (SELECT MAX(x.criado_em) FROM tentativas_contato x WHERE x.usuario_id = t.usuario_id) AS ultima_tentativa_em,
+              u.suspenso_em, u.suspenso_motivo`
     const lista = await pool.query(
       `SELECT t.id, t.usuario_id, u.nome, u.email, u.role, u.tipo_prestador,
               t.tipo, t.demanda_id, t.campo, t.criado_em,
-              COALESCE(o.titulo, r.titulo) AS demanda_titulo
+              COALESCE(o.titulo, r.titulo) AS demanda_titulo, ${SQL_PENALIDADE}
          FROM tentativas_contato t
          JOIN usuarios u ON u.id = t.usuario_id
          LEFT JOIN obras   o ON o.id = t.demanda_id
@@ -8392,15 +8403,20 @@ router.get('/admin/tentativas-contato', autenticar, exigirAdmin, async (req, res
       [dias, usuarioId]
     )
     const porUsuario = await pool.query(
-      `SELECT t.usuario_id, u.nome, u.email, COUNT(*)::int AS tentativas, MAX(t.criado_em) AS ultima_em
+      `SELECT t.usuario_id, u.nome, u.email, u.role, COUNT(*)::int AS tentativas, MAX(t.criado_em) AS ultima_em,
+              ${SQL_PENALIDADE}
          FROM tentativas_contato t JOIN usuarios u ON u.id = t.usuario_id
          ${filtro}
-        GROUP BY t.usuario_id, u.nome, u.email
+        GROUP BY t.usuario_id, u.nome, u.email, u.role, u.suspenso_em, u.suspenso_motivo
         ORDER BY tentativas DESC, ultima_em DESC
         LIMIT 20`,
       [dias, usuarioId]
     )
-    res.json({ dias, page, limit, ...agregados.rows[0], por_usuario: porUsuario.rows, tentativas: lista.rows })
+    res.json({
+      dias, page, limit, ...agregados.rows[0],
+      regra: { janela_dias: JANELA_PENALIDADE_DIAS, avisos: AVISOS_ANTES_DE_SUSPENDER, suspende_na: AVISOS_ANTES_DE_SUSPENDER + 1, dias_suspensao: DIAS_SUSPENSAO_CONTATO },
+      por_usuario: porUsuario.rows, tentativas: lista.rows,
+    })
   } catch (err) {
     console.error('[admin/tentativas-contato]', err.message)
     res.status(500).json({ erro: 'Erro ao listar tentativas de contato' })
