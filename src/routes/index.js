@@ -4530,6 +4530,9 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
              -- confirmou a chegada (declarada por ele + confirmada = atendimento em curso).
              r.chegada_janela, r.chegada_prevista_em, r.chegada_declarada_por,
              r.chegada_declarada_em, r.chegada_confirmada_em,
+             -- "Estou a caminho" deste match (mesmo valor de GET /reparos/:id), como em
+             -- GET /candidaturas/minhas.
+             r.a_caminho_em,
              -- Janela pendente de resposta do dono e marca de recusa (ver o mesmo bloco em
              -- GET /candidaturas/minhas): sem elas o prestador não enxerga a proposta que fez.
              r.chegada_pendente_janela, r.chegada_pendente_em, r.chegada_recusada_em,
