@@ -25,7 +25,7 @@ const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaCon
         JANELA_PENALIDADE_DIAS, AVISOS_ANTES_DE_SUSPENDER, DIAS_SUSPENSAO_CONTATO } = require('../utils/tentativasContato')
 // Cancelamento justo de match pelas partes (antecedência, acordo mútuo, falta no tardio) —
 // substitui o uso de POST /:id/expirar-match por dono/profissional.
-const { handlers: cancelamentoHandlers, pedidoCancelamento } = require('../services/cancelamentoMatchService')
+const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQL_LIMPAR_MATCH } = require('../services/cancelamentoMatchService')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 const { PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao, normalizarVersao, normalizarTestadores, SQL_VERSAO_INT, versoesPublicas, invalidarCacheVersoes, gravarConfig, lerConfigVersao, candidatosPromocao,
@@ -2729,17 +2729,27 @@ router.delete('/obras/:id', autenticar, exigirSuperAdmin, obrasCtrl.encerrar)
 // Dono pode excluir sua própria obra
 router.delete('/obras/dono/:id', autenticar, async (req, res) => {
   try {
-    const obra = await pool.query(`SELECT id, match_usuario_id FROM obras WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+    // match_real: o match é sustentado por uma candidatura 'aceito' do próprio pintor casado.
+    const obra = await pool.query(
+      `SELECT o.id, o.match_usuario_id,
+              EXISTS (SELECT 1 FROM candidaturas c WHERE c.obra_id = o.id AND c.usuario_id = o.match_usuario_id AND c.status = 'aceito') AS match_real
+         FROM obras o WHERE o.id = $1 AND o.criado_por = $2`,
+      [req.params.id, req.usuario.id]
+    )
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-    // Mesma guarda de DELETE /reparos/dono/:id (D72): com pintor casado, cancelar deixava a
-    // candidatura 'aceito', o contrato já enviado e o match preso numa obra 'cancelada' — sem
-    // push ao pintor e sem cron que desfizesse (todos exigem status = 'aberta'). A saída do
-    // dono continua sendo POST /obras/:id/expirar-match, que desfaz o match avisando os dois.
-    if (obra.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Não é possível excluir uma obra com pintor a caminho' })
+    // Mesma guarda de DELETE /reparos/dono/:id (D72): com pintor casado DE VERDADE, cancelar
+    // deixava a candidatura 'aceito', o contrato já enviado e o match preso numa obra
+    // 'cancelada'. A saída do dono é POST /obras/:id/cancelar-match (ou expirar-match com o
+    // prazo vencido). Match ÓRFÃO (match_usuario_id sem candidatura aceita — proposta apagada
+    // por limpeza, /match legado) não segura nada: é limpo no mesmo UPDATE e a exclusão segue.
+    if (obra.rows[0].match_usuario_id && obra.rows[0].match_real) {
+      return res.status(409).json({ erro: "Já existe um profissional escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
+    }
     // encerrado_em: mesmo motivo do recusar acima — libera a obra cancelada para a limpeza
     // de mídia depois de 7 dias. COALESCE não reinicia contagem já iniciada.
     await pool.query(`UPDATE obras SET status = 'cancelada', status_aprovacao = 'cancelada',
-      encerrado_em = COALESCE(encerrado_em, NOW()) WHERE id = $1`, [req.params.id])
+      encerrado_em = COALESCE(encerrado_em, NOW()), ${SQL_LIMPAR_MATCH} WHERE id = $1`, [req.params.id])
+    if (obra.rows[0].match_usuario_id) console.log(`[obras/dono DELETE] ${req.params.id}: match órfão (${obra.rows[0].match_usuario_id}) limpo na exclusão`)
     res.json({ mensagem: 'Obra removida com sucesso' })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao remover obra' })
@@ -4196,12 +4206,19 @@ router.post('/reparos/dono', autenticar, exigirNaoSuspenso, async (req, res) => 
 
 router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
   try {
+    // match_real: ver DELETE /obras/dono/:id — só um interesse 'aceito' do prestador casado segura
+    // a exclusão; match órfão é limpo no UPDATE abaixo.
     const reparo = await pool.query(
-      `SELECT id, match_usuario_id FROM reparos WHERE id = $1 AND criado_por = $2`,
+      `SELECT r.id, r.match_usuario_id,
+              EXISTS (SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id AND ir.status = 'aceito') AS match_real
+         FROM reparos r WHERE r.id = $1 AND r.criado_por = $2`,
       [req.params.id, req.usuario.id]
     )
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
-    if (reparo.rows[0].match_usuario_id) return res.status(409).json({ erro: 'Não é possível excluir um serviço com prestador a caminho' })
+    if (reparo.rows[0].match_usuario_id && reparo.rows[0].match_real) {
+      return res.status(409).json({ erro: "Já existe um profissional escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
+    }
+    if (reparo.rows[0].match_usuario_id) console.log(`[reparos/dono DELETE] ${req.params.id}: match órfão (${reparo.rows[0].match_usuario_id}) limpo na exclusão`)
     // CANCELA em vez de apagar, alinhando com DELETE /obras/dono/:id. Apagar a linha custava
     // duas coisas:
     //   - a mídia saía do banco antes de o cron poder limpá-la, então o arquivo ficava no
@@ -4214,7 +4231,7 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
     // encerrado_em é o relógio desses 7 dias; COALESCE não reinicia contagem já iniciada.
     await pool.query(
       `UPDATE reparos SET status = 'cancelada', status_aprovacao = 'cancelada',
-              encerrado_em = COALESCE(encerrado_em, NOW())
+              encerrado_em = COALESCE(encerrado_em, NOW()), ${SQL_LIMPAR_MATCH}
         WHERE id = $1`,
       [req.params.id]
     )
@@ -8434,6 +8451,24 @@ router.post('/admin/suspensos/:id/liberar', autenticar, exigirAdmin, async (req,
 // titulo do contrato sai de um LEFT JOIN por tipo: contrato_id é polimórfico (obras OU
 // reparos), então não há FK única para seguir. denunciado_nome pode vir NULL quando o
 // denunciado excluiu a conta — a denúncia sobrevive anonimizada (ON DELETE SET NULL).
+// POST /admin/reparos/:id/cancelar e POST /admin/obras/:id/cancelar — body { motivo? }. Cancela
+// a demanda em QUALQUER estado (services/cancelamentoMatchService.cancelarPorAdmin): demanda
+// 'cancelada' com match/chegada/agenda/pedido zerados; com match real a proposta vira
+// 'cancelado' (admin + motivo) e os dois lados são avisados; log com o id do admin e o motivo.
+for (const tabela of ['reparos', 'obras']) {
+  router.post(`/admin/${tabela}/:id/cancelar`, autenticar, exigirAdmin, async (req, res) => {
+    try {
+      const r = await cancelarPorAdmin({ tabela, id: req.params.id, adminId: req.usuario.id, motivo: req.body?.motivo })
+      if (r.status === 404) return res.status(404).json({ erro: tabela === 'reparos' ? 'Serviço não encontrado' : 'Obra não encontrada' })
+      const { status, ...resto } = r
+      res.json({ mensagem: `${tabela === 'reparos' ? 'Serviço' : 'Obra'} cancelad${tabela === 'reparos' ? 'o' : 'a'} pelo admin.`, ...resto })
+    } catch (err) {
+      console.error(`[admin/${tabela}/cancelar] ${req.params.id}:`, err.message)
+      res.status(500).json({ erro: 'Erro ao cancelar' })
+    }
+  })
+}
+
 // GET /admin/tentativas-contato?dias=30&usuario_id=&page=&limit= — só leitura. Cada linha é
 // um ENVIO de texto livre em que o filtro removeu contato na escrita (utils/tentativasContato):
 // quem, em que tipo de texto, em qual demanda (título via LEFT JOIN nas duas tabelas — o id
