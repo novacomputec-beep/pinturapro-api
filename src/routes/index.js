@@ -18,6 +18,10 @@ const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobre
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { moderarDemanda, avisarModeracao, sanitizarTexto, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
+// Contato em texto livre entre as partes (mensagem de candidatura/interesse, referências,
+// pergunta/resposta, denúncia): limpo na escrita (+ linha em tentativas_contato) e mascarado
+// na leitura das linhas antigas — utils/tentativasContato.
+const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaContato } = require('../utils/tentativasContato')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 const { PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao, normalizarVersao, normalizarTestadores, SQL_VERSAO_INT, versoesPublicas, invalidarCacheVersoes, gravarConfig, lerConfigVersao, candidatosPromocao,
@@ -1491,6 +1495,23 @@ const migracaoPronta = (async () => {
         UNIQUE (tipo, demanda_id, autor_id)
       )
     `)
+    // Tentativas de contato (utils/tentativasContato): uma linha por campo de texto livre em
+    // que o sanitizador removeu telefone/e-mail/link/handle na ESCRITA — quem tentou, em que
+    // tipo de texto (candidatura, interesse, pergunta_obra, resposta_reparo, denuncia_obra...),
+    // em qual demanda e em qual campo. Só leitura pelo painel (GET /admin/tentativas-contato).
+    // usuario_id com ON DELETE CASCADE: sem conta, some o histórico dela.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS tentativas_contato (
+        id BIGSERIAL PRIMARY KEY,
+        usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        tipo TEXT NOT NULL,
+        demanda_id UUID,
+        campo TEXT NOT NULL,
+        criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+    await client.query(`CREATE INDEX IF NOT EXISTS tentativas_contato_criado_em_idx ON tentativas_contato (criado_em DESC)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS tentativas_contato_usuario_idx ON tentativas_contato (usuario_id, criado_em DESC)`)
     // Indicações (utils/indicacoes): código único de 6 caracteres por profissional, quem o
     // indicou, e os dois agregados por indicador (meses de bônus com teto, embaixador).
     // Colunas ADD IF NOT EXISTS; a função é CREATE OR REPLACE; o backfill só toca prestador
@@ -3084,17 +3105,20 @@ const PERGUNTA_MAX = 200
 const RESPOSTA_MAX = 300
 
 // Lê um campo de texto do body: string obrigatória (aparada), teto de tamanho medido no que o
-// usuário digitou, contatos removidos no que vai ao banco. Devolve { texto } ou { erro }.
+// usuário digitou, contatos removidos no que vai ao banco. Devolve { texto, removido } ou
+// { erro }; removido = true quando o sanitizador mexeu (o handler registra a tentativa).
 const lerTextoPergunta = (valor, campo, max) => {
   const texto = typeof valor === 'string' ? valor.trim() : ''
   if (!texto) return { erro: `${campo} é obrigatória` }
   if (texto.length > max) return { erro: `${campo} deve ter no máximo ${max} caracteres` }
-  return { texto: sanitizarTexto(texto) }
+  const limpo = sanitizarTexto(texto)
+  return { texto: limpo, removido: limpo !== texto }
 }
 
 // Lista para os detalhes: id (o dono precisa dele para responder), textos e carimbos; minha =
 // true só na pergunta do próprio leitor. Nome e id do autor NUNCA saem — o profissional que
-// perguntou continua anônimo para o dono e para os concorrentes até se candidatar.
+// perguntou continua anônimo para o dono e para os concorrentes até se candidatar. Pergunta e
+// resposta passam pela máscara de leitura (linha gravada antes de um padrão novo do filtro).
 const listarPerguntas = async (tipo, demandaId, leitorId) => {
   const r = await pool.query(
     `SELECT id, pergunta, resposta, criado_em, respondido_em, (autor_id = $3) AS minha
@@ -3102,7 +3126,7 @@ const listarPerguntas = async (tipo, demandaId, leitorId) => {
       ORDER BY criado_em ASC`,
     [tipo, demandaId, leitorId]
   )
-  return r.rows
+  return mascararLista(r.rows, ['pergunta', 'resposta'])
 }
 
 // POST /:tabela/:id/perguntas — body { pergunta } (≤ 200 chars). 201 com a pergunta gravada.
@@ -3137,6 +3161,7 @@ const criarHandlerPergunta = (tabela) => async (req, res) => {
       [lado.tipo, req.params.id, req.usuario.id, lido.texto]
     )
     if (ins.rowCount === 0) return res.status(409).json({ erro: 'Você já fez sua pergunta neste pedido' })
+    if (lido.removido) registrarTentativaContato({ usuario_id: req.usuario.id, tipo: `pergunta_${lado.tipo}`, demanda_id: req.params.id, campo: 'pergunta' })
     const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [demanda.criado_por])
     res.status(201).json({ ...ins.rows[0], minha: true })
     if (dono.rows[0]) {
@@ -3181,6 +3206,7 @@ const criarHandlerResposta = (tabela) => async (req, res) => {
       [req.params.pid, lido.texto]
     )
     if (upd.rowCount === 0) return res.status(409).json({ erro: 'Esta pergunta já foi respondida' })
+    if (lido.removido) registrarTentativaContato({ usuario_id: req.usuario.id, tipo: `resposta_${lado.tipo}`, demanda_id: req.params.id, campo: 'resposta' })
     const { autor_id, ...pergunta } = upd.rows[0]
     const autor = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [autor_id])
     res.json({ ...pergunta, minha: false })
@@ -3222,7 +3248,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       [req.params.id]
     )
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-    const obra = result.rows[0]
+    // Máscara de leitura: título/descrição de obra gravada antes do filtro de contato.
+    const obra = mascararLinha(result.rows[0], ['titulo', 'descricao'])
     const ehDono = obra.criado_por === req.usuario.id
     const ehPintorDoMatch = obra.match_usuario_id === req.usuario.id
 
@@ -3271,8 +3298,10 @@ router.get('/obras/:id', autenticar, async (req, res) => {
          WHERE c.obra_id = $1 ORDER BY c.criado_em DESC`,
         [req.params.id, obra.match_usuario_id, !!obra.a_caminho_em]
       )
-      candidatos = candidatosResult.rows
+      // Mensagem do candidato mascarada na leitura (candidatura antiga, anterior ao filtro).
+      candidatos = mascararLista(candidatosResult.rows, ['mensagem'])
     }
+    mascararLista(minhaCandidaturaResult.rows, ['mensagem', 'mensagem_oferta'])
 
     // dono_nome ("Luiz M.") e dono_foto_url (avatar otimizado): SÓ para o pintor do match;
     // null para qualquer outro leitor (dono, admin, assinante). Nunca e-mail nem endereço.
@@ -3339,9 +3368,11 @@ router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssin
       [req.params.id, req.usuario.id]
     )
     if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já se candidatou nesta obra' })
+    // Contato na mensagem vira "[contato removido]" antes de gravar (+ linha em tentativas_contato).
+    const { valores: limpos } = limparCamposEscrita({ mensagem }, { usuario_id: req.usuario.id, tipo: 'candidatura', demanda_id: req.params.id })
     const result = await pool.query(
       `INSERT INTO candidaturas (obra_id, usuario_id, mensagem, valor_proposto, status) VALUES ($1, $2, $3, $4, 'pendente') RETURNING *`,
-      [req.params.id, req.usuario.id, mensagem, valor_proposto || null]
+      [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
     )
     const donoInfo = await pool.query(
       `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
@@ -4663,9 +4694,11 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
     if (await ehDemandaPropria('reparos', req.params.id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
     const existente = await pool.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
     if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse neste serviço' })
+    // Contato na mensagem vira "[contato removido]" antes de gravar (+ linha em tentativas_contato).
+    const { valores: limpos } = limparCamposEscrita({ mensagem }, { usuario_id: req.usuario.id, tipo: 'interesse', demanda_id: req.params.id })
     const result = await pool.query(
       `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem, valor_proposto, rodada) VALUES ($1, $2, $3, $4, 1) RETURNING *`,
-      [req.params.id, req.usuario.id, mensagem, valor_proposto || null]
+      [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
     )
     // Notify dono
     const donoInfo = await pool.query(
@@ -6044,7 +6077,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     )
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
 
-    const reparo = result.rows[0]
+    // Máscara de leitura: título/descrição de reparo gravado antes do filtro de contato.
+    const reparo = mascararLinha(result.rows[0], ['titulo', 'descricao'])
     const ehDono           = reparo.criado_por === req.usuario.id
     const ehPrestadorDoMatch = reparo.match_usuario_id === req.usuario.id
 
@@ -6095,7 +6129,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
          ORDER BY ir.criado_em ASC`,
         [req.params.id, reparo.match_usuario_id, !!reparo.a_caminho_em]
       )
-      interessados = result2.rows
+      // Mensagem do interessado mascarada na leitura (interesse antigo, anterior ao filtro).
+      interessados = mascararLista(result2.rows, ['mensagem'])
     }
 
     // dono_nome ("Luiz M.") e dono_foto_url (avatar otimizado): SÓ para o prestador do match;
@@ -7484,10 +7519,13 @@ router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiv
     if (await ehDemandaPropria('obras', obra_id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
     const existente = await pool.query(`SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`, [obra_id, req.usuario.id])
     if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse nesta obra' })
+    // Contato em referencias (texto, lista ou objeto) e na mensagem vira "[contato removido]"
+    // antes de gravar (+ linha em tentativas_contato por campo alterado).
+    const { valores: limpos } = limparCamposEscrita({ referencias, mensagem }, { usuario_id: req.usuario.id, tipo: 'candidatura', demanda_id: obra_id })
     const result = await pool.query(
       `INSERT INTO candidaturas (obra_id, usuario_id, referencias, valor_proposto, mensagem, status)
        VALUES ($1, $2, $3, $4, $5, 'pendente') RETURNING *`,
-      [obra_id, req.usuario.id, referencias, valor_proposto || null, mensagem || null]
+      [obra_id, req.usuario.id, limpos.referencias, valor_proposto || null, limpos.mensagem || null]
     )
     const valor_oferta = valor_proposto
     const dono = await pool.query(
@@ -7753,16 +7791,20 @@ router.post('/denuncias', autenticar, async (req, res) => {
       return res.status(403).json({ erro: 'Você não participou deste contrato' })
     }
 
+    // Contato na descrição vira "[contato removido]" antes de gravar; a tentativa só é
+    // registrada se a denúncia entrou (o 409 abaixo não conta).
+    const descricaoLimpa = sanitizarTexto(texto)
     const result = await pool.query(
       `INSERT INTO denuncias (contrato_tipo, contrato_id, denunciante_id, denunciado_id, categoria, descricao)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (contrato_tipo, contrato_id, denunciante_id) DO NOTHING
        RETURNING id`,
-      [contrato_tipo, contrato_id, uid, c.criado_por, categoria, texto]
+      [contrato_tipo, contrato_id, uid, c.criado_por, categoria, descricaoLimpa]
     )
     if (result.rows.length === 0) {
       return res.status(409).json({ erro: 'Você já denunciou este contrato' })
     }
+    if (descricaoLimpa !== texto) registrarTentativaContato({ usuario_id: uid, tipo: `denuncia_${contrato_tipo}`, demanda_id: contrato_id, campo: 'descricao' })
 
     res.status(201).json({ mensagem: 'Denúncia registrada. Nossa equipe vai analisar.', id: result.rows[0].id })
   } catch (err) {
@@ -8320,6 +8362,51 @@ router.post('/admin/suspensos/:id/liberar', autenticar, exigirAdmin, async (req,
 // titulo do contrato sai de um LEFT JOIN por tipo: contrato_id é polimórfico (obras OU
 // reparos), então não há FK única para seguir. denunciado_nome pode vir NULL quando o
 // denunciado excluiu a conta — a denúncia sobrevive anonimizada (ON DELETE SET NULL).
+// GET /admin/tentativas-contato?dias=30&usuario_id=&page=&limit= — só leitura. Cada linha é
+// um campo de texto livre em que o filtro removeu contato na escrita (utils/tentativasContato):
+// quem, em que tipo de texto, em qual demanda (título via LEFT JOIN nas duas tabelas — o id
+// é UUID, só uma casa) e quando. por_usuario = quem mais tentou na janela (top 20).
+router.get('/admin/tentativas-contato', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { page, limit, offset } = paginacaoAdmin(req.query)
+    const diasBruto = parseInt(req.query.dias, 10)
+    const dias = Number.isInteger(diasBruto) && diasBruto > 0 ? Math.min(diasBruto, 365) : 30
+    const usuarioId = typeof req.query.usuario_id === 'string' && UUID_RE.test(req.query.usuario_id) ? req.query.usuario_id : null
+    const filtro = `WHERE t.criado_em >= NOW() - ($1::int * INTERVAL '1 day') AND ($2::uuid IS NULL OR t.usuario_id = $2::uuid)`
+    const lista = await pool.query(
+      `SELECT t.id, t.usuario_id, u.nome, u.email, u.role, u.tipo_prestador,
+              t.tipo, t.demanda_id, t.campo, t.criado_em,
+              COALESCE(o.titulo, r.titulo) AS demanda_titulo
+         FROM tentativas_contato t
+         JOIN usuarios u ON u.id = t.usuario_id
+         LEFT JOIN obras   o ON o.id = t.demanda_id
+         LEFT JOIN reparos r ON r.id = t.demanda_id
+         ${filtro}
+        ORDER BY t.criado_em DESC
+        LIMIT $3 OFFSET $4`,
+      [dias, usuarioId, limit, offset]
+    )
+    const agregados = await pool.query(
+      `SELECT COUNT(*)::int AS total, COUNT(DISTINCT t.usuario_id)::int AS usuarios
+         FROM tentativas_contato t ${filtro}`,
+      [dias, usuarioId]
+    )
+    const porUsuario = await pool.query(
+      `SELECT t.usuario_id, u.nome, u.email, COUNT(*)::int AS tentativas, MAX(t.criado_em) AS ultima_em
+         FROM tentativas_contato t JOIN usuarios u ON u.id = t.usuario_id
+         ${filtro}
+        GROUP BY t.usuario_id, u.nome, u.email
+        ORDER BY tentativas DESC, ultima_em DESC
+        LIMIT 20`,
+      [dias, usuarioId]
+    )
+    res.json({ dias, page, limit, ...agregados.rows[0], por_usuario: porUsuario.rows, tentativas: lista.rows })
+  } catch (err) {
+    console.error('[admin/tentativas-contato]', err.message)
+    res.status(500).json({ erro: 'Erro ao listar tentativas de contato' })
+  }
+})
+
 router.get('/admin/denuncias', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { page, limit, offset } = paginacaoAdmin(req.query)

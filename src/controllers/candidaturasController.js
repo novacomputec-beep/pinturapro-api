@@ -4,6 +4,8 @@ const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 const { enviarPushNotificacao, avisarMatchFeito } = require('../services/alertaService')
 // Colunas do agendamento zeradas junto com as chegada_* no match (mesma lista de routes/index.js).
 const { SQL_ZERAR_AGENDA } = require('../utils/agendamento')
+// Máscara de leitura do texto livre que o dono vê (utils/tentativasContato).
+const { mascararLista } = require('../utils/tentativasContato')
 
 const minhas = async (req, res) => {
   try {
@@ -83,7 +85,8 @@ const porObra = async (req, res) => {
        LIMIT $2 OFFSET $3`,
       [req.params.obra_id, limit, offset]
     )
-    res.json({ candidaturas: result.rows, page, limit })
+    // Texto livre do candidato mascarado na leitura (linha antiga, anterior ao filtro de contato).
+    res.json({ candidaturas: mascararLista(result.rows, ['mensagem_oferta', 'referencias']), page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar candidaturas' })
   }
