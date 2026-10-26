@@ -5007,6 +5007,15 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
     }
 
     if (action === 'recusar') {
+      // Só proposta ainda em negociação pode ser recusada. Recusar uma 'aceito' (ou o
+      // prestador que já é o match) deixava match_usuario_id apontando para uma proposta
+      // 'recusado' — match órfão. O caminho correto é POST /reparos/:id/cancelar-match.
+      if (int.status === 'aceito' || reparo.rows[0].match_usuario_id === int.usuario_id) {
+        return res.status(409).json({ erro: "Este profissional já foi escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
+      }
+      if (!['pendente', 'contraproposta_dono'].includes(int.status)) {
+        return res.status(409).json({ erro: 'Esta proposta não está mais em negociação.' })
+      }
       await pool.query(`UPDATE interesse_reparos SET status = 'recusado' WHERE id = $1`, [interesse_id])
       if (int.push_token) {
         enviarPushNotificacao(int.push_token, '❌ Proposta não aceita',
