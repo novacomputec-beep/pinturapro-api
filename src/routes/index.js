@@ -38,6 +38,8 @@ const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
 // fragmentos SQL compartilhados com os crons (alertaService) e o formatador dos pushes.
 const { JANELA_AGENDADO, SUGESTOES_MAX_POR_LADO, ERRO_LIMITE_SUGESTOES, colunaSugestoes, sugestoesRestantes, RESPOSTAS_COMPARECIMENTO, PRAZO_MINIMO_REMARCAR, RE_DATA_HORA, temFuso, sqlDataHora, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, formatarDataHoraSP } = require('../utils/agendamento')
 const { nomeCurto, fotoOtimizada } = require('../utils/donoResumo')
+// Indicações: recálculo do indicador após cada aprovação, código/link em GET /indicacoes/minhas.
+const { normalizarCodigo, recalcularIndicador, LINK_INDICACAO } = require('../utils/indicacoes')
 // Grupo chegada_* zerado NO MESMO UPDATE que cria um match (A1/A2 da auditoria externa): o
 // match novo nasce sem rastro de chegada de uma rodada anterior — uma declaração/confirmação
 // órfã congelaria o cronômetro do profissional novo (os crons pulam linha com
@@ -1462,6 +1464,41 @@ const migracaoPronta = (async () => {
         UNIQUE (tipo, demanda_id, autor_id)
       )
     `)
+    // Indicações (utils/indicacoes): código único de 6 caracteres por profissional, quem o
+    // indicou, e os dois agregados por indicador (meses de bônus com teto, embaixador).
+    // Colunas ADD IF NOT EXISTS; a função é CREATE OR REPLACE; o backfill só toca prestador
+    // sem código, linha a linha (como codigo_publico), e o índice único é a garantia final.
+    // assinaturas.meses_bonus_aplicados registra quantos meses de bônus o backfill do fim da
+    // janela já somou nesta assinatura, para uma segunda conversão nunca somar duas vezes.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS codigo_indicacao TEXT`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS indicado_por UUID REFERENCES usuarios(id) ON DELETE SET NULL`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS meses_bonus_indicacao INTEGER NOT NULL DEFAULT 0`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS embaixador BOOLEAN NOT NULL DEFAULT false`)
+    await client.query(`ALTER TABLE assinaturas ADD COLUMN IF NOT EXISTS meses_bonus_aplicados INTEGER NOT NULL DEFAULT 0`)
+    await client.query(`
+      CREATE OR REPLACE FUNCTION gerar_codigo_indicacao() RETURNS text LANGUAGE plpgsql VOLATILE AS $fn$
+      DECLARE
+        alfabeto CONSTANT text := '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
+        codigo text;
+      BEGIN
+        LOOP
+          codigo := '';
+          FOR i IN 1..6 LOOP
+            codigo := codigo || substr(alfabeto, 1 + floor(random() * length(alfabeto))::int, 1);
+          END LOOP;
+          EXIT WHEN NOT EXISTS (SELECT 1 FROM usuarios WHERE codigo_indicacao = codigo);
+        END LOOP;
+        RETURN codigo;
+      END
+      $fn$
+    `)
+    const semCodigoIndicacao = await client.query(`SELECT id FROM usuarios WHERE role = 'prestador' AND codigo_indicacao IS NULL`)
+    for (const { id } of semCodigoIndicacao.rows) {
+      await client.query(`UPDATE usuarios SET codigo_indicacao = gerar_codigo_indicacao() WHERE id = $1 AND codigo_indicacao IS NULL`, [id])
+    }
+    if (semCodigoIndicacao.rowCount > 0) console.log(`[migration] usuarios: ${semCodigoIndicacao.rowCount} código(s) de indicação gerado(s)`)
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS usuarios_codigo_indicacao_idx ON usuarios (codigo_indicacao) WHERE codigo_indicacao IS NOT NULL`)
+    await client.query(`CREATE INDEX IF NOT EXISTS usuarios_indicado_por_idx ON usuarios (indicado_por) WHERE indicado_por IS NOT NULL`)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -3197,7 +3234,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         // "Estou a caminho" (obras.a_caminho_em, $3): antes dele sai NULL até para o pintor casado.
         `SELECT c.id, c.status, c.valor_proposto, c.valor_contraproposta, c.mensagem,
                 u.nome, u.cidade, u.bairro, u.foto_url, c.usuario_id,
-                u.anos_experiencia, u.especialidades, u.tamanho_equipe,
+                u.anos_experiencia, u.especialidades, u.tamanho_equipe, u.embaixador,
                 CASE WHEN c.usuario_id = $2 THEN u.logradouro ELSE NULL END as logradouro,
                 CASE WHEN c.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
                 CASE WHEN c.usuario_id = $2 AND $3::boolean THEN u.telefone ELSE NULL END as telefone,
@@ -6005,7 +6042,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
         // "Estou a caminho" (reparos.a_caminho_em, $3): antes dele sai NULL até para o casado.
         `SELECT ir.id, ir.usuario_id, ir.status, ir.mensagem, ir.criado_em,
                 ir.valor_proposto, ir.valor_contraproposta, ir.rodada,
-                u.nome, u.cidade, u.bairro, u.foto_url, u.anos_experiencia, u.especialidades, u.tamanho_equipe,
+                u.nome, u.cidade, u.bairro, u.foto_url, u.anos_experiencia, u.especialidades, u.tamanho_equipe, u.embaixador,
                 CASE WHEN ir.usuario_id = $2 THEN u.logradouro ELSE NULL END as logradouro,
                 CASE WHEN ir.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
                 CASE WHEN ir.usuario_id = $2 AND $3::boolean THEN u.telefone ELSE NULL END as telefone,
@@ -6536,6 +6573,8 @@ const aprovarPrestador = async (id) => {
     // Assinatura acabou de virar 'ativa' — derruba o cache para o app não cair na
     // tela de pagamento por causa de um `ativa=false` ainda cacheado (B72-07).
     invalidarCachesUsuario(id)
+    // Indicação conta na aprovação: recalcula bônus/embaixador de quem o indicou (nunca lança).
+    recalcularIndicador(id)
 
     // Notifica prestador por e-mail
     const { nome, email } = usuario.rows[0]
@@ -6679,9 +6718,9 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
         tipo_dono, pix_reembolso, referencias,
         verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
         verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador, cep, latitude, longitude,
-        logradouro, numero, complemento, bairro, foto_url)
+        logradouro, numero, complemento, bairro, foto_url, codigo_indicacao)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'prestador',true,NULL,$11,$12,$13,$14,$15,$27,
-               $16,$17,$18,'reparador',$19,$20,$21,$22,$23,$24,$25,$26)
+               $16,$17,$18,'reparador',$19,$20,$21,$22,$23,$24,$25,$26, gerar_codigo_indicacao())
        RETURNING id, nome, role, tipo_prestador, tipo_dono`,
       [origem.nome, emailNormalizado, origem.telefone, origem.senha_hash, origem.cidade, origem.uf,
        esp.valor, origem.anos_experiencia || 0, origem.tamanho_equipe || 1, origem.cpf_cnpj,
@@ -6883,6 +6922,7 @@ router.post('/verificacao/modo-automatico', autenticar, exigirSuperAdmin, async 
           if (claim.rowCount === 0) continue
         }
         invalidarCachesUsuario(p.id)
+        recalcularIndicador(p.id)
 
         // Notificação push — mesmo tratamento do /verificacao/:id/aprovar. Sem token: arma
         // aviso_aprovacao_em = NULL (= aviso pendente, enviado quando o token for registrado);
@@ -7005,9 +7045,14 @@ const SQL_ALVO_BACKFILL_SP = SQL_PRIMEIRO_DIA_MES_SP(1)
 // backfill ENCURTE um prazo já mais distante: quem entrou grátis mas depois PAGOU carrega um
 // vencimento futuro que precisa sobreviver ao desligamento da janela. GREATEST ignora NULL no
 // Postgres, então a coorte sem vencimento cai no fim-do-mês, como antes.
+// Bônus de indicação (utils/indicacoes): os meses_bonus_indicacao do usuário que AINDA não
+// foram somados nesta assinatura (meses_bonus_aplicados) entram por cima do alvo — e ficam
+// registrados, para uma segunda conversão (janela religada) só somar o que for novo.
 const SQL_BACKFILL_LANCAMENTO = `
   UPDATE assinaturas a
-     SET proximo_vencimento = GREATEST(a.proximo_vencimento, ${SQL_ALVO_BACKFILL_SP}),
+     SET proximo_vencimento = GREATEST(a.proximo_vencimento, ${SQL_ALVO_BACKFILL_SP})
+                              + GREATEST(u.meses_bonus_indicacao - a.meses_bonus_aplicados, 0) * INTERVAL '1 month',
+         meses_bonus_aplicados = GREATEST(a.meses_bonus_aplicados, u.meses_bonus_indicacao),
          tipo          = NULL,
          marco_1_em    = NULL,
          marco_2_em    = NULL,
@@ -7034,6 +7079,58 @@ router.get('/config', async (req, res) => {
     res.json({ multiplas_contas: await multiplasContasAtivo() })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar configurações' })
+  }
+})
+
+// ───────────────────────────── Indicações (utils/indicacoes) ─────────────────────────────
+// GET /indicacao/:codigo — PÚBLICO (a tela de cadastro roda pré-login, como /config): só o
+// nome curto do indicador ("Luiz M."), para o app mostrar "indicado por". Código malformado
+// ou inexistente → 404, sem distinguir os dois. Nada mais sai: nem id, nem cidade, nem foto.
+router.get('/indicacao/:codigo', async (req, res) => {
+  const codigo = normalizarCodigo(req.params.codigo)
+  res.set('Cache-Control', 'no-cache')
+  if (!codigo) return res.status(404).json({ erro: 'Código não encontrado' })
+  try {
+    const r = await pool.query(`SELECT nome FROM usuarios WHERE codigo_indicacao = $1 AND ativo = true`, [codigo])
+    if (r.rows.length === 0) return res.status(404).json({ erro: 'Código não encontrado' })
+    res.json({ nome: nomeCurto(r.rows[0].nome) })
+  } catch (err) {
+    console.error(`[Indicacoes] GET /indicacao/${codigo}:`, err.message)
+    res.status(500).json({ erro: 'Erro ao buscar o código' })
+  }
+})
+
+// GET /indicacoes/minhas — o profissional vê o próprio código, o link de convite e os números:
+// indicados (todos que se cadastraram com o código), aprovados (os que contam), meses_bonus
+// (aprovados com teto, somados ao vencimento no fim da janela de lançamento) e embaixador.
+// Profissional sem código (conta anterior à coluna que escapou do backfill, ou role legado)
+// ganha um aqui mesmo — o código nunca muda depois de existir.
+router.get('/indicacoes/minhas', autenticar, async (req, res) => {
+  if (!['prestador', 'admin', 'aprovador'].includes(req.usuario.role)) {
+    return res.status(403).json({ erro: 'Indicações são exclusivas para profissionais' })
+  }
+  try {
+    await pool.query(`UPDATE usuarios SET codigo_indicacao = gerar_codigo_indicacao() WHERE id = $1 AND codigo_indicacao IS NULL`, [req.usuario.id])
+    const r = await pool.query(
+      `SELECT u.codigo_indicacao, u.meses_bonus_indicacao, u.embaixador,
+              (SELECT COUNT(*)::int FROM usuarios i WHERE i.indicado_por = u.id) AS indicados,
+              (SELECT COUNT(*)::int FROM usuarios i WHERE i.indicado_por = u.id AND i.verificacao_status = 'aprovado') AS aprovados
+         FROM usuarios u WHERE u.id = $1`,
+      [req.usuario.id]
+    )
+    if (r.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
+    const { codigo_indicacao, meses_bonus_indicacao, embaixador, indicados, aprovados } = r.rows[0]
+    res.json({
+      codigo: codigo_indicacao,
+      link: LINK_INDICACAO(codigo_indicacao),
+      indicados,
+      aprovados,
+      meses_bonus: meses_bonus_indicacao,
+      embaixador,
+    })
+  } catch (err) {
+    console.error('[Indicacoes] GET /indicacoes/minhas:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar suas indicações' })
   }
 })
 

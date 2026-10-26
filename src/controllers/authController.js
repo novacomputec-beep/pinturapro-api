@@ -8,6 +8,7 @@ const { validarEspecialidades } = require('../utils/especialidades')
 const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, multiplasContasAtivo } = require('../utils/tipoConta')
 const { registrarPlataforma } = require('../utils/plataforma')
 const { municipioExiste } = require('../utils/geoBusca')
+const { normalizarCodigo, recalcularIndicador } = require('../utils/indicacoes')
 const nodemailer = require('nodemailer')
 const crypto = require('crypto')
 
@@ -48,7 +49,7 @@ const cadastrar = async (req, res) => {
             cpf_cnpj, tipo_conta, plano, pix_reembolso, referencias,
             verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
             rg, rg_orgao, rg_estado, cep, latitude, longitude,
-            logradouro, numero, complemento, bairro } = req.body
+            logradouro, numero, complemento, bairro, codigo_indicacao } = req.body
 
     // PRESENÇA, nunca o valor: email e cpf_cnpj saíam em claro para o stdout e ficavam
     // retidos no log da Railway. Mesmo estilo booleano já usado no log de campos obrigatórios
@@ -247,6 +248,24 @@ const cadastrar = async (req, res) => {
       console.log(`[CADASTRO][${ts}] ✓ novo tipo para pessoa existente | tipo=${tipoNovo} contas_existentes=${existente.rows.length}`)
     }
 
+    // Indicação (utils/indicacoes): só profissional nasce indicado, e só por um código que
+    // existe e não é da própria pessoa (mesmo e-mail ou mesmo CPF normalizado — a outra conta
+    // dela). Código ausente, malformado, inexistente ou próprio é IGNORADO em silêncio: nunca
+    // barra o cadastro. O próprio código do novo profissional sai de gerar_codigo_indicacao().
+    let indicadoPor = null
+    const codigoIndicacao = role === 'prestador' ? normalizarCodigo(codigo_indicacao) : null
+    if (codigoIndicacao) {
+      const indicador = await client.query(
+        `SELECT id FROM usuarios
+          WHERE codigo_indicacao = $1
+            AND LOWER(email) <> $2
+            AND (NULLIF(regexp_replace(COALESCE(cpf_cnpj, ''), '[^0-9]', '', 'g'), '') IS DISTINCT FROM $3::text OR $3::text IS NULL)`,
+        [codigoIndicacao, emailNormalizado, cpfLimpo || null]
+      )
+      indicadoPor = indicador.rows[0]?.id || null
+      console.log(`[CADASTRO][${ts}] ${indicadoPor ? '✓ código de indicação aceito' : '· código de indicação ignorado'}`)
+    }
+
     console.log(`[CADASTRO][${ts}] ▶ INSERT usuarios | role=${role} tipo_dono=${tipo_dono} tipo_prestador=${tipo_prestador} verificacao_status=${verificacaoStatus}`)
     const result = await client.query(
       `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade, uf,
@@ -254,8 +273,9 @@ const cadastrar = async (req, res) => {
         tipo_dono, pix_reembolso, referencias,
         verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
         verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador, cep, latitude, longitude,
-        logradouro, numero, complemento, bairro)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+        logradouro, numero, complemento, bairro, indicado_por, codigo_indicacao)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,
+               $30, CASE WHEN $31::boolean THEN gerar_codigo_indicacao() ELSE NULL END)
        RETURNING id, nome, email, telefone, cidade, role, tipo_dono, tipo_prestador, foto_url`,
       [nome.trim(), emailNormalizado, telefone, senha_hash, cidade, uf || null,
        espCadastro.valor, anos_experiencia || 0,
@@ -270,7 +290,8 @@ const cadastrar = async (req, res) => {
        rg || null, rg_orgao || null, rg_estado || null,
        tipo_prestador,
        cep || null, latitude ?? null, longitude ?? null,
-       logradouro || null, numero || null, complemento || null, bairro || null]
+       logradouro || null, numero || null, complemento || null, bairro || null,
+       indicadoPor, role === 'prestador']
     )
 
     const usuario = result.rows[0]
@@ -354,6 +375,7 @@ const cadastrar = async (req, res) => {
         try {
           await pool.query(`UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = true WHERE id = $1`, [usuario.id])
           await pool.query(`UPDATE assinaturas SET status = 'ativa', tipo = 'gratuito', atualizado_em = NOW() WHERE usuario_id = $1`, [usuario.id])
+          recalcularIndicador(usuario.id)
           console.log(`[Acesso especial] ${emailNormalizado} aprovado automaticamente`)
         } catch (err) {
           console.error('Erro ao aprovar e-mail especial:', err)
