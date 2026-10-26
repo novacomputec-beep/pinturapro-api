@@ -272,6 +272,13 @@ const migracaoPronta = (async () => {
     await client.query(`INSERT INTO configuracoes (chave, valor)
                         SELECT 'multiplas_contas', 'false'
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'multiplas_contas')`)
+    // Flag global "Grupos de categorias relacionadas" nos avisos de reparo (utils/gruposCategorias):
+    // ligada, o push/e-mail de serviço novo, oferta aumentada e lembrete também chega a quem tem
+    // uma categoria do MESMO grupo da demanda em especialidades. Default 'true' = ON; 'false'
+    // volta ao casamento exato. Mesma convenção das chaves acima (valor TEXT 'true'/'false').
+    await client.query(`INSERT INTO configuracoes (chave, valor)
+                        SELECT 'grupos_relacionados_ativo', 'true'
+                        WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'grupos_relacionados_ativo')`)
     // Vídeo "Como funciona" (utils/videoComoFunciona): id do YouTube ('' = sem vídeo) e os
     // capítulos em JSON. Seed só na PRIMEIRA vez, como as chaves acima — o que o admin gravar
     // pelo painel nunca é sobrescrito no boot. valor '' (não NULL), como lancamento_data_fim.

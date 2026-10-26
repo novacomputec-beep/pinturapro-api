@@ -31,6 +31,17 @@ const { sqlNaoMesmoCpf, sqlNaoMesmoCpfDoCriador } = require('../utils/demandaPro
 // Agendamento livre de chegada (módulo inerte): zeragem das colunas no un-match, isenção de
 // falta (JS + SQL), espera pela resposta à vigia e os lembretes/vigia abaixo de lembrarPrazoChegada.
 const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, isentoDeFalta, SQL_ESPERA_COMPARECIMENTO, formatarDataHoraSP } = require('../utils/agendamento')
+// Grupos de categorias relacionadas (lado reparo): a categoria da demanda vira a lista de slugs
+// do seu grupo (chave grupos_relacionados_ativo) antes do casamento com especialidades, nos DOIS
+// públicos (broadcastPaginado e reivindicarEmailsNovaDemanda). utils/gruposCategorias só importa
+// utils/supabase e utils/categoriasApp — sem ciclo.
+const { expandirCategoria } = require('../utils/gruposCategorias')
+// Predicado único categoria × especialidades dos dois públicos: `param` = placeholder text[]
+// (NULL no lado obra = sem filtro). 'outros' na lista = todo profissional com ao menos uma
+// especialidade; senão, basta UMA especialidade em comum (&&). Cada usuário sai UMA vez da
+// consulta (é uma linha por u.id), então ninguém é avisado duas vezes por evento.
+const sqlCasaCategorias = (param) =>
+  `(${param}::text[] IS NULL OR (cardinality(u.especialidades) > 0 AND ('outros' = ANY(${param}::text[]) OR u.especialidades && ${param}::text[])))`
 
 const expo = new Expo()
 
@@ -262,10 +273,11 @@ const PAGINA_BROADCAST = 500
 // (const em TDZ derrubou o boot em 25/08).
 //
 // categoria (opcional, só o lado reparo passa): casa a categoria da demanda com
-// usuarios.especialidades NO SQL —
+// usuarios.especialidades NO SQL (sqlCasaCategorias) —
 //   - null (lado obra): sem filtro, comportamento de sempre;
 //   - 'outros': todo reparador ativo da cidade que tenha AO MENOS UMA especialidade;
-//   - qualquer outra: só quem tem exatamente esse slug no array.
+//   - qualquer outra: quem tem esse slug no array OU, com grupos_relacionados_ativo ligada,
+//     qualquer slug do mesmo grupo (expandirCategoria, utils/gruposCategorias).
 // Array NULL ou vazio nunca recebe nada, nem 'outros' (cardinality(NULL) é NULL → falso).
 // Registro por destinatário em push_entregas (routes/index.js, migração). Um statement por
 // página. ON CONFLICT: a linha já existe quando é RE-tentativa (rede de segurança) ou quando o
@@ -303,13 +315,16 @@ const sqlSemManifestacao = (interesse, param) => (interesse
 // conta do seu criador (sqlNaoMesmoCpfDoCriador). Todos os chamadores passam; sem ela não filtra.
 const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null, demanda = null }) => {
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
+  // Lista de slugs a casar (categoria + grupo, ou só ela; null no lado obra), resolvida UMA vez
+  // por broadcast — a chave de config é lida aqui, não a cada página.
+  const categorias = await expandirCategoria(categoria)
   let cursor = null
   for (;;) {
     // Filtros opcionais entram no SQL E na lista de parâmetros JUNTOS: o pg recusa parâmetro
     // que a consulta não cita ("bind message supplies N parameters, but prepared statement
     // requires N-1"), e era isso que o $7 fixo fazia com o broadcast de demanda nova (sem
     // excluirManifestados o fragmento era '' e o 7º valor sobrava → o claim dava ROLLBACK).
-    const params = [tipoPrestador, cidade, uf, cursor, PAGINA_BROADCAST, categoria]
+    const params = [tipoPrestador, cidade, uf, cursor, PAGINA_BROADCAST, categorias]
     let filtrosOpcionais = ''
     if (excluirManifestados?.interesse) {
       params.push(excluirManifestados.demandaId)
@@ -335,7 +350,7 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
          AND ${SQL_CIDADE_PRESTADOR} = $2
          AND upper(btrim(u.uf)) = $3
          AND ($4::uuid IS NULL OR u.id > $4::uuid)
-         AND ($6::text IS NULL OR (cardinality(u.especialidades) > 0 AND ($6::text = 'outros' OR $6::text = ANY(u.especialidades))))${filtrosOpcionais}
+         AND ${sqlCasaCategorias('$6')}${filtrosOpcionais}
        ORDER BY u.id
        LIMIT $5`,
       params
@@ -620,7 +635,8 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     const cidade = normalizar(demanda.cidade)
     const uf = String(demanda.uf || '').trim().toUpperCase()
     if (!cidade || !uf) return null // mesmo silêncio do push: sem lugar não há alvo
-    const categoria = lado.comCategoria ? demanda.categoria : null
+    // Mesma expansão por grupo do push (expandirCategoria); null no lado obra.
+    const categorias = await expandirCategoria(lado.comCategoria ? demanda.categoria : null, client)
 
     // Elegíveis SEM token (espelho de broadcastPaginado, trocando push_token IS NOT NULL por
     // IS NULL e exigindo e-mail). Ordem por u.id como lá, para o teto cortar de forma estável.
@@ -637,11 +653,11 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          AND NULLIF(btrim(u.uf), '')     IS NOT NULL
          AND ${SQL_CIDADE_PRESTADOR} = $2
          AND upper(btrim(u.uf)) = $3
-         AND ($4::text IS NULL OR (cardinality(u.especialidades) > 0 AND ($4::text = 'outros' OR $4::text = ANY(u.especialidades))))
+         AND ${sqlCasaCategorias('$4')}
          ${sqlSemManifestacao(lado.interesse, '$5')}
          AND ${sqlNaoMesmoCpfDoCriador(tabela, '$5')}
        ORDER BY u.id`,
-      [lado.tipoPrestador, cidade, uf, categoria, demandaId]
+      [lado.tipoPrestador, cidade, uf, categorias, demandaId]
     )
     if (elegiveis.rows.length === 0) return null
 
