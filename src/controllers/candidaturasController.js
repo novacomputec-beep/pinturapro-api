@@ -27,6 +27,9 @@ const minhas = async (req, res) => {
               -- confirmou a chegada (declarada por ele + confirmada = atendimento em curso).
               o.chegada_janela, o.chegada_prevista_em, o.chegada_declarada_por,
               o.chegada_declarada_em, o.chegada_confirmada_em,
+              -- "Estou a caminho" deste match (mesmo valor de GET /obras/:id): o app decide entre
+              -- cancelar-match e expirar-match sem abrir o detalhe.
+              o.a_caminho_em,
               -- Janela que estourou o prazo e aguarda o dono, e a marca de recusa. Sem estas o
               -- pintor via a lista sem janela nenhuma (na pendência, chegada_janela/_prevista_em
               -- seguem NULL) e ainda era barrado de propor outra pelo write-once — sem nada na
