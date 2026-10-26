@@ -3796,11 +3796,19 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     const donoContesta = ehDono
       && o.chegada_declarada_por !== req.usuario.id
       && o.status !== 'encerrada'
-    // Pelas PARTES este caminho só resta para a contestação de chegada do dono (acima): o
-    // cancelamento comum é POST /obras/:id/cancelar-match (antecedência, acordo, falta justa).
-    // Admin e cron seguem usando o expirar-match.
-    if (!ehAdmin && !(donoContesta && o.chegada_declarada_em)) {
-      return res.status(403).json({ erro: 'Para desfazer o atendimento, use o cancelamento no app.', codigo: 'USE_CANCELAR_MATCH' })
+    // Pelas PARTES este caminho vale em dois casos: a contestação de chegada do dono (acima) e
+    // o prazo REALMENTE vencido pelo relógio do servidor — expira_em OU a janela de chegada/
+    // horário vigente (COALESCE(chegada_prevista_em, expira_em), o mesmo prazo do cron) já no
+    // passado — sem "Estou a caminho". Aí o comportamento é o de sempre (bloqueio e pushes).
+    // Prazo ainda correndo: o cancelamento comum é POST /obras/:id/cancelar-match. Admin e cron
+    // seguem usando o expirar-match sem restrição.
+    const vencido = await pool.query(
+      `SELECT (expira_em <= NOW() OR COALESCE(chegada_prevista_em, expira_em) <= NOW()) AS vencido FROM obras WHERE id = $1`,
+      [req.params.id]
+    )
+    const prazoVencido = !!vencido.rows[0]?.vencido && !o.a_caminho_em
+    if (!ehAdmin && !(donoContesta && o.chegada_declarada_em) && !prazoVencido) {
+      return res.status(403).json({ erro: 'O prazo ainda não venceu. Para desfazer o atendimento, use o cancelamento no app.', codigo: 'USE_CANCELAR_MATCH' })
     }
     if ((o.chegada_declarada_em || o.chegada_confirmada_em) && !donoContesta) {
       return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
@@ -5180,10 +5188,16 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     const donoContesta = ehDono
       && r.chegada_declarada_por !== req.usuario.id
       && r.status !== 'encerrada'
-    // Pelas PARTES só resta a contestação de chegada do dono; o cancelamento comum é
-    // POST /reparos/:id/cancelar-match (ver o lado obra). Admin e cron seguem aqui.
-    if (!ehAdmin && !(donoContesta && r.chegada_declarada_em)) {
-      return res.status(403).json({ erro: 'Para desfazer o atendimento, use o cancelamento no app.', codigo: 'USE_CANCELAR_MATCH' })
+    // Pelas PARTES: contestação de chegada do dono OU prazo realmente vencido pelo relógio do
+    // servidor (expira_em ou a janela vigente no passado) sem "Estou a caminho" — ver o lado
+    // obra. Prazo correndo: POST /reparos/:id/cancelar-match. Admin e cron seguem aqui.
+    const vencido = await pool.query(
+      `SELECT (expira_em <= NOW() OR COALESCE(chegada_prevista_em, expira_em) <= NOW()) AS vencido FROM reparos WHERE id = $1`,
+      [req.params.id]
+    )
+    const prazoVencido = !!vencido.rows[0]?.vencido && !r.a_caminho_em
+    if (!ehAdmin && !(donoContesta && r.chegada_declarada_em) && !prazoVencido) {
+      return res.status(403).json({ erro: 'O prazo ainda não venceu. Para desfazer o atendimento, use o cancelamento no app.', codigo: 'USE_CANCELAR_MATCH' })
     }
     if ((r.chegada_declarada_em || r.chegada_confirmada_em) && !donoContesta) {
       return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
