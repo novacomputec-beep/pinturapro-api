@@ -8200,6 +8200,8 @@ router.get('/pagamentos/falha',               (req, res) => res.redirect('https:
 router.get('/pagamentos/pendente',            (req, res) => res.redirect('https://painel.protudo.app.br'))
 router.post('/pagamentos/acesso-gratuito',    autenticar, exigirSuperAdmin, pagamentoCtrl.darAcessoGratuito)
 router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamentoCtrl.listarAssinantes)
+// Totais do painel de usuários por COUNT na tabela inteira (ver pagamentoController.totaisDeUsuarios).
+router.get('/admin/usuarios/totais',          autenticar, exigirAdmin, pagamentoCtrl.totaisUsuarios)
 
 // ============================================================
 // ASSINATURA PELA WEB (protudo.app.br) — públicas, sem JWT: a credencial é o link de uso
