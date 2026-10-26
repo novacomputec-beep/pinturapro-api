@@ -3510,6 +3510,14 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
       return res.json({ mensagem: 'Candidatura aceita! Contrato enviado por e-mail.' })
     }
     if (action === 'recusar') {
+      // Mesma guarda do lado reparo: recusar uma candidatura 'aceito' (ou o pintor que já é o
+      // match) criava match órfão. Cancelar é POST /obras/:id/cancelar-match.
+      if (cand.status === 'aceito' || obra.rows[0].match_usuario_id === cand.usuario_id) {
+        return res.status(409).json({ erro: "Este profissional já foi escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
+      }
+      if (!['pendente', 'contraproposta_dono'].includes(cand.status)) {
+        return res.status(409).json({ erro: 'Esta candidatura não está mais em negociação.' })
+      }
       await pool.query(`UPDATE candidaturas SET status = 'recusado' WHERE id = $1`, [candidaturaId])
       if (cand.push_token) {
         enviarPushNotificacao(cand.push_token, '❌ Candidatura não aceita',
