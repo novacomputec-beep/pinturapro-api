@@ -16,7 +16,7 @@ const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrl
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
-const { moderarDemanda, avisarModeracao, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
+const { moderarDemanda, avisarModeracao, sanitizarTexto, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
@@ -1442,6 +1442,26 @@ const migracaoPronta = (async () => {
     `)
     // Caixa de entrada do usuário (as suas, mais recentes primeiro).
     await client.query(`CREATE INDEX IF NOT EXISTS respostas_equipe_usuario_idx ON respostas_equipe (usuario_id, criada_em DESC)`)
+    // Pergunta única do profissional ao dono ANTES do match (POST /reparos|obras/:id/perguntas e
+    // .../perguntas/:pid/resposta). Tabela NOVA e puramente aditiva, como as três acima: nada
+    // existente lê ou escreve nela, nenhum ALTER a acompanha, e CREATE TABLE IF NOT EXISTS torna
+    // o re-run um no-op. demanda_id é só UUID, sem FK, porque aponta para obras OU reparos
+    // conforme `tipo`. autor_id com ON DELETE CASCADE: a pergunta é do autor — sem conta, some.
+    // UNIQUE (tipo, demanda_id, autor_id) = "uma pergunta por profissional por demanda", valendo
+    // no banco para duas chamadas simultâneas não passarem (o INSERT usa ON CONFLICT DO NOTHING).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS perguntas_demanda (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tipo TEXT NOT NULL CHECK (tipo IN ('reparo','obra')),
+        demanda_id UUID NOT NULL,
+        autor_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        pergunta TEXT NOT NULL,
+        resposta TEXT,
+        criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        respondido_em TIMESTAMPTZ,
+        UNIQUE (tipo, demanda_id, autor_id)
+      )
+    `)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -2984,6 +3004,144 @@ const aumentarValorDemanda = (lado) => async (req, res) => {
 
 router.post('/obras/:id/aumentar-valor', autenticar, aumentarValorDemanda(LADOS_AUMENTO_VALOR.obras))
 
+// ───────────────────────── Pergunta única ao dono ANTES do match ─────────────────────────
+// Um profissional aprovado do lado certo (pintor em obras, reparador em reparos — as mesmas
+// guardas de candidatura/interesse) faz UMA pergunta por demanda, enquanto ela está aberta,
+// aprovada, dentro do prazo e sem match. O dono responde UMA vez (409 depois). Pergunta e
+// resposta passam pelo MESMO sanitizador das descrições (sanitizarTexto: telefone, e-mail,
+// @handle, link e "chame no zap" viram "[contato removido]") — a pergunta não pode virar o
+// canal de contato que o feed já não permite. Tabela perguntas_demanda (migração de boot).
+// Feeds não mudam; a lista sai só em GET /obras/:id e GET /reparos/:id (listarPerguntas).
+const LADOS_PERGUNTA = {
+  obras:   { tabela: 'obras',   tipo: 'obra',   chave: 'obra_id',   erro404: 'Obra não encontrada' },
+  reparos: { tabela: 'reparos', tipo: 'reparo', chave: 'reparo_id', erro404: 'Serviço não encontrado' },
+}
+const PERGUNTA_MAX = 200
+const RESPOSTA_MAX = 300
+
+// Lê um campo de texto do body: string obrigatória (aparada), teto de tamanho medido no que o
+// usuário digitou, contatos removidos no que vai ao banco. Devolve { texto } ou { erro }.
+const lerTextoPergunta = (valor, campo, max) => {
+  const texto = typeof valor === 'string' ? valor.trim() : ''
+  if (!texto) return { erro: `${campo} é obrigatória` }
+  if (texto.length > max) return { erro: `${campo} deve ter no máximo ${max} caracteres` }
+  return { texto: sanitizarTexto(texto) }
+}
+
+// Lista para os detalhes: id (o dono precisa dele para responder), textos e carimbos; minha =
+// true só na pergunta do próprio leitor. Nome e id do autor NUNCA saem — o profissional que
+// perguntou continua anônimo para o dono e para os concorrentes até se candidatar.
+const listarPerguntas = async (tipo, demandaId, leitorId) => {
+  const r = await pool.query(
+    `SELECT id, pergunta, resposta, criado_em, respondido_em, (autor_id = $3) AS minha
+       FROM perguntas_demanda WHERE tipo = $1 AND demanda_id = $2
+      ORDER BY criado_em ASC`,
+    [tipo, demandaId, leitorId]
+  )
+  return r.rows
+}
+
+// POST /:tabela/:id/perguntas — body { pergunta } (≤ 200 chars). 201 com a pergunta gravada.
+// Pergunta no pedido da própria pessoa em outra conta (mesmo CPF) → 400 demanda_propria, como
+// candidatura/interesse. A unicidade (tipo, demanda_id, autor_id) vale no banco: duas chamadas
+// simultâneas não passam (ON CONFLICT DO NOTHING → 409). Aviso ao dono por push ou, sem
+// token / push falho, e-mail em texto puro (entregarPushOuEmail), fire-and-forget.
+const criarHandlerPergunta = (tabela) => async (req, res) => {
+  const lado = LADOS_PERGUNTA[tabela]
+  try {
+    const lido = lerTextoPergunta(req.body?.pergunta, 'pergunta', PERGUNTA_MAX)
+    if (lido.erro) return res.status(400).json({ erro: lido.erro })
+    if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ erro: lado.erro404 })
+    if (await ehDemandaPropria(tabela, req.params.id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
+    // "Aberta e sem match" = a mesma expressão dos feeds e do armamento de proximidade:
+    // status aberta, aprovada, prazo vigente, match_usuario_id nulo.
+    const d = await pool.query(
+      `SELECT titulo, criado_por,
+              (status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW() AND match_usuario_id IS NULL) AS aberta
+         FROM ${lado.tabela} WHERE id = $1`,
+      [req.params.id]
+    )
+    if (d.rows.length === 0) return res.status(404).json({ erro: lado.erro404 })
+    const demanda = d.rows[0]
+    if (demanda.criado_por === req.usuario.id) return res.status(403).json({ erro: 'Você não pode perguntar no seu próprio pedido' })
+    if (!demanda.aberta) return res.status(409).json({ erro: 'Este pedido não está mais aberto a perguntas' })
+    const ins = await pool.query(
+      `INSERT INTO perguntas_demanda (tipo, demanda_id, autor_id, pergunta)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (tipo, demanda_id, autor_id) DO NOTHING
+       RETURNING id, pergunta, resposta, criado_em, respondido_em`,
+      [lado.tipo, req.params.id, req.usuario.id, lido.texto]
+    )
+    if (ins.rowCount === 0) return res.status(409).json({ erro: 'Você já fez sua pergunta neste pedido' })
+    const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [demanda.criado_por])
+    res.status(201).json({ ...ins.rows[0], minha: true })
+    if (dono.rows[0]) {
+      entregarPushOuEmail({
+        ...dono.rows[0],
+        titulo: '❓ Nova pergunta sobre seu pedido',
+        corpo: `${demanda.titulo}: responda para atrair propostas`,
+        data: { tipo: 'nova_pergunta', [lado.chave]: req.params.id },
+        rotulo: `pergunta ${tabela} ${req.params.id}`,
+      }).catch(() => {})
+    }
+  } catch (err) {
+    console.error(`[Perguntas] ${tabela} ${req.params.id}:`, err.message)
+    res.status(500).json({ erro: 'Erro ao enviar a pergunta' })
+  }
+}
+
+// POST /:tabela/:id/perguntas/:pid/resposta — body { resposta } (≤ 300 chars). Só o dono da
+// demanda; a pergunta precisa ser desta demanda. Responde UMA vez: o UPDATE exige
+// respondido_em IS NULL, e a segunda chamada (ou duas simultâneas) leva 409. Aviso ao autor
+// por push ou, sem token / push falho, e-mail em texto puro, fire-and-forget.
+const criarHandlerResposta = (tabela) => async (req, res) => {
+  const lado = LADOS_PERGUNTA[tabela]
+  try {
+    const lido = lerTextoPergunta(req.body?.resposta, 'resposta', RESPOSTA_MAX)
+    if (lido.erro) return res.status(400).json({ erro: lido.erro })
+    if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ erro: lado.erro404 })
+    if (!UUID_RE.test(String(req.params.pid))) return res.status(404).json({ erro: 'Pergunta não encontrada' })
+    const d = await pool.query(`SELECT titulo, criado_por FROM ${lado.tabela} WHERE id = $1`, [req.params.id])
+    if (d.rows.length === 0) return res.status(404).json({ erro: lado.erro404 })
+    const demanda = d.rows[0]
+    if (demanda.criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono do pedido pode responder' })
+    const existe = await pool.query(
+      `SELECT 1 FROM perguntas_demanda WHERE id = $1 AND tipo = $2 AND demanda_id = $3`,
+      [req.params.pid, lado.tipo, req.params.id]
+    )
+    if (existe.rows.length === 0) return res.status(404).json({ erro: 'Pergunta não encontrada' })
+    const upd = await pool.query(
+      `UPDATE perguntas_demanda SET resposta = $2, respondido_em = NOW()
+        WHERE id = $1 AND respondido_em IS NULL
+        RETURNING id, autor_id, pergunta, resposta, criado_em, respondido_em`,
+      [req.params.pid, lido.texto]
+    )
+    if (upd.rowCount === 0) return res.status(409).json({ erro: 'Esta pergunta já foi respondida' })
+    const { autor_id, ...pergunta } = upd.rows[0]
+    const autor = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [autor_id])
+    res.json({ ...pergunta, minha: false })
+    if (autor.rows[0]) {
+      entregarPushOuEmail({
+        ...autor.rows[0],
+        titulo: '💬 O cliente respondeu sua pergunta',
+        corpo: demanda.titulo,
+        data: { tipo: 'pergunta_respondida', [lado.chave]: req.params.id },
+        rotulo: `resposta pergunta ${tabela} ${req.params.id}`,
+      }).catch(() => {})
+    }
+  } catch (err) {
+    console.error(`[Perguntas] resposta ${tabela} ${req.params.id}/${req.params.pid}:`, err.message)
+    res.status(500).json({ erro: 'Erro ao responder a pergunta' })
+  }
+}
+
+// Mesmas guardas de POST /obras/:id/candidatura e POST /reparos/:id/interesse: conta não
+// suspensa, assinatura ativa, tier do lado certo, verificação de identidade aprovada.
+router.post('/obras/:id/perguntas',   autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, exigirVerificado, criarHandlerPergunta('obras'))
+router.post('/reparos/:id/perguntas', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, exigirVerificado, criarHandlerPergunta('reparos'))
+router.post('/obras/:id/perguntas/:pid/resposta',   autenticar, criarHandlerResposta('obras'))
+router.post('/reparos/:id/perguntas/:pid/resposta', autenticar, criarHandlerResposta('reparos'))
+
 router.get('/obras/:id', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
@@ -3090,7 +3248,11 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // sugestoes_restantes: quantas sugestões de horário o LEITOR ainda tem neste match (dono ou
     // pintor do match; null para os demais). Teto por lado em utils/agendamento.
     const sugestoes_restantes = (ehDono || ehPintorDoMatch) ? sugestoesRestantes(obra, ehDono) : null
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento })
+    // perguntas: a pergunta única de cada profissional ao dono (com resposta, se houver) para
+    // qualquer leitor que passou a guarda acima; minha = true só na do próprio leitor, nunca
+    // nome ou id do autor (listarPerguntas).
+    const perguntas = await listarPerguntas('obra', req.params.id, req.usuario.id)
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -5896,6 +6058,10 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // sugestoes_restantes: quantas sugestões de horário o LEITOR ainda tem neste match (dono ou
     // prestador do match; null para os demais). Teto por lado em utils/agendamento.
     const sugestoes_restantes = (ehDono || ehPrestadorDoMatch) ? sugestoesRestantes(reparo, ehDono) : null
+    // perguntas: a pergunta única de cada profissional ao dono (com resposta, se houver) para
+    // qualquer leitor que passou a guarda acima; minha = true só na do próprio leitor, nunca
+    // nome ou id do autor (listarPerguntas).
+    const perguntas = await listarPerguntas('reparo', req.params.id, req.usuario.id)
     res.json({
       reparo,
       midias: midias.rows,
@@ -5908,6 +6074,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       extensao_maxima_horas,
       pode_aumentar_valor,
       valor_minimo_aumento,
+      perguntas,
     })
 
     // Contador de visitas em memória (mesmo racional do GET /obras/:id, inclusive o dedupe
