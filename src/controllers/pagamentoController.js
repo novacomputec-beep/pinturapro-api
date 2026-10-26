@@ -492,11 +492,62 @@ const darAcessoGratuito = async (req, res) => {
   }
 }
 
+// Totais do painel calculados com COUNT sobre a tabela usuarios INTEIRA (nunca sobre a página
+// da lista): contas, pessoas (e-mails distintos — múltiplas contas por e-mail contam uma vez),
+// por tipo de cadastro (sqlTipoConta: reparador = "prestador", pintor = "construtor/pintor",
+// dono_reparo = "dono de serviço", dono_obra) e por plataforma (plataforma do cadastro, com
+// recuo para a do push; NULL = sem plataforma). admin/aprovador/assinante saem em `outros`.
+const { sqlTipoConta } = require('../utils/tipoConta')
+const SQL_PLATAFORMA = `COALESCE(u.plataforma, u.push_plataforma)`
+const totaisDeUsuarios = async () => {
+  const r = await pool.query(`
+    SELECT COUNT(*)::int                                                         AS total_contas,
+           COUNT(DISTINCT lower(btrim(u.email)))::int                            AS pessoas,
+           COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} = 'reparador')::int      AS prestador,
+           COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} = 'pintor')::int         AS construtor_pintor,
+           COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} = 'dono_reparo')::int    AS dono_servico,
+           COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} = 'dono_obra')::int      AS dono_obra,
+           COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} NOT IN ('reparador', 'pintor', 'dono_reparo', 'dono_obra'))::int AS outros,
+           COUNT(*) FILTER (WHERE ${SQL_PLATAFORMA} = 'android')::int           AS android,
+           COUNT(*) FILTER (WHERE ${SQL_PLATAFORMA} = 'ios')::int               AS iphone,
+           COUNT(*) FILTER (WHERE ${SQL_PLATAFORMA} IS NULL)::int               AS sem_plataforma,
+           COUNT(*) FILTER (WHERE u.ativo = true)::int                          AS ativos,
+           COUNT(*) FILTER (WHERE u.suspenso_em IS NOT NULL)::int               AS suspensos
+      FROM usuarios u`)
+  const t = r.rows[0]
+  return {
+    total_contas: t.total_contas,
+    pessoas: t.pessoas,
+    ativos: t.ativos,
+    suspensos: t.suspensos,
+    por_tipo: { prestador: t.prestador, construtor_pintor: t.construtor_pintor, dono_servico: t.dono_servico, dono_obra: t.dono_obra, outros: t.outros },
+    por_plataforma: { android: t.android, iphone: t.iphone, sem_plataforma: t.sem_plataforma },
+  }
+}
+
+// GET /admin/usuarios/totais — só os totais acima (o painel monta os cards daqui, não da lista).
+const totaisUsuarios = async (req, res) => {
+  try {
+    res.json(await totaisDeUsuarios())
+  } catch (err) {
+    console.error('Erro nos totais de usuários:', err.message)
+    res.status(500).json({ erro: 'Erro ao calcular totais de usuários' })
+  }
+}
+
+// GET /pagamentos/assinantes?page=&limit=&offset=&q=&ordem= — lista paginada de verdade:
+// `total` é o COUNT do filtro inteiro (não o tamanho da página), `limit` até LISTA_MAX,
+// `offset` explícito vence `page`. `q` procura em nome e e-mail (ILIKE) e, quando tem 3+
+// dígitos, no telefone só por dígitos (regexp_replace) — "(34) 9 9881" acha "34998817102".
+// `totais` repete GET /admin/usuarios/totais para o painel não derivar cards da página.
+const LISTA_PADRAO = 200
+const LISTA_MAX = 1000
 const listarAssinantes = async (req, res) => {
   try {
-    const page   = parseInt(req.query.page)  || 1
-    const limit  = parseInt(req.query.limit) || 200
-    const offset = (page - 1) * limit
+    const page   = Math.max(1, parseInt(req.query.page) || 1)
+    const limit  = Math.min(LISTA_MAX, Math.max(1, parseInt(req.query.limit) || LISTA_PADRAO))
+    const offsetBruto = parseInt(req.query.offset)
+    const offset = Number.isFinite(offsetBruto) && offsetBruto >= 0 ? offsetBruto : (page - 1) * limit
 
     // ?ordem é whitelist: o valor do request só ESCOLHE uma das cláusulas literais abaixo,
     // nunca é interpolado. Qualquer valor desconhecido (ou ausente) cai em 'recentes'.
@@ -507,25 +558,54 @@ const listarAssinantes = async (req, res) => {
     }
     const ordem = Object.prototype.hasOwnProperty.call(ORDENS, req.query.ordem) ? req.query.ordem : 'recentes'
 
+    const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : ''
+    const digitos = q.replace(/\D/g, '')
+    const params = [limit, offset]
+    let busca = ''
+    if (q) {
+      params.push(`%${q}%`)
+      busca = `AND (u.nome ILIKE $3 OR u.email ILIKE $3`
+      if (digitos.length >= 3) {
+        params.push(`%${digitos}%`)
+        busca += ` OR regexp_replace(COALESCE(u.telefone, ''), '[^0-9]', '', 'g') LIKE $4`
+      }
+      busca += ')'
+    }
+
     // cadastrado_em = data de cadastro do USUÁRIO. a.criado_em (abaixo) é a da assinatura
     // e sai NULL para quem não tem linha em assinaturas — por isso o alias distinto.
+    // COUNT(*) OVER(): total do filtro no mesmo statement, antes do LIMIT.
     const result = await pool.query(`
       SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.bairro, u.role,
              u.tipo_dono, u.tipo_prestador, u.verificacao_status, u.aprovado_automaticamente,
              u.referencias, u.especialidades, u.plataforma, u.criado_em AS cadastrado_em,
-             a.status, a.plano, a.tipo, a.valor_mensal, a.criado_em
+             a.status, a.plano, a.tipo, a.valor_mensal, a.criado_em,
+             COUNT(*) OVER()::int AS _total
       FROM usuarios u
       LEFT JOIN assinaturas a ON a.usuario_id = u.id
       WHERE u.role IN ('assinante', 'prestador', 'dono_obra', 'pintor')
+      ${busca}
       ORDER BY ${ORDENS[ordem]}
       LIMIT $1 OFFSET $2
-    `, [limit, offset])
+    `, params)
 
-    res.json({ assinantes: result.rows, page, limit })
+    const assinantes = result.rows
+    let total = assinantes.length > 0 ? assinantes[0]._total : 0
+    assinantes.forEach(r => delete r._total)
+    if (assinantes.length === 0 && offset > 0) {
+      // Página além do fim: o OVER() não devolve linha; conta o filtro à parte.
+      const c = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM usuarios u WHERE u.role IN ('assinante', 'prestador', 'dono_obra', 'pintor') ${busca.replace('$3', '$1').replace('$4', '$2')}`,
+        params.slice(2)
+      )
+      total = c.rows[0].n
+    }
+    const totais = await totaisDeUsuarios()
+    res.json({ assinantes, page, limit, offset, total, total_paginas: Math.max(1, Math.ceil(total / limit)), q: q || null, totais })
   } catch (err) {
     console.error('Erro ao listar assinantes:', err.message)
     res.status(500).json({ erro: 'Erro ao listar assinantes' })
   }
 }
 
-module.exports = { criarAssinatura, criarCheckoutPagBank, inativarCheckoutPagBank, ErroCheckout, precoAssinaturaCentavos, sucesso, webhookPagbank, darAcessoGratuito, listarAssinantes }
+module.exports = { criarAssinatura, criarCheckoutPagBank, inativarCheckoutPagBank, ErroCheckout, precoAssinaturaCentavos, sucesso, webhookPagbank, darAcessoGratuito, listarAssinantes, totaisUsuarios, totaisDeUsuarios }
