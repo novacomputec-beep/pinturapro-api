@@ -372,8 +372,70 @@ const expirarPedidosCancelamento = async () => {
   }
 }
 
+// Cancelamento pelo ADMIN (POST /admin/:tabela/:id/cancelar): qualquer estado. Numa transação,
+// a demanda vira 'cancelada' (como DELETE /:tabela/dono/:id) com todo o match/chegada/agenda/
+// pedido zerado; se havia match REAL (proposta 'aceito' do profissional casado) ela vira
+// 'cancelado' com o id do admin e o motivo, e os DOIS lados recebem push + e-mail. Match órfão
+// (match_usuario_id sem proposta aceita) só é limpo. Log com admin e motivo. Devolve
+// { status: 404 } ou { status: 200, ... } para a rota responder.
+const ADMIN_MOTIVO_MAX = 300
+const cancelarPorAdmin = async ({ tabela, id, adminId, motivo }) => {
+  const lado = LADOS[tabela]
+  if (!lado) throw new Error(`cancelarPorAdmin: lado desconhecido "${tabela}"`)
+  if (!UUID_RE.test(String(id))) return { status: 404 }
+  const motivoLimpo = typeof motivo === 'string' ? motivo.trim().slice(0, ADMIN_MOTIVO_MAX) || null : null
+  const client = await pool.connect()
+  let d, matchReal
+  try {
+    await client.query('BEGIN')
+    const r = await client.query(
+      `SELECT d.id, d.titulo, d.criado_por, d.match_usuario_id, d.status,
+              EXISTS (SELECT 1 FROM ${lado.proposta.tabela} p
+                       WHERE p.${lado.proposta.coluna} = d.id AND p.usuario_id = d.match_usuario_id AND p.status = 'aceito') AS match_real
+         FROM ${lado.tabela} d WHERE d.id = $1 FOR UPDATE`,
+      [id]
+    )
+    if (r.rows.length === 0) { await client.query('ROLLBACK'); return { status: 404 } }
+    d = r.rows[0]
+    matchReal = !!d.match_usuario_id && d.match_real
+    await client.query(
+      `UPDATE ${lado.tabela} SET ${SQL_LIMPAR_MATCH},
+              status = 'cancelada', status_aprovacao = 'cancelada', encerrado_em = COALESCE(encerrado_em, NOW())
+        WHERE id = $1`,
+      [id]
+    )
+    if (matchReal) {
+      await client.query(
+        `UPDATE ${lado.proposta.tabela}
+            SET status = 'cancelado', cancelado_por = $3, cancelado_motivo = 'outro', cancelado_detalhe = $4,
+                cancelado_em = NOW(), cancelado_acordo = false
+          WHERE ${lado.proposta.coluna} = $1 AND usuario_id = $2 AND status = 'aceito'`,
+        [id, d.match_usuario_id, adminId, motivoLimpo ? `admin: ${motivoLimpo}` : 'admin']
+      )
+    }
+    await client.query('COMMIT')
+  } catch (err) {
+    try { await client.query('ROLLBACK') } catch {}
+    throw err
+  } finally {
+    client.release()
+  }
+  console.log(`[AdminCancelar] ${lado.tipo} ${id} cancelado pelo admin ${adminId}${motivoLimpo ? ` — motivo: ${motivoLimpo}` : ''} (status anterior: ${d.status}; match: ${matchReal ? 'real' : d.match_usuario_id ? 'órfão, limpo' : 'nenhum'})`)
+  if (matchReal) {
+    const corpo = `A equipe do ProTudo cancelou "${d.titulo}".${motivoLimpo ? ` Motivo: ${motivoLimpo}.` : ''} Dúvidas, fale com o suporte.`
+    for (const alvo of [d.criado_por, d.match_usuario_id]) {
+      avisar(alvo, {
+        titulo: lado.tituloCancelado, corpo,
+        data: { tipo: 'match_cancelado', [lado.chave]: id, por: 'admin' },
+        rotulo: `admin cancelou ${lado.tipo} ${id}`,
+      })
+    }
+  }
+  return { status: 200, status_anterior: d.status, tinha_match: matchReal, match_orfao_limpo: !!d.match_usuario_id && !matchReal, notificados: matchReal ? 2 : 0 }
+}
+
 module.exports = {
   MOTIVOS, ROTULO_MOTIVO, ANTECEDENCIA_LIVRE_HORAS, ANTECEDENCIA_LIVRE_FAIXA_CURTA_HORAS, FAIXA_CURTA_HORAS,
-  ACORDO_VALIDADE_HORAS, JANELA_CANCELAMENTOS_DIAS, AVISO_CANCELAMENTOS_N,
-  classificar, pedidoCancelamento, handlers, expirarPedidosCancelamento,
+  ACORDO_VALIDADE_HORAS, JANELA_CANCELAMENTOS_DIAS, AVISO_CANCELAMENTOS_N, SQL_LIMPAR_MATCH,
+  classificar, pedidoCancelamento, handlers, expirarPedidosCancelamento, cancelarPorAdmin,
 }
