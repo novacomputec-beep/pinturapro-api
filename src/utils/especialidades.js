@@ -70,6 +70,14 @@ const rotuloCategoria = (slug, padrao) => {
   if (padrao !== undefined) return padrao
   return slug == null ? slug : String(slug)
 }
+// Reparo com várias categorias (reparos.categorias): rótulo da PRIMEIRA + " +N" quando há
+// mais — o contrato (HTML e PDF) mostra o mesmo texto do push. Lista vazia → `padrao`.
+const rotuloCategorias = (lista, padrao) => {
+  const slugs = Array.isArray(lista) ? lista.filter(Boolean) : []
+  if (slugs.length === 0) return rotuloCategoria(null, padrao)
+  const primeiro = rotuloCategoria(slugs[0], padrao)
+  return slugs.length > 1 ? `${primeiro} +${slugs.length - 1}` : primeiro
+}
 
 // Valida o que está sendo ESCRITO, nunca o que já está gravado.
 //
@@ -127,4 +135,5 @@ module.exports = {
   ESPECIALIDADES_MAX,
   validarEspecialidades,
   rotuloCategoria,
+  rotuloCategorias,
 }

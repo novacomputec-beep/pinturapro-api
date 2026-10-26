@@ -24,7 +24,7 @@ const fs = require('fs')
 const path = require('path')
 const { pool } = require('../utils/supabase')
 const { MARCA } = require('../utils/marca')
-const { apresentacaoReparo, apresentacaoObra } = require('../utils/categoriasApp')
+const { apresentacaoReparo, apresentacaoReparoLista, apresentacaoObra } = require('../utils/categoriasApp')
 const { PRAZO_MODO_HOJE } = require('../utils/faixasPrazo')
 
 const router = express.Router()
@@ -70,7 +70,7 @@ const LADOS = [
 const buscarDemanda = async (codigo, db = pool) => {
   for (const lado of LADOS) {
     const r = await db.query(
-      `SELECT d.titulo, d.categoria, d.cidade, d.uf, d.bairro, d.${lado.colunaValor} AS valor,
+      `SELECT d.titulo, d.categoria, ${lado.tabela === 'reparos' ? 'd.categorias, ' : ''}d.cidade, d.uf, d.bairro, d.${lado.colunaValor} AS valor,
               d.${lado.janelaCol} AS janela_horas, d.prazo_modo, d.expira_em,
               (d.status = 'aberta' AND d.status_aprovacao = 'aprovada'
                AND d.match_usuario_id IS NULL AND d.expira_em > NOW()) AS aberta,
@@ -85,9 +85,12 @@ const buscarDemanda = async (codigo, db = pool) => {
 
 const escapar = (s) => String(s ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
 // Chip da categoria como na lista do app: "🧹 Faxina" (emoji + rótulo de categoriasApp, nos
-// dois lados). Slug fora do catálogo: emoji padrão do lado + slug cru; sem slug: só o genérico.
-const chipCategoria = (lado, slug) => {
-  const { emoji, rotulo } = lado.apresentacao(slug, lado.emojiPadrao)
+// dois lados). Reparo com várias categorias: a primeira + " +N" (apresentacaoReparoLista).
+// Slug fora do catálogo: emoji padrão do lado + slug cru; sem slug: só o genérico.
+const chipCategoria = (lado, demanda) => {
+  const { emoji, rotulo } = lado.tabela === 'reparos'
+    ? apresentacaoReparoLista(demanda, lado.emojiPadrao)
+    : lado.apresentacao(demanda?.categoria, lado.emojiPadrao)
   return `${emoji} ${rotulo || (lado.tabela === 'obras' ? 'Obra' : 'Serviço')}`
 }
 const formatarValor = (v) => {
@@ -206,7 +209,7 @@ const renderAberta = ({ lado, demanda, base, url, ua }) => {
     heading: 'Tem cliente esperando por um profissional!',
     card: `
     <div class="card">
-      <span class="chip">${escapar(chipCategoria(lado, demanda.categoria))}</span>
+      <span class="chip">${escapar(chipCategoria(lado, demanda))}</span>
       <div class="titulo">${escapar(demanda.titulo)}</div>
       <div class="linha">📍 ${escapar(local)}</div>
       <div class="linha">⏱ Prazo: ${escapar(rotuloPrazo(demanda))} · ${escapar(tempoRestante(demanda.expira_em))}</div>
@@ -228,7 +231,7 @@ const renderEncerrada = ({ lado, demanda, base, url, ua }) => {
     heading: 'Este pedido já foi atendido ou expirou.',
     card: `
     <div class="card off">
-      ${lado ? `<span class="chip">${escapar(chipCategoria(lado, demanda.categoria))}</span>` : ''}
+      ${lado ? `<span class="chip">${escapar(chipCategoria(lado, demanda))}</span>` : ''}
       <div class="titulo">${escapar(titulo)}</div>
       ${cidade ? `<div class="linha">📍 ${escapar(cidade)}</div>` : ''}
     </div>`,

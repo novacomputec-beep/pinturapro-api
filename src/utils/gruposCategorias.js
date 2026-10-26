@@ -18,7 +18,7 @@ const CHAVE_GRUPOS_ATIVO = 'grupos_relacionados_ativo'
 
 const GRUPOS_RELACIONADOS = {
   'Elétrica e tecnologia':        ['eletrica', 'eletronica', 'climatizacao'],
-  'Reparos da casa':              ['alvenaria', 'hidraulica', 'marcenaria', 'montagem_moveis', 'estofamento'],
+  'Reparos da casa':              ['alvenaria', 'hidraulica', 'marcenaria', 'montagem_moveis', 'estofamento', 'chaveiro'],
   'Limpeza e cuidados da casa':   ['faxina', 'dedetizacao', 'jardineiro'],
   'Beleza':                       ['cabelo', 'manicure', 'maquiagem', 'barbeiro', 'depilacao', 'massagem', 'podologo'],
   'Festas e eventos':             ['aluguel_festas', 'decoracao_festas', 'recreacao_infantil', 'dj', 'musico', 'garcom',
@@ -27,7 +27,7 @@ const GRUPOS_RELACIONADOS = {
   'Transporte':                   ['motorista', 'motociclista', 'mudancas', 'mecanica', 'lavajato'],
   'Segurança':                    ['vigia', 'seguranca'],
   'Digital e aulas':              ['editor_video', 'social_midia', 'profissional_home_office', 'panfletagem',
-                                   'aula_particular', 'personal_trainer'],
+                                   'aula_particular', 'personal_trainer', 'tradutor'],
   'Arte e criação':               ['artesanato', 'costura', 'tatuagem'],
 }
 
@@ -53,14 +53,22 @@ const gruposRelacionadosAtivo = async (db = pool) => {
   return r.rows[0]?.valor !== 'false'
 }
 
-// Categoria da demanda → array de slugs a casar com especialidades (SEM repetição), ou null
-// quando não há categoria (lado obra). Com a chave desligada ou slug fora de grupo: [slug].
+// Categoria(s) da demanda → array de slugs a casar com especialidades (SEM repetição), ou null
+// quando não há categoria (lado obra). Aceita um slug (reparo antigo) ou a lista `categorias`
+// (até 3): a saída é a UNIÃO de cada slug com o seu grupo. Chave desligada ou slug fora de
+// grupo: só os próprios slugs. A chave é lida UMA vez por chamada.
 const expandirCategoria = async (categoria, db = pool) => {
   if (categoria == null) return null
-  const slug = String(categoria)
-  const grupo = GRUPO_DO_SLUG[slug]
-  if (!grupo || !(await gruposRelacionadosAtivo(db))) return [slug]
-  return [...new Set([slug, ...grupo])]
+  const slugs = (Array.isArray(categoria) ? categoria : [categoria]).filter(s => s != null).map(String)
+  if (slugs.length === 0) return null
+  const ativo = await gruposRelacionadosAtivo(db)
+  const saida = new Set()
+  for (const slug of slugs) {
+    saida.add(slug)
+    const grupo = GRUPO_DO_SLUG[slug]
+    if (ativo && grupo) grupo.forEach(s => saida.add(s))
+  }
+  return [...saida]
 }
 
 module.exports = { GRUPOS_RELACIONADOS, CHAVE_GRUPOS_ATIVO, gruposRelacionadosAtivo, expandirCategoria }

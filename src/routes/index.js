@@ -40,6 +40,10 @@ const { JANELA_AGENDADO, SUGESTOES_MAX_POR_LADO, ERRO_LIMITE_SUGESTOES, colunaSu
 const { nomeCurto, fotoOtimizada } = require('../utils/donoResumo')
 // Indicações: recálculo do indicador após cada aprovação, código/link em GET /indicacoes/minhas.
 const { normalizarCodigo, recalcularIndicador, LINK_INDICACAO } = require('../utils/indicacoes')
+// Grupos de categorias relacionadas (mapa público em GET /config/grupos-categorias) e o teto de
+// categorias por reparo (POST /reparos/dono grava reparos.categorias; categoria = a primeira).
+const { GRUPOS_RELACIONADOS, gruposRelacionadosAtivo } = require('../utils/gruposCategorias')
+const CATEGORIAS_MAX_REPARO = 3
 // Grupo chegada_* zerado NO MESMO UPDATE que cria um match (A1/A2 da auditoria externa): o
 // match novo nasce sem rastro de chegada de uma rodada anterior — uma declaração/confirmação
 // órfã congelaria o cronômetro do profissional novo (os crons pulam linha com
@@ -730,6 +734,13 @@ const migracaoPronta = (async () => {
     await client.query(`DROP INDEX IF EXISTS idx_obras_status`)
     // Filtro quente do cron de proximidade (15min): lp.atualizado_em > NOW() - 30min.
     await client.query(`CREATE INDEX IF NOT EXISTS localizacoes_prestadores_atualizado_em_idx ON localizacoes_prestadores (atualizado_em)`)
+    // Reparo com até 3 categorias (reparos.categorias, slugs de CATEGORIAS_SERVICO; `categoria`
+    // continua gravada = a primeira, para apps antigos e para quem ainda lê a coluna). GIN para o
+    // filtro do feed (categorias @> ARRAY[slug]). Backfill idempotente: linha antiga ganha
+    // [categoria]; o create novo sempre grava as duas, então nos boots seguintes é no-op.
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS categorias TEXT[]`)
+    await client.query(`CREATE INDEX IF NOT EXISTS reparos_categorias_gin_idx ON reparos USING GIN (categorias)`)
+    await client.query(`UPDATE reparos SET categorias = ARRAY[categoria] WHERE categorias IS NULL AND categoria IS NOT NULL`)
 
     // ---- Índices da auditoria de escala: cada um nomeia a query/job que serve ----
     // GET /obras (obrasController.listar): filtro `o.categoria = $n`. reparos já tinha
@@ -3971,7 +3982,7 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar serviços' })
     }
-    const { categoria, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
+    const { categoria, categorias, valor_estimado, cidade, bairro, uf, tags, prazo_atendimento_horas, endereco_obra, ponto_referencia, latitude, longitude, client_request_id } = req.body
     // titulo — presença apenas (ausente/null/''/só espaços): reparos.titulo é NOT NULL e
     // sem este guard o INSERT estourava em 500. Sem teto de tamanho e sem trim ao gravar —
     // o trim aqui é só para o teste de "só espaços". Lê o body cru: a moderação abaixo só
@@ -4002,12 +4013,24 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     //      EXATA — sem trim, sem lowercase, sem tirar acento. Valor que precisa de ajuste é
     //      bug do cliente e é recusado, não consertado: a coluna é text livre e é ela que o
     //      broadcast casa com especialidades; um slug "quase certo" gravado avisaria ninguém.
-    if (!categoria) {
+    // Multi-categoria: `categorias` (array de 1 a 3 slugs distintos) tem precedência; app antigo
+    // manda só `categoria` (string) e vira [categoria]. A coluna categoria = a PRIMEIRA da lista.
+    const listaCategorias = Array.isArray(categorias) ? categorias : (categoria ? [categoria] : [])
+    if (listaCategorias.length === 0) {
       return res.status(400).json({ erro: 'Categoria é obrigatória' })
     }
-    if (typeof categoria !== 'string' || !ESPECIALIDADES_REPARADOR.includes(categoria)) {
-      return res.status(400).json({ erro: `Categoria inválida: ${String(categoria)}` })
+    if (listaCategorias.length > CATEGORIAS_MAX_REPARO) {
+      return res.status(400).json({ erro: `Escolha no máximo ${CATEGORIAS_MAX_REPARO} categorias` })
     }
+    if (new Set(listaCategorias).size !== listaCategorias.length) {
+      return res.status(400).json({ erro: 'Categorias repetidas' })
+    }
+    for (const c of listaCategorias) {
+      if (typeof c !== 'string' || !ESPECIALIDADES_REPARADOR.includes(c)) {
+        return res.status(400).json({ erro: `Categoria inválida: ${String(c)}` })
+      }
+    }
+    const categoriaPrincipal = listaCategorias[0]
     // Mesmo teto do POST /obras/dono e sobre a MESMA contagem (obras + reparos): o limite é por
     // dono, não por tipo de demanda, senão 2 obras + 2 reparos passariam.
     const limiteReparos = await limiteDemandasAtingido('reparos', req.usuario.id, client_request_id)
@@ -4037,14 +4060,14 @@ router.post('/reparos/dono', autenticar, async (req, res) => {
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam o reparo já criado em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id, prazo_modo, prazo_timezone)
+      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id, prazo_modo, prazo_timezone, categorias)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',
                CASE WHEN $18::text = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia('$19::text')} ELSE $10::timestamptz END,
-               $11,$12,$13,$14,$15,$16,$17,$18,$19)
+               $11,$12,$13,$14,$15,$16,$17,$18,$19,$20::text[])
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo, prazoZona]
+      [req.usuario.id, titulo, categoriaPrincipal, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo, prazoZona, listaCategorias]
     )
     res.status(201).json(result.rows[0])
     // ESTE e o unico envio que dispara no fluxo real, e por isso ele FICA. O INSERT acima
@@ -4375,7 +4398,7 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
     // Dono (nome/email/telefone), criado_em e prazo (prazo_atendimento_horas + expira_em) só
     // aqui, no endpoint admin: o feed público GET /reparos não expõe contato do dono ao app.
     const result = await pool.query(`
-      SELECT r.id, r.titulo, r.categoria, r.valor_estimado, r.cidade, r.uf, r.bairro,
+      SELECT r.id, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.cidade, r.uf, r.bairro,
              r.expira_em, r.status, r.criado_em, r.prazo_atendimento_horas,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              (r.status = 'aberta' AND r.expira_em <= NOW()) AS expirada,
@@ -4398,7 +4421,7 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
     if (req.usuario.role !== 'prestador') return res.status(403).json({ erro: 'Acesso restrito a prestadores' })
     const result = await pool.query(`
       SELECT ir.id, ir.status, ir.valor_proposto, ir.valor_contraproposta, ir.rodada, ir.criado_em,
-             r.id as reparo_id, r.titulo, r.categoria, r.descricao, r.valor_estimado,
+             r.id as reparo_id, r.titulo, r.categoria, r.categorias, r.descricao, r.valor_estimado,
              r.cidade, r.bairro, r.latitude, r.longitude, r.expira_em, r.status as reparo_status, r.prazo_atendimento_horas,
              r.match_usuario_id, r.match_feito_em,
              -- Encerramento assimétrico: só o PRESTADOR cria solicitação pendente. O dono não
@@ -4454,7 +4477,7 @@ router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
   try {
     if (req.usuario.role !== 'prestador') return res.status(403).json({ erro: 'Acesso restrito a prestadores' })
     const result = await pool.query(
-      `SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
+      `SELECT r.id, r.titulo, r.categoria, r.categorias, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
               r.match_feito_em, r.status,
               u.id AS dono_id, u.nome AS dono_nome, u.telefone AS dono_telefone,
               (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) AS foto_capa,
@@ -4487,7 +4510,7 @@ router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
 router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT r.id, r.titulo, r.categoria, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
+      `SELECT r.id, r.titulo, r.categoria, r.categorias, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
               r.match_feito_em, r.status,
               u.id AS prestador_id,
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
@@ -4526,7 +4549,7 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
     const params = [req.usuario.id]
 
     let query = `
-      SELECT r.id, r.titulo, r.categoria, r.valor_estimado, r.cidade, r.bairro, r.uf,
+      SELECT r.id, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.cidade, r.bairro, r.uf,
              r.latitude, r.longitude, r.coordenadas_origem,
              -- prazo_atendimento_horas (D81): o card do feed no app lê exatamente este campo
              -- para a faixa de urgência ("🔴 URGENTE / Atender em até Nh") e devolve null
@@ -4560,9 +4583,11 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
         -- — POST /reparos/:id/interesse o recusa com 400 demanda_propria. Sem CPF, não filtra.
         AND ${sqlNaoDemandaPropria('r')}`
 
+    // Filtro por categoria casa QUALQUER uma das categorias do reparo (reparos.categorias, GIN);
+    // linha sem o array (categoria NULL de legado) não casa, como antes.
     if (categoria && categoria !== 'todas') {
       params.push(categoria)
-      query += ` AND r.categoria = $${params.length}`
+      query += ` AND r.categorias @> ARRAY[$${params.length}::text]`
     }
 
     // Modos 'cidade' e raio numérico passam pelo resolvedor compartilhado (geoBusca):
@@ -7089,6 +7114,22 @@ router.get('/config', async (req, res) => {
   }
 })
 
+// GET /config/grupos-categorias — PÚBLICO (a tela de novo serviço monta o seletor de até 3
+// categorias pré-login/pós-login sem token, como /config): o mapa grupo → slugs de
+// utils/gruposCategorias, o teto por reparo e se a expansão por grupo está ligada.
+router.get('/config/grupos-categorias', async (req, res) => {
+  try {
+    res.set('Cache-Control', 'public, max-age=300')
+    res.json({
+      grupos: Object.entries(GRUPOS_RELACIONADOS).map(([nome, categorias]) => ({ nome, categorias })),
+      maximo_por_reparo: CATEGORIAS_MAX_REPARO,
+      ativo: await gruposRelacionadosAtivo(),
+    })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar grupos de categorias' })
+  }
+})
+
 // ───────────────────────────── Indicações (utils/indicacoes) ─────────────────────────────
 // GET /indicacao/:codigo — PÚBLICO (a tela de cadastro roda pré-login, como /config): só o
 // nome curto do indicador ("Luiz M."), para o app mostrar "indicado por". Código malformado
@@ -8612,7 +8653,7 @@ const PERIODO_FINALIZADAS_PADRAO = 'mes_atual'
 // ramo devolve a sua e NULL na outra: obra → horas_para_expirar + prazo_modo; reparo →
 // prazo_atendimento_horas. expira_em existe nas duas.
 const SQL_FINALIZADAS = `
-  SELECT 'obra'::text AS tipo, o.id, o.titulo, o.categoria, o.cidade, o.uf, o.bairro,
+  SELECT 'obra'::text AS tipo, o.id, o.titulo, o.categoria, NULL::text[] AS categorias, o.cidade, o.uf, o.bairro,
          o.criado_em, o.encerrado_em, o.expira_em, o.horas_para_expirar, o.prazo_modo,
          NULL AS prazo_atendimento_horas,
          d.nome AS dono_nome, d.email AS dono_email, d.telefone AS dono_telefone,
@@ -8624,7 +8665,7 @@ const SQL_FINALIZADAS = `
     LEFT JOIN candidaturas cd ON cd.obra_id = o.id AND cd.status = 'aceito'
    WHERE o.status = 'encerrada'
   UNION ALL
-  SELECT 'reparo'::text AS tipo, r.id, r.titulo, r.categoria, r.cidade, r.uf, r.bairro,
+  SELECT 'reparo'::text AS tipo, r.id, r.titulo, r.categoria, r.categorias, r.cidade, r.uf, r.bairro,
          r.criado_em, r.encerrado_em, r.expira_em, NULL AS horas_para_expirar, NULL AS prazo_modo,
          r.prazo_atendimento_horas,
          d.nome AS dono_nome, d.email AS dono_email, d.telefone AS dono_telefone,
@@ -8653,7 +8694,7 @@ router.get('/admin/finalizadas', autenticar, exigirAdmin, async (req, res) => {
     // paginação. NULLS LAST porque em DESC o padrão do Postgres é NULLS FIRST — sem isso
     // uma linha sem data iria para o topo do painel.
     const lista = await pool.query(
-      `SELECT f.tipo, f.id, f.titulo, f.categoria, f.cidade, f.uf, f.bairro,
+      `SELECT f.tipo, f.id, f.titulo, f.categoria, f.categorias, f.cidade, f.uf, f.bairro,
               f.criado_em, f.encerrado_em, f.expira_em,
               f.horas_para_expirar, f.prazo_modo, f.prazo_atendimento_horas,
               f.dono_nome, f.dono_email, f.dono_telefone,
@@ -9133,7 +9174,7 @@ router.get('/admin/canal/resumo', autenticar, exigirAdmin, async (req, res) => {
     const itens = []
     if (comServicos) {
       const r = await pool.query(
-        `SELECT 'reparo' AS tipo, r.titulo, r.categoria, r.bairro, r.valor_estimado AS valor, r.criado_em, r.codigo_publico
+        `SELECT 'reparo' AS tipo, r.titulo, r.categoria, r.categorias, r.bairro, r.valor_estimado AS valor, r.criado_em, r.codigo_publico
            FROM reparos r
           WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()
             AND ${sqlNormalizarCidade('r.cidade')} = $1

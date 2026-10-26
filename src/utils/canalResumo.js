@@ -9,7 +9,7 @@
 //
 // Emoji por categoria vem do mesmo mapa do push (categoriasApp); categoria fora do mapa
 // cai no emoji padrão do lado (🔧 serviço / 🏗️ obra) e no rótulo genérico do lado.
-const { apresentacaoReparo, apresentacaoObra } = require('./categoriasApp')
+const { apresentacaoReparo, apresentacaoReparoLista, apresentacaoObra } = require('./categoriasApp')
 const { MARCA } = require('./marca')
 
 const MAX_ITENS = 15
@@ -25,10 +25,14 @@ const LADOS = {
 }
 
 // Rótulo e emoji de uma categoria. apresentacao*() devolve o slug cru quando não conhece o
-// slug; aqui isso vira o rótulo genérico do lado — slug nunca aparece no canal.
-const categoriaApresentada = (tipo, slug) => {
+// slug; aqui isso vira o rótulo genérico do lado — slug nunca aparece no canal. Reparo com
+// várias categorias: a primeira + " +N" (apresentacaoReparoLista, mesmo texto do push).
+const categoriaApresentada = (tipo, item) => {
   const lado = LADOS[tipo]
-  const { emoji, rotulo } = lado.apresentar(slug, lado.emojiPadrao)
+  const slug = item?.categoria
+  const { emoji, rotulo } = tipo === 'reparo'
+    ? apresentacaoReparoLista(item, lado.emojiPadrao)
+    : lado.apresentar(slug, lado.emojiPadrao)
   const conhecido = rotulo != null && rotulo !== String(slug)
   return { emoji, rotulo: conhecido ? rotulo : lado.rotuloPadrao }
 }
@@ -73,7 +77,7 @@ const montarResumoCanal = ({ cidade, itens, agora = new Date() }) => {
     linhas.push('Nenhum pedido aberto no momento.', '')
   }
   for (const it of exibidos) {
-    const { emoji, rotulo } = categoriaApresentada(it.tipo, it.categoria)
+    const { emoji, rotulo } = categoriaApresentada(it.tipo, it)
     const partes = [rotulo]
     const bairro = limparBairro(it.bairro)
     if (bairro) partes.push(`Bairro ${bairro}`)

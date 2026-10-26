@@ -12,7 +12,9 @@ const { normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 // Emoji e rótulo por categoria (cópia verbatim das listas do app): o push "novo serviço" /
 // "nova obra" mostra o mesmo emoji do chip que o prestador vê no feed, e o rótulo acentuado
 // em vez do slug cru. Fallback = emoji fixo de antes + slug cru, para categoria fora da lista.
-const { apresentacaoReparo, apresentacaoObra } = require('../utils/categoriasApp')
+// Reparo com até 3 categorias: o texto usa a primeira + " +N" (apresentacaoReparoLista) e o
+// casamento usa TODAS (categoriasDoReparo → expandirCategoria).
+const { apresentacaoReparoLista, apresentacaoObra, categoriasDoReparo } = require('../utils/categoriasApp')
 // Cidade dobrada dos DOIS lados com a MESMA regra (ver utils/localidade): a do profissional
 // aqui, a da demanda em JS com normalizar(). uf compara em caixa alta, que e como e gravado.
 const SQL_CIDADE_PRESTADOR = sqlNormalizarCidade('u.cidade')
@@ -391,7 +393,7 @@ const mensagemNovaObra = (obra, obraId) => {
   }
 }
 const mensagemNovoReparo = (reparo, reparoId) => {
-  const { emoji, rotulo } = apresentacaoReparo(reparo.categoria, '🔧')
+  const { emoji, rotulo } = apresentacaoReparoLista(reparo, '🔧')
   return {
     titulo: `${emoji} Novo serviço disponível!`,
     corpo: `"${reparo.titulo}" em ${reparo.cidade} — categoria: ${rotulo}`,
@@ -440,7 +442,7 @@ const notificarPintoresSobreNovaObra = async (obraId) => {
 const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
   try {
     const reparoResult = await pool.query(
-      `SELECT titulo, cidade, uf, categoria FROM reparos WHERE id = $1`,
+      `SELECT titulo, cidade, uf, categoria, categorias FROM reparos WHERE id = $1`,
       [reparoId]
     )
     if (reparoResult.rows.length === 0) return
@@ -464,7 +466,7 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     // todo reparador da cidade com ao menos uma especialidade (ver broadcastPaginado).
     // Os DOIS chamadores (POST /reparos/dono e a rota de aprovação) passam por aqui.
     await broadcastPaginado({
-      tipoPrestador: 'reparador', cidade: cidadeReparo, uf: ufReparo, categoria: reparo.categoria,
+      tipoPrestador: 'reparador', cidade: cidadeReparo, uf: ufReparo, categoria: categoriasDoReparo(reparo),
       ...mensagemNovoReparo(reparo, reparoId),
       rotulo: `novo reparo ${reparoId}`,
       entrega: { tipo: 'reparo', demandaId: reparoId },
@@ -496,7 +498,7 @@ const mensagemOfertaAumentadaObra = (obra, obraId) => {
   }
 }
 const mensagemOfertaAumentadaReparo = (reparo, reparoId) => {
-  const { emoji, rotulo } = apresentacaoReparo(reparo.categoria, '🔧')
+  const { emoji, rotulo } = apresentacaoReparoLista(reparo, '🔧')
   return {
     titulo: `${emoji} Oferta aumentada!`,
     corpo: `"${reparo.titulo}" em ${reparo.cidade} agora paga ${formatarReaisPush(reparo.valor_estimado)}.${rotulo ? ` Categoria: ${rotulo}.` : ''}`,
@@ -527,7 +529,7 @@ const notificarOfertaAumentadaObra = async (obraId) => {
   })
 }
 const notificarOfertaAumentadaReparo = async (reparoId) => {
-  const r = await pool.query(`SELECT titulo, cidade, uf, categoria, valor_estimado FROM reparos WHERE id = $1`, [reparoId])
+  const r = await pool.query(`SELECT titulo, cidade, uf, categoria, categorias, valor_estimado FROM reparos WHERE id = $1`, [reparoId])
   if (r.rows.length === 0) return null
   const reparo = r.rows[0]
   const cidade = normalizar(reparo.cidade)
@@ -537,7 +539,7 @@ const notificarOfertaAumentadaReparo = async (reparoId) => {
     return null
   }
   return broadcastPaginado({
-    tipoPrestador: 'reparador', cidade, uf, categoria: reparo.categoria,
+    tipoPrestador: 'reparador', cidade, uf, categoria: categoriasDoReparo(reparo),
     ...mensagemOfertaAumentadaReparo(reparo, reparoId),
     rotulo: `oferta aumentada reparo ${reparoId}`,
     entrega: null,
@@ -628,6 +630,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     // `interessados` só no lembrete (lado.interesse): é o que escolhe o texto do corpo.
     const dem = await client.query(
       `SELECT d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor, d.codigo_publico
+              ${lado.comCategoria ? ', d.categorias' : ''}
               ${lado.interesse ? `, (SELECT count(*)::int FROM ${lado.interesse.tabela} x WHERE x.${lado.interesse.coluna} = d.id) AS interessados` : ''}
          FROM ${tabela} d WHERE d.id = $1`, [demandaId])
     if (dem.rows.length === 0) return null
@@ -635,8 +638,9 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     const cidade = normalizar(demanda.cidade)
     const uf = String(demanda.uf || '').trim().toUpperCase()
     if (!cidade || !uf) return null // mesmo silêncio do push: sem lugar não há alvo
-    // Mesma expansão por grupo do push (expandirCategoria); null no lado obra.
-    const categorias = await expandirCategoria(lado.comCategoria ? demanda.categoria : null, client)
+    // Mesma expansão por grupo do push (expandirCategoria sobre TODAS as categorias do reparo);
+    // null no lado obra.
+    const categorias = await expandirCategoria(lado.comCategoria ? categoriasDoReparo(demanda) : null, client)
 
     // Elegíveis SEM token (espelho de broadcastPaginado, trocando push_token IS NOT NULL por
     // IS NULL e exigindo e-mail). Ordem por u.id como lá, para o teto cortar de forma estável.
@@ -777,7 +781,7 @@ const mensagemLembreteObra = (obra, obraId) => {
   }
 }
 const mensagemLembreteReparo = (reparo, reparoId) => {
-  const { rotulo } = apresentacaoReparo(reparo.categoria, '🔧')
+  const { rotulo } = apresentacaoReparoLista(reparo, '🔧')
   return {
     titulo: `🔔 Ainda aberto: ${reparo.titulo}`,
     corpo: `${rotulo || 'Serviço'} · ${valorLembrete(reparo.valor)} · ${chamadaLembrete(reparo)}`,
@@ -831,7 +835,7 @@ const sqlFatiaDevida = (lado) => `
       AND (s.fase <> 'unica' OR d.lembretes_enviados = 0)
       AND (s.fase = 'unica' OR (${SQL_JANELA_LEMBRETE}
            AND (d.lembrete_enviado_em IS NULL OR d.lembrete_enviado_em < NOW() - (${LEMBRETE_GAP_MIN_HORAS} * INTERVAL '1 hour'))))`
-const COLUNAS_LEMBRETE = (lado) => `d.id, d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor, d.lembretes_enviados, ${sqlInteressados(lado)} AS interessados`
+const COLUNAS_LEMBRETE = (lado) => `d.id, d.titulo, d.cidade, d.uf, d.categoria, ${lado.comCategoria ? 'd.categorias, ' : ''}d.${lado.colunaValor} AS valor, d.lembretes_enviados, ${sqlInteressados(lado)} AS interessados`
 // O claim em si (UPDATE … RETURNING). Exportado só para o dry-run executar o MESMO statement
 // dentro de um BEGIN…ROLLBACK; o cron (lembrarDemandasSemResposta) é o único chamador real.
 const sqlClaimLembrete = (lado) => `
@@ -1195,7 +1199,7 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
         try {
           await broadcastPaginado({
             tipoPrestador: lado.tipoPrestador, cidade, uf,
-            categoria: lado.comCategoria ? d.categoria : null,
+            categoria: lado.comCategoria ? categoriasDoReparo(d) : null,
             ...lado.mensagem(d, d.id),
             rotulo: `lembrete ${lado.tabela} ${d.id}`,
             entrega: null,
