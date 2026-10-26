@@ -18,6 +18,7 @@ const { limparTentativasAntigas } = require('./src/utils/tentativasAuth')
 const { cronPromoverVersaoAtual } = require('./src/utils/versaoApp')
 // Proximidade: a outra conta do criador do reparo (mesmo CPF) não recebe "serviço próximo".
 const { sqlNaoMesmoCpf } = require('./src/utils/demandaPropria')
+const { recalcularIndicador } = require('./src/utils/indicacoes')
 // Poda de links de assinatura pela web nunca usados (> 7 dias) — mesmo agendamento diário
 // de limparTentativasAntigas, sem mecanismo novo.
 const { limparLinksAssinaturaAntigos } = require('./src/controllers/assinaturaLinkController')
@@ -878,6 +879,8 @@ const iniciarAgendador = () => {
         // p/ o app não cair na tela de pagamento com um `false` ainda cacheado (B72-07).
         // O bug original vinha de haver DOIS mapas e a invalidação limpar só um; hoje é um só.
         invalidarCachesUsuario(p.id)
+        // Indicação conta na aprovação: recalcula bônus/embaixador de quem o indicou (nunca lança).
+        recalcularIndicador(p.id)
         if (p.push_token) {
           await enviarPushNotificacao(p.push_token, '✅ Cadastro aprovado!', `Bem-vindo ao ${MARCA}! Seu acesso está liberado.`, { tipo: 'verificacao_aprovada' }).catch(() => {})
         }

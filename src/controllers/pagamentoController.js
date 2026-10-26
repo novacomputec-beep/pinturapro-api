@@ -2,6 +2,7 @@ const crypto = require('crypto')
 const { pool } = require('../utils/supabase')
 const { enviarEmail } = require('../services/brevoService')
 const { MARCA } = require('../utils/marca')
+const { recalcularIndicador } = require('../utils/indicacoes')
 
 const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN
 const PAGBANK_URL = 'https://api.pagseguro.com'
@@ -481,6 +482,8 @@ const darAcessoGratuito = async (req, res) => {
     await pool.query(
       `UPDATE usuarios SET verificacao_status = 'aprovado', aprovado_automaticamente = false WHERE id = $1`, [usuario_id]
     )
+    // Indicação conta na aprovação: recalcula bônus/embaixador de quem o indicou (nunca lança).
+    recalcularIndicador(usuario_id)
 
     res.json({ mensagem: 'Acesso gratuito concedido com sucesso' })
   } catch (err) {

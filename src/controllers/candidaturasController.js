@@ -73,7 +73,7 @@ const porObra = async (req, res) => {
               u.id as usuario_id, u.nome,
               NULL as email,
               NULL as telefone,
-              u.cidade, u.anos_experiencia, u.tamanho_equipe, u.especialidades,
+              u.cidade, u.anos_experiencia, u.tamanho_equipe, u.especialidades, u.embaixador,
               (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_total,
               (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_media
        FROM candidaturas c
