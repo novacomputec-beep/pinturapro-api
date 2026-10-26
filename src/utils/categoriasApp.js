@@ -101,6 +101,23 @@ const apresentacaoReparo     = (slug, emojiPadrao) => apresentacao(MAPA_SERVICO,
 const apresentacaoConstrucao = (slug, emojiPadrao) => apresentacao(MAPA_CONSTRUCAO, slug, emojiPadrao)
 const apresentacaoObra       = (slug, emojiPadrao) => apresentacao(MAPA_OBRA, slug, emojiPadrao)
 
+// Reparo com até 3 categorias (reparos.categorias; `categoria` = a primeira, para apps e
+// linhas antigas). Lista efetiva da demanda: categorias quando preenchida, senão [categoria].
+const categoriasDoReparo = (reparo) => {
+  const lista = Array.isArray(reparo?.categorias) ? reparo.categorias.filter(Boolean) : []
+  if (lista.length > 0) return lista
+  return reparo?.categoria ? [reparo.categoria] : []
+}
+// Apresentação de um reparo com várias categorias: emoji e rótulo da PRIMEIRA, com " +N"
+// quando há mais (texto de push, e-mail, página pública, canal, contrato). Sem categoria:
+// emoji padrão e rótulo null, como apresentacaoReparo(null).
+const apresentacaoReparoLista = (reparo, emojiPadrao) => {
+  const lista = categoriasDoReparo(reparo)
+  const { emoji, rotulo } = apresentacaoReparo(lista[0] ?? null, emojiPadrao)
+  const extras = lista.length - 1
+  return { emoji, rotulo: rotulo != null && extras > 0 ? `${rotulo} +${extras}` : rotulo, extras: Math.max(0, extras) }
+}
+
 module.exports = {
   CATEGORIAS_SERVICO,
   CATEGORIAS_CONSTRUCAO,
@@ -108,4 +125,6 @@ module.exports = {
   apresentacaoReparo,
   apresentacaoConstrucao,
   apresentacaoObra,
+  categoriasDoReparo,
+  apresentacaoReparoLista,
 }
