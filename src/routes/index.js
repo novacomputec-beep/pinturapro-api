@@ -9002,6 +9002,108 @@ router.get('/admin/especialidades-resumo', autenticar, exigirAdmin, async (req, 
   }
 })
 
+// GET /admin/crescimento?dias=14&cidade=<opcional> — painel de crescimento (só leitura).
+// Contas contadas: profissionais = role prestador/pintor/assinante, clientes = dono_obra —
+// os mesmos quatro papéis de listarAssinantes; admin/aprovador ficam fora pelo papel e as
+// contas especiais/de teste (EMAILS_ESPECIAIS) pelo e-mail, como no backfill e na prévia da
+// janela de lançamento. cidade dobra com a regra de utils/localidade (mesma de
+// /admin/especialidades-resumo) e vale para TODOS os números, inclusive a meta de 1000.
+// Dias em America/Sao_Paulo: o cadastro entra no dia do relógio de parede de SP, e a série
+// traz todo dia da janela (generate_series), com zero onde não houve cadastro.
+//   hoje            { profissionais, clientes } cadastrados no dia de hoje (SP)
+//   media_dia       { profissionais, clientes } média por dia na janela (soma / dias)
+//   total_profissionais  profissionais ATIVOS hoje; faltam_para_1000 = max(0, 1000 - total)
+//   previsao_dias   faltam / media_dia.profissionais, arredondado para cima; null se média 0
+//   serie[]         { data, profissionais, clientes, total, aprovados, notificacao_ativa } —
+//                   aprovados/notificacao_ativa = daquela coorte de profissionais, HOJE
+//   funil           profissionais cadastrados na janela: cadastraram → aprovados →
+//                   com_notificacao (push_token) → primeira_proposta (candidatura ou interesse)
+const META_PROFISSIONAIS = 1000
+const SQL_PAPEL_PROFISSIONAL = `u.role IN ('prestador', 'pintor', 'assinante')`
+const SQL_PAPEL_CLIENTE = `u.role = 'dono_obra'`
+const SQL_PUSH_ATIVO = `(u.push_token IS NOT NULL AND u.push_token <> '')`
+// Base comum das duas consultas: contas contadas, filtro de cidade ($2) e e-mails especiais ($3).
+const SQL_CONTAS_CRESCIMENTO = `(${SQL_PAPEL_PROFISSIONAL} OR ${SQL_PAPEL_CLIENTE})
+        AND LOWER(u.email) <> ALL($3::text[])
+        AND ($2::text IS NULL OR ${sqlNormalizarCidade('u.cidade')} = $2::text)`
+// Hoje (data SP) e o primeiro instante (timestamptz) do primeiro dia da janela de $1 dias.
+const SQL_HOJE_SP = `(NOW() AT TIME ZONE 'America/Sao_Paulo')::date`
+const SQL_INICIO_JANELA = `((${SQL_HOJE_SP} - ($1::int - 1))::timestamp AT TIME ZONE 'America/Sao_Paulo')`
+
+router.get('/admin/crescimento', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const diasBruto = parseInt(req.query.dias)
+    const dias = Number.isInteger(diasBruto) ? Math.min(Math.max(diasBruto, 1), 365) : 14
+    const cidadeBruta = typeof req.query.cidade === 'string' ? req.query.cidade.trim() : ''
+    const cidade = cidadeBruta ? normalizar(cidadeBruta) : null
+    const params = [dias, cidade, emailsEspeciais()]
+
+    const serie = await pool.query(
+      `WITH dias AS (
+         SELECT generate_series(${SQL_HOJE_SP} - ($1::int - 1), ${SQL_HOJE_SP}, INTERVAL '1 day')::date AS dia
+       ), base AS (
+         SELECT (u.criado_em AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
+                ${SQL_PAPEL_PROFISSIONAL} AS prof,
+                ${SQL_PAPEL_CLIENTE} AS cli,
+                (u.verificacao_status = 'aprovado') AS aprovado,
+                ${SQL_PUSH_ATIVO} AS push
+           FROM usuarios u
+          WHERE ${SQL_CONTAS_CRESCIMENTO}
+            AND u.criado_em >= ${SQL_INICIO_JANELA}
+       )
+       SELECT to_char(d.dia, 'YYYY-MM-DD') AS data,
+              COUNT(b.dia) FILTER (WHERE b.prof)::int AS profissionais,
+              COUNT(b.dia) FILTER (WHERE b.cli)::int AS clientes,
+              COUNT(b.dia)::int AS total,
+              COUNT(b.dia) FILTER (WHERE b.prof AND b.aprovado)::int AS aprovados,
+              COUNT(b.dia) FILTER (WHERE b.prof AND b.push)::int AS notificacao_ativa
+         FROM dias d
+         LEFT JOIN base b ON b.dia = d.dia
+        GROUP BY d.dia
+        ORDER BY d.dia ASC`,
+      params
+    )
+
+    const funil = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE ${SQL_PAPEL_PROFISSIONAL} AND u.criado_em >= ${SQL_INICIO_JANELA})::int AS cadastraram,
+         COUNT(*) FILTER (WHERE ${SQL_PAPEL_PROFISSIONAL} AND u.criado_em >= ${SQL_INICIO_JANELA}
+                            AND u.verificacao_status = 'aprovado')::int AS aprovados,
+         COUNT(*) FILTER (WHERE ${SQL_PAPEL_PROFISSIONAL} AND u.criado_em >= ${SQL_INICIO_JANELA}
+                            AND ${SQL_PUSH_ATIVO})::int AS com_notificacao,
+         COUNT(*) FILTER (WHERE ${SQL_PAPEL_PROFISSIONAL} AND u.criado_em >= ${SQL_INICIO_JANELA}
+                            AND (EXISTS (SELECT 1 FROM candidaturas c WHERE c.usuario_id = u.id)
+                              OR EXISTS (SELECT 1 FROM interesse_reparos ir WHERE ir.usuario_id = u.id)))::int AS primeira_proposta,
+         COUNT(*) FILTER (WHERE ${SQL_PAPEL_PROFISSIONAL} AND u.ativo = true)::int AS total_profissionais
+       FROM usuarios u
+       WHERE ${SQL_CONTAS_CRESCIMENTO}`,
+      params
+    )
+
+    const linhas = serie.rows
+    const hojeLinha = linhas[linhas.length - 1] || { profissionais: 0, clientes: 0 }
+    const soma = (campo) => linhas.reduce((acc, l) => acc + l[campo], 0)
+    const mediaProf = soma('profissionais') / dias
+    const mediaCli = soma('clientes') / dias
+    const { cadastraram, aprovados, com_notificacao, primeira_proposta, total_profissionais } = funil.rows[0]
+    const faltam = Math.max(0, META_PROFISSIONAIS - total_profissionais)
+    res.json({
+      dias,
+      cidade: cidadeBruta || null,
+      hoje: { profissionais: hojeLinha.profissionais, clientes: hojeLinha.clientes },
+      media_dia: { profissionais: Number(mediaProf.toFixed(2)), clientes: Number(mediaCli.toFixed(2)) },
+      total_profissionais,
+      faltam_para_1000: faltam,
+      previsao_dias: mediaProf > 0 ? Math.ceil(faltam / mediaProf) : null,
+      serie: linhas,
+      funil: { cadastraram, aprovados, com_notificacao, primeira_proposta },
+    })
+  } catch (err) {
+    console.error('[admin/crescimento]', err.message)
+    res.status(500).json({ erro: 'Erro ao calcular o crescimento' })
+  }
+})
+
 // GET /admin/canal/resumo?cidade=Patos de Minas&uf=MG&servicos=1&obras=1 — texto pronto
 // para o canal de WhatsApp com os pedidos ABERTOS (status 'aberta', aprovados, não
 // expirados) da cidade: { texto, total }. Montagem em utils/canalResumo (mais recentes
