@@ -19,6 +19,8 @@ const { cronPromoverVersaoAtual } = require('./src/utils/versaoApp')
 // Proximidade: a outra conta do criador do reparo (mesmo CPF) não recebe "serviço próximo".
 const { sqlNaoMesmoCpf } = require('./src/utils/demandaPropria')
 const { recalcularIndicador } = require('./src/utils/indicacoes')
+// Suspensão por tentativa de compartilhar contato dura 7 dias: o cron horário levanta as vencidas.
+const { liberarSuspensoesContato } = require('./src/utils/tentativasContato')
 // Poda de links de assinatura pela web nunca usados (> 7 dias) — mesmo agendamento diário
 // de limparTentativasAntigas, sem mecanismo novo.
 const { limparLinksAssinaturaAntigos } = require('./src/controllers/assinaturaLinkController')
@@ -800,6 +802,9 @@ const iniciarAgendador = () => {
   // preço de contar TODOS (o que fecha o oráculo de existência de conta).
   setInterval(() => { limparTentativasAntigas(); limparLinksAssinaturaAntigos() }, 24 * 60 * 60 * 1000)
   setInterval(() => { expirarAssinaturasVencidas() }, 60 * 60 * 1000)
+  // Suspensões por contato (7 dias) vencidas: de hora em hora, como a expiração de assinatura —
+  // a folga de até 1h num prazo de 7 dias é irrelevante. Fora do warm-up: a próxima hora pega.
+  setInterval(() => { liberarSuspensoesContato() }, 60 * 60 * 1000)
   // De 5 em 5 minutos. Era de hora em hora, justificado pelo prazo (então de 2 dias) do
   // encerramento — mas a MESMA função também auto-confirma chegada, e esse prazo passou a ser
   // de 30 min nos reparos. Uma varredura horária é mais grossa que a própria janela: o reparo
