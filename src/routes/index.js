@@ -7938,6 +7938,8 @@ router.post('/pagamentos/acesso-gratuito',    autenticar, exigirSuperAdmin, paga
 router.get('/pagamentos/assinantes',          autenticar, exigirAdmin, pagamentoCtrl.listarAssinantes)
 // Totais do painel de usuários por COUNT na tabela inteira (ver pagamentoController.totaisDeUsuarios).
 router.get('/admin/usuarios/totais',          autenticar, exigirAdmin, pagamentoCtrl.totaisUsuarios)
+// Cidades distintas (normalizadas) das contas de cliente, com contagem — ver cidadesClientes.
+router.get('/admin/cidades',                  autenticar, exigirAdmin, pagamentoCtrl.cidadesClientes)
 
 // ============================================================
 // ASSINATURA PELA WEB (protudo.app.br) — públicas, sem JWT: a credencial é o link de uso
