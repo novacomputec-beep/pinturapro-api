@@ -103,6 +103,17 @@ const removerContatos = (texto) => {
 // create tratar como já trata (validação dos creates segue deferida, não é daqui).
 const sanitizarTexto = (v) => (typeof v === 'string' ? removerContatos(v) : v)
 
+// Contato CLARO — o que conta para a penalidade (utils/tentativasContato): e-mail, link/domínio,
+// telefone em algarismos (8+ dígitos) ou "canal + número" (6+). Dígitos por extenso, @handle e
+// "chame no whats" são mascarados do mesmo jeito, mas NÃO contam (falso positivo plausível).
+// search() ignora o lastIndex dos regex /g; match() idem.
+const temContatoClaro = (v) => {
+  if (typeof v !== 'string' || !v) return false
+  if (v.search(RE_EMAIL) >= 0 || v.search(RE_URL) >= 0 || v.search(RE_DOMINIO) >= 0) return true
+  if ((v.match(RE_CANAL_NUMERO) || []).some(m => contarDigitos(m) >= 6)) return true
+  return (v.match(RE_TELEFONE) || []).some(ehTelefone)
+}
+
 const valorVazio = (v) => {
   if (v === undefined || v === null) return true
   if (typeof v === 'string' && !v.trim()) return true
@@ -162,6 +173,7 @@ module.exports = {
   moderarDemanda,
   avisarModeracao,
   sanitizarTexto,
+  temContatoClaro,
   MENSAGEM_REJEICAO,
   CODIGO_REJEICAO,
   MARCA_CONTATO,

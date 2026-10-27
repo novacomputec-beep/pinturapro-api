@@ -1241,11 +1241,13 @@ const LADOS_MATCH = {
   reparos: { tabela: 'reparos', chave: 'reparo_id', tipoPush: 'interesse_aceito',   aba: 'Serviços' },
 }
 const SQL_PRAZO_CHEGADA = `COALESCE(d.chegada_prevista_em, d.expira_em)`
+// "Pedir mais tempo" só existe depois do "Estou a caminho" (atrasoChegadaService); antes disso
+// o caminho é combinar dia e hora no app — os dois textos apontam para o que de fato funciona.
 const TEXTO_MATCH_FEITO = {
   titulo: '🤝 Match feito!',
-  corpo: 'Se combinar outra data com o cliente, use "Pedir mais tempo" no app. Senão o match é desfeito quando o prazo de chegada vencer.',
+  corpo: 'Combine dia e hora de chegada no app. Depois de tocar em "Estou a caminho", você pode pedir mais tempo se atrasar. Senão o match é desfeito quando o prazo de chegada vencer.',
 }
-const CORPO_LEMBRETE_CHEGADA = 'Já chegou? Confirme no app. Combinou outra data? Toque em "Pedir mais tempo".'
+const CORPO_LEMBRETE_CHEGADA = 'Já chegou? Confirme no app. Vai atrasar? Toque em "Estou a caminho" e peça mais tempo ao cliente.'
 // "1h" quando resta a hora inteira (antecedência de 1h disparada no tique certo, com até 1 min
 // de cadência); senão os minutos reais que restam — inclusive quando o tique chegou atrasado.
 const rotuloRestante = (restanteMin) =>
@@ -1630,7 +1632,7 @@ const vigiarComparecimento = semSobreposicao('vigiarComparecimento', async () =>
       )
       for (const d of claim.rows) {
         if (!d.push_token) {
-          console.log(`[Vigia] ${lado.tabela} ${d.id}: dono sem push_token — sem aviso (o cron espera a resposta até 24h mesmo assim)`)
+          console.log(`[Vigia] ${lado.tabela} ${d.id}: dono sem push_token — sem aviso (o cron espera a resposta até 3h mesmo assim)`)
           continue
         }
         await enviarPushNotificacao(
@@ -1856,17 +1858,24 @@ const notificarMatchDesfeito = async (tabela, demanda) => {
   const { chave, profissional, artigo, volta } = ROTULOS_MATCH_DESFEITO[tabela]
   const alvos = [demanda.criado_por, demanda.match_usuario_id].filter(Boolean)
   if (alvos.length === 0) return
-  const tokens = await pool.query(
-    `SELECT id, push_token FROM usuarios WHERE id = ANY($1::uuid[]) AND push_token IS NOT NULL`,
+  // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail) — mesma
+  // entrega dos avisos de atraso; resultado no log em vez do catch vazio de antes.
+  const contatos = await pool.query(
+    `SELECT id, push_token, email, nome FROM usuarios WHERE id = ANY($1::uuid[])`,
     [alvos]
   )
-  for (const u of tokens.rows) {
+  for (const u of contatos.rows) {
     const paraDono = u.id === demanda.criado_por
-    enviarPushNotificacao(u.push_token, '⏰ Prazo expirado!',
-      paraDono
+    const via = await entregarPushOuEmail({
+      ...u,
+      titulo: '⏰ Prazo expirado!',
+      corpo: paraDono
         ? `O ${profissional} não chegou a tempo para "${demanda.titulo}". ${artigo} está disponível novamente.`
         : `O prazo para chegar em "${demanda.titulo}" acabou. ${volta} para o feed.`,
-      { tipo: 'match_expirado', [chave]: demanda.id }).catch(() => {})
+      data: { tipo: 'match_expirado', [chave]: demanda.id },
+      rotulo: `match expirado ${tabela} ${demanda.id}`,
+    })
+    console.log(`[MatchDesfeito] ${tabela} ${demanda.id} → ${paraDono ? 'dono' : 'profissional'} via ${via}`)
   }
 }
 
@@ -2008,6 +2017,9 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
         AND u.push_token IS NOT NULL
         AND r.chegada_declarada_em IS NULL
         AND r.chegada_confirmada_em IS NULL
+        -- Dono já avisado do atraso ("tolerância até HH:MM", atrasoChegadaService): o "faltam
+        -- 5 minutos" seria o 2º push sobre o mesmo fato — só sai quando aquele não saiu.
+        AND r.aviso_atraso_enviado_em IS NULL
         AND ${sqlLimiteChegada('r.')} BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
       RETURNING r.id, r.titulo, u.push_token
     `)
@@ -2165,6 +2177,8 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
         AND u.push_token IS NOT NULL
         AND o.chegada_declarada_em IS NULL
         AND o.chegada_confirmada_em IS NULL
+        -- Mesma regra do cron de reparos: sem 2º push quando o aviso de atraso já saiu.
+        AND o.aviso_atraso_enviado_em IS NULL
         AND ${sqlLimiteChegada('o.')} BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
       RETURNING o.id, o.titulo, u.push_token
     `)

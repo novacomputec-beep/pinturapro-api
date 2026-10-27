@@ -14,6 +14,9 @@
 // últimos JANELA_PENALIDADE_DIAS:
 //   1ª  → push (reserva: e-mail) "⚠️ Contato não permitido" explicando a regra;
 //   2ª  → mesmo título, "Último aviso";
+//   (só linhas com conta = true — contato CLARO: telefone em algarismos, e-mail, link ou
+//   "canal + número"; dígitos por extenso, @handle e "chame no whats" são mascarados mas não
+//   contam, para um falso positivo não suspender ninguém)
 //   3ª+ → suspensão por DIAS_SUSPENSAO_CONTATO dias pelo MESMO mecanismo das faltas
 //         (usuarios.suspenso_em + suspenso_motivo; exigirNaoSuspenso barra proposta/interesse/
 //         pergunta e a publicação de pedido; cache de autenticar invalidado), com push/e-mail
@@ -21,7 +24,7 @@
 //         POST /admin/suspensos/:id/liberar; liberarSuspensoesContato (cron horário em server.js)
 //         levanta sozinho as que venceram — só as deste motivo, as de falta são do admin.
 const { pool } = require('./supabase')
-const { sanitizarTexto } = require('./moderacaoDemanda')
+const { sanitizarTexto, temContatoClaro } = require('./moderacaoDemanda')
 const { invalidarCacheAssinatura } = require('../middlewares/auth')
 const { MARCA } = require('./marca')
 
@@ -43,9 +46,11 @@ const entregar = (args) => require('../services/alertaService').entregarPushOuEm
 // Conta as tentativas do usuário na janela e aplica o degrau correspondente. Nunca lança.
 const aplicarPenalidadeContato = async (usuarioId, db = pool) => {
   try {
+    // conta = true: só contato CLARO (telefone em algarismos, e-mail, link) pesa na régua;
+    // dígitos por extenso e afins ficam na lista do admin (conta = false) sem punir.
     const c = await db.query(
       `SELECT COUNT(*)::int AS n FROM tentativas_contato
-        WHERE usuario_id = $1 AND criado_em > NOW() - ($2::int * INTERVAL '1 day')`,
+        WHERE usuario_id = $1 AND conta AND criado_em > NOW() - ($2::int * INTERVAL '1 day')`,
       [usuarioId, JANELA_PENALIDADE_DIAS]
     )
     const n = c.rows[0]?.n || 0
@@ -82,17 +87,20 @@ const aplicarPenalidadeContato = async (usuarioId, db = pool) => {
   }
 }
 
-// Uma linha por ENVIO sujo; em seguida o degrau da penalidade. Nunca rejeita.
-const registrarTentativaContato = async ({ usuario_id, tipo, demanda_id, campo }, db = pool) => {
+// Uma linha por ENVIO sujo; em seguida o degrau da penalidade — só quando `conta` (contato
+// claro: temContatoClaro). Chamar DEPOIS de o INSERT do envio ter entrado: um envio recusado
+// (409 de duplicidade etc.) não é tentativa. Nunca rejeita.
+const registrarTentativaContato = async ({ usuario_id, tipo, demanda_id, campo, conta = true }, db = pool) => {
   try {
     await db.query(
-      `INSERT INTO tentativas_contato (usuario_id, tipo, demanda_id, campo) VALUES ($1, $2, $3, $4)`,
-      [usuario_id, tipo, demanda_id || null, campo]
+      `INSERT INTO tentativas_contato (usuario_id, tipo, demanda_id, campo, conta) VALUES ($1, $2, $3, $4, $5)`,
+      [usuario_id, tipo, demanda_id || null, campo, !!conta]
     )
   } catch (err) {
     console.error(`[TentativaContato] ${tipo}/${campo} de ${usuario_id}:`, err.message)
     return null
   }
+  if (!conta) return 'sem_penalidade'
   return aplicarPenalidadeContato(usuario_id, db)
 }
 
@@ -124,20 +132,35 @@ const limparProfundo = (v) => {
   return v
 }
 const mudou = (antes, depois) => JSON.stringify(antes) !== JSON.stringify(depois)
+// Algum valor (string, lista ou objeto) com contato CLARO.
+const temClaroProfundo = (v) => {
+  if (typeof v === 'string') return temContatoClaro(v)
+  if (Array.isArray(v)) return v.some(temClaroProfundo)
+  if (v && typeof v === 'object') return Object.values(v).some(temClaroProfundo)
+  return false
+}
 
 // ESCRITA. campos = { nome: valor } como veio do body; contexto = { usuario_id, tipo, demanda_id }.
-// Devolve { valores (limpos, mesmas chaves), removidos (nomes dos campos que mudaram) } e
-// registra UMA tentativa pelo envio (campo = nomes alterados, separados por vírgula).
+// Devolve { valores (limpos, mesmas chaves), removidos (nomes dos campos que mudaram), conta
+// (algum campo tinha contato claro), registrar }. NÃO registra sozinha: o chamador invoca
+// registrar() depois de o INSERT entrar (envio recusado não é tentativa) — uma tentativa por
+// envio (campo = nomes alterados, separados por vírgula), penalidade só quando conta.
 const limparCamposEscrita = (campos, contexto) => {
   const valores = {}
   const removidos = []
+  let conta = false
   for (const [campo, valor] of Object.entries(campos)) {
     const limpo = limparProfundo(valor)
     valores[campo] = limpo
-    if (mudou(valor, limpo)) removidos.push(campo)
+    if (mudou(valor, limpo)) {
+      removidos.push(campo)
+      if (temClaroProfundo(valor)) conta = true
+    }
   }
-  if (removidos.length > 0) registrarTentativaContato({ ...contexto, campo: removidos.join(',') })
-  return { valores, removidos }
+  const registrar = () => (removidos.length > 0
+    ? registrarTentativaContato({ ...contexto, campo: removidos.join(','), conta })
+    : Promise.resolve(null))
+  return { valores, removidos, conta, registrar }
 }
 
 // LEITURA. Mascara os campos listados numa linha (ou em cada linha de uma lista) — linha
@@ -154,6 +177,6 @@ const mascararLista = (linhas, campos) => (Array.isArray(linhas) ? linhas.map(l 
 
 module.exports = {
   JANELA_PENALIDADE_DIAS, AVISOS_ANTES_DE_SUSPENDER, DIAS_SUSPENSAO_CONTATO, MOTIVO_SUSPENSAO_CONTATO,
-  registrarTentativaContato, aplicarPenalidadeContato, liberarSuspensoesContato,
+  registrarTentativaContato, aplicarPenalidadeContato, liberarSuspensoesContato, temContatoClaro,
   limparProfundo, limparCamposEscrita, mascararLinha, mascararLista,
 }

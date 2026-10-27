@@ -31,7 +31,7 @@
 // GET /:id expõe (camposAtraso): prazo_chegada, tolerancia_ate, atrasado, pedido_atraso
 // {minutos, motivo, criado_em, status, respondido_em, responde_ate} e pedidos_atraso_restantes.
 const { pool } = require('../utils/supabase')
-const { SQL_ZERAR_AGENDA, TOLERANCIA_CHEGADA_MIN, sqlPrazoChegada, sqlLimiteChegada, formatarHoraSP } = require('../utils/agendamento')
+const { SQL_ZERAR_AGENDA, TOLERANCIA_CHEGADA_MIN, sqlPrazoChegada, sqlLimiteChegada, formatarHoraSP, isentoDeFalta } = require('../utils/agendamento')
 const { entregarPushOuEmail } = require('./alertaService')
 
 const MINUTOS_PERMITIDOS = [15, 30, 60]
@@ -54,7 +54,10 @@ const LADOS = {
   },
 }
 
-const COLUNAS = `id, titulo, criado_por, match_usuario_id, status, a_caminho_em,
+// prazo_timezone: fuso do dono para o HH:MM dos avisos (formatarHoraSP). chegada_recusada_em /
+// chegada_pendente_em / chegada_proposta_por: isenção de falta (isentoDeFalta) no texto do aviso.
+const COLUNAS = `id, titulo, criado_por, match_usuario_id, status, a_caminho_em, prazo_timezone,
+         chegada_recusada_em, chegada_pendente_em, chegada_proposta_por,
          chegada_declarada_em, chegada_confirmada_em, chegada_prevista_em, expira_em, prazo_chegada_extra_em,
          pedido_atraso_minutos, pedido_atraso_motivo, pedido_atraso_em, pedido_atraso_status,
          pedido_atraso_respondido_em, pedidos_atraso_usados,
@@ -207,7 +210,7 @@ const aceitarNoBanco = async (client, lado, id, statusFinal) => {
 
 const avisarAceite = async (tabela, d, automatico) => {
   const lado = LADOS[tabela]
-  const hora = formatarHoraSP(d.prazo_chegada_extra_em)
+  const hora = formatarHoraSP(d.prazo_chegada_extra_em, d.prazo_timezone)
   const [dono, prof] = await Promise.all([contato(d.criado_por), contato(d.match_usuario_id)])
   const nome = primeiroNome(prof?.nome)
   const viaProf = await entregar(prof, {
@@ -265,10 +268,15 @@ const responder = async ({ tabela, id, usuarioId, aceitar }) => {
       if (!novo) return erro(409, 'Não há pedido de mais tempo aguardando resposta.', 'SEM_PEDIDO')
       return { ok: true, aceito: true, d: novo }
     }
-    await client.query(
-      `UPDATE ${lado.tabela} SET pedido_atraso_status = 'recusado', ${SQL_RESOLVER} WHERE id = $1`, [d.id]
-    )
+    // O un-match zera pedido_atraso_* (SQL_ZERAR_AGENDA); o rastro da recusa é regravado
+    // DEPOIS dele e dura até o próximo match (SQL_LIMPAR_CHEGADA zera de novo).
     await recusarNoBanco(client, lado, d)
+    await client.query(
+      `UPDATE ${lado.tabela} SET pedido_atraso_status = 'recusado', pedido_atraso_minutos = $2, pedido_atraso_motivo = $3,
+              pedido_atraso_em = $4, pedido_atraso_respondido_em = NOW()
+        WHERE id = $1`,
+      [d.id, d.pedido_atraso_minutos, d.pedido_atraso_motivo, d.pedido_atraso_em]
+    )
     return { ok: true, aceito: false, d }
   })
   if (!feito.ok) return feito
@@ -314,7 +322,8 @@ const autoAceitarPedidosAtraso = async () => {
   }
 }
 
-// No PRAZO acordado, sem chegada e sem extensão: avisa os dois lados uma vez por match.
+// No PRAZO acordado, sem chegada e com o LIMITE efetivo ainda à frente (tolerância ou extensão
+// já aceita — HH:MM é o limite, seja qual for): avisa os dois lados uma vez por match.
 const avisarAtrasados = async () => {
   for (const [tabela, lado] of Object.entries(LADOS)) {
     try {
@@ -322,13 +331,17 @@ const avisarAtrasados = async () => {
         `UPDATE ${lado.tabela} SET aviso_atraso_enviado_em = NOW()
          WHERE status = 'aberta' AND match_usuario_id IS NOT NULL
            AND chegada_declarada_em IS NULL AND chegada_confirmada_em IS NULL
-           AND prazo_chegada_extra_em IS NULL AND aviso_atraso_enviado_em IS NULL
+           AND aviso_atraso_enviado_em IS NULL
            AND ${sqlPrazoChegada()} <= NOW() AND ${sqlLimiteChegada()} > NOW()
-         RETURNING id, titulo, criado_por, match_usuario_id, ${sqlLimiteChegada()} AS limite_chegada`
+         RETURNING id, titulo, criado_por, match_usuario_id, prazo_timezone,
+                   chegada_prevista_em, chegada_recusada_em, chegada_pendente_em, chegada_proposta_por,
+                   ${sqlLimiteChegada()} AS limite_chegada`
       )
       for (const d of claim.rows) {
         try {
-          const hora = formatarHoraSP(d.limite_chegada)
+          const hora = formatarHoraSP(d.limite_chegada, d.prazo_timezone)
+          // Janela recusada/sem resposta e nenhuma valendo: não há falta a cobrar, o texto não ameaça.
+          const isento = isentoDeFalta(d)
           const [dono, prof] = await Promise.all([contato(d.criado_por), contato(d.match_usuario_id)])
           const nome = primeiroNome(prof?.nome)
           const viaDono = await entregar(dono, {
@@ -338,7 +351,9 @@ const avisarAtrasados = async () => {
             rotulo: `atrasado dono ${tabela} ${d.id}`,
           })
           const viaProf = await entregar(prof, {
-            titulo: `⏰ Você está atrasado — tolerância até ${hora}, depois conta como falta`,
+            titulo: isento
+              ? `⏰ Você está atrasado — tolerância até ${hora}`
+              : `⏰ Você está atrasado — tolerância até ${hora}, depois conta como falta`,
             corpo: `Confirme a chegada em "${d.titulo}" no app assim que chegar, ou peça mais tempo ao cliente.`,
             data: { tipo: 'atrasado', [lado.chave]: d.id },
             rotulo: `atrasado profissional ${tabela} ${d.id}`,
@@ -429,8 +444,9 @@ const handlersLegados = (tabela) => {
           if (r.status === 200) r.corpo = { ...r.corpo, mensagem: 'Dono notificado para aprovar o tempo.' }
           return responderHttp(res, r)
         }
+        // Minutos novos = pedido novo para o dono: o relógio dos 10 min do auto-aceite recomeça.
         const upd = await pool.query(
-          `UPDATE ${lado.tabela} SET pedido_atraso_minutos = $2, pedido_tempo_minutos = $2
+          `UPDATE ${lado.tabela} SET pedido_atraso_minutos = $2, pedido_tempo_minutos = $2, pedido_atraso_em = NOW()
             WHERE id = $1 AND match_usuario_id = $3 AND pedido_atraso_status = '${STATUS_PENDENTE}'
             RETURNING ${COLUNAS}`,
           [req.params.id, min, req.usuario.id]
@@ -452,7 +468,9 @@ const handlersLegados = (tabela) => {
     responderTempo: async (req, res) => {
       try {
         const r = await responder({ tabela, id: req.params.id, usuarioId: req.usuario.id, aceitar: !!req.body?.aceito })
-        if (r.status === 200 && r.corpo.pedido_atraso) r.corpo = { ...r.corpo, mensagem: 'Tempo extra concedido!' }
+        // novo_match_feito_em: campo que o app antigo lia na resposta do aceite — hoje vale o
+        // limite novo de chegada (prazo_chegada), que é o que de fato mudou.
+        if (r.status === 200 && r.corpo.pedido_atraso) r.corpo = { ...r.corpo, mensagem: 'Tempo extra concedido!', novo_match_feito_em: r.corpo.prazo_chegada }
         responderHttp(res, r)
       } catch (err) {
         console.error(`[Atraso] responder-tempo ${tabela}:`, err.message)
