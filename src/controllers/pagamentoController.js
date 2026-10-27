@@ -492,28 +492,32 @@ const darAcessoGratuito = async (req, res) => {
   }
 }
 
-// Totais do painel calculados com COUNT sobre a tabela usuarios INTEIRA (nunca sobre a página
-// da lista): contas, pessoas (e-mails distintos — múltiplas contas por e-mail contam uma vez),
+// Totais do painel calculados com COUNT sobre as contas de CLIENTE (os mesmos quatro papéis
+// de listarAssinantes — admin/aprovador ficam fora, como na lista), nunca sobre a página da
+// lista: contas, pessoas (e-mails distintos — múltiplas contas por e-mail contam uma vez),
 // por tipo de cadastro (sqlTipoConta: reparador = "prestador", pintor = "construtor/pintor",
-// dono_reparo = "dono de serviço", dono_obra) e por plataforma (plataforma do cadastro, com
-// recuo para a do push; NULL = sem plataforma). admin/aprovador/assinante saem em `outros`.
+// dono_reparo = "dono de serviço", dono_obra; o papel legado 'assinante' é o construtor/pintor
+// de antes do tipo_prestador, como o painel sempre tratou) e por plataforma (plataforma do
+// cadastro, com recuo para a do push; NULL = sem plataforma). `outros` fica para o contrato.
 const { sqlTipoConta } = require('../utils/tipoConta')
 const SQL_PLATAFORMA = `COALESCE(u.plataforma, u.push_plataforma)`
+const SQL_PAPEIS_CLIENTE = `u.role IN ('assinante', 'prestador', 'dono_obra', 'pintor')`
 const totaisDeUsuarios = async () => {
   const r = await pool.query(`
     SELECT COUNT(*)::int                                                         AS total_contas,
            COUNT(DISTINCT lower(btrim(u.email)))::int                            AS pessoas,
            COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} = 'reparador')::int      AS prestador,
-           COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} = 'pintor')::int         AS construtor_pintor,
+           COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} IN ('pintor', 'assinante'))::int AS construtor_pintor,
            COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} = 'dono_reparo')::int    AS dono_servico,
            COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} = 'dono_obra')::int      AS dono_obra,
-           COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} NOT IN ('reparador', 'pintor', 'dono_reparo', 'dono_obra'))::int AS outros,
+           COUNT(*) FILTER (WHERE ${sqlTipoConta('u')} NOT IN ('reparador', 'pintor', 'assinante', 'dono_reparo', 'dono_obra'))::int AS outros,
            COUNT(*) FILTER (WHERE ${SQL_PLATAFORMA} = 'android')::int           AS android,
            COUNT(*) FILTER (WHERE ${SQL_PLATAFORMA} = 'ios')::int               AS iphone,
            COUNT(*) FILTER (WHERE ${SQL_PLATAFORMA} IS NULL)::int               AS sem_plataforma,
            COUNT(*) FILTER (WHERE u.ativo = true)::int                          AS ativos,
            COUNT(*) FILTER (WHERE u.suspenso_em IS NOT NULL)::int               AS suspensos
-      FROM usuarios u`)
+      FROM usuarios u
+     WHERE ${SQL_PAPEIS_CLIENTE}`)
   const t = r.rows[0]
   return {
     total_contas: t.total_contas,
@@ -574,16 +578,18 @@ const listarAssinantes = async (req, res) => {
 
     // cadastrado_em = data de cadastro do USUÁRIO. a.criado_em (abaixo) é a da assinatura
     // e sai NULL para quem não tem linha em assinaturas — por isso o alias distinto.
+    // plataforma = a MESMA expressão dos totais (cadastro com recuo para a do push), senão o
+    // chip "iPhone (N)" do painel filtra as linhas por outra regra e mostra menos que N.
     // COUNT(*) OVER(): total do filtro no mesmo statement, antes do LIMIT.
     const result = await pool.query(`
       SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.bairro, u.role,
              u.tipo_dono, u.tipo_prestador, u.verificacao_status, u.aprovado_automaticamente,
-             u.referencias, u.especialidades, u.plataforma, u.criado_em AS cadastrado_em,
+             u.referencias, u.especialidades, ${SQL_PLATAFORMA} AS plataforma, u.criado_em AS cadastrado_em,
              a.status, a.plano, a.tipo, a.valor_mensal, a.criado_em,
              COUNT(*) OVER()::int AS _total
       FROM usuarios u
       LEFT JOIN assinaturas a ON a.usuario_id = u.id
-      WHERE u.role IN ('assinante', 'prestador', 'dono_obra', 'pintor')
+      WHERE ${SQL_PAPEIS_CLIENTE}
       ${busca}
       ORDER BY ${ORDENS[ordem]}
       LIMIT $1 OFFSET $2
@@ -595,7 +601,7 @@ const listarAssinantes = async (req, res) => {
     if (assinantes.length === 0 && offset > 0) {
       // Página além do fim: o OVER() não devolve linha; conta o filtro à parte.
       const c = await pool.query(
-        `SELECT COUNT(*)::int AS n FROM usuarios u WHERE u.role IN ('assinante', 'prestador', 'dono_obra', 'pintor') ${busca.replace('$3', '$1').replace('$4', '$2')}`,
+        `SELECT COUNT(*)::int AS n FROM usuarios u WHERE ${SQL_PAPEIS_CLIENTE} ${busca.replace('$3', '$1').replace('$4', '$2')}`,
         params.slice(2)
       )
       total = c.rows[0].n
