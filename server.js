@@ -23,6 +23,9 @@ const { recalcularIndicador } = require('./src/utils/indicacoes')
 const { liberarSuspensoesContato } = require('./src/utils/tentativasContato')
 // Pedidos de cancelamento por acordo (2h) vencidos: limpa e avisa quem pediu.
 const { expirarPedidosCancelamento } = require('./src/services/cancelamentoMatchService')
+// Tolerância de chegada: aviso de atraso aos dois lados no prazo e auto-aceite (10 min) do
+// pedido de mais tempo sem resposta do dono. Cadência dos cronômetros (1 min).
+const { autoAceitarPedidosAtraso, avisarAtrasados } = require('./src/services/atrasoChegadaService')
 // Poda de links de assinatura pela web nunca usados (> 7 dias) — mesmo agendamento diário
 // de limparTentativasAntigas, sem mecanismo novo.
 const { limparLinksAssinaturaAntigos } = require('./src/controllers/assinaturaLinkController')
@@ -783,6 +786,9 @@ const iniciarAgendador = () => {
   setInterval(() => { verificarMarcosExpiracao() }, INTERVALO_CRONOMETRO)
   setInterval(() => { verificarCronometroReparos() }, INTERVALO_CRONOMETRO)
   setInterval(() => { verificarCronometroObras() }, INTERVALO_CRONOMETRO)
+  // Atraso na chegada (atrasoChegadaService): aviso no prazo e auto-aceite do pedido pendente.
+  setInterval(() => { avisarAtrasados() }, INTERVALO_CRONOMETRO)
+  setInterval(() => { autoAceitarPedidosAtraso() }, INTERVALO_CRONOMETRO)
   // Lembrete ao profissional antes do prazo de chegada (prazo − min(1h, metade do intervalo
   // match→prazo)): mesma cadência dos cronômetros, que leem o mesmo prazo. Fora do warm-up: o
   // lembrete fica devido até o prazo, então o primeiro tique de 1 min o pega.
