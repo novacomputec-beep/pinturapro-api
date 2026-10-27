@@ -3,6 +3,7 @@ const { pool } = require('../utils/supabase')
 const { enviarEmail } = require('../services/brevoService')
 const { MARCA } = require('../utils/marca')
 const { recalcularIndicador } = require('../utils/indicacoes')
+const { mascararCpfCnpj } = require('../utils/mascaras')
 
 const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN
 const PAGBANK_URL = 'https://api.pagseguro.com'
@@ -621,7 +622,7 @@ const listarAssinantes = async (req, res) => {
     // chip "iPhone (N)" do painel filtra as linhas por outra regra e mostra menos que N.
     // COUNT(*) OVER(): total do filtro no mesmo statement, antes do LIMIT.
     const result = await pool.query(`
-      SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.bairro, u.role,
+      SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.bairro, u.role, u.cpf_cnpj,
              u.tipo_dono, u.tipo_prestador, u.verificacao_status, u.aprovado_automaticamente,
              u.referencias, u.especialidades, ${SQL_PLATAFORMA} AS plataforma, u.criado_em AS cadastrado_em,
              a.status, a.plano, a.tipo, a.valor_mensal, a.criado_em,
@@ -636,7 +637,8 @@ const listarAssinantes = async (req, res) => {
 
     const assinantes = result.rows
     let total = assinantes.length > 0 ? assinantes[0]._total : 0
-    assinantes.forEach(r => delete r._total)
+    // cpf_cnpj_mascarado (***.456.789-**) no lugar do cru: o CPF inteiro nunca sai na lista.
+    assinantes.forEach(r => { delete r._total; r.cpf_cnpj_mascarado = mascararCpfCnpj(r.cpf_cnpj); delete r.cpf_cnpj })
     if (assinantes.length === 0 && offset > 0) {
       // Página além do fim: o OVER() não devolve linha; conta o filtro à parte.
       const c = await pool.query(

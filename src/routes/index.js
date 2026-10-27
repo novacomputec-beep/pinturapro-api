@@ -7972,15 +7972,8 @@ router.get('/admin/usuarios/totais',          autenticar, exigirAdmin, pagamento
 // Cidades distintas (normalizadas) das contas de cliente, com contagem — ver cidadesClientes.
 router.get('/admin/cidades',                  autenticar, exigirAdmin, pagamentoCtrl.cidadesClientes)
 
-// CPF/CNPJ mascarado para o painel: só o miolo fica legível (***.456.789-** / **.345.678/0001-**).
-// Qualquer outro tamanho: tudo oculto menos os 4 últimos dígitos. Sem valor → null.
-const mascararCpfCnpj = (valor) => {
-  const d = String(valor || '').replace(/\D/g, '')
-  if (!d) return null
-  if (d.length === 11) return `***.${d.slice(3, 6)}.${d.slice(6, 9)}-**`
-  if (d.length === 14) return `**.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-**`
-  return '*'.repeat(Math.max(0, d.length - 4)) + d.slice(-4)
-}
+// CPF/CNPJ mascarado (***.456.789-**): helper único em utils/mascaras, o mesmo da lista de usuários.
+const { mascararCpfCnpj } = require('../utils/mascaras')
 
 // GET /admin/usuarios/:id/verificacao — ficha de verificação de QUALQUER usuário, seja qual for
 // o status (a aba Verificação só lista os pendentes). Mesmos documentos e mesma assinatura de
