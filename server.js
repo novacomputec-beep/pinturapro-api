@@ -861,6 +861,9 @@ const iniciarAgendador = () => {
         FROM usuarios u
         JOIN assinaturas a ON a.usuario_id = u.id
         WHERE u.verificacao_status = 'pendente'
+          -- Modo Auto só aprova quem enviou documento (frente) E selfie; sem um deles a
+          -- linha fica 'pendente' para revisão manual no painel.
+          AND u.verificacao_doc_frente_url IS NOT NULL AND u.verificacao_selfie_url IS NOT NULL
           AND ((a.status = 'pendente_verificacao' AND a.atualizado_em < NOW() - INTERVAL '15 seconds')
             OR (a.status <> 'pendente_verificacao' AND u.verificacao_enviada_em < NOW() - INTERVAL '15 seconds'))
       `)

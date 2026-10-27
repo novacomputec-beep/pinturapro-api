@@ -6391,6 +6391,9 @@ router.post('/auth/upload-verificacao', upload.single('arquivo'), async (req, re
 // documentos já em análise nem reabre um cadastro aprovado/reprovado.
 const URL_DOC_VERIFICACAO = /^https:\/\/res\.cloudinary\.com\/\S+$/
 const REFERENCIAS_VERIFICACAO_MAX = 2
+// Referência própria (mesmo telefone / mesmo nome do usuário) é recusada — regra única em
+// utils/referencias, a mesma do cadastro e do campo `propria` da ficha do admin.
+const { referenciaPropria, temReferenciaPropria, ERRO_REFERENCIA_PROPRIA } = require('../utils/referencias')
 router.post('/auth/verificacao', autenticar, async (req, res) => {
   try {
     const { verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url } = req.body || {}
@@ -6422,6 +6425,9 @@ router.post('/auth/verificacao', autenticar, async (req, res) => {
         codigo: 'REFERENCIAS_OBRIGATORIAS',
       })
     }
+    // Referência não pode ser o próprio usuário (telefone igual ou nome igual/contido).
+    const eu = (await pool.query(`SELECT nome, telefone FROM usuarios WHERE id = $1`, [req.usuario.id])).rows[0]
+    if (eu && temReferenciaPropria(refs, eu)) return res.status(400).json(ERRO_REFERENCIA_PROPRIA)
 
     const r = await pool.query(
       `UPDATE usuarios
@@ -6840,6 +6846,9 @@ router.post('/verificacao/modo-automatico', autenticar, exigirSuperAdmin, async 
         `SELECT u.id, a.status AS assinatura_status FROM usuarios u
          JOIN assinaturas a ON a.usuario_id = u.id
          WHERE u.verificacao_status = 'pendente'
+           -- Mesma regra do cron (server.js): só com documento (frente) E selfie; o resto
+           -- fica 'pendente' para revisão manual.
+           AND u.verificacao_doc_frente_url IS NOT NULL AND u.verificacao_selfie_url IS NOT NULL
            AND (a.status = 'pendente_verificacao' OR u.verificacao_enviada_em IS NOT NULL)`
       )
       let aprovados = 0
@@ -7978,7 +7987,7 @@ const { mascararCpfCnpj } = require('../utils/mascaras')
 // GET /admin/usuarios/:id/verificacao — ficha de verificação de QUALQUER usuário, seja qual for
 // o status (a aba Verificação só lista os pendentes). Mesmos documentos e mesma assinatura de
 // leitura da aba (gerarUrlAssinadaVerificacao, TTL curto, nunca público); referências do
-// cadastro/verificação adiada ({ nome, telefone[, relacao] } em usuarios.referencias) e CPF/CNPJ
+// cadastro/verificação adiada ({ nome, telefone[, relacao], propria } em usuarios.referencias) e CPF/CNPJ
 // mascarado. Campos vazios saem null/[] — 404 só quando o id não existe. Datas de decisão e
 // quem decidiu NÃO são gravadas hoje (só aprovado_automaticamente), então saem null.
 // Cada consulta é logada com o id do admin (auditoria de acesso a documento pessoal).
@@ -8011,6 +8020,8 @@ router.get('/admin/usuarios/:id/verificacao', autenticar, exigirAdmin, async (re
     } catch (_) {
       if (typeof u.referencias === 'string' && u.referencias.trim()) referencias = [{ nome: u.referencias.trim(), telefone: null, relacao: null }]
     }
+    // propria: a referência é o próprio usuário (mesma regra que recusa no cadastro/verificação).
+    referencias = referencias.map(x => ({ ...x, propria: referenciaPropria(x, u) }))
 
     const temDocs = !!(u.verificacao_doc_frente_url || u.verificacao_doc_verso_url || u.verificacao_selfie_url)
     const status = u.verificacao_status || 'nao_solicitada'
