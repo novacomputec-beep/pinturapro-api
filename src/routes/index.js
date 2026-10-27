@@ -2350,7 +2350,9 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
         -- passou — vale em qualquer status vivo (inclusive 'rascunho', que também tem
         -- expira_em desde a criação). Calculado no SQL (relógio do servidor) para o cliente
         -- não precisar comparar expira_em com o relógio do aparelho.
-        (o.status <> 'encerrada' AND o.expira_em <= NOW()) AS expirada,
+        -- Com pintor casado vale o limite de chegada (tolerância/extensão — sqlLimiteChegada),
+        -- a MESMA expressão de GET /obras/:id: a lista não mostra "Expirado" com o match vivo.
+        (o.status <> 'encerrada' AND (CASE WHEN o.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('o.')} ELSE o.expira_em END) <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
         -- Conta 'pendente' E 'contraproposta_dono': uma obra em negociação (contraproposta
         -- enviada, aguardando o pintor) continua tendo interessado, e antes aparecia como zero.
@@ -2727,7 +2729,7 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status,
              o.criado_em, o.horas_para_expirar, o.prazo_modo,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
-             (o.status = 'aberta' AND o.expira_em <= NOW()) AS expirada,
+             (o.status = 'aberta' AND (CASE WHEN o.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('o.')} ELSE o.expira_em END) <= NOW()) AS expirada,
              (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) AS total_candidaturas
       FROM obras o
       LEFT JOIN usuarios u ON u.id = o.criado_por
@@ -3970,7 +3972,8 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
         -- "Expirado" não é status no banco: é um reparo NÃO encerrado cujo expira_em já
         -- passou — vale em qualquer status vivo. Calculado no SQL (relógio do servidor)
         -- para o cliente não precisar comparar expira_em com o relógio do aparelho.
-        (r.status <> 'encerrada' AND r.expira_em <= NOW()) AS expirada,
+        -- Com prestador casado vale o limite de chegada (sqlLimiteChegada), como em GET /reparos/:id.
+        (r.status <> 'encerrada' AND (CASE WHEN r.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('r.')} ELSE r.expira_em END) <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         -- Conta 'pendente' E 'contraproposta_dono': um reparo em negociação (contraproposta
         -- enviada, aguardando o prestador) continua tendo interessado, e antes aparecia como zero.
@@ -4434,7 +4437,7 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
       SELECT r.id, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.cidade, r.uf, r.bairro,
              r.expira_em, r.status, r.criado_em, r.prazo_atendimento_horas,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
-             (r.status = 'aberta' AND r.expira_em <= NOW()) AS expirada,
+             (r.status = 'aberta' AND (CASE WHEN r.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('r.')} ELSE r.expira_em END) <= NOW()) AS expirada,
              (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) AS total_interessados
       FROM reparos r
       LEFT JOIN usuarios u ON u.id = r.criado_por
