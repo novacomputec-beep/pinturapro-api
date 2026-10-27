@@ -9,6 +9,7 @@ const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, multip
 const { registrarPlataforma } = require('../utils/plataforma')
 const { municipioExiste } = require('../utils/geoBusca')
 const { normalizarCodigo, recalcularIndicador } = require('../utils/indicacoes')
+const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA } = require('../utils/referencias')
 const nodemailer = require('nodemailer')
 const crypto = require('crypto')
 
@@ -121,6 +122,13 @@ const cadastrar = async (req, res) => {
       && !verificacao_doc_frente_url && !verificacao_doc_verso_url && !verificacao_selfie_url
     const verificacaoStatus = role === 'prestador' && !semDocs ? 'pendente' : 'nao_solicitada'
     const planoEscolhido = plano || 'mensal'
+
+    // Referência própria (telefone igual ao do cadastro, ou nome igual/contido no nome
+    // completo) é recusada antes de abrir a transação — regra única em utils/referencias.
+    if (temReferenciaPropria(referencias, { nome, telefone })) {
+      console.log(`[CADASTRO][${ts}] ✗ 400 referencia propria`)
+      return res.status(400).json(ERRO_REFERENCIA_PROPRIA)
+    }
 
     // Janela de lançamento: prestador entra SEM pagar mas AINDA aguarda aprovação
     // do admin (idoneidade nunca é pulada). A janela só remove o paywall — a fila de
