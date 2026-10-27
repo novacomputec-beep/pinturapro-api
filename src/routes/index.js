@@ -3656,12 +3656,19 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
         }
         if (marcado.rowCount === 0) return res.json(corpo)
         const nome = await primeiroNome(req.usuario.id)
-        const donoTok = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [obra.rows[0].criado_por])
+        const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [obra.rows[0].criado_por])
         res.json(corpo)
-        if (donoTok.rows[0]?.push_token) {
-          enviarPushNotificacao(donoTok.rows[0].push_token, `🚗 ${nome} está a caminho!`,
-            `O pintor saiu para "${obra.rows[0].titulo}". O telefone dele já aparece no app.`,
-            { tipo: 'a_caminho', obra_id: req.params.id }).catch(() => {})
+        // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail), como os
+        // avisos de horário. Erro de ticket é logado dentro do helper; aqui fica o resultado.
+        if (dono.rows[0]) {
+          entregarPushOuEmail({
+            ...dono.rows[0],
+            titulo: `🚗 ${nome} está a caminho!`,
+            corpo: `O pintor saiu para "${obra.rows[0].titulo}". O telefone dele já aparece no app.`,
+            data: { tipo: 'a_caminho', obra_id: req.params.id },
+            rotulo: `a caminho obras ${req.params.id}`,
+          }).then(via => console.log(`[ACaminho] obras ${req.params.id} → dono via ${via}`))
+            .catch(err => console.error(`[ACaminho] obras ${req.params.id}:`, err.message))
         }
         return
       }
@@ -4881,12 +4888,19 @@ router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) 
         }
         if (marcado.rowCount === 0) return res.json(corpo)
         const nome = await primeiroNome(req.usuario.id)
-        const donoTok = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [reparo.rows[0].criado_por])
+        const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [reparo.rows[0].criado_por])
         res.json(corpo)
-        if (donoTok.rows[0]?.push_token) {
-          enviarPushNotificacao(donoTok.rows[0].push_token, `🚗 ${nome} está a caminho!`,
-            `O prestador saiu para "${reparo.rows[0].titulo}". O telefone dele já aparece no app.`,
-            { tipo: 'a_caminho', reparo_id: req.params.id }).catch(() => {})
+        // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail), como os
+        // avisos de horário. Erro de ticket é logado dentro do helper; aqui fica o resultado.
+        if (dono.rows[0]) {
+          entregarPushOuEmail({
+            ...dono.rows[0],
+            titulo: `🚗 ${nome} está a caminho!`,
+            corpo: `O prestador saiu para "${reparo.rows[0].titulo}". O telefone dele já aparece no app.`,
+            data: { tipo: 'a_caminho', reparo_id: req.params.id },
+            rotulo: `a caminho reparos ${req.params.id}`,
+          }).then(via => console.log(`[ACaminho] reparos ${req.params.id} → dono via ${via}`))
+            .catch(err => console.error(`[ACaminho] reparos ${req.params.id}:`, err.message))
         }
         return
       }
