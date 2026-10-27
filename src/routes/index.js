@@ -14,7 +14,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail } = require('../services/alertaService')
+const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, encerramentoAutomaticoEm } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { moderarDemanda, avisarModeracao, sanitizarTexto, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
@@ -498,6 +498,12 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS encerramento_solicitado_em  TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS encerramento_solicitado_por UUID REFERENCES usuarios(id)`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS encerramento_solicitado_em  TIMESTAMPTZ`)
+    // Lembretes ao dono da solicitação pendente (alertaService.lembrarConfirmacaoEncerramento):
+    // claim atômico de cada aviso (30 min / 2h), zerados ao registrar uma solicitação nova.
+    for (const tabela of ['obras', 'reparos']) {
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_encerramento_30m_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_encerramento_2h_em TIMESTAMPTZ`)
+    }
     // Relógio de publicação da obra — traz a obra à paridade que o reparo já tem (criado_em é
     // o instante de publicação do reparo + prazo_atendimento_horas é a janela). horas_para_expirar
     // guarda a janela original; publicado_em guarda o instante em que a obra foi ao ar. A obra
@@ -3434,7 +3440,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     const pedido_cancelamento = pedidoCancelamento(obra, req.usuario.id)
     // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
     // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, pedido_cancelamento, ...camposAtraso(obra) })
+    // encerramento_automatico_em: quando o cron fecha sozinho a solicitação pendente do pintor
+    // (solicitado_em + 2 dias — alertaService.encerramentoAutomaticoEm); null sem solicitação.
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, pedido_cancelamento, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -3790,18 +3798,28 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
     if (!ehAdmin && !ehDono && !semContraparte) {
       // 1ª chamada do pintor: registra a solicitação e avisa o dono. Não fecha.
       if (!o.encerramento_solicitado_por) {
+        // Lembretes (30 min / 2h) zerados junto: valem para ESTA solicitação.
         await pool.query(
-          `UPDATE obras SET encerramento_solicitado_por = $1, encerramento_solicitado_em = NOW() WHERE id = $2`,
+          `UPDATE obras SET encerramento_solicitado_por = $1, encerramento_solicitado_em = NOW(),
+                            lembrete_encerramento_30m_em = NULL, lembrete_encerramento_2h_em = NULL WHERE id = $2`,
           [req.usuario.id, req.params.id]
         )
         const outroId = ehDono ? o.match_usuario_id : o.criado_por
-        const outro = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [outroId])
-        if (outro.rows[0]?.push_token) {
-          enviarPushNotificacao(outro.rows[0].push_token, '🔔 Encerramento solicitado',
-            `A outra parte pediu para encerrar a obra "${o.titulo}". Confirme no app.`,
-            { tipo: 'encerramento_solicitado', obra_id: req.params.id }).catch(() => {})
+        const nome = await primeiroNome(req.usuario.id)
+        const outro = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [outroId])
+        res.json({ mensagem: 'Encerramento solicitado. Aguardando confirmação da outra parte.', encerramento: 'pendente' })
+        // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
+        if (outro.rows[0]) {
+          entregarPushOuEmail({
+            ...outro.rows[0],
+            titulo: `✅ ${nome} terminou a obra`,
+            corpo: `"${o.titulo}" foi concluída. Confira e confirme no app para avaliar.`,
+            data: { tipo: 'encerramento_solicitado', obra_id: req.params.id },
+            rotulo: `encerramento solicitado obras ${req.params.id}`,
+          }).then(via => console.log(`[Encerrar] obras ${req.params.id}: solicitação → dono via ${via}`))
+            .catch(err => console.error(`[Encerrar] obras ${req.params.id} aviso da solicitação:`, err.message))
         }
-        return res.json({ mensagem: 'Encerramento solicitado. Aguardando confirmação da outra parte.', encerramento: 'pendente' })
+        return
       }
       // Pintor chamando de novo: segue pendente. Não fecha (só o dono fecha) e não reenvia push.
       if (o.encerramento_solicitado_por === req.usuario.id) {
@@ -3818,18 +3836,17 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
     )
     // Pushes fire-and-forget: o UPDATE acima já commitou, então uma falha de push não pode
     // virar 500 para um encerramento que aconteceu.
+    // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
+    const avisarEncerramento = (destino, titulo, corpo) => entregarPushOuEmail({
+      ...destino, titulo, corpo, data: { tipo: 'obra_encerrada', obra_id: req.params.id }, rotulo: `obra encerrada ${req.params.id}`,
+    }).then(via => console.log(`[Encerrar] obras ${req.params.id}: ${titulo} → via ${via}`))
+      .catch(err => console.error(`[Encerrar] obras ${req.params.id} aviso de encerramento:`, err.message))
     if (ehDono && o.match_usuario_id) {
-      const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.match_usuario_id])
-      if (pintor.rows[0]?.push_token) {
-        enviarPushNotificacao(pintor.rows[0].push_token, '✅ Obra encerrada!',
-          `O solicitante encerrou a obra "${o.titulo}".`, { tipo: 'obra_encerrada', obra_id: req.params.id }).catch(() => {})
-      }
+      const pintor = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [o.match_usuario_id])
+      if (pintor.rows[0]) avisarEncerramento(pintor.rows[0], '✅ Obra encerrada!', `O solicitante encerrou a obra "${o.titulo}".`)
     } else if (ehPintor) {
-      const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '✅ Serviço concluído!',
-          `O pintor concluiu a obra "${o.titulo}".`, { tipo: 'obra_encerrada', obra_id: req.params.id }).catch(() => {})
-      }
+      const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [o.criado_por])
+      if (dono.rows[0]) avisarEncerramento(dono.rows[0], '✅ Serviço concluído!', `O pintor concluiu a obra "${o.titulo}".`)
     }
     res.json({ mensagem: 'Obra encerrada com sucesso!', encerramento: 'concluido' })
   } catch (err) {
@@ -5085,18 +5102,28 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
     const semContraparte = !r.match_usuario_id
     if (!ehAdmin && !ehDono && !semContraparte) {
       if (!r.encerramento_solicitado_por) {
+        // Lembretes (30 min / 2h) zerados junto: valem para ESTA solicitação.
         await pool.query(
-          `UPDATE reparos SET encerramento_solicitado_por = $1, encerramento_solicitado_em = NOW() WHERE id = $2`,
+          `UPDATE reparos SET encerramento_solicitado_por = $1, encerramento_solicitado_em = NOW(),
+                              lembrete_encerramento_30m_em = NULL, lembrete_encerramento_2h_em = NULL WHERE id = $2`,
           [req.usuario.id, req.params.id]
         )
         const outroId = ehDono ? r.match_usuario_id : r.criado_por
-        const outro = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [outroId])
-        if (outro.rows[0]?.push_token) {
-          enviarPushNotificacao(outro.rows[0].push_token, '🔔 Encerramento solicitado',
-            `A outra parte pediu para encerrar o serviço "${r.titulo}". Confirme no app.`,
-            { tipo: 'encerramento_solicitado', reparo_id: req.params.id }).catch(() => {})
+        const nome = await primeiroNome(req.usuario.id)
+        const outro = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [outroId])
+        res.json({ mensagem: 'Encerramento solicitado. Aguardando confirmação da outra parte.', encerramento: 'pendente' })
+        // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
+        if (outro.rows[0]) {
+          entregarPushOuEmail({
+            ...outro.rows[0],
+            titulo: `✅ ${nome} terminou o serviço`,
+            corpo: `"${r.titulo}" foi concluído. Confira e confirme no app para avaliar.`,
+            data: { tipo: 'encerramento_solicitado', reparo_id: req.params.id },
+            rotulo: `encerramento solicitado reparos ${req.params.id}`,
+          }).then(via => console.log(`[Encerrar] reparos ${req.params.id}: solicitação → dono via ${via}`))
+            .catch(err => console.error(`[Encerrar] reparos ${req.params.id} aviso da solicitação:`, err.message))
         }
-        return res.json({ mensagem: 'Encerramento solicitado. Aguardando confirmação da outra parte.', encerramento: 'pendente' })
+        return
       }
       if (r.encerramento_solicitado_por === req.usuario.id) {
         return res.json({ mensagem: 'Encerramento já solicitado. Aguardando a outra parte.', encerramento: 'pendente' })
@@ -5109,18 +5136,17 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
        WHERE id = $1`,
       [req.params.id]
     )
+    // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
+    const avisarEncerramento = (destino, titulo, corpo) => entregarPushOuEmail({
+      ...destino, titulo, corpo, data: { tipo: 'reparo_encerrado', reparo_id: req.params.id }, rotulo: `reparo encerrado ${req.params.id}`,
+    }).then(via => console.log(`[Encerrar] reparos ${req.params.id}: ${titulo} → via ${via}`))
+      .catch(err => console.error(`[Encerrar] reparos ${req.params.id} aviso de encerramento:`, err.message))
     if (ehDono && r.match_usuario_id) {
-      const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
-      if (prestador.rows[0]?.push_token) {
-        enviarPushNotificacao(prestador.rows[0].push_token, '✅ Serviço encerrado!',
-          `O solicitante encerrou o serviço "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id }).catch(() => {})
-      }
+      const prestador = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [r.match_usuario_id])
+      if (prestador.rows[0]) avisarEncerramento(prestador.rows[0], '✅ Serviço encerrado!', `O solicitante encerrou o serviço "${r.titulo}".`)
     } else if (ehPrestador) {
-      const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.criado_por])
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '✅ Serviço concluído!',
-          `O prestador concluiu o serviço "${r.titulo}".`, { tipo: 'reparo_encerrado', reparo_id: req.params.id }).catch(() => {})
-      }
+      const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [r.criado_por])
+      if (dono.rows[0]) avisarEncerramento(dono.rows[0], '✅ Serviço concluído!', `O prestador concluiu o serviço "${r.titulo}".`)
     }
     res.json({ mensagem: 'Serviço encerrado com sucesso!', encerramento: 'concluido' })
   } catch (err) {
@@ -6024,6 +6050,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
       // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
       ...camposAtraso(reparo),
+      // Fechamento automático da solicitação pendente do prestador (solicitado_em + 3h).
+      encerramento_automatico_em: encerramentoAutomaticoEm('reparos', reparo),
       dono_telefone,
       dono_nome,
       dono_foto_url,

@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, lembrarRespostaHorario, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, lembrarRespostaHorario, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -829,6 +829,8 @@ const iniciarAgendador = () => {
   // cronômetro — a fatia de W=1h cai em 30 min e não pode esperar 10. Fora do warm-up: a
   // fatia fica devida até acabar, então o próximo tique a pega.
   setInterval(() => { lembrarDemandasSemResposta() }, INTERVALO_LEMBRETE)
+  // Lembretes ao dono (30 min / 2h) da solicitação de encerramento pendente do profissional.
+  setInterval(() => { lembrarConfirmacaoEncerramento() }, INTERVALO_LEMBRETE)
   // Versão "atual" do app: sobe sozinha quando N usuários não testadores já rodam uma maior.
   // 5 min: o aviso de atualização não é urgente, e a consulta agrupa uma tabela pequena.
   setInterval(() => { cronPromoverVersaoAtual() }, INTERVALO_LEMBRETE)
