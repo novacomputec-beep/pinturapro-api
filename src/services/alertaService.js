@@ -32,7 +32,7 @@ const { enviarEmail: enviarEmailBrevo } = require('./brevoService')
 const { sqlNaoMesmoCpf, sqlNaoMesmoCpfDoCriador } = require('../utils/demandaPropria')
 // Agendamento livre de chegada (módulo inerte): zeragem das colunas no un-match, isenção de
 // falta (JS + SQL), espera pela resposta à vigia e os lembretes/vigia abaixo de lembrarPrazoChegada.
-const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, isentoDeFalta, SQL_ESPERA_COMPARECIMENTO, formatarDataHoraSP } = require('../utils/agendamento')
+const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, isentoDeFalta, SQL_ESPERA_COMPARECIMENTO, formatarDataHoraSP, sqlLimiteChegada } = require('../utils/agendamento')
 // Grupos de categorias relacionadas (lado reparo): a categoria da demanda vira a lista de slugs
 // do seu grupo (chave grupos_relacionados_ativo) antes do casamento com especialidades, nos DOIS
 // públicos (broadcastPaginado e reivindicarEmailsNovaDemanda). utils/gruposCategorias só importa
@@ -1623,7 +1623,9 @@ const vigiarComparecimento = semSobreposicao('vigiarComparecimento', async () =>
            FROM usuarios u
           WHERE u.id = d.criado_por AND ${SQL_BASE_AGENDA}
             AND d.vigia_comparecimento_em IS NULL AND d.comparecimento_resposta IS NULL
-            AND NOW() >= d.chegada_prevista_em + INTERVAL '${VIGIA_ATRASO}'
+            -- 1h depois do LIMITE (horário + tolerância de 15 min, ou a extensão aceita —
+            -- utils/agendamento.sqlLimiteChegada), não do horário cru: a tolerância vale aqui também.
+            AND NOW() >= ${sqlLimiteChegada('d.')} + INTERVAL '${VIGIA_ATRASO}'
       RETURNING d.id, d.titulo, d.chegada_prevista_em, u.push_token`
       )
       for (const d of claim.rows) {
@@ -1982,6 +1984,9 @@ const registrarFaltaUsuario = async (tabela, demandaId, usuarioId) => {
 // expira_em): quando o prestador promete uma janela de chegada, é ELA que passa a valer como
 // prazo — inclusive quando cai depois do expira_em original (o dono aceitou esperar até lá ao
 // ver a previsão). Sem previsão, nada muda: continua o expira_em.
+// LIMITE = prazo + tolerância de 15 min, ou a extensão aceita num pedido de atraso
+// (prazo_chegada_extra_em, services/atrasoChegadaService) — sqlLimiteChegada em
+// utils/agendamento. Os dois ramos abaixo leem o LIMITE; pedido de atraso 'pendente' segura (b).
 // (a) A 5 minutos do fim: avisa o dono uma única vez por match.
 // (b) Quando o cronômetro zera: devolve o reparo ao feed e limpa o match.
 // Os dois ramos param assim que a chegada é DECLARADA (por qualquer lado) ou CONFIRMADA: a
@@ -2003,7 +2008,7 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
         AND u.push_token IS NOT NULL
         AND r.chegada_declarada_em IS NULL
         AND r.chegada_confirmada_em IS NULL
-        AND COALESCE(r.chegada_prevista_em, r.expira_em) BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
+        AND ${sqlLimiteChegada('r.')} BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
       RETURNING r.id, r.titulo, u.push_token
     `)
 
@@ -2041,7 +2046,8 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
         AND match_usuario_id IS NOT NULL
         AND chegada_declarada_em IS NULL
         AND chegada_confirmada_em IS NULL
-        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()
+        AND ${sqlLimiteChegada()} <= NOW()
+        AND pedido_atraso_status IS DISTINCT FROM 'pendente'
         AND ${SQL_ESPERA_COMPARECIMENTO}`
 
     // chegada_recusada_em/chegada_prevista_em entram no SELECT para a ISENÇÃO: match que morre
@@ -2159,7 +2165,7 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
         AND u.push_token IS NOT NULL
         AND o.chegada_declarada_em IS NULL
         AND o.chegada_confirmada_em IS NULL
-        AND COALESCE(o.chegada_prevista_em, o.expira_em) BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
+        AND ${sqlLimiteChegada('o.')} BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
       RETURNING o.id, o.titulo, u.push_token
     `)
 
@@ -2186,7 +2192,8 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
         AND match_usuario_id IS NOT NULL
         AND chegada_declarada_em IS NULL
         AND chegada_confirmada_em IS NULL
-        AND COALESCE(chegada_prevista_em, expira_em) <= NOW()
+        AND ${sqlLimiteChegada()} <= NOW()
+        AND pedido_atraso_status IS DISTINCT FROM 'pendente'
         AND ${SQL_ESPERA_COMPARECIMENTO}`
 
     // Mesma isenção do cron de reparos (ver isentoPorRecusa).

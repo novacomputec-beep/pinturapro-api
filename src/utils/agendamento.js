@@ -26,6 +26,17 @@ const RESPOSTAS_COMPARECIMENTO = ['sim', 'nao', 'remarcar']
 // automática espera até 24h depois do horário por essa resposta.
 const VIGIA_ATRASO = '1 hour'
 const ESPERA_RESPOSTA_COMPARECIMENTO = '24 hours'
+// Tolerância de chegada (services/atrasoChegadaService): depois do prazo de chegada (horário
+// aceito ou expira_em) o profissional ainda tem TOLERANCIA_CHEGADA antes de qualquer ação —
+// o cron não desfaz o match, a vigia e o "não chegou" do dono só começam depois dela. Uma
+// extensão aceita (prazo_chegada_extra_em) JÁ inclui a tolerância: depois dela, nada mais.
+const TOLERANCIA_CHEGADA_MIN = 15
+const TOLERANCIA_CHEGADA = `${TOLERANCIA_CHEGADA_MIN} minutes`
+// Prazo de chegada ACORDADO (o mesmo que os crons sempre leram) e LIMITE efetivo (quando o cron
+// age): extensão aceita, senão prazo + tolerância. `a` = alias da tabela ('d.', 'r.', 'o.').
+const sqlPrazoChegada = (a = '') => `COALESCE(${a}chegada_prevista_em, ${a}expira_em)`
+const sqlLimiteChegada = (a = '') =>
+  `COALESCE(${a}prazo_chegada_extra_em, ${sqlPrazoChegada(a)} + INTERVAL '${TOLERANCIA_CHEGADA}')`
 // Lembrete que ficou devido há mais de 60 min não é enviado (horário aceito depois do instante
 // do lembrete): seria "amanhã às 14:00" dito hoje.
 const LEMBRETE_AGENDA_JANELA = '60 minutes'
@@ -58,7 +69,10 @@ const SQL_ZERAR_AGENDA = `chegada_proposta_por = NULL, chegada_pendente_rodada =
               vigia_comparecimento_em = NULL, comparecimento_resposta = NULL, comparecimento_respondido_em = NULL,
               a_caminho_em = NULL, lembrete_agendar_offsets = '{}',
               chegada_proposta_em = NULL, lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL,
-              sugestoes_horario_dono = 0, sugestoes_horario_profissional = 0`
+              sugestoes_horario_dono = 0, sugestoes_horario_profissional = 0,
+              prazo_chegada_extra_em = NULL, aviso_atraso_enviado_em = NULL,
+              pedido_atraso_minutos = NULL, pedido_atraso_motivo = NULL, pedido_atraso_em = NULL,
+              pedido_atraso_status = NULL, pedido_atraso_respondido_em = NULL, pedidos_atraso_usados = 0`
 
 // Isenção de falta e de bloqueio quando o match morre sem horário valendo: o dono recusou a
 // janela (chegada_recusada_em) OU a proposta que ficou sem resposta era do PROFISSIONAL
@@ -77,11 +91,12 @@ const isentoDeFalta = (d) =>
     (!!d.chegada_pendente_em && (d.chegada_proposta_por || d.match_usuario_id) === d.match_usuario_id))
 
 // Espera pela resposta do dono à vigia antes de o cron desfazer o match de um horário
-// AGENDADO vencido: 'nao' libera na hora; sem resposta, libera 24h depois do horário. Janela
-// de rótulo antigo (ou sem janela) segue a regra de sempre — sem espera.
+// AGENDADO vencido: 'nao' libera na hora; sem resposta, libera 24h depois do LIMITE (horário +
+// tolerância, ou a extensão aceita). Janela de rótulo antigo (ou sem janela) segue a regra de
+// sempre — sem espera.
 const SQL_ESPERA_COMPARECIMENTO = `(chegada_janela IS DISTINCT FROM '${JANELA_AGENDADO}'
              OR comparecimento_resposta = 'nao'
-             OR chegada_prevista_em + INTERVAL '${ESPERA_RESPOSTA_COMPARECIMENTO}' <= NOW())`
+             OR ${sqlLimiteChegada()} + INTERVAL '${ESPERA_RESPOSTA_COMPARECIMENTO}' <= NOW())`
 
 // "Qui, 23/10 às 14:00" em America/Sao_Paulo. Aceita Date ou string parseável.
 const DIAS_SEMANA = { Sun: 'Dom', Mon: 'Seg', Tue: 'Ter', Wed: 'Qua', Thu: 'Qui', Fri: 'Sex', Sat: 'Sáb' }
@@ -95,12 +110,20 @@ const formatarDataHoraSP = (valor) => {
   const p = Object.fromEntries(fmtPartes.formatToParts(data).map(x => [x.type, x.value]))
   return `${DIAS_SEMANA[fmtDia.format(data)] || ''}, ${p.day}/${p.month} às ${p.hour}:${p.minute}`
 }
+// Só "14:00" (mesmo fuso): hora do limite de tolerância nos avisos de atraso.
+const formatarHoraSP = (valor) => {
+  const data = valor instanceof Date ? valor : new Date(valor)
+  if (Number.isNaN(data.getTime())) return String(valor)
+  const p = Object.fromEntries(fmtPartes.formatToParts(data).map(x => [x.type, x.value]))
+  return `${p.hour}:${p.minute}`
+}
 
 module.exports = {
   TZ_AGENDA, JANELA_AGENDADO, SUGESTOES_MAX_POR_LADO, ERRO_LIMITE_SUGESTOES, colunaSugestoes, sugestoesRestantes,
   RESPOSTAS_COMPARECIMENTO,
   VIGIA_ATRASO, ESPERA_RESPOSTA_COMPARECIMENTO, LEMBRETE_AGENDA_JANELA, PRAZO_MINIMO_REMARCAR,
+  TOLERANCIA_CHEGADA_MIN, TOLERANCIA_CHEGADA, sqlPrazoChegada, sqlLimiteChegada,
   RE_DATA_HORA, temFuso, sqlDataHora,
   SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, isentoDeFalta, SQL_ESPERA_COMPARECIMENTO,
-  formatarDataHoraSP,
+  formatarDataHoraSP, formatarHoraSP,
 }

@@ -26,6 +26,11 @@ const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaCon
 // Cancelamento justo de match pelas partes (antecedência, acordo mútuo, falta no tardio) —
 // substitui o uso de POST /:id/expirar-match por dono/profissional.
 const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQL_LIMPAR_MATCH } = require('../services/cancelamentoMatchService')
+// Tolerância de chegada (15 min) e pedido de atraso (15/30/60 min, 2 por match, auto-aceite em
+// 10 min). Os endpoints antigos pedir-tempo/perguntar-tempo/informar-tempo/responder-tempo caem
+// na mesma lógica (handlersLegados). GET /:id expõe camposAtraso.
+const { handlers: atrasoHandlers, handlersLegados: atrasoHandlersLegados, camposAtraso } = require('../services/atrasoChegadaService')
+const { sqlLimiteChegada } = require('../utils/agendamento')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 const { PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao, normalizarVersao, normalizarTestadores, SQL_VERSAO_INT, versoesPublicas, invalidarCacheVersoes, gravarConfig, lerConfigVersao, candidatosPromocao,
@@ -451,6 +456,18 @@ const migracaoPronta = (async () => {
       // incrementados a cada proposta/contraproposta do lado, zerados em SQL_ZERAR_AGENDA.
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS sugestoes_horario_dono INTEGER NOT NULL DEFAULT 0`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS sugestoes_horario_profissional INTEGER NOT NULL DEFAULT 0`)
+      // Tolerância de chegada e pedido de atraso (services/atrasoChegadaService). Todas zeradas
+      // em SQL_ZERAR_AGENDA (match novo, un-match, remarcar): são estado DESTE match.
+      // prazo_chegada_extra_em: limite estendido por pedido aceito — o cron lê sqlLimiteChegada.
+      // aviso_atraso_enviado_em: claim do aviso "está atrasado — tolerância até HH:MM".
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS prazo_chegada_extra_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS aviso_atraso_enviado_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS pedido_atraso_minutos INTEGER`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS pedido_atraso_motivo TEXT`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS pedido_atraso_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS pedido_atraso_status VARCHAR(20)`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS pedido_atraso_respondido_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS pedidos_atraso_usados INTEGER NOT NULL DEFAULT 0`)
     }
     // Lista negra POR OBRA, espelho de reparos.prestadores_bloqueados (que nasceu fora deste
     // arquivo — não há ALTER dele aqui). Mesmo nome de coluna nas duas tabelas de propósito: as
@@ -3279,6 +3296,17 @@ for (const tabela of ['obras', 'reparos']) {
   router.post(`/${tabela}/:id/cancelar-match`, autenticar, h.cancelar)
   router.post(`/${tabela}/:id/cancelamento-acordo`, autenticar, h.pedirAcordo)
   router.post(`/${tabela}/:id/cancelamento-acordo/responder`, autenticar, h.responderAcordo)
+  // Pedido de atraso (services/atrasoChegadaService): profissional pede 15/30/60 min depois do
+  // "Estou a caminho"; dono aceita/recusa (sem resposta em 10 min, aceito pelo cron).
+  const a = atrasoHandlers(tabela)
+  router.post(`/${tabela}/:id/pedir-atraso`, autenticar, a.pedir)
+  router.post(`/${tabela}/:id/pedir-atraso/responder`, autenticar, a.responder)
+  // Endpoints antigos (apps 1.1.2/1.1.3) na MESMA lógica — ver handlersLegados.
+  const l = atrasoHandlersLegados(tabela)
+  router.post(`/${tabela}/:id/pedir-tempo`, autenticar, l.pedirTempo)
+  router.post(`/${tabela}/:id/perguntar-tempo`, autenticar, l.perguntarTempo)
+  router.post(`/${tabela}/:id/informar-tempo`, autenticar, l.informarTempo)
+  router.post(`/${tabela}/:id/responder-tempo`, autenticar, l.responderTempo)
 }
 
 router.get('/obras/:id', autenticar, async (req, res) => {
@@ -3396,7 +3424,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     const perguntas = await listarPerguntas('obra', req.params.id, req.usuario.id)
     // pedido_cancelamento: pedido de acordo vigente (quem, motivo, expira_em) — só dono e pintor do match.
     const pedido_cancelamento = pedidoCancelamento(obra, req.usuario.id)
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, pedido_cancelamento })
+    // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
+    // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, pedido_cancelamento, ...camposAtraso(obra) })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -3827,10 +3857,17 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     // passado — sem "Estou a caminho". Aí o comportamento é o de sempre (bloqueio e pushes).
     // Prazo ainda correndo: o cancelamento comum é POST /obras/:id/cancelar-match. Admin e cron
     // seguem usando o expirar-match sem restrição.
+    // Tolerância de 15 min (utils/agendamento.sqlLimiteChegada) nas duas pontas, e nenhuma
+    // expiração pelas partes enquanto um pedido de atraso aguarda o dono (o cron também espera).
     const vencido = await pool.query(
-      `SELECT (expira_em <= NOW() OR COALESCE(chegada_prevista_em, expira_em) <= NOW()) AS vencido FROM obras WHERE id = $1`,
+      `SELECT ((prazo_chegada_extra_em IS NULL AND expira_em + INTERVAL '15 minutes' <= NOW()) OR ${sqlLimiteChegada()} <= NOW()) AS vencido,
+              (pedido_atraso_status = 'pendente') AS pedido_pendente
+         FROM obras WHERE id = $1`,
       [req.params.id]
     )
+    if (!ehAdmin && vencido.rows[0]?.pedido_pendente) {
+      return res.status(403).json({ erro: 'Há um pedido de mais tempo aguardando resposta. Responda a ele antes de desfazer o atendimento.', codigo: 'PEDIDO_ATRASO_PENDENTE' })
+    }
     const prazoVencido = !!vencido.rows[0]?.vencido && !o.a_caminho_em
     if (!ehAdmin && !(donoContesta && o.chegada_declarada_em) && !prazoVencido) {
       return res.status(403).json({ erro: 'O prazo ainda não venceu. Para desfazer o atendimento, use o cancelamento no app.', codigo: 'USE_CANCELAR_MATCH' })
@@ -3911,145 +3948,6 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     return
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao expirar match' })
-  }
-})
-
-// POST /obras/:id/pedir-tempo — pintor solicita mais tempo
-router.post('/obras/:id/pedir-tempo', autenticar, async (req, res) => {
-  try {
-    const { motivo } = req.body
-    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
-    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-    const o = obra.rows[0]
-    if (o.match_usuario_id !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o pintor do match pode solicitar mais tempo' })
-    await pool.query(
-      `UPDATE obras SET pedido_tempo_status = 'aguardando_tempo', pedido_tempo_motivo = $1, pedido_tempo_minutos = NULL WHERE id = $2`,
-      [motivo, req.params.id]
-    )
-    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
-    if (dono.rows[0]?.push_token) {
-      await enviarPushNotificacao(dono.rows[0].push_token, '⚠️ Pintor precisa de mais tempo!',
-        `Motivo: ${motivo}. Abra o app para responder.`,
-        { tipo: 'pedido_tempo', obra_id: req.params.id })
-    }
-    res.json({ mensagem: 'Solicitação enviada ao dono.' })
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao solicitar mais tempo' })
-  }
-})
-
-// POST /obras/:id/perguntar-tempo — dono pergunta quantos minutos o pintor precisa
-router.post('/obras/:id/perguntar-tempo', autenticar, async (req, res) => {
-  try {
-    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
-    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-    const o = obra.rows[0]
-    if (o.criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder o pedido' })
-    await pool.query(`UPDATE obras SET pedido_tempo_status = 'aguardando_minutos' WHERE id = $1`, [req.params.id])
-    const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.match_usuario_id])
-    if (pintor.rows[0]?.push_token) {
-      await enviarPushNotificacao(pintor.rows[0].push_token, '⏱ Quanto tempo você precisa?',
-        'O solicitante quer saber quantos minutos a mais você precisa para chegar.',
-        { tipo: 'perguntar_tempo', obra_id: req.params.id })
-    }
-    res.json({ mensagem: 'Pintor notificado para informar o tempo.' })
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao perguntar tempo' })
-  }
-})
-
-// POST /obras/:id/informar-tempo — pintor informa quantos minutos precisa
-router.post('/obras/:id/informar-tempo', autenticar, async (req, res) => {
-  try {
-    const { minutos } = req.body
-    if (!minutos || minutos <= 0) return res.status(400).json({ erro: 'Informe um tempo válido em minutos' })
-    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
-    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-    const o = obra.rows[0]
-    if (o.match_usuario_id !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o pintor do match pode informar o tempo' })
-    await pool.query(
-      `UPDATE obras SET pedido_tempo_status = 'aguardando_aprovacao', pedido_tempo_minutos = $1 WHERE id = $2`,
-      [minutos, req.params.id]
-    )
-    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
-    if (dono.rows[0]?.push_token) {
-      await enviarPushNotificacao(dono.rows[0].push_token, '⏳ Pintor precisa de mais tempo',
-        `Ele precisa de ${minutos} minuto(s) a mais. Aceitar ou recusar?`,
-        { tipo: 'aprovar_tempo', obra_id: req.params.id })
-    }
-    res.json({ mensagem: 'Dono notificado para aprovar o tempo.' })
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao informar tempo' })
-  }
-})
-
-// POST /obras/:id/responder-tempo — dono aceita ou recusa tempo extra
-router.post('/obras/:id/responder-tempo', autenticar, async (req, res) => {
-  try {
-    const { aceito } = req.body
-    const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
-    if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-    const o = obra.rows[0]
-    if (o.criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
-    if (aceito) {
-      const novoMatchFeitoEm = new Date(new Date(o.match_feito_em).getTime() + o.pedido_tempo_minutos * 60 * 1000)
-      await pool.query(
-        `UPDATE obras SET match_feito_em = $1, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL WHERE id = $2`,
-        [novoMatchFeitoEm.toISOString(), req.params.id]
-      )
-      const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.match_usuario_id])
-      if (pintor.rows[0]?.push_token) {
-        await enviarPushNotificacao(pintor.rows[0].push_token, '✅ Tempo extra aceito!',
-          `O solicitante aceitou. Você tem mais ${o.pedido_tempo_minutos} minuto(s). Corra!`,
-          { tipo: 'tempo_aceito', obra_id: req.params.id })
-      }
-      res.json({ mensagem: 'Tempo extra concedido!', novo_match_feito_em: novoMatchFeitoEm })
-    } else {
-      const pintorId = o.match_usuario_id
-      // Recusar o tempo extra desfaz o match, então é caminho de un-match como os outros: o
-      // pintor entra na lista negra DESTA obra e não vê mais o card no feed. Paridade com
-      // POST /reparos/:id/responder-tempo, que já bloqueava. Mesmo CASE NULL-safe/idempotente
-      // dos demais un-matches (ver POST /obras/:id/expirar-match).
-      // chegada_* zeradas como nos outros un-matches: a obra volta ao feed limpa.
-      // chegada_confirmada_em entra na lista aqui E nos dois expirar-match — os três pontos que
-      // conseguem tocar uma linha JÁ confirmada. Aqui nunca houve guard; lá o dono passou a furar
-      // o 409 para contestar chegada declarada por outro, e com isso o WHERE deixou de proteger
-      // a coluna (era esse o motivo de eles não precisarem dela). Deixá-la preenchida devolveria
-      // ao feed uma demanda que o cron nunca mais conseguiria expirar (o job pula linhas com
-      // chegada_confirmada_em) e cuja PRÓXIMA chegada já nasceria confirmada, porque o CASE de
-      // POST /:id/chegada devolve o valor antigo quando a coluna não está NULL.
-      // Os dois crons seguem sem precisar: o predicado deles exige chegada_confirmada_em IS NULL,
-      // então a coluna nunca está preenchida nas linhas que eles pegam.
-      await pool.query(
-        `WITH desfeito AS (
-           UPDATE obras SET match_feito_em = NULL, match_usuario_id = NULL, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL,
-                  chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
-                  chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
-                  chegada_confirmada_em = NULL, ${SQL_ZERAR_AGENDA},
-                  prestadores_bloqueados = CASE
-                    WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
-                    THEN prestadores_bloqueados
-                    ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
-            WHERE id = $1
-            RETURNING id
-         )
-         -- Candidatura vencedora expira junto (ver POST /obras/:id/expirar-match): recusar o
-         -- tempo extra é un-match como os outros, e sem isto a obra voltava ao feed com o
-         -- índice de aceite ainda ocupado, sem poder ser fechada de novo.
-         UPDATE candidaturas SET status = 'expirado'
-          WHERE obra_id IN (SELECT id FROM desfeito) AND usuario_id = $2::uuid AND status = 'aceito'`,
-        [req.params.id, pintorId]
-      )
-      const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [pintorId])
-      if (pintor.rows[0]?.push_token) {
-        await enviarPushNotificacao(pintor.rows[0].push_token, '❌ Tempo extra recusado',
-          'O solicitante não aceitou. A obra voltou para disponível.',
-          { tipo: 'tempo_recusado', obra_id: req.params.id })
-      }
-      res.json({ mensagem: 'Tempo recusado. Obra disponível novamente.' })
-    }
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao responder pedido de tempo' })
   }
 })
 
@@ -5242,10 +5140,16 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     // Pelas PARTES: contestação de chegada do dono OU prazo realmente vencido pelo relógio do
     // servidor (expira_em ou a janela vigente no passado) sem "Estou a caminho" — ver o lado
     // obra. Prazo correndo: POST /reparos/:id/cancelar-match. Admin e cron seguem aqui.
+    // Tolerância de 15 min e pedido de atraso pendente: ver o lado obra.
     const vencido = await pool.query(
-      `SELECT (expira_em <= NOW() OR COALESCE(chegada_prevista_em, expira_em) <= NOW()) AS vencido FROM reparos WHERE id = $1`,
+      `SELECT ((prazo_chegada_extra_em IS NULL AND expira_em + INTERVAL '15 minutes' <= NOW()) OR ${sqlLimiteChegada()} <= NOW()) AS vencido,
+              (pedido_atraso_status = 'pendente') AS pedido_pendente
+         FROM reparos WHERE id = $1`,
       [req.params.id]
     )
+    if (!ehAdmin && vencido.rows[0]?.pedido_pendente) {
+      return res.status(403).json({ erro: 'Há um pedido de mais tempo aguardando resposta. Responda a ele antes de desfazer o atendimento.', codigo: 'PEDIDO_ATRASO_PENDENTE' })
+    }
     const prazoVencido = !!vencido.rows[0]?.vencido && !r.a_caminho_em
     if (!ehAdmin && !(donoContesta && r.chegada_declarada_em) && !prazoVencido) {
       return res.status(403).json({ erro: 'O prazo ainda não venceu. Para desfazer o atendimento, use o cancelamento no app.', codigo: 'USE_CANCELAR_MATCH' })
@@ -5986,200 +5890,6 @@ router.post('/reparos/:id/chegada',          autenticar, criarHandlerChegada('re
 router.post('/obras/:id/confirmar-comparecimento',   autenticar, criarHandlerConfirmarComparecimento('obras'))
 router.post('/reparos/:id/confirmar-comparecimento', autenticar, criarHandlerConfirmarComparecimento('reparos'))
 
-// Prestador solicita mais tempo — envia motivo e notifica dono
-router.post('/reparos/:id/pedir-tempo', autenticar, async (req, res) => {
-  try {
-    const { motivo } = req.body
-    const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
-    const r = reparo.rows[0]
-
-    if (r.match_usuario_id !== req.usuario.id) {
-      return res.status(403).json({ erro: 'Apenas o prestador do match pode solicitar mais tempo' })
-    }
-
-    await pool.query(
-      `UPDATE reparos SET pedido_tempo_status = 'aguardando_tempo', pedido_tempo_motivo = $1, pedido_tempo_minutos = NULL WHERE id = $2`,
-      [motivo, req.params.id]
-    )
-
-    // Notifica o dono
-    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.criado_por])
-    if (dono.rows[0]?.push_token) {
-      await enviarPushNotificacao(
-        dono.rows[0].push_token,
-        '⚠️ Prestador precisa de mais tempo!',
-        `Motivo: ${motivo}. Abra o app para responder.`,
-        { tipo: 'pedido_tempo', reparo_id: req.params.id }
-      )
-    }
-
-    res.json({ mensagem: 'Solicitação enviada ao dono.' })
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao solicitar mais tempo' })
-  }
-})
-
-// Dono pergunta quanto tempo o prestador precisa — notifica prestador
-router.post('/reparos/:id/perguntar-tempo', autenticar, async (req, res) => {
-  try {
-    const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
-    const r = reparo.rows[0]
-
-    if (r.criado_por !== req.usuario.id) {
-      return res.status(403).json({ erro: 'Apenas o dono pode responder o pedido' })
-    }
-
-    await pool.query(
-      `UPDATE reparos SET pedido_tempo_status = 'aguardando_minutos' WHERE id = $1`,
-      [req.params.id]
-    )
-
-    // Notifica o prestador
-    const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
-    if (prestador.rows[0]?.push_token) {
-      await enviarPushNotificacao(
-        prestador.rows[0].push_token,
-        '⏱ Quanto tempo você precisa?',
-        'O solicitante quer saber quantos minutos a mais você precisa para chegar.',
-        { tipo: 'perguntar_tempo', reparo_id: req.params.id }
-      )
-    }
-
-    res.json({ mensagem: 'Prestador notificado para informar o tempo.' })
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao perguntar tempo' })
-  }
-})
-
-// Prestador informa quantos minutos precisa — notifica dono para aceitar/recusar
-router.post('/reparos/:id/informar-tempo', autenticar, async (req, res) => {
-  try {
-    const { minutos } = req.body
-    if (!minutos || minutos <= 0) return res.status(400).json({ erro: 'Informe um tempo válido em minutos' })
-
-    const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
-    const r = reparo.rows[0]
-
-    if (r.match_usuario_id !== req.usuario.id) {
-      return res.status(403).json({ erro: 'Apenas o prestador do match pode informar o tempo' })
-    }
-
-    await pool.query(
-      `UPDATE reparos SET pedido_tempo_status = 'aguardando_aprovacao', pedido_tempo_minutos = $1 WHERE id = $2`,
-      [minutos, req.params.id]
-    )
-
-    // Notifica o dono
-    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.criado_por])
-    if (dono.rows[0]?.push_token) {
-      await enviarPushNotificacao(
-        dono.rows[0].push_token,
-        '⏳ Prestador precisa de mais tempo',
-        `Ele precisa de ${minutos} minuto(s) a mais. Aceitar ou recusar?`,
-        { tipo: 'aprovar_tempo', reparo_id: req.params.id }
-      )
-    }
-
-    res.json({ mensagem: 'Dono notificado para aprovar o tempo.' })
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao informar tempo' })
-  }
-})
-
-// Dono aceita ou recusa o tempo extra
-router.post('/reparos/:id/responder-tempo', autenticar, async (req, res) => {
-  try {
-    const { aceito } = req.body
-    const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
-    if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
-    const r = reparo.rows[0]
-
-    if (r.criado_por !== req.usuario.id) {
-      return res.status(403).json({ erro: 'Apenas o dono pode responder' })
-    }
-
-    if (aceito) {
-      // Estende o cronômetro somando os minutos ao match_feito_em
-      const novoMatchFeitoEm = new Date(new Date(r.match_feito_em).getTime() + r.pedido_tempo_minutos * 60 * 1000)
-      await pool.query(
-        `UPDATE reparos SET match_feito_em = $1, pedido_tempo_status = NULL, pedido_tempo_motivo = NULL, pedido_tempo_minutos = NULL WHERE id = $2`,
-        [novoMatchFeitoEm.toISOString(), req.params.id]
-      )
-
-      // Notifica prestador
-      const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
-      if (prestador.rows[0]?.push_token) {
-        await enviarPushNotificacao(
-          prestador.rows[0].push_token,
-          '✅ Tempo extra aceito!',
-          `O solicitante aceitou. Você tem mais ${r.pedido_tempo_minutos} minuto(s). Corra!`,
-          { tipo: 'tempo_aceito', reparo_id: req.params.id }
-        )
-      }
-
-      res.json({ mensagem: 'Tempo extra concedido!', novo_match_feito_em: novoMatchFeitoEm })
-    } else {
-      // Recusou — bloqueia prestador e volta reparo para disponível.
-      // Mesmo CASE NULL-safe/idempotente dos outros quatro pontos de append (ver
-      // POST /obras/:id/expirar-match): array_append cru gravaria um NULL no array se o match
-      // já tivesse sido desfeito, e duplicaria o uuid numa rechamada.
-      // chegada_* zeradas — incluindo chegada_confirmada_em, pelo mesmo motivo explicado em
-      // POST /obras/:id/responder-tempo (este caminho não tem o guard que os outros têm).
-      await pool.query(
-        `WITH desfeito AS (
-           UPDATE reparos SET
-            match_feito_em = NULL,
-            match_usuario_id = NULL,
-            pedido_tempo_status = NULL,
-            pedido_tempo_motivo = NULL,
-            pedido_tempo_minutos = NULL,
-            chegada_janela = NULL,
-            chegada_prevista_em = NULL,
-            chegada_declarada_por = NULL,
-            chegada_declarada_em = NULL,
-            chegada_pendente_janela = NULL,
-            chegada_pendente_em = NULL,
-            chegada_recusada_em = NULL,
-            chegada_confirmada_em = NULL,
-            ${SQL_ZERAR_AGENDA},
-            prestadores_bloqueados = CASE
-              WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
-              THEN prestadores_bloqueados
-              ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
-           WHERE id = $1
-           RETURNING id
-         )
-         -- Interesse vencedor expira junto (D71 — paridade com POST /obras/:id/responder-tempo e
-         -- com os dois expirar-match): recusar o tempo extra é un-match como os outros, e sem
-         -- isto o serviço voltava ao feed com interesse_reparos_aceito_unico_idx ainda ocupado —
-         -- nenhum aceite novo passava (guard jaAceito → 409) e o próprio prestador bloqueado
-         -- ainda refazia o match sozinho por POST /reparos/:id/match, que só olha o 'aceito'.
-         UPDATE interesse_reparos SET status = 'expirado'
-          WHERE reparo_id IN (SELECT id FROM desfeito) AND usuario_id = $2::uuid AND status = 'aceito'`,
-        [req.params.id, r.match_usuario_id]
-      )
-
-      // Notifica prestador
-      const prestador = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.match_usuario_id])
-      if (prestador.rows[0]?.push_token) {
-        await enviarPushNotificacao(
-          prestador.rows[0].push_token,
-          '❌ Tempo extra recusado',
-          'O solicitante não aceitou. O serviço voltou para disponível.',
-          { tipo: 'tempo_recusado', reparo_id: req.params.id }
-        )
-      }
-
-      res.json({ mensagem: 'Tempo recusado. Serviço disponível novamente.' })
-    }
-  } catch (err) {
-    res.status(500).json({ erro: 'Erro ao responder pedido de tempo' })
-  }
-})
-
 // CORRIGIDO: aceita dono do reparo E prestador (não só prestador)
 router.get('/reparos/:id', autenticar, async (req, res) => {
   try {
@@ -6300,6 +6010,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       interessados,
       // Pedido de acordo de cancelamento vigente (quem, motivo, expira_em) — só dono e prestador do match.
       pedido_cancelamento: pedidoCancelamento(reparo, req.usuario.id),
+      // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
+      // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
+      ...camposAtraso(reparo),
       dono_telefone,
       dono_nome,
       dono_foto_url,
