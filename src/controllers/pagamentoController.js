@@ -519,6 +519,19 @@ const totaisDeUsuarios = async () => {
       FROM usuarios u
      WHERE ${SQL_PAPEIS_CLIENTE}`)
   const t = r.rows[0]
+  // por_plano: assinaturas ATIVAS (mesma regra de "assinatura ativa" das guardas: status 'ativa'
+  // e vencimento no futuro ou nulo) das contas de cliente, por valor mensal contratado —
+  // 49.90 (reparador) e 99.90 (pintor); a cobrança anual (499.00 / 999.00) é o mesmo plano pago
+  // por ano e entra no mesmo balde (mesma tabela de valores do boot em routes/index.js).
+  const p = await pool.query(`
+    SELECT COUNT(*) FILTER (WHERE a.valor_mensal IN (49.90, 499.00))::int AS plano_49_90,
+           COUNT(*) FILTER (WHERE a.valor_mensal IN (99.90, 999.00))::int AS plano_99_90,
+           COUNT(*)::int AS ativas
+      FROM assinaturas a
+      JOIN usuarios u ON u.id = a.usuario_id
+     WHERE ${SQL_PAPEIS_CLIENTE}
+       AND a.status = 'ativa' AND (a.proximo_vencimento IS NULL OR a.proximo_vencimento > NOW())`)
+  const pl = p.rows[0]
   return {
     total_contas: t.total_contas,
     pessoas: t.pessoas,
@@ -526,6 +539,30 @@ const totaisDeUsuarios = async () => {
     suspensos: t.suspensos,
     por_tipo: { prestador: t.prestador, construtor_pintor: t.construtor_pintor, dono_servico: t.dono_servico, dono_obra: t.dono_obra, outros: t.outros },
     por_plataforma: { android: t.android, iphone: t.iphone, sem_plataforma: t.sem_plataforma },
+    por_plano: { plano_49_90: pl.plano_49_90, plano_99_90: pl.plano_99_90, ativas: pl.ativas },
+  }
+}
+
+// GET /admin/cidades — cidades DISTINTAS das contas de cliente (mesmos papéis dos totais),
+// normalizadas como o feed normaliza (sqlNormalizarCidade: minúsculas, sem acento, espaços
+// únicos — "Patos de Minas" e "patos de minas " contam juntas), com o nº de contas em cada
+// uma, da maior para a menor. Cidade vazia/NULL fica fora e sai em sem_cidade.
+const { sqlNormalizarCidade } = require('../utils/localidade')
+const cidadesClientes = async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT ${sqlNormalizarCidade('u.cidade')} AS cidade, COUNT(*)::int AS total
+        FROM usuarios u
+       WHERE ${SQL_PAPEIS_CLIENTE} AND btrim(COALESCE(u.cidade, '')) <> ''
+       GROUP BY 1
+       ORDER BY total DESC, cidade`)
+    const s = await pool.query(`
+      SELECT COUNT(*)::int AS sem_cidade FROM usuarios u
+       WHERE ${SQL_PAPEIS_CLIENTE} AND btrim(COALESCE(u.cidade, '')) = ''`)
+    res.json({ total_cidades: r.rows.length, sem_cidade: s.rows[0].sem_cidade, cidades: r.rows })
+  } catch (err) {
+    console.error('Erro nas cidades de clientes:', err.message)
+    res.status(500).json({ erro: 'Erro ao listar cidades' })
   }
 }
 
@@ -614,4 +651,4 @@ const listarAssinantes = async (req, res) => {
   }
 }
 
-module.exports = { criarAssinatura, criarCheckoutPagBank, inativarCheckoutPagBank, ErroCheckout, precoAssinaturaCentavos, sucesso, webhookPagbank, darAcessoGratuito, listarAssinantes, totaisUsuarios, totaisDeUsuarios }
+module.exports = { criarAssinatura, criarCheckoutPagBank, inativarCheckoutPagBank, ErroCheckout, precoAssinaturaCentavos, sucesso, webhookPagbank, darAcessoGratuito, listarAssinantes, totaisUsuarios, totaisDeUsuarios, cidadesClientes }
