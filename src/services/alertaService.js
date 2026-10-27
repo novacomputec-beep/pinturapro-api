@@ -1638,7 +1638,7 @@ const vigiarComparecimento = semSobreposicao('vigiarComparecimento', async () =>
         await enviarPushNotificacao(
           d.push_token,
           '🤔 O profissional veio?',
-          `O horário combinado em "${d.titulo}" (${formatarDataHoraSP(d.chegada_prevista_em)}) passou há 1h sem chegada registrada. Responda no app.`,
+          `O horário combinado em "${d.titulo}" (${formatarDataHoraSP(d.chegada_prevista_em)}) já passou e nenhuma chegada foi registrada. O profissional chegou? Responda no app.`,
           { tipo: 'confirmar_comparecimento', [lado.chave]: d.id }
         )
       }
