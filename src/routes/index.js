@@ -7972,6 +7972,90 @@ router.get('/admin/usuarios/totais',          autenticar, exigirAdmin, pagamento
 // Cidades distintas (normalizadas) das contas de cliente, com contagem — ver cidadesClientes.
 router.get('/admin/cidades',                  autenticar, exigirAdmin, pagamentoCtrl.cidadesClientes)
 
+// CPF/CNPJ mascarado para o painel: só o miolo fica legível (***.456.789-** / **.345.678/0001-**).
+// Qualquer outro tamanho: tudo oculto menos os 4 últimos dígitos. Sem valor → null.
+const mascararCpfCnpj = (valor) => {
+  const d = String(valor || '').replace(/\D/g, '')
+  if (!d) return null
+  if (d.length === 11) return `***.${d.slice(3, 6)}.${d.slice(6, 9)}-**`
+  if (d.length === 14) return `**.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-**`
+  return '*'.repeat(Math.max(0, d.length - 4)) + d.slice(-4)
+}
+
+// GET /admin/usuarios/:id/verificacao — ficha de verificação de QUALQUER usuário, seja qual for
+// o status (a aba Verificação só lista os pendentes). Mesmos documentos e mesma assinatura de
+// leitura da aba (gerarUrlAssinadaVerificacao, TTL curto, nunca público); referências do
+// cadastro/verificação adiada ({ nome, telefone[, relacao] } em usuarios.referencias) e CPF/CNPJ
+// mascarado. Campos vazios saem null/[] — 404 só quando o id não existe. Datas de decisão e
+// quem decidiu NÃO são gravadas hoje (só aprovado_automaticamente), então saem null.
+// Cada consulta é logada com o id do admin (auditoria de acesso a documento pessoal).
+const RE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+router.get('/admin/usuarios/:id/verificacao', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const { id } = req.params
+    if (!RE_UUID.test(id)) return res.status(400).json({ erro: 'id inválido' })
+    const r = await pool.query(
+      `SELECT id, nome, email, telefone, cidade, uf, role, tipo_prestador, tipo_dono, criado_em,
+              cpf_cnpj, rg, rg_orgao, rg_estado, referencias, pix_reembolso,
+              verificacao_status, verificacao_enviada_em, aprovado_automaticamente,
+              verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url
+         FROM usuarios WHERE id = $1`, [id]
+    )
+    if (r.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
+    const u = r.rows[0]
+    console.log(`[Auditoria] admin ${req.usuario.id} consultou a verificação do usuário ${id} (status ${u.verificacao_status || 'nao_solicitada'})`)
+
+    let referencias = []
+    try {
+      const bruto = typeof u.referencias === 'string' ? JSON.parse(u.referencias) : u.referencias
+      if (Array.isArray(bruto)) {
+        referencias = bruto.filter(x => x && typeof x === 'object').map(x => ({
+          nome: x.nome ?? null, telefone: x.telefone ?? null, relacao: x.relacao ?? x.parentesco ?? null,
+        }))
+      } else if (typeof bruto === 'string' && bruto.trim()) {
+        referencias = [{ nome: bruto.trim(), telefone: null, relacao: null }]
+      }
+    } catch (_) {
+      if (typeof u.referencias === 'string' && u.referencias.trim()) referencias = [{ nome: u.referencias.trim(), telefone: null, relacao: null }]
+    }
+
+    const temDocs = !!(u.verificacao_doc_frente_url || u.verificacao_doc_verso_url || u.verificacao_selfie_url)
+    const status = u.verificacao_status || 'nao_solicitada'
+    res.json({
+      usuario: {
+        id: u.id, nome: u.nome, email: u.email, telefone: u.telefone, cidade: u.cidade, uf: u.uf,
+        role: u.role, tipo_prestador: u.tipo_prestador, tipo_dono: u.tipo_dono, criado_em: u.criado_em,
+      },
+      verificacao: {
+        status,
+        // enviada_em: verificação adiada carimba verificacao_enviada_em; documentos no cadastro
+        // (apps antigos) não carimbam nada → a data é a do próprio cadastro.
+        enviada_em: u.verificacao_enviada_em || (temDocs ? u.criado_em : null),
+        enviada_no_cadastro: temDocs && !u.verificacao_enviada_em,
+        aprovada_em: null,
+        reprovada_em: null,
+        decidida_por: null,
+        aprovado_automaticamente: status === 'aprovado' ? (u.aprovado_automaticamente ?? null) : null,
+      },
+      documentos: {
+        verificacao_doc_frente_url: u.verificacao_doc_frente_url || null,
+        verificacao_doc_frente_url_assinada: gerarUrlAssinadaVerificacao(u.verificacao_doc_frente_url),
+        verificacao_doc_verso_url: u.verificacao_doc_verso_url || null,
+        verificacao_doc_verso_url_assinada: gerarUrlAssinadaVerificacao(u.verificacao_doc_verso_url),
+        verificacao_selfie_url: u.verificacao_selfie_url || null,
+        verificacao_selfie_url_assinada: gerarUrlAssinadaVerificacao(u.verificacao_selfie_url),
+      },
+      referencias,
+      cpf_cnpj_mascarado: mascararCpfCnpj(u.cpf_cnpj),
+      rg: u.rg ? { numero: u.rg, orgao: u.rg_orgao || null, estado: u.rg_estado || null } : null,
+      pix_reembolso: u.pix_reembolso || null,
+    })
+  } catch (err) {
+    console.error('Erro na ficha de verificação (admin):', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar verificação do usuário' })
+  }
+})
+
 // ============================================================
 // ASSINATURA PELA WEB (protudo.app.br) — públicas, sem JWT: a credencial é o link de uso
 // único enviado por e-mail (padrão do reset de senha). Teto por identidade no banco
