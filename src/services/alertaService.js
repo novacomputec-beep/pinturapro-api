@@ -2306,6 +2306,59 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
 // que ela se aplica (lado.tabela), então casar constante e lado não exige tradução nenhuma.
 const AUTO_ENCERRAR_APOS_OBRAS   = '2 days'
 const AUTO_ENCERRAR_APOS_REPAROS = '3 hours'
+// Os MESMOS prazos em milissegundos, para GET /:id expor encerramento_automatico_em (quando o
+// cron fechará sozinho a solicitação pendente do profissional): solicitado_em + prazo da tabela.
+const AUTO_ENCERRAR_MS = { obras: 2 * 24 * 60 * 60 * 1000, reparos: 3 * 60 * 60 * 1000 }
+const encerramentoAutomaticoEm = (tabela, d) => {
+  if (!d || d.status !== 'aberta' || !d.encerramento_solicitado_por || !d.encerramento_solicitado_em) return null
+  const ms = AUTO_ENCERRAR_MS[tabela]
+  return ms ? new Date(new Date(d.encerramento_solicitado_em).getTime() + ms) : null
+}
+
+// Lembretes ao DONO enquanto a solicitação de encerramento do profissional está pendente:
+// 30 min e 2h depois de encerramento_solicitado_em, cada um UMA vez (claim atômico nas
+// colunas lembrete_encerramento_30m_em / _2h_em, zeradas quando uma solicitação nova é
+// registrada). Só com a demanda ainda aberta e a solicitação ainda pendente — fechou (pelo
+// dono ou pelo cron) ou foi limpa, nada sai. O de 30 min não sai se já passou das 2h (o de 2h
+// cobre; evita dois pushes no mesmo tique depois de uma queda). Push ou e-mail (entregarPushOuEmail).
+const LEMBRETES_ENCERRAMENTO = [
+  { coluna: 'lembrete_encerramento_30m_em', apos: '30 minutes', teto: '2 hours' },
+  { coluna: 'lembrete_encerramento_2h_em',  apos: '2 hours',    teto: null },
+]
+const lembrarConfirmacaoEncerramento = semSobreposicao('lembrarConfirmacaoEncerramento', async () => {
+  for (const [tabela, chave] of [['obras', 'obra_id'], ['reparos', 'reparo_id']]) {
+    for (const l of LEMBRETES_ENCERRAMENTO) {
+      try {
+        const claim = await pool.query(`
+          UPDATE ${tabela} d SET ${l.coluna} = NOW()
+            FROM usuarios p
+           WHERE p.id = d.match_usuario_id
+             AND d.status = 'aberta'
+             AND d.encerramento_solicitado_por IS NOT NULL
+             AND d.encerramento_solicitado_por = d.match_usuario_id
+             AND d.${l.coluna} IS NULL
+             AND d.encerramento_solicitado_em <= NOW() - INTERVAL '${l.apos}'
+             ${l.teto ? `AND d.encerramento_solicitado_em > NOW() - INTERVAL '${l.teto}'` : ''}
+          RETURNING d.id, d.titulo, d.criado_por, p.nome AS profissional_nome`)
+        for (const d of claim.rows) {
+          const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [d.criado_por])
+          if (!dono.rows[0]) continue
+          const nome = String(d.profissional_nome || '').trim().split(/\s+/)[0] || 'O profissional'
+          const via = await entregarPushOuEmail({
+            ...dono.rows[0],
+            titulo: '⏰ Falta confirmar a conclusão',
+            corpo: `${nome} aguarda sua confirmação de "${d.titulo}".`,
+            data: { tipo: 'encerramento_solicitado', [chave]: d.id },
+            rotulo: `lembrete encerramento ${l.apos} ${tabela} ${d.id}`,
+          })
+          console.log(`[LembreteEncerramento] ${tabela} ${d.id} (${l.apos}) → dono via ${via}`)
+        }
+      } catch (err) {
+        console.error(`[LembreteEncerramento] ${tabela} ${l.apos}:`, err.message)
+      }
+    }
+  }
+})
 
 // Rótulo pt-BR DERIVADO do próprio INTERVAL aplicado, em vez de escrito à mão ao lado dele:
 // o push anuncia exatamente o prazo que o WHERE cobra, e não há um segundo valor para
@@ -2354,11 +2407,17 @@ const autoEncerrarPendentes = async () => {
         // Quem NÃO solicitou é quem precisa ser avisado do fechamento automático.
         const avisarId = d.encerramento_solicitado_por === d.criado_por ? d.match_usuario_id : d.criado_por
         if (!avisarId) continue
-        const alvo = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [avisarId])
-        if (alvo.rows[0]?.push_token) {
-          enviarPushNotificacao(alvo.rows[0].push_token, '✅ Encerrado automaticamente',
-            `Sem confirmação em ${rotuloPrazo(lado.encerrarApos)}, ${lado.rotulo} "${d.titulo}" foi encerrad${lado.tabela === 'obras' ? 'a' : 'o'} automaticamente.`,
-            { tipo: lado.tipoPush, [lado.chave]: d.id }).catch(() => {})
+        // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
+        const alvo = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [avisarId])
+        if (alvo.rows[0]) {
+          const via = await entregarPushOuEmail({
+            ...alvo.rows[0],
+            titulo: '✅ Encerrado automaticamente',
+            corpo: `Sem confirmação em ${rotuloPrazo(lado.encerrarApos)}, ${lado.rotulo} "${d.titulo}" foi encerrad${lado.tabela === 'obras' ? 'a' : 'o'} automaticamente.`,
+            data: { tipo: lado.tipoPush, [lado.chave]: d.id },
+            rotulo: `auto-encerrado ${lado.tabela} ${d.id}`,
+          })
+          console.log(`[AutoEncerrar] ${lado.tabela} ${d.id} → ${avisarId} via ${via}`)
         }
       }
       if (fechados.rows.length > 0) {
@@ -2449,6 +2508,10 @@ module.exports = {
   verificarCronometroReparos,
   verificarCronometroObras,
   autoEncerrarPendentes,
+  // Encerramento solicitado pelo profissional: lembretes ao dono (30 min / 2h) e o instante
+  // do fechamento automático para GET /:id.
+  lembrarConfirmacaoEncerramento,
+  encerramentoAutomaticoEm,
   // Exportadas para o painel admin (GET /admin/suspensos e o liberar) usarem EXATAMENTE a mesma
   // janela e o mesmo limite que o cron aplica — antes a rota tinha uma cópia '90 days' própria,
   // que passaria a mentir na primeira vez que este valor mudasse.
