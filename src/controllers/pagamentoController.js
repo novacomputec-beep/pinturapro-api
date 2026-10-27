@@ -579,7 +579,8 @@ const totaisUsuarios = async (req, res) => {
 // GET /pagamentos/assinantes?page=&limit=&offset=&q=&ordem= — lista paginada de verdade:
 // `total` é o COUNT do filtro inteiro (não o tamanho da página), `limit` até LISTA_MAX,
 // `offset` explícito vence `page`. `q` procura em nome e e-mail (ILIKE) e, quando tem 3+
-// dígitos, no telefone só por dígitos (regexp_replace) — "(34) 9 9881" acha "34998817102".
+// dígitos, no telefone e no cpf_cnpj só por dígitos (regexp_replace) — "(34) 9 9881" acha
+// "34998817102" e "123.456" acha "12345678901", pontos e traços ignorados dos dois lados.
 // `totais` repete GET /admin/usuarios/totais para o painel não derivar cards da página.
 const LISTA_PADRAO = 200
 const LISTA_MAX = 1000
@@ -609,6 +610,7 @@ const listarAssinantes = async (req, res) => {
       if (digitos.length >= 3) {
         params.push(`%${digitos}%`)
         busca += ` OR regexp_replace(COALESCE(u.telefone, ''), '[^0-9]', '', 'g') LIKE $4`
+        busca += ` OR regexp_replace(COALESCE(u.cpf_cnpj, ''), '[^0-9]', '', 'g') LIKE $4`
       }
       busca += ')'
     }
