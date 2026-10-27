@@ -22,10 +22,12 @@ const colunaSugestoes = (ehDono) => (ehDono ? 'sugestoes_horario_dono' : 'sugest
 const sugestoesRestantes = (linha, ehDono) =>
   Math.max(0, SUGESTOES_MAX_POR_LADO - (Number(linha?.[colunaSugestoes(ehDono)]) || 0))
 const RESPOSTAS_COMPARECIMENTO = ['sim', 'nao', 'remarcar']
-// Vigia: 1h depois do horário aceito sem chegada declarada, o dono é perguntado; a falta
-// automática espera até 24h depois do horário por essa resposta.
+// Vigia: 1h depois do limite de chegada (horário aceito + tolerância, ou extensão) sem chegada
+// declarada, o dono é perguntado; a falta automática espera até 3h depois do limite por essa
+// resposta (era 24h: com "Estou a caminho" nem dono nem profissional conseguem cancelar, e um
+// dia inteiro preso num no-show era demais).
 const VIGIA_ATRASO = '1 hour'
-const ESPERA_RESPOSTA_COMPARECIMENTO = '24 hours'
+const ESPERA_RESPOSTA_COMPARECIMENTO = '3 hours'
 // Tolerância de chegada (services/atrasoChegadaService): depois do prazo de chegada (horário
 // aceito ou expira_em) o profissional ainda tem TOLERANCIA_CHEGADA antes de qualquer ação —
 // o cron não desfaz o match, a vigia e o "não chegou" do dono só começam depois dela. Uma
@@ -91,9 +93,9 @@ const isentoDeFalta = (d) =>
     (!!d.chegada_pendente_em && (d.chegada_proposta_por || d.match_usuario_id) === d.match_usuario_id))
 
 // Espera pela resposta do dono à vigia antes de o cron desfazer o match de um horário
-// AGENDADO vencido: 'nao' libera na hora; sem resposta, libera 24h depois do LIMITE (horário +
-// tolerância, ou a extensão aceita). Janela de rótulo antigo (ou sem janela) segue a regra de
-// sempre — sem espera.
+// AGENDADO vencido: 'nao' libera na hora; sem resposta, libera ESPERA_RESPOSTA_COMPARECIMENTO
+// depois do LIMITE (horário + tolerância, ou a extensão aceita). Janela de rótulo antigo (ou
+// sem janela) segue a regra de sempre — sem espera.
 const SQL_ESPERA_COMPARECIMENTO = `(chegada_janela IS DISTINCT FROM '${JANELA_AGENDADO}'
              OR comparecimento_resposta = 'nao'
              OR ${sqlLimiteChegada()} + INTERVAL '${ESPERA_RESPOSTA_COMPARECIMENTO}' <= NOW())`
@@ -110,11 +112,26 @@ const formatarDataHoraSP = (valor) => {
   const p = Object.fromEntries(fmtPartes.formatToParts(data).map(x => [x.type, x.value]))
   return `${DIAS_SEMANA[fmtDia.format(data)] || ''}, ${p.day}/${p.month} às ${p.hour}:${p.minute}`
 }
-// Só "14:00" (mesmo fuso): hora do limite de tolerância nos avisos de atraso.
-const formatarHoraSP = (valor) => {
+// Só "14:00": hora do limite de tolerância nos avisos de atraso, no fuso do DONO da demanda
+// (prazo_timezone) quando é uma zona IANA válida; senão America/Sao_Paulo.
+const formatadoresHora = new Map()
+const formatadorHora = (zona) => {
+  const z = typeof zona === 'string' && zona.trim() ? zona.trim() : TZ_AGENDA
+  if (!formatadoresHora.has(z)) {
+    let f
+    try {
+      f = new Intl.DateTimeFormat('en-GB', { timeZone: z, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    } catch {
+      f = new Intl.DateTimeFormat('en-GB', { timeZone: TZ_AGENDA, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    }
+    formatadoresHora.set(z, f)
+  }
+  return formatadoresHora.get(z)
+}
+const formatarHoraSP = (valor, zona) => {
   const data = valor instanceof Date ? valor : new Date(valor)
   if (Number.isNaN(data.getTime())) return String(valor)
-  const p = Object.fromEntries(fmtPartes.formatToParts(data).map(x => [x.type, x.value]))
+  const p = Object.fromEntries(formatadorHora(zona).formatToParts(data).map(x => [x.type, x.value]))
   return `${p.hour}:${p.minute}`
 }
 

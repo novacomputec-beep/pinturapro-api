@@ -21,7 +21,7 @@ const { montarResumoCanal } = require('../utils/canalResumo')
 // Contato em texto livre entre as partes (mensagem de candidatura/interesse, referências,
 // pergunta/resposta, denúncia): limpo na escrita (+ linha em tentativas_contato) e mascarado
 // na leitura das linhas antigas — utils/tentativasContato.
-const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaContato,
+const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaContato, temContatoClaro,
         JANELA_PENALIDADE_DIAS, AVISOS_ANTES_DE_SUSPENDER, DIAS_SUSPENSAO_CONTATO } = require('../utils/tentativasContato')
 // Cancelamento justo de match pelas partes (antecedência, acordo mútuo, falta no tardio) —
 // substitui o uso de POST /:id/expirar-match por dono/profissional.
@@ -1531,6 +1531,9 @@ const migracaoPronta = (async () => {
         criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `)
+    // conta: só contato CLARO (telefone em algarismos, e-mail, link) pesa na régua de
+    // penalidade; dígitos por extenso e afins entram na lista com conta = false.
+    await client.query(`ALTER TABLE tentativas_contato ADD COLUMN IF NOT EXISTS conta BOOLEAN NOT NULL DEFAULT true`)
     await client.query(`CREATE INDEX IF NOT EXISTS tentativas_contato_criado_em_idx ON tentativas_contato (criado_em DESC)`)
     await client.query(`CREATE INDEX IF NOT EXISTS tentativas_contato_usuario_idx ON tentativas_contato (usuario_id, criado_em DESC)`)
     // Cancelamento de match (services/cancelamentoMatchService): pedido de acordo pendente na
@@ -3164,7 +3167,8 @@ const lerTextoPergunta = (valor, campo, max) => {
   if (!texto) return { erro: `${campo} é obrigatória` }
   if (texto.length > max) return { erro: `${campo} deve ter no máximo ${max} caracteres` }
   const limpo = sanitizarTexto(texto)
-  return { texto: limpo, removido: limpo !== texto }
+  // conta: contato CLARO (pesa na penalidade); removido sem conta = mascarado, sem punir.
+  return { texto: limpo, removido: limpo !== texto, conta: temContatoClaro(texto) }
 }
 
 // Lista para os detalhes: id (o dono precisa dele para responder), textos e carimbos; minha =
@@ -3213,7 +3217,7 @@ const criarHandlerPergunta = (tabela) => async (req, res) => {
       [lado.tipo, req.params.id, req.usuario.id, lido.texto]
     )
     if (ins.rowCount === 0) return res.status(409).json({ erro: 'Você já fez sua pergunta neste pedido' })
-    if (lido.removido) registrarTentativaContato({ usuario_id: req.usuario.id, tipo: `pergunta_${lado.tipo}`, demanda_id: req.params.id, campo: 'pergunta' })
+    if (lido.removido) registrarTentativaContato({ usuario_id: req.usuario.id, tipo: `pergunta_${lado.tipo}`, demanda_id: req.params.id, campo: 'pergunta', conta: lido.conta })
     const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [demanda.criado_por])
     res.status(201).json({ ...ins.rows[0], minha: true })
     if (dono.rows[0]) {
@@ -3258,7 +3262,7 @@ const criarHandlerResposta = (tabela) => async (req, res) => {
       [req.params.pid, lido.texto]
     )
     if (upd.rowCount === 0) return res.status(409).json({ erro: 'Esta pergunta já foi respondida' })
-    if (lido.removido) registrarTentativaContato({ usuario_id: req.usuario.id, tipo: `resposta_${lado.tipo}`, demanda_id: req.params.id, campo: 'resposta' })
+    if (lido.removido) registrarTentativaContato({ usuario_id: req.usuario.id, tipo: `resposta_${lado.tipo}`, demanda_id: req.params.id, campo: 'resposta', conta: lido.conta })
     const { autor_id, ...pergunta } = upd.rows[0]
     const autor = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [autor_id])
     res.json({ ...pergunta, minha: false })
@@ -3317,7 +3321,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         -- passou. Calculado no SQL (relógio do servidor) para a tela de detalhe gatear o
         -- botão de estender sem comparar com o relógio do aparelho. Mesma expressão do
         -- GET /obras/minhas.
-        (o.status <> 'encerrada' AND o.expira_em <= NOW()) AS expirada,
+        -- Com pintor casado o que vale é o limite de chegada (tolerância/extensão —
+        -- sqlLimiteChegada): a obra não aparece "expirada" enquanto o match ainda vale.
+        (o.status <> 'encerrada' AND (CASE WHEN o.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('o.')} ELSE o.expira_em END) <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa,
         ${sqlTotalExtensaoObra('o.')} AS total_extensao_horas
@@ -3450,11 +3456,12 @@ router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssin
     )
     if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já se candidatou nesta obra' })
     // Contato na mensagem vira "[contato removido]" antes de gravar (+ linha em tentativas_contato).
-    const { valores: limpos } = limparCamposEscrita({ mensagem }, { usuario_id: req.usuario.id, tipo: 'candidatura', demanda_id: req.params.id })
+    const { valores: limpos, registrar: registrarContato } = limparCamposEscrita({ mensagem }, { usuario_id: req.usuario.id, tipo: 'candidatura', demanda_id: req.params.id })
     const result = await pool.query(
       `INSERT INTO candidaturas (obra_id, usuario_id, mensagem, valor_proposto, status) VALUES ($1, $2, $3, $4, 'pendente') RETURNING *`,
       [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
     )
+    registrarContato() // só depois de a candidatura entrar: envio recusado não é tentativa
     const donoInfo = await pool.query(
       `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
       [req.params.id]
@@ -4684,11 +4691,12 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
     const existente = await pool.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
     if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse neste serviço' })
     // Contato na mensagem vira "[contato removido]" antes de gravar (+ linha em tentativas_contato).
-    const { valores: limpos } = limparCamposEscrita({ mensagem }, { usuario_id: req.usuario.id, tipo: 'interesse', demanda_id: req.params.id })
+    const { valores: limpos, registrar: registrarContato } = limparCamposEscrita({ mensagem }, { usuario_id: req.usuario.id, tipo: 'interesse', demanda_id: req.params.id })
     const result = await pool.query(
       `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem, valor_proposto, rodada) VALUES ($1, $2, $3, $4, 1) RETURNING *`,
       [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
     )
+    registrarContato() // só depois de o interesse entrar: envio recusado não é tentativa
     // Notify dono
     const donoInfo = await pool.query(
       `SELECT u.push_token, r.titulo FROM reparos r JOIN usuarios u ON r.criado_por = u.id WHERE r.id = $1`,
@@ -5898,7 +5906,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // servidor) para a tela de detalhe gatear o botão de estender sem comparar com o
     // relógio do aparelho.
     const result = await pool.query(
-      `SELECT *, (status <> 'encerrada' AND expira_em <= NOW()) AS expirada,
+      `SELECT *, (status <> 'encerrada' AND (CASE WHEN match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada()} ELSE expira_em END) <= NOW()) AS expirada,
               ${sqlTotalExtensaoReparo()} AS total_extensao_horas
          FROM reparos WHERE id = $1`,
       [req.params.id]
@@ -7354,12 +7362,13 @@ router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiv
     if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse nesta obra' })
     // Contato em referencias (texto, lista ou objeto) e na mensagem vira "[contato removido]"
     // antes de gravar (+ linha em tentativas_contato por campo alterado).
-    const { valores: limpos } = limparCamposEscrita({ referencias, mensagem }, { usuario_id: req.usuario.id, tipo: 'candidatura', demanda_id: obra_id })
+    const { valores: limpos, registrar: registrarContato } = limparCamposEscrita({ referencias, mensagem }, { usuario_id: req.usuario.id, tipo: 'candidatura', demanda_id: obra_id })
     const result = await pool.query(
       `INSERT INTO candidaturas (obra_id, usuario_id, referencias, valor_proposto, mensagem, status)
        VALUES ($1, $2, $3, $4, $5, 'pendente') RETURNING *`,
       [obra_id, req.usuario.id, limpos.referencias, valor_proposto || null, limpos.mensagem || null]
     )
+    registrarContato() // só depois de a candidatura entrar: envio recusado não é tentativa
     const valor_oferta = valor_proposto
     const dono = await pool.query(
       `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
@@ -7637,7 +7646,7 @@ router.post('/denuncias', autenticar, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(409).json({ erro: 'Você já denunciou este contrato' })
     }
-    if (descricaoLimpa !== texto) registrarTentativaContato({ usuario_id: uid, tipo: `denuncia_${contrato_tipo}`, demanda_id: contrato_id, campo: 'descricao' })
+    if (descricaoLimpa !== texto) registrarTentativaContato({ usuario_id: uid, tipo: `denuncia_${contrato_tipo}`, demanda_id: contrato_id, campo: 'descricao', conta: temContatoClaro(texto) })
 
     res.status(201).json({ mensagem: 'Denúncia registrada. Nossa equipe vai analisar.', id: result.rows[0].id })
   } catch (err) {
@@ -8230,12 +8239,12 @@ router.get('/admin/tentativas-contato', autenticar, exigirAdmin, async (req, res
     const filtro = `WHERE t.criado_em >= NOW() - ($1::int * INTERVAL '1 day') AND ($2::uuid IS NULL OR t.usuario_id = $2::uuid)`
     const SQL_PENALIDADE = `
               (SELECT COUNT(*)::int FROM tentativas_contato x
-                WHERE x.usuario_id = t.usuario_id AND x.criado_em > NOW() - (${JANELA_PENALIDADE_DIAS} * INTERVAL '1 day')) AS tentativas_janela,
+                WHERE x.usuario_id = t.usuario_id AND x.conta AND x.criado_em > NOW() - (${JANELA_PENALIDADE_DIAS} * INTERVAL '1 day')) AS tentativas_janela,
               (SELECT MAX(x.criado_em) FROM tentativas_contato x WHERE x.usuario_id = t.usuario_id) AS ultima_tentativa_em,
               u.suspenso_em, u.suspenso_motivo`
     const lista = await pool.query(
       `SELECT t.id, t.usuario_id, u.nome, u.email, u.role, u.tipo_prestador,
-              t.tipo, t.demanda_id, t.campo, t.criado_em,
+              t.tipo, t.demanda_id, t.campo, t.criado_em, t.conta,
               COALESCE(o.titulo, r.titulo) AS demanda_titulo, ${SQL_PENALIDADE}
          FROM tentativas_contato t
          JOIN usuarios u ON u.id = t.usuario_id
