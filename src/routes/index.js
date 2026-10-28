@@ -69,7 +69,7 @@ const CATEGORIAS_MAX_REPARO = 3
 // para o match novo poder recebê-los; os un-matches não precisam tocá-los.
 const SQL_LIMPAR_CHEGADA = `chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
               chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL, chegada_confirmada_em = NULL,
-              aviso_match_enviado_em = NULL, lembrete_chegada_enviado_em = NULL, ${SQL_ZERAR_AGENDA}`
+              aviso_match_enviado_em = NULL, lembrete_chegada_enviado_em = NULL, lembrete_conclusao_em = NULL, ${SQL_ZERAR_AGENDA}`
 const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
@@ -503,6 +503,10 @@ const migracaoPronta = (async () => {
     for (const tabela of ['obras', 'reparos']) {
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_encerramento_30m_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_encerramento_2h_em TIMESTAMPTZ`)
+      // Lembrete "Ainda trabalhando?" ao profissional (alertaService.lembrarConclusaoPendente):
+      // último envio, claim atômico por fatia (6h reparo / 3 dias obra desde a chegada
+      // confirmada); zerado no match novo (SQL_LIMPAR_CHEGADA).
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_conclusao_em TIMESTAMPTZ`)
     }
     // Relógio de publicação da obra — traz a obra à paridade que o reparo já tem (criado_em é
     // o instante de publicação do reparo + prazo_atendimento_horas é a janela). horas_para_expirar

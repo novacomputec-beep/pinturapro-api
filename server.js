@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, lembrarRespostaHorario, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, lembrarRespostaHorario, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -831,6 +831,10 @@ const iniciarAgendador = () => {
   setInterval(() => { lembrarDemandasSemResposta() }, INTERVALO_LEMBRETE)
   // Lembretes ao dono (30 min / 2h) da solicitação de encerramento pendente do profissional.
   setInterval(() => { lembrarConfirmacaoEncerramento() }, INTERVALO_LEMBRETE)
+  // "Ainda trabalhando?" ao profissional com chegada confirmada e sem pedido de conclusão de
+  // ninguém: fatias de 6h (reparo) / 3 dias (obra) desde a chegada, silêncio 22–07h SP. Mesma
+  // cadência dos outros lembretes; o claim por fatia torna o tique repetido inofensivo.
+  setInterval(() => { lembrarConclusaoPendente() }, INTERVALO_LEMBRETE)
   // Versão "atual" do app: sobe sozinha quando N usuários não testadores já rodam uma maior.
   // 5 min: o aviso de atualização não é urgente, e a consulta agrupa uma tabela pequena.
   setInterval(() => { cronPromoverVersaoAtual() }, INTERVALO_LEMBRETE)
