@@ -2420,6 +2420,60 @@ const lembrarConfirmacaoEncerramento = semSobreposicao('lembrarConfirmacaoEncerr
   }
 })
 
+// Lembrete "Ainda trabalhando?" ao PROFISSIONAL: chegada confirmada (em andamento), demanda
+// aberta com match e NINGUÉM pediu a conclusão (encerramento_solicitado_por IS NULL). Reparo a
+// cada 6h, obra a cada 3 dias, em FATIAS contadas de chegada_confirmada_em (k = 1, 2, …) — o
+// adiamento pela janela de silêncio não desloca a grade. Para sozinho quando alguém pede ou
+// confirma a conclusão (coluna preenchida / status 'encerrada') ou cancela (status 'cancelada').
+// Silêncio 22:00–07:00 (America/Sao_Paulo): a fatia devida nesse intervalo sai no primeiro
+// tique a partir das 07:00. Claim atômico em lembrete_conclusao_em (UPDATE … WHERE a coluna é
+// anterior ao início da fatia atual, RETURNING só o que ESTE tique reivindicou): réplicas,
+// boots e tiques repetidos nunca duplicam; a coluna é zerada no match novo (SQL_LIMPAR_CHEGADA,
+// routes/index.js). Canal dos lembretes: push ou, sem token / push falho, e-mail
+// (entregarPushOuEmail). Cron de 5 min em server.js (INTERVALO_LEMBRETE).
+const LEMBRETE_CONCLUSAO = {
+  obras:   { chave: 'obra_id',   intervalo: '3 days',  acao: 'Concluí a obra' },
+  reparos: { chave: 'reparo_id', intervalo: '6 hours', acao: 'Concluí o serviço' },
+}
+const LEMBRETE_CONCLUSAO_HORA_INICIO = 7   // envia a partir das 07:00 SP (inclusive)
+const LEMBRETE_CONCLUSAO_HORA_FIM = 22     // e antes das 22:00 SP (exclusive)
+const TITULO_LEMBRETE_CONCLUSAO = 'Ainda trabalhando?'
+// Início da fatia atual: chegada_confirmada_em + floor(decorrido / intervalo) * intervalo.
+const sqlInicioFatiaConclusao = (intervalo) =>
+  `d.chegada_confirmada_em + floor(EXTRACT(EPOCH FROM (NOW() - d.chegada_confirmada_em)) / EXTRACT(EPOCH FROM INTERVAL '${intervalo}')) * INTERVAL '${intervalo}'`
+const lembrarConclusaoPendente = semSobreposicao('lembrarConclusaoPendente', async () => {
+  for (const [tabela, l] of Object.entries(LEMBRETE_CONCLUSAO)) {
+    try {
+      const claim = await pool.query(`
+        UPDATE ${tabela} d SET lembrete_conclusao_em = NOW()
+          FROM usuarios u
+         WHERE u.id = d.match_usuario_id
+           AND d.status = 'aberta'
+           AND d.match_usuario_id IS NOT NULL
+           AND d.chegada_confirmada_em IS NOT NULL
+           AND d.encerramento_solicitado_por IS NULL
+           AND NOW() >= d.chegada_confirmada_em + INTERVAL '${l.intervalo}'
+           AND (d.lembrete_conclusao_em IS NULL OR d.lembrete_conclusao_em < ${sqlInicioFatiaConclusao(l.intervalo)})
+           AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'America/Sao_Paulo')) >= $1::int
+           AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'America/Sao_Paulo')) <  $2::int
+        RETURNING d.id, d.titulo, u.push_token, u.email, u.nome`,
+        [LEMBRETE_CONCLUSAO_HORA_INICIO, LEMBRETE_CONCLUSAO_HORA_FIM])
+      for (const d of claim.rows) {
+        const via = await entregarPushOuEmail({
+          push_token: d.push_token, email: d.email, nome: d.nome,
+          titulo: TITULO_LEMBRETE_CONCLUSAO,
+          corpo: `Quando terminar "${d.titulo}", toque em ${l.acao} para o cliente confirmar.`,
+          data: { tipo: 'lembrete_conclusao', [l.chave]: d.id },
+          rotulo: `lembrete conclusão ${tabela} ${d.id}`,
+        })
+        console.log(`[LembreteConclusao] ${tabela} ${d.id} → profissional via ${via}`)
+      }
+    } catch (err) {
+      console.error(`[LembreteConclusao] ${tabela}:`, err.message)
+    }
+  }
+})
+
 // Rótulo pt-BR DERIVADO do próprio INTERVAL aplicado, em vez de escrito à mão ao lado dele:
 // o push anuncia exatamente o prazo que o WHERE cobra, e não há um segundo valor para
 // esquecer de mudar. Cobre as unidades usadas aqui; qualquer outra cai no fallback e o push
@@ -2574,6 +2628,8 @@ module.exports = {
   // do fechamento automático para GET /:id.
   lembrarConfirmacaoEncerramento,
   encerramentoAutomaticoEm,
+  lembrarConclusaoPendente,
+  LEMBRETE_CONCLUSAO,
   // Exportadas para o painel admin (GET /admin/suspensos e o liberar) usarem EXATAMENTE a mesma
   // janela e o mesmo limite que o cron aplica — antes a rota tinha uma cópia '90 days' própria,
   // que passaria a mentir na primeira vez que este valor mudasse.
