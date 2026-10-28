@@ -5,7 +5,8 @@
 // Com a chave configuracoes.grupos_relacionados_ativo = 'true' (semente de boot), um reparo
 // de categoria X avisa quem tem X OU qualquer categoria do MESMO grupo de X em
 // especialidades. Desligada ('false'), ou categoria fora de qualquer grupo, o casamento é
-// o exato de sempre. 'outros' não entra em grupo nenhum: continua avisando todo mundo.
+// o exato de sempre. 'outros' não entra em grupo nenhum: SOZINHO avisa todo mundo; junto de
+// outra categoria é descartado (ver expandirCategoria).
 //
 // Os slugs são os de CATEGORIAS_SERVICO (utils/categoriasApp, cópia verbatim do app);
 // validarGrupos() confere na carga do módulo que cada slug existe e aparece em UM grupo só —
@@ -57,10 +58,18 @@ const gruposRelacionadosAtivo = async (db = pool) => {
 // quando não há categoria (lado obra). Aceita um slug (reparo antigo) ou a lista `categorias`
 // (até 3): a saída é a UNIÃO de cada slug com o seu grupo. Chave desligada ou slug fora de
 // grupo: só os próprios slugs. A chave é lida UMA vez por chamada.
+// 'outros' só vale SOZINHO (→ todo profissional da cidade com ≥1 especialidade, via
+// sqlCasaCategorias). Acompanhado de outra categoria é DESCARTADO: o público passa a ser só
+// as categorias escolhidas + seus grupos (decisão do dono, 28/10/2026). Como esta é a única
+// porta dos públicos (push de demanda nova e rede de segurança, oferta aumentada, lembrete,
+// e-mail), a regra não diverge entre caminhos; a repescagem por destinatário (push_entregas)
+// reenvia só a quem o broadcast original já escolheu.
 const expandirCategoria = async (categoria, db = pool) => {
   if (categoria == null) return null
-  const slugs = (Array.isArray(categoria) ? categoria : [categoria]).filter(s => s != null).map(String)
+  let slugs = (Array.isArray(categoria) ? categoria : [categoria]).filter(s => s != null).map(String)
   if (slugs.length === 0) return null
+  const semOutros = slugs.filter(s => s !== 'outros')
+  if (semOutros.length > 0) slugs = semOutros
   const ativo = await gruposRelacionadosAtivo(db)
   const saida = new Set()
   for (const slug of slugs) {

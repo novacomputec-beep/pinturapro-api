@@ -40,7 +40,8 @@ const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZE
 const { expandirCategoria } = require('../utils/gruposCategorias')
 // Predicado único categoria × especialidades dos dois públicos: `param` = placeholder text[]
 // (NULL no lado obra = sem filtro). 'outros' na lista = todo profissional com ao menos uma
-// especialidade; senão, basta UMA especialidade em comum (&&). Cada usuário sai UMA vez da
+// especialidade; senão, basta UMA especialidade em comum (&&). expandirCategoria só deixa
+// 'outros' chegar aqui quando ele é a ÚNICA categoria da demanda. Cada usuário sai UMA vez da
 // consulta (é uma linha por u.id), então ninguém é avisado duas vezes por evento.
 const sqlCasaCategorias = (param) =>
   `(${param}::text[] IS NULL OR (cardinality(u.especialidades) > 0 AND ('outros' = ANY(${param}::text[]) OR u.especialidades && ${param}::text[])))`
@@ -277,9 +278,10 @@ const PAGINA_BROADCAST = 500
 // categoria (opcional, só o lado reparo passa): casa a categoria da demanda com
 // usuarios.especialidades NO SQL (sqlCasaCategorias) —
 //   - null (lado obra): sem filtro, comportamento de sempre;
-//   - 'outros': todo reparador ativo da cidade que tenha AO MENOS UMA especialidade;
+//   - só 'outros': todo reparador ativo da cidade que tenha AO MENOS UMA especialidade;
 //   - qualquer outra: quem tem esse slug no array OU, com grupos_relacionados_ativo ligada,
-//     qualquer slug do mesmo grupo (expandirCategoria, utils/gruposCategorias).
+//     qualquer slug do mesmo grupo (expandirCategoria, utils/gruposCategorias). 'outros'
+//     junto de outra categoria é descartado lá — vale só a(s) escolhida(s) + grupos.
 // Array NULL ou vazio nunca recebe nada, nem 'outros' (cardinality(NULL) é NULL → falso).
 // Registro por destinatário em push_entregas (routes/index.js, migração). Um statement por
 // página. ON CONFLICT: a linha já existe quando é RE-tentativa (rede de segurança) ou quando o
@@ -462,8 +464,9 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     // "IS DISTINCT FROM 'pintor'" antigo incluía NULL/legado, que recebia o push e caía em
     // 403 TIER_INCORRETO ao tocar. Paridade com o broadcast de obra (= 'pintor').
     // Paginado por u.id (A5), mesmo helper do lado obra.
-    // categoria: só quem declarou esse serviço em especialidades recebe; 'outros' vai a
-    // todo reparador da cidade com ao menos uma especialidade (ver broadcastPaginado).
+    // categoria: só quem declarou esse serviço em especialidades recebe; 'outros' SOZINHO vai a
+    // todo reparador da cidade com ao menos uma especialidade; junto de outra categoria é
+    // descartado (expandirCategoria — ver broadcastPaginado).
     // Os DOIS chamadores (POST /reparos/dono e a rota de aprovação) passam por aqui.
     await broadcastPaginado({
       tipoPrestador: 'reparador', cidade: cidadeReparo, uf: ufReparo, categoria: categoriasDoReparo(reparo),
