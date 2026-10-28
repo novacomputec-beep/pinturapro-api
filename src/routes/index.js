@@ -9270,6 +9270,87 @@ router.get('/admin/crescimento', autenticar, exigirAdmin, async (req, res) => {
   }
 })
 
+// GET /admin/crescimento-nichos?semanas=6&cidade=Patos de Minas — profissionais NOVOS (role
+// 'prestador', criado_em na janela) por semana (America/Sao_Paulo, semana começa na segunda,
+// date_trunc('week')) e, em cada semana, quantos marcaram AO MENOS UMA especialidade de cada
+// nicho (cada profissional conta UMA vez por nicho, mesmo com várias especialidades dele).
+// Nichos = os MESMOS grupos do push de reparo novo (utils/gruposCategorias.GRUPOS_RELACIONADOS),
+// com a chave curta de CHAVES_NICHO; 'outros' = ao menos uma especialidade fora de todo grupo
+// (inclui o slug 'outros' e os slugs do lado obra). Mesma exclusão de contas dos demais
+// contadores admin (EMAILS_ESPECIAIS, $3) e mesmo filtro de cidade ($2, dobrada). Só leitura.
+// Resposta: { semanas, cidade, nichos: [{ chave, nome, especialidades }],
+//             serie: [{ semana_inicio, semana_fim, total, nichos: { chave: n, … } }] }.
+const CHAVES_NICHO = {
+  'Elétrica e tecnologia': 'eletrica_tec', 'Reparos da casa': 'reparos_casa',
+  'Limpeza e cuidados da casa': 'limpeza', 'Beleza': 'beleza', 'Festas e eventos': 'festas',
+  'Cuidado': 'cuidado', 'Transporte': 'transporte', 'Segurança': 'seguranca',
+  'Digital e aulas': 'digital_aulas', 'Arte e criação': 'arte',
+}
+const NICHOS_CRESCIMENTO = Object.entries(GRUPOS_RELACIONADOS).map(([nome, especialidades]) =>
+  ({ chave: CHAVES_NICHO[nome] || normalizar(nome).replace(/[^a-z0-9]+/g, '_'), nome, especialidades }))
+const SLUGS_COM_NICHO = NICHOS_CRESCIMENTO.flatMap(n => n.especialidades)
+const SQL_SEMANA_ATUAL_SP = `date_trunc('week', NOW() AT TIME ZONE 'America/Sao_Paulo')`
+
+router.get('/admin/crescimento-nichos', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const semanasBruto = parseInt(req.query.semanas)
+    const semanas = Number.isInteger(semanasBruto) ? Math.min(Math.max(semanasBruto, 1), 52) : 6
+    const cidadeBruta = typeof req.query.cidade === 'string' ? req.query.cidade.trim() : ''
+    const cidade = cidadeBruta ? normalizar(cidadeBruta) : null
+    const nichosJson = JSON.stringify(NICHOS_CRESCIMENTO.map(n => ({ chave: n.chave, slugs: n.especialidades })))
+
+    const r = await pool.query(
+      `WITH semanas AS (
+         SELECT generate_series(${SQL_SEMANA_ATUAL_SP} - (($1::int - 1) * INTERVAL '1 week'),
+                                ${SQL_SEMANA_ATUAL_SP}, INTERVAL '1 week')::date AS semana
+       ), base AS (
+         SELECT u.id, date_trunc('week', u.criado_em AT TIME ZONE 'America/Sao_Paulo')::date AS semana,
+                COALESCE(u.especialidades, '{}'::text[]) AS especialidades
+           FROM usuarios u
+          WHERE u.role = 'prestador'
+            AND LOWER(u.email) <> ALL($3::text[])
+            AND ($2::text IS NULL OR ${sqlNormalizarCidade('u.cidade')} = $2::text)
+            AND u.criado_em >= ((${SQL_SEMANA_ATUAL_SP} - (($1::int - 1) * INTERVAL '1 week')) AT TIME ZONE 'America/Sao_Paulo')
+       ), nichos AS (
+         SELECT n->>'chave' AS chave, ARRAY(SELECT jsonb_array_elements_text(n->'slugs')) AS slugs
+           FROM jsonb_array_elements($4::jsonb) AS n
+       ), por_nicho AS (
+         SELECT b.semana, n.chave, COUNT(DISTINCT b.id)::int AS n
+           FROM base b JOIN nichos n ON b.especialidades && n.slugs
+          GROUP BY b.semana, n.chave
+         UNION ALL
+         SELECT b.semana, 'outros' AS chave, COUNT(DISTINCT b.id)::int AS n
+           FROM base b
+          WHERE EXISTS (SELECT 1 FROM unnest(b.especialidades) e WHERE e <> ALL($5::text[]))
+          GROUP BY b.semana
+       )
+       SELECT to_char(s.semana, 'YYYY-MM-DD') AS semana_inicio,
+              to_char(s.semana + 6, 'YYYY-MM-DD') AS semana_fim,
+              (SELECT COUNT(*)::int FROM base b WHERE b.semana = s.semana) AS total,
+              COALESCE(jsonb_object_agg(p.chave, p.n) FILTER (WHERE p.chave IS NOT NULL), '{}'::jsonb) AS nichos
+         FROM semanas s
+         LEFT JOIN por_nicho p ON p.semana = s.semana
+        GROUP BY s.semana
+        ORDER BY s.semana ASC`,
+      [semanas, cidade, emailsEspeciais(), nichosJson, SLUGS_COM_NICHO]
+    )
+    const chaves = [...NICHOS_CRESCIMENTO.map(n => n.chave), 'outros']
+    const serie = r.rows.map(l => ({
+      ...l,
+      nichos: Object.fromEntries(chaves.map(c => [c, Number(l.nichos?.[c] || 0)])),
+    }))
+    res.json({
+      semanas,
+      cidade: cidadeBruta || null,
+      nichos: [...NICHOS_CRESCIMENTO, { chave: 'outros', nome: 'Outros', especialidades: ['(qualquer slug fora dos grupos)'] }],
+      serie,
+    })
+  } catch (err) {
+    console.error('[admin/crescimento-nichos]', err.message)
+    res.status(500).json({ erro: 'Erro ao calcular o crescimento por nicho' })
+  }
+})
+
 // GET /admin/canal/resumo?cidade=Patos de Minas&uf=MG&servicos=1&obras=1 — texto pronto
 // para o canal de WhatsApp com os pedidos ABERTOS (status 'aberta', aprovados, não
 // expirados) da cidade: { texto, total }. Montagem em utils/canalResumo (mais recentes
