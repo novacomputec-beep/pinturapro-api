@@ -29,7 +29,7 @@
 // pendente sai em GET /:id como pedido_cancelamento (pedidoCancelamento).
 const { pool } = require('../utils/supabase')
 const { SQL_ZERAR_AGENDA, formatarDataHoraSP } = require('../utils/agendamento')
-const { entregarPushOuEmail, registrarFaltaUsuario, reanunciarDemanda } = require('./alertaService')
+const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunciarDemanda } = require('./alertaService')
 
 const MOTIVOS = ['imprevisto', 'nao_preciso', 'nao_consigo_horario', 'outro']
 const ROTULO_MOTIVO = {
@@ -144,13 +144,17 @@ const pedidoCancelamento = (linha, leitorId) => {
 
 // ---------- efeitos ----------
 const contato = async (usuarioId, db = pool) => {
-  const r = await db.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [usuarioId])
+  const r = await db.query(`SELECT id AS usuario_id, push_token, email, nome FROM usuarios WHERE id = $1`, [usuarioId])
   return r.rows[0] || null
 }
-const avisar = async (usuarioId, { titulo, corpo, data, rotulo }) => {
+// ambos (padrão): push E e-mail (entregarPushEEmail, dedupe em email_alertas) — cancelamento,
+// pedido de cancelamento, recusa e expiração do acordo são avisos críticos pós-match.
+// ambos: false → push ou, sem ele, e-mail (entregarPushOuEmail): só o aviso de cancelamentos
+// frequentes, que é penalidade/lembrete e não tem demanda.
+const avisar = async (usuarioId, { titulo, corpo, data, rotulo }, { ambos = true } = {}) => {
   try {
     const u = await contato(usuarioId)
-    if (u) await entregarPushOuEmail({ ...u, titulo, corpo, data, rotulo })
+    if (u) await (ambos ? entregarPushEEmail : entregarPushOuEmail)({ ...u, titulo, corpo, data, rotulo })
   } catch (err) {
     console.error(`[CancelarMatch] aviso ${rotulo}:`, err.message)
   }
@@ -171,7 +175,7 @@ const avisarCancelamentosFrequentes = async (usuarioId) => {
       corpo: `Você cancelou ${n} atendimentos nos últimos ${JANELA_CANCELAMENTOS_DIAS} dias. Cancelamentos repetidos prejudicam quem conta com você e podem levar à suspensão da conta.`,
       data: { tipo: 'cancelamentos_frequentes', total: n },
       rotulo: `cancelamentos frequentes ${usuarioId}`,
-    })
+    }, { ambos: false })
     return n
   } catch (err) {
     console.error('[CancelarMatch] contagem de cancelamentos:', err.message)

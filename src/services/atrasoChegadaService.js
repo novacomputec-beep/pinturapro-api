@@ -32,7 +32,8 @@
 // {minutos, motivo, criado_em, status, respondido_em, responde_ate} e pedidos_atraso_restantes.
 const { pool } = require('../utils/supabase')
 const { SQL_ZERAR_AGENDA, TOLERANCIA_CHEGADA_MIN, sqlPrazoChegada, sqlLimiteChegada, formatarHoraSP, isentoDeFalta } = require('../utils/agendamento')
-const { entregarPushOuEmail } = require('./alertaService')
+// Avisos de atraso são críticos pós-match: push E e-mail, com dedupe em email_alertas.
+const { entregarPushEEmail } = require('./alertaService')
 
 const MINUTOS_PERMITIDOS = [15, 30, 60]
 const MAX_PEDIDOS_POR_MATCH = 2
@@ -121,13 +122,13 @@ const carregar = async (lado, id, db, lock = false) => {
 }
 const contato = async (usuarioId, db = pool) => {
   if (!usuarioId) return null
-  const r = await db.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [usuarioId])
+  const r = await db.query(`SELECT id AS usuario_id, push_token, email, nome FROM usuarios WHERE id = $1`, [usuarioId])
   return r.rows[0] || null
 }
 const primeiroNome = (nome) => (String(nome || '').trim().split(/\s+/)[0] || 'O profissional')
 const entregar = (destino, campos) => {
   if (!destino) return Promise.resolve('sem contato')
-  return entregarPushOuEmail({ ...destino, ...campos }).catch(() => 'falha')
+  return entregarPushEEmail({ ...destino, ...campos }).catch(() => 'falha')
 }
 const transacao = async (fn) => {
   const client = await pool.connect()

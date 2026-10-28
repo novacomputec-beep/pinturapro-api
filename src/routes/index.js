@@ -14,7 +14,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, encerramentoAutomaticoEm } = require('../services/alertaService')
+const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, encerramentoAutomaticoEm } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { moderarDemanda, avisarModeracao, sanitizarTexto, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
@@ -1357,13 +1357,19 @@ const migracaoPronta = (async () => {
           WHERE conrelid = 'email_alertas'::regclass AND contype = 'c'
             AND pg_get_constraintdef(oid) ~ '\\mtipo\\M'`
       )
-      const jaAceita = chksTipoEmail.rows.some(r => r.def.includes('lembrete_(obra|reparo)(#[0-9]+)?'))
+      // Padrões aceitos: demanda nova ('obra'/'reparo'), lembrete por fatia, reanúncio
+      // ('reaberta_obra'/'reaberta_reparo' — faltava no CHECK anterior e o claim do e-mail de
+      // reanúncio caía na exceção) e os avisos 1:1 pós-match de entregarPushEEmail
+      // ('aviso:<evento>#<hash8>'). jaAceita olha o padrão mais novo: CHECK antigo é recriado.
+      const jaAceita = chksTipoEmail.rows.some(r => r.def.includes('aviso:'))
       if (!jaAceita) {
         for (const r of chksTipoEmail.rows) {
           await client.query(`ALTER TABLE email_alertas DROP CONSTRAINT IF EXISTS ${client.escapeIdentifier(r.conname)}`)
         }
         await client.query(`ALTER TABLE email_alertas ADD CONSTRAINT email_alertas_tipo_check
-                            CHECK (tipo IN ('obra', 'reparo') OR tipo ~ '^lembrete_(obra|reparo)(#[0-9]+)?$')`)
+                            CHECK (tipo IN ('obra', 'reparo')
+                                   OR tipo ~ '^(lembrete|reaberta)_(obra|reparo)(#[0-9]+)?$'
+                                   OR tipo ~ '^aviso:[a-z_]+#[0-9a-f]{8}$')`)
         console.log(`[migration] email_alertas: CHECK de tipo recriado (removidos: ${chksTipoEmail.rows.map(r => r.conname).join(', ') || 'nenhum'})`)
       }
       await client.query('RELEASE SAVEPOINT chk_tipo_email')
@@ -3709,7 +3715,8 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
         // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail), como os
         // avisos de horário. Erro de ticket é logado dentro do helper; aqui fica o resultado.
         if (dono.rows[0]) {
-          entregarPushOuEmail({
+          entregarPushEEmail({
+            usuario_id: obra.rows[0].criado_por,
             ...dono.rows[0],
             titulo: `🚗 ${nome} está a caminho!`,
             corpo: `O pintor saiu para "${obra.rows[0].titulo}". O telefone dele já aparece no app.`,
@@ -3811,7 +3818,8 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
         res.json({ mensagem: 'Encerramento solicitado. Aguardando confirmação da outra parte.', encerramento: 'pendente' })
         // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
         if (outro.rows[0]) {
-          entregarPushOuEmail({
+          entregarPushEEmail({
+            usuario_id: outroId,
             ...outro.rows[0],
             titulo: `✅ ${nome} terminou a obra`,
             corpo: `"${o.titulo}" foi concluída. Confira e confirme no app para avaliar.`,
@@ -3837,16 +3845,16 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
     )
     // Pushes fire-and-forget: o UPDATE acima já commitou, então uma falha de push não pode
     // virar 500 para um encerramento que aconteceu.
-    // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
-    const avisarEncerramento = (destino, titulo, corpo) => entregarPushOuEmail({
+    // Push E e-mail (entregarPushEEmail, dedupe em email_alertas); resultado no log.
+    const avisarEncerramento = (destino, titulo, corpo) => entregarPushEEmail({
       ...destino, titulo, corpo, data: { tipo: 'obra_encerrada', obra_id: req.params.id }, rotulo: `obra encerrada ${req.params.id}`,
     }).then(via => console.log(`[Encerrar] obras ${req.params.id}: ${titulo} → via ${via}`))
       .catch(err => console.error(`[Encerrar] obras ${req.params.id} aviso de encerramento:`, err.message))
     if (ehDono && o.match_usuario_id) {
-      const pintor = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [o.match_usuario_id])
+      const pintor = await pool.query(`SELECT id AS usuario_id, push_token, email, nome FROM usuarios WHERE id = $1`, [o.match_usuario_id])
       if (pintor.rows[0]) avisarEncerramento(pintor.rows[0], '✅ Obra encerrada!', `O solicitante encerrou a obra "${o.titulo}".`)
     } else if (ehPintor) {
-      const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [o.criado_por])
+      const dono = await pool.query(`SELECT id AS usuario_id, push_token, email, nome FROM usuarios WHERE id = $1`, [o.criado_por])
       if (dono.rows[0]) avisarEncerramento(dono.rows[0], '✅ Serviço concluído!', `O pintor concluiu a obra "${o.titulo}".`)
     }
     res.json({ mensagem: 'Obra encerrada com sucesso!', encerramento: 'concluido' })
@@ -4820,7 +4828,8 @@ router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) 
         // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail), como os
         // avisos de horário. Erro de ticket é logado dentro do helper; aqui fica o resultado.
         if (dono.rows[0]) {
-          entregarPushOuEmail({
+          entregarPushEEmail({
+            usuario_id: reparo.rows[0].criado_por,
             ...dono.rows[0],
             titulo: `🚗 ${nome} está a caminho!`,
             corpo: `O prestador saiu para "${reparo.rows[0].titulo}". O telefone dele já aparece no app.`,
@@ -5115,7 +5124,8 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
         res.json({ mensagem: 'Encerramento solicitado. Aguardando confirmação da outra parte.', encerramento: 'pendente' })
         // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
         if (outro.rows[0]) {
-          entregarPushOuEmail({
+          entregarPushEEmail({
+            usuario_id: outroId,
             ...outro.rows[0],
             titulo: `✅ ${nome} terminou o serviço`,
             corpo: `"${r.titulo}" foi concluído. Confira e confirme no app para avaliar.`,
@@ -5137,16 +5147,16 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
        WHERE id = $1`,
       [req.params.id]
     )
-    // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
-    const avisarEncerramento = (destino, titulo, corpo) => entregarPushOuEmail({
+    // Push E e-mail (entregarPushEEmail, dedupe em email_alertas); resultado no log.
+    const avisarEncerramento = (destino, titulo, corpo) => entregarPushEEmail({
       ...destino, titulo, corpo, data: { tipo: 'reparo_encerrado', reparo_id: req.params.id }, rotulo: `reparo encerrado ${req.params.id}`,
     }).then(via => console.log(`[Encerrar] reparos ${req.params.id}: ${titulo} → via ${via}`))
       .catch(err => console.error(`[Encerrar] reparos ${req.params.id} aviso de encerramento:`, err.message))
     if (ehDono && r.match_usuario_id) {
-      const prestador = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [r.match_usuario_id])
+      const prestador = await pool.query(`SELECT id AS usuario_id, push_token, email, nome FROM usuarios WHERE id = $1`, [r.match_usuario_id])
       if (prestador.rows[0]) avisarEncerramento(prestador.rows[0], '✅ Serviço encerrado!', `O solicitante encerrou o serviço "${r.titulo}".`)
     } else if (ehPrestador) {
-      const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [r.criado_por])
+      const dono = await pool.query(`SELECT id AS usuario_id, push_token, email, nome FROM usuarios WHERE id = $1`, [r.criado_por])
       if (dono.rows[0]) avisarEncerramento(dono.rows[0], '✅ Serviço concluído!', `O prestador concluiu o serviço "${r.titulo}".`)
     }
     res.json({ mensagem: 'Serviço encerrado com sucesso!', encerramento: 'concluido' })
@@ -5391,7 +5401,8 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
         res.json({ ...upd.rows[0], sugestoes_restantes: sugestoesRestantes(upd.rows[0], false) })
         // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
         if (dono.rows[0]) {
-          entregarPushOuEmail({
+          entregarPushEEmail({
+            usuario_id: alvo.rows[0].criado_por,
             ...dono.rows[0],
             titulo: `📅 ${nome} propôs ${formatarDataHoraSP(dh.prevista)}`,
             corpo: `Horário de chegada para "${alvo.rows[0].titulo}". Aceitar ou sugerir outro?`,
@@ -5503,7 +5514,8 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
       if (dono.rows[0]) {
         // Dois textos porque são duas perguntas diferentes: um informa, o outro PEDE resposta.
         // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
-        entregarPushOuEmail({
+        entregarPushEEmail({
+          usuario_id: alvo.rows[0].criado_por,
           ...dono.rows[0],
           titulo: pendente ? '📅 Chegada depois do prazo' : '📅 Previsão de chegada!',
           corpo: pendente
@@ -5613,27 +5625,36 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
     // responder duas vezes (mesmo cuidado de candidaturasController.aprovar).
     const avisarDono = declarouAgora && ehProfissional
     const avisarProf = confirmouAgora && !!d.match_usuario_id
-    const tokenDono = avisarDono
-      ? (await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [d.criado_por])).rows[0]?.push_token
+    const contatoDono = avisarDono
+      ? (await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [d.criado_por])).rows[0]
       : null
-    const tokenProf = avisarProf
-      ? (await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [d.match_usuario_id])).rows[0]?.push_token
+    const contatoProf = avisarProf
+      ? (await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [d.match_usuario_id])).rows[0]
       : null
 
     res.json(upd.rows[0])
 
+    // Push E e-mail (entregarPushEEmail): aviso crítico pós-match, dedupe em email_alertas.
     // Profissional declarou → o dono precisa confirmar.
-    if (tokenDono) {
-      enviarPushNotificacao(tokenDono, '📍 Chegada informada!',
-        `O ${profissional} informou que chegou em "${d.titulo}". Confirme no app.`,
-        { tipo: 'chegada_declarada', [chave]: req.params.id }).catch(() => {})
+    if (contatoDono) {
+      entregarPushEEmail({
+        usuario_id: d.criado_por, ...contatoDono,
+        titulo: '📍 Chegada informada!',
+        corpo: `O ${profissional} informou que chegou em "${d.titulo}". Confirme no app.`,
+        data: { tipo: 'chegada_declarada', [chave]: req.params.id },
+        rotulo: `chegada declarada ${tabela} ${req.params.id}`,
+      }).catch(() => {})
     }
     // Chegada confirmada → avisa o profissional. Vale tanto para o dono declarando direto
     // quanto para o dono confirmando uma declaração anterior do profissional.
-    if (tokenProf) {
-      enviarPushNotificacao(tokenProf, '✅ Chegada confirmada!',
-        `O solicitante confirmou sua chegada em "${d.titulo}".`,
-        { tipo: 'chegada_confirmada', [chave]: req.params.id }).catch(() => {})
+    if (contatoProf) {
+      entregarPushEEmail({
+        usuario_id: d.match_usuario_id, ...contatoProf,
+        titulo: '✅ Chegada confirmada!',
+        corpo: `O solicitante confirmou sua chegada em "${d.titulo}".`,
+        data: { tipo: 'chegada_confirmada', [chave]: req.params.id },
+        rotulo: `chegada confirmada ${tabela} ${req.params.id}`,
+      }).catch(() => {})
     }
   } catch (err) {
     console.error(`[${tabela}/chegada]`, err.message)
@@ -5784,8 +5805,8 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
 
     // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
     const rotuloPendente = descreverPendente(d)
-    const entregar = (titulo, corpo, tipo) => entregarPushOuEmail({
-      ...outro.rows[0], titulo, corpo, data: { tipo, [chave]: req.params.id },
+    const entregar = (titulo, corpo, tipo) => entregarPushEEmail({
+      usuario_id: outroId, ...outro.rows[0], titulo, corpo, data: { tipo, [chave]: req.params.id },
       rotulo: `${modo} horário ${tabela} ${req.params.id}`,
     }).catch(() => {})
     if (modo === 'aceitar') {
@@ -5894,7 +5915,7 @@ const criarHandlerConfirmarComparecimento = (tabela) => async (req, res) => {
     if (upd.rowCount === 0) return res.status(409).json({ erro: 'O estado da demanda mudou — recarregue e tente de novo' })
 
     const { chave } = ROTULOS_CHEGADA[tabela]
-    const prof = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [d.match_usuario_id])
+    const prof = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [d.match_usuario_id])
     res.json({ resposta, ...upd.rows[0] })
 
     if (resposta === 'nao') {
@@ -5903,15 +5924,16 @@ const criarHandlerConfirmarComparecimento = (tabela) => async (req, res) => {
       ;(tabela === 'obras' ? verificarCronometroObras : verificarCronometroReparos)()
       return
     }
-    if (!prof.rows[0]?.push_token) return
+    if (!prof.rows[0]) return
+    // Push E e-mail (entregarPushEEmail): aviso crítico pós-match, dedupe em email_alertas.
+    const avisarProf = (titulo, corpo, tipo) => entregarPushEEmail({
+      usuario_id: d.match_usuario_id, ...prof.rows[0], titulo, corpo,
+      data: { tipo, [chave]: req.params.id }, rotulo: `${tipo} ${tabela} ${req.params.id}`,
+    }).catch(() => {})
     if (resposta === 'sim') {
-      enviarPushNotificacao(prof.rows[0].push_token, '✅ Chegada confirmada!',
-        `O solicitante confirmou sua chegada em "${d.titulo}".`,
-        { tipo: 'chegada_confirmada', [chave]: req.params.id }).catch(() => {})
+      avisarProf('✅ Chegada confirmada!', `O solicitante confirmou sua chegada em "${d.titulo}".`, 'chegada_confirmada')
     } else {
-      enviarPushNotificacao(prof.rows[0].push_token, '📅 O cliente pediu para remarcar',
-        `Proponha um novo horário para "${d.titulo}" no app.`,
-        { tipo: 'chegada_remarcar', [chave]: req.params.id }).catch(() => {})
+      avisarProf('📅 O cliente pediu para remarcar', `Proponha um novo horário para "${d.titulo}" no app.`, 'chegada_remarcar')
     }
   } catch (err) {
     console.error(`[${tabela}/confirmar-comparecimento]`, err.message)

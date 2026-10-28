@@ -1,5 +1,6 @@
 const { pool } = require('../utils/supabase')
 const { Expo } = require('expo-server-sdk')
+const crypto = require('crypto')
 const { getFaixa, MAX_OFFSET_MARCO_MINUTOS, PRAZO_MODO_HOJE, sqlFimDoDia, SQL_FIM_DO_DIA_SP, sqlZonaSegura } = require('../utils/faixasPrazo')
 // Ver src/routes/index.js: a obra guarda a zona do dono em prazo_timezone, validada contra
 // pg_timezone_names NA HORA DO USO — zona NULL ou que deixou de existir recua para o padrão em
@@ -674,7 +675,8 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
 
     const hoje = await client.query(
       `SELECT count(*)::int AS n FROM email_alertas
-        WHERE created_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')`
+        WHERE created_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')
+          AND tipo NOT LIKE 'aviso:%'`
     )
     const restante = EMAIL_ALERTAS_TETO_DIA - hoje.rows[0].n
     if (restante <= 0) {
@@ -1280,6 +1282,12 @@ const entregarAoProfissional = async ({ lado, demanda, titulo, corpo, rotulo }) 
 // quando há token E o Expo aceitou o ticket; senão (sem token, token inválido, ticket 'error',
 // exceção) e-mail em TEXTO PURO, sem link: assunto = título do push, corpo = texto do push.
 // Nunca lança (erro de e-mail vira log). Devolve 'push' | 'e-mail' | 'sem contato' | 'falha'.
+// Corpo em texto puro dos e-mails 1:1 (entregarPushOuEmail e entregarPushEEmail): primeiro nome,
+// título e texto do push, e o convite para abrir o app. Um só lugar para os dois helpers.
+const textoEmailAviso = (nome, titulo, corpo) => {
+  const primeiro = String(nome || '').trim().split(/\s+/)[0]
+  return `${primeiro ? `Olá, ${primeiro}!\n\n` : ''}${titulo}\n\n${corpo}\n\nAbra o app ${MARCA} para responder.`
+}
 const entregarPushOuEmail = async ({ push_token, email, nome, titulo, corpo, data, rotulo }) => {
   try {
     if (push_token) {
@@ -1288,13 +1296,57 @@ const entregarPushOuEmail = async ({ push_token, email, nome, titulo, corpo, dat
     }
     const destino = String(email || '').trim()
     if (!destino) return 'sem contato'
-    const primeiro = String(nome || '').trim().split(/\s+/)[0]
-    const texto = `${primeiro ? `Olá, ${primeiro}!\n\n` : ''}${titulo}\n\n${corpo}\n\nAbra o app ${MARCA} para responder.`
-    await comTimeout(enviarEmailBrevo({ para: destino, assunto: titulo, texto }), EMAIL_ALERTAS_TIMEOUT_MS, `Brevo ${rotulo}`)
+    await comTimeout(enviarEmailBrevo({ para: destino, assunto: titulo, texto: textoEmailAviso(nome, titulo, corpo) }), EMAIL_ALERTAS_TIMEOUT_MS, `Brevo ${rotulo}`)
     return 'e-mail'
   } catch (err) {
     console.error(`[Entrega] ${rotulo} falhou:`, err.message)
     return 'falha'
+  }
+}
+
+// Push E e-mail, SEMPRE os dois (decisão do dono, 28/10/2026) — avisos 1:1 CRÍTICOS pós-match:
+// horário proposto / confirmado / contraproposta / recusado, a caminho, chegada declarada e
+// confirmada, remarcar, atraso (pedido, aceite, recusa, atrasado), pedido e confirmação de
+// conclusão, cancelamento e pedido de cancelamento, encerramento automático.
+// Push como em entregarPushOuEmail; e-mail em texto puro com o MESMO texto (textoEmailAviso) a
+// todo destinatário com e-mail, tenha token ou não. Dedupe do e-mail: claim em email_alertas com
+// tipo 'aviso:<data.tipo>#<hash8(titulo+corpo)>', demanda_id = data.obra_id/reparo_id e
+// usuario_id — o mesmo aviso (mesmo texto) ao mesmo usuário na mesma demanda sai UMA vez, mesmo
+// com retry da rota, réplica ou tique repetido; um aviso novo (outro horário, outro pedido) tem
+// outro hash e sai. Sem usuario_id, sem id de demanda em `data` ou id que não é UUID: envia sem
+// claim (nunca segura um aviso por falta de chave). Essas linhas NÃO contam no teto diário do
+// e-mail de demanda nova (reivindicarEmailsNovaDemanda exclui 'aviso:%').
+// Lembretes (resposta de horário, chegada, confirmação de conclusão, cancelamentos frequentes,
+// contato) NÃO passam por aqui: continuam em entregarPushOuEmail (push ou, sem ele, e-mail).
+// Nunca lança. Devolve as vias que saíram ('push+e-mail', 'push', 'e-mail', 'push+e-mail já
+// enviado', …), 'sem contato' ou 'falha'.
+const UUID_RE_AVISO = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const hash8 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 8)
+const entregarPushEEmail = async ({ usuario_id, push_token, email, nome, titulo, corpo, data, rotulo }) => {
+  const vias = []
+  try {
+    if (push_token) {
+      const r = await enviarPushNotificacao(push_token, titulo, corpo, data)
+      if (r === 'enviado') vias.push('push')
+    }
+    const destino = String(email || '').trim()
+    if (!destino) return vias.length ? vias.join('+') : 'sem contato'
+    const demandaId = String(data?.obra_id || data?.reparo_id || '')
+    const evento = String(data?.tipo || '')
+    if (usuario_id && UUID_RE_AVISO.test(demandaId) && /^[a-z_]+$/.test(evento)) {
+      const claim = await pool.query(
+        `INSERT INTO email_alertas (tipo, demanda_id, usuario_id) VALUES ($1, $2, $3)
+         ON CONFLICT (tipo, demanda_id, usuario_id) DO NOTHING RETURNING usuario_id`,
+        [`aviso:${evento}#${hash8(`${titulo}\n${corpo}`)}`, demandaId, usuario_id]
+      )
+      if (claim.rowCount === 0) { vias.push('e-mail já enviado'); return vias.join('+') }
+    }
+    await comTimeout(enviarEmailBrevo({ para: destino, assunto: titulo, texto: textoEmailAviso(nome, titulo, corpo) }), EMAIL_ALERTAS_TIMEOUT_MS, `Brevo ${rotulo}`)
+    vias.push('e-mail')
+    return vias.join('+')
+  } catch (err) {
+    console.error(`[Entrega] ${rotulo} falhou:`, err.message)
+    return vias.length ? `${vias.join('+')}+falha` : 'falha'
   }
 }
 
@@ -2418,7 +2470,8 @@ const autoEncerrarPendentes = async () => {
         // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
         const alvo = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [avisarId])
         if (alvo.rows[0]) {
-          const via = await entregarPushOuEmail({
+          const via = await entregarPushEEmail({
+            usuario_id: avisarId,
             ...alvo.rows[0],
             titulo: '✅ Encerrado automaticamente',
             corpo: `Sem confirmação em ${rotuloPrazo(lado.encerrarApos)}, ${lado.rotulo} "${d.titulo}" foi encerrad${lado.tabela === 'obras' ? 'a' : 'o'} automaticamente.`,
@@ -2502,6 +2555,7 @@ module.exports = {
   sqlClaimAgendar,
   OFFSETS_AGENDAR,
   entregarPushOuEmail,
+  entregarPushEEmail,
   lembrarRespostaHorario,
   sqlClaimRespostaHorario,
   LEMBRETES_RESPOSTA,
