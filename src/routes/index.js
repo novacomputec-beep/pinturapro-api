@@ -1320,8 +1320,9 @@ const migracaoPronta = (async () => {
     // Índice PARCIAL só do que a rede de segurança procura: falhas ainda repescáveis. A PK
     // cobre o lookup por demanda; este evita varrer as linhas 'enviado' (a maioria).
     await client.query(`CREATE INDEX IF NOT EXISTS push_entregas_falha_idx ON push_entregas (tipo, demanda_id, ultima_tentativa_em) WHERE resultado = 'falha' AND tentativas < 3`)
-    // E-mail de RESERVA do aviso "nova obra / novo serviço" (alertaService.enviarEmailsNovaDemanda):
-    // vai ao prestador elegível que NÃO tem push_token (e por isso nunca entra em push_entregas).
+    // E-mail do aviso "nova obra / novo serviço" (alertaService.enviarEmailsNovaDemanda): vai a
+    // TODO prestador elegível do broadcast, com ou sem push_token (desde 28/10/2026; antes só
+    // a quem não tinha token). Lembrete/reanúncio seguem só para quem não tem token.
     // Uma linha = um e-mail reivindicado para uma demanda; o INSERT ... ON CONFLICT DO NOTHING
     // acontece ANTES do envio, então a repetição do caminho (claim que rodou de novo, boot,
     // réplica) nunca manda o mesmo e-mail duas vezes. created_at é a base do teto diário.

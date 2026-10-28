@@ -20,7 +20,7 @@ const { apresentacaoReparoLista, apresentacaoObra, categoriasDoReparo } = requir
 const SQL_CIDADE_PRESTADOR = sqlNormalizarCidade('u.cidade')
 // Sem ciclo: middlewares/auth só importa jsonwebtoken e utils/supabase, nunca este serviço.
 const { invalidarCacheAssinatura } = require('../middlewares/auth')
-// E-mail de reserva do aviso de demanda nova (enviarEmailsNovaDemanda). brevoService só
+// E-mail do aviso de demanda nova a todos os elegíveis (enviarEmailsNovaDemanda). brevoService só
 // importa o SDK e utils/marca — sem ciclo. Direto no Brevo (e não em emailService) para o
 // erro de cada envio chegar aqui e ser logado por destinatário.
 const { enviarEmail: enviarEmailBrevo } = require('./brevoService')
@@ -40,7 +40,8 @@ const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZE
 const { expandirCategoria } = require('../utils/gruposCategorias')
 // Predicado único categoria × especialidades dos dois públicos: `param` = placeholder text[]
 // (NULL no lado obra = sem filtro). 'outros' na lista = todo profissional com ao menos uma
-// especialidade; senão, basta UMA especialidade em comum (&&). Cada usuário sai UMA vez da
+// especialidade; senão, basta UMA especialidade em comum (&&). expandirCategoria só deixa
+// 'outros' chegar aqui quando ele é a ÚNICA categoria da demanda. Cada usuário sai UMA vez da
 // consulta (é uma linha por u.id), então ninguém é avisado duas vezes por evento.
 const sqlCasaCategorias = (param) =>
   `(${param}::text[] IS NULL OR (cardinality(u.especialidades) > 0 AND ('outros' = ANY(${param}::text[]) OR u.especialidades && ${param}::text[])))`
@@ -277,9 +278,10 @@ const PAGINA_BROADCAST = 500
 // categoria (opcional, só o lado reparo passa): casa a categoria da demanda com
 // usuarios.especialidades NO SQL (sqlCasaCategorias) —
 //   - null (lado obra): sem filtro, comportamento de sempre;
-//   - 'outros': todo reparador ativo da cidade que tenha AO MENOS UMA especialidade;
+//   - só 'outros': todo reparador ativo da cidade que tenha AO MENOS UMA especialidade;
 //   - qualquer outra: quem tem esse slug no array OU, com grupos_relacionados_ativo ligada,
-//     qualquer slug do mesmo grupo (expandirCategoria, utils/gruposCategorias).
+//     qualquer slug do mesmo grupo (expandirCategoria, utils/gruposCategorias). 'outros'
+//     junto de outra categoria é descartado lá — vale só a(s) escolhida(s) + grupos.
 // Array NULL ou vazio nunca recebe nada, nem 'outros' (cardinality(NULL) é NULL → falso).
 // Registro por destinatário em push_entregas (routes/index.js, migração). Um statement por
 // página. ON CONFLICT: a linha já existe quando é RE-tentativa (rede de segurança) ou quando o
@@ -462,8 +464,9 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     // "IS DISTINCT FROM 'pintor'" antigo incluía NULL/legado, que recebia o push e caía em
     // 403 TIER_INCORRETO ao tocar. Paridade com o broadcast de obra (= 'pintor').
     // Paginado por u.id (A5), mesmo helper do lado obra.
-    // categoria: só quem declarou esse serviço em especialidades recebe; 'outros' vai a
-    // todo reparador da cidade com ao menos uma especialidade (ver broadcastPaginado).
+    // categoria: só quem declarou esse serviço em especialidades recebe; 'outros' SOZINHO vai a
+    // todo reparador da cidade com ao menos uma especialidade; junto de outra categoria é
+    // descartado (expandirCategoria — ver broadcastPaginado).
     // Os DOIS chamadores (POST /reparos/dono e a rota de aprovação) passam por aqui.
     await broadcastPaginado({
       tipoPrestador: 'reparador', cidade: cidadeReparo, uf: ufReparo, categoria: categoriasDoReparo(reparo),
@@ -547,11 +550,13 @@ const notificarOfertaAumentadaReparo = async (reparoId) => {
   })
 }
 
-// E-mail de RESERVA do aviso "nova obra / novo serviço": vai ao prestador ELEGÍVEL que não tem
-// push_token — o mesmo público do broadcast, menos a exigência de token (e mais a de e-mail).
-// Consulta SEPARADA da do push (broadcastPaginado continua intocado): os predicados abaixo
-// ESPELHAM os de lá (role, tipo_prestador, assinatura ativa, não suspenso, cidade+uf dobrados,
-// categoria × especialidades) e mudar um sem o outro deve saltar aos olhos.
+// E-mail do aviso "nova obra / novo serviço": vai a TODO prestador ELEGÍVEL do broadcast — com
+// ou sem push_token (push e e-mail juntos, decisão do dono em 28/10/2026); a única exigência a
+// mais é ter e-mail. Consulta SEPARADA da do push (broadcastPaginado continua intocado): os
+// predicados abaixo ESPELHAM os de lá (role, tipo_prestador, assinatura ativa, não suspenso,
+// cidade+uf dobrados, categoria × especialidades) e mudar um sem o outro deve saltar aos olhos.
+// lado.somenteSemToken = true restringe a quem NÃO tem token (comportamento de reserva, mantido
+// no lembrete "ainda aberto" e no reanúncio); ausente/false = todos os elegíveis.
 //
 // Quando roda: SÓ depois do COMMIT do claim (dispararPushNovoComClaim), fire-and-forget, fora de
 // qualquer transação, nunca no caminho "oferta aumentada". Erro aqui é apenas logado — jamais
@@ -578,9 +583,10 @@ const botaoEmailDemanda = (codigoPublico) => {
 }
 // colunaValor: lida como `valor` no SELECT da demanda — mensagemNovaObra/NovoReparo a ignoram;
 // o lembrete "ainda aberto" (lembrarDemandasSemResposta) a mostra no corpo.
+// somenteSemToken: false — demanda nova manda e-mail a todos os elegíveis (com e sem push_token).
 const LADOS_EMAIL = {
-  obras:   { tipo: 'obra',   tipoPrestador: 'pintor',    comCategoria: false, mensagem: mensagemNovaObra,   aba: 'Obras',    colunaValor: 'valor' },
-  reparos: { tipo: 'reparo', tipoPrestador: 'reparador', comCategoria: true,  mensagem: mensagemNovoReparo, aba: 'Serviços', colunaValor: 'valor_estimado' },
+  obras:   { tipo: 'obra',   tipoPrestador: 'pintor',    comCategoria: false, mensagem: mensagemNovaObra,   aba: 'Obras',    colunaValor: 'valor',          somenteSemToken: false },
+  reparos: { tipo: 'reparo', tipoPrestador: 'reparador', comCategoria: true,  mensagem: mensagemNovoReparo, aba: 'Serviços', colunaValor: 'valor_estimado', somenteSemToken: false },
 }
 const escaparHtml = (s) => String(s ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
 const htmlEmailNovaDemanda = ({ nome, titulo, corpo, aba, botao = botaoEmailDemanda(null) }) => `
@@ -642,15 +648,16 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     // null no lado obra.
     const categorias = await expandirCategoria(lado.comCategoria ? categoriasDoReparo(demanda) : null, client)
 
-    // Elegíveis SEM token (espelho de broadcastPaginado, trocando push_token IS NOT NULL por
-    // IS NULL e exigindo e-mail). Ordem por u.id como lá, para o teto cortar de forma estável.
+    // Elegíveis (espelho de broadcastPaginado, sem exigir token e exigindo e-mail). Com
+    // lado.somenteSemToken ($6) só quem NÃO tem push_token entra (lembrete/reanúncio). Ordem
+    // por u.id como lá, para o teto cortar de forma estável.
     const elegiveis = await client.query(
       `SELECT u.id, u.nome, u.email
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
        WHERE u.role = 'prestador' AND u.tipo_prestador = $1
          AND ${SQL_ASSINATURA_ATIVA}
-         AND u.push_token IS NULL
+         AND (NOT $6::boolean OR u.push_token IS NULL)
          AND NULLIF(btrim(u.email), '') IS NOT NULL
          AND u.suspenso_em IS NULL
          AND NULLIF(btrim(u.cidade), '') IS NOT NULL
@@ -661,7 +668,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          ${sqlSemManifestacao(lado.interesse, '$5')}
          AND ${sqlNaoMesmoCpfDoCriador(tabela, '$5')}
        ORDER BY u.id`,
-      [lado.tipoPrestador, cidade, uf, categorias, demandaId]
+      [lado.tipoPrestador, cidade, uf, categorias, demandaId, lado.somenteSemToken === true]
     )
     if (elegiveis.rows.length === 0) return null
 
@@ -714,7 +721,7 @@ const enviarEmailsNovaDemanda = async (tabela, demandaId, ladoOverride = null) =
         console.error(`[EmailAlerta] falha ao enviar | ${lado.tipo} ${demandaId} | usuário ${d.id}:`, err.message)
       }
     }
-    console.log(`[EmailAlerta] ${lado.tipo} ${demandaId} | elegíveis sem token: ${fase1.elegiveis} | enviados: ${enviados} | falhos: ${falhos} | cortados pelo teto: ${fase1.cortados}`)
+    console.log(`[EmailAlerta] ${lado.tipo} ${demandaId} | elegíveis${lado.somenteSemToken ? ' sem token' : ''}: ${fase1.elegiveis} | enviados: ${enviados} | falhos: ${falhos} | cortados pelo teto: ${fase1.cortados}`)
   } catch (err) {
     console.error(`[EmailAlerta] erro em ${tabela} ${demandaId}:`, err.message)
   }
@@ -951,8 +958,9 @@ const dispararPushNovoComClaim = async (tabela, id, notificar, { criadoPor = nul
     await notificar(id)
     await client.query(`UPDATE ${tabela} SET push_novo_enviado_em = NOW() WHERE id = $1`, [id])
     await client.query('COMMIT')
-    // E-mail de reserva a quem não tem token: só DEPOIS do COMMIT, fire-and-forget, com o pool
-    // (nunca este client). Falha ali é só log — o carimbo acima já está gravado e fica.
+    // E-mail a TODOS os elegíveis (com e sem token; claim em email_alertas): só DEPOIS do COMMIT,
+    // fire-and-forget, com o pool (nunca este client). Falha ali é só log — o carimbo acima já
+    // está gravado e fica.
     enviarEmailsNovaDemanda(tabela, id).catch(err =>
       console.error(`[EmailAlerta] erro inesperado em ${tabela} ${id}:`, err.message))
     return true
@@ -1213,7 +1221,7 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
         // tipo do lembrete + número da fatia no claim de email_alertas (ver cabeçalho: o UNIQUE
         // é por fatia) e o `interesse` do lado (exclui quem já se manifestou; conta os
         // interessados para o texto). Já engole os próprios erros (só log).
-        await enviarEmailsNovaDemanda(lado.tabela, d.id, { tipo: `${lado.tipoEmail}#${d.lembretes_enviados}`, mensagem: lado.mensagem, interesse: lado.interesse })
+        await enviarEmailsNovaDemanda(lado.tabela, d.id, { tipo: `${lado.tipoEmail}#${d.lembretes_enviados}`, mensagem: lado.mensagem, interesse: lado.interesse, somenteSemToken: true })
       }
     } catch (err) {
       console.error(`[Lembrete] erro em ${lado.tabela}:`, err.message)
@@ -1910,7 +1918,7 @@ const reanunciarDemanda = async (tabela, demandaId) => {
       excluirManifestados: { interesse: lembrete.interesse, demandaId },
       demanda: { tabela, id: demandaId },
     })
-    await enviarEmailsNovaDemanda(tabela, demandaId, { tipo: `reaberta_${lado.tipo}`, interesse: lembrete.interesse })
+    await enviarEmailsNovaDemanda(tabela, demandaId, { tipo: `reaberta_${lado.tipo}`, interesse: lembrete.interesse, somenteSemToken: true })
   } catch (err) {
     console.error(`[Reanuncio] ${tabela} ${demandaId}:`, err.message)
   }
