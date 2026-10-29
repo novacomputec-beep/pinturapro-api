@@ -2409,6 +2409,17 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
 
 // GET /obras/meus-contratos — obras finalizadas (encerradas) em que o usuário foi o pintor do match
 // IMPORTANTE: registrar antes de GET /obras/:id para não ser sombreado por :id='meus-contratos'
+// avaliacao_recebida de cada contrato finalizado do PROFISSIONAL (avaliado_id = $1):
+// { nota, nivel, etiquetas[], criado_em } ou null se o dono ainda não avaliou. A tela
+// AvaliacaoRecebidaScreen do app lê exatamente estes campos. nivel é preenchido em JS
+// (comNivel) a partir de NIVEIS, a mesma tabela do push 'avaliacao_recebida'.
+const sqlAvaliacaoRecebida = (tipo, exprId) => `(
+  SELECT json_build_object('nota', a.estrelas, 'etiquetas', a.etiquetas, 'criado_em', a.criado_em)
+    FROM avaliacoes a
+   WHERE a.contrato_tipo = '${tipo}' AND a.contrato_id = ${exprId} AND a.avaliado_id = $1
+   ORDER BY a.criado_em DESC LIMIT 1)`
+const comNivel = (av) => (av ? { nota: av.nota, nivel: NIVEIS[av.nota] || null, etiquetas: av.etiquetas || [], criado_em: av.criado_em } : null)
+
 router.get('/obras/meus-contratos', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
@@ -2421,6 +2432,7 @@ router.get('/obras/meus-contratos', autenticar, async (req, res) => {
                 SELECT 1 FROM avaliacoes a
                 WHERE a.contrato_tipo = 'obra' AND a.contrato_id = o.id AND a.avaliador_id = $1
               ) AS ja_avaliei,
+              ${sqlAvaliacaoRecebida('obra', 'o.id')} AS avaliacao_recebida,
               -- Total ANTES do LIMIT, no mesmo statement: evita uma segunda query repetindo
               -- o WHERE — duplicar predicado é exatamente onde os dois lados divergem depois.
               COUNT(*) OVER()::int AS _total
@@ -2438,7 +2450,7 @@ router.get('/obras/meus-contratos', autenticar, async (req, res) => {
     // entra AO LADO de `contratos`, sem aninhar nem renomear — o app não precisa mudar.
     const contratos = result.rows
     const total = contratos.length > 0 ? contratos[0]._total : 0
-    contratos.forEach(c => delete c._total)
+    contratos.forEach(c => { delete c._total; c.avaliacao_recebida = comNivel(c.avaliacao_recebida) })
     res.json({ contratos, total })
   } catch (err) {
     console.error('[obras/meus-contratos]', err.message)
@@ -4562,6 +4574,7 @@ router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
                 SELECT 1 FROM avaliacoes a
                 WHERE a.contrato_tipo = 'reparo' AND a.contrato_id = r.id AND a.avaliador_id = $1
               ) AS ja_avaliei,
+              ${sqlAvaliacaoRecebida('reparo', 'r.id')} AS avaliacao_recebida,
               COUNT(*) OVER()::int AS _total
        FROM reparos r
        JOIN usuarios u ON r.criado_por = u.id
@@ -4573,7 +4586,7 @@ router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
     )
     const contratos = result.rows
     const total = contratos.length > 0 ? contratos[0]._total : 0
-    contratos.forEach(c => delete c._total)
+    contratos.forEach(c => { delete c._total; c.avaliacao_recebida = comNivel(c.avaliacao_recebida) })
     res.json({ contratos, total })
   } catch (err) {
     console.error('[reparos/meus-contratos]', err.message)
@@ -7570,7 +7583,7 @@ router.post('/avaliacoes', autenticar, async (req, res) => {
           usuario_id: avaliado_id, ator_id: uid, ...prof.rows[0],
           titulo: `⭐ Nova avaliação: ${NIVEIS[notaInt]}!`,
           corpo: `${cliente} avaliou "${c.titulo}" com ${notaInt} estrela(s). Toque para ver.`,
-          data: { tipo: 'avaliacao_recebida', [tabela === 'reparos' ? 'reparo_id' : 'obra_id']: contrato_id, nota: notaInt },
+          data: { tipo: 'avaliacao_recebida', [tabela === 'reparos' ? 'reparo_id' : 'obra_id']: contrato_id, nota: notaInt, nivel: NIVEIS[notaInt], etiquetas: etq.valor },
           rotulo: `avaliacao recebida ${tabela} ${contrato_id}`,
         })
         console.log(`[Avaliacoes] ${tabela} ${contrato_id}: ${notaInt}★ → profissional ${avaliado_id} via ${via}`)
