@@ -32,16 +32,29 @@ const GRUPOS_RELACIONADOS = {
   'Arte e criação':               ['artesanato', 'costura', 'tatuagem'],
 }
 
+// Chave curta e estável de cada grupo (API: /admin/crescimento-nichos, etiquetas de avaliação).
+// Nome novo em GRUPOS_RELACIONADOS exige chave aqui — validarGrupos() derruba o boot sem ela.
+const CHAVE_DO_GRUPO = {
+  'Elétrica e tecnologia': 'eletrica_tec', 'Reparos da casa': 'reparos_casa',
+  'Limpeza e cuidados da casa': 'limpeza', 'Beleza': 'beleza', 'Festas e eventos': 'festas',
+  'Cuidado': 'cuidado', 'Transporte': 'transporte', 'Segurança': 'seguranca',
+  'Digital e aulas': 'digital_aulas', 'Arte e criação': 'arte',
+}
+
 // slug → lista do seu grupo (ele incluído). Montado uma vez; slug sem grupo não está no mapa.
 const GRUPO_DO_SLUG = {}
+// slug → chave do grupo (CHAVE_DO_GRUPO). Mesmo preenchimento de validarGrupos().
+const CHAVE_DO_SLUG = {}
 const validarGrupos = () => {
   const conhecidos = new Set(CATEGORIAS_SERVICO.map(c => c.slug))
   for (const [grupo, slugs] of Object.entries(GRUPOS_RELACIONADOS)) {
+    if (!CHAVE_DO_GRUPO[grupo]) throw new Error(`gruposCategorias: grupo "${grupo}" sem chave em CHAVE_DO_GRUPO`)
     for (const slug of slugs) {
       if (!conhecidos.has(slug)) throw new Error(`gruposCategorias: slug desconhecido "${slug}" no grupo "${grupo}"`)
       if (slug === 'outros') throw new Error(`gruposCategorias: "outros" não pode entrar em grupo ("${grupo}")`)
       if (GRUPO_DO_SLUG[slug]) throw new Error(`gruposCategorias: slug "${slug}" em dois grupos`)
       GRUPO_DO_SLUG[slug] = slugs
+      CHAVE_DO_SLUG[slug] = CHAVE_DO_GRUPO[grupo]
     }
   }
 }
@@ -80,4 +93,4 @@ const expandirCategoria = async (categoria, db = pool) => {
   return [...saida]
 }
 
-module.exports = { GRUPOS_RELACIONADOS, CHAVE_GRUPOS_ATIVO, gruposRelacionadosAtivo, expandirCategoria }
+module.exports = { GRUPOS_RELACIONADOS, CHAVE_DO_GRUPO, CHAVE_DO_SLUG, CHAVE_GRUPOS_ATIVO, gruposRelacionadosAtivo, expandirCategoria }

@@ -10,6 +10,8 @@ const { registrarPlataforma } = require('../utils/plataforma')
 const { municipioExiste } = require('../utils/geoBusca')
 const { normalizarCodigo, recalcularIndicador } = require('../utils/indicacoes')
 const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA } = require('../utils/referencias')
+// Resumo de avaliações + selo "bem avaliado" no perfil do profissional (utils/etiquetasAvaliacao).
+const { sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
 const nodemailer = require('nodemailer')
 const crypto = require('crypto')
 
@@ -577,7 +579,23 @@ const perfil = async (req, res) => {
       [req.usuario.id]
     )
     registrarPlataforma(req.usuario.id, req)
-    res.json({ usuario: result.rows[0], assinatura: assinaturaResult.rows[0] || null })
+    const usuario = result.rows[0]
+    // Profissional: resumo das avaliações recebidas + selo "bem avaliado" (3× 5★) no payload
+    // do perfil, para o app mostrar sem segunda chamada. Dono/admin não recebem o bloco.
+    if (usuario && usuario.role === 'prestador') {
+      const av = await pool.query(
+        `SELECT COUNT(*)::int AS total,
+                COALESCE(ROUND(AVG(estrelas)::numeric, 1), 0) AS media,
+                COUNT(*) FILTER (WHERE estrelas = 5)::int AS cinco_estrelas,
+                ${sqlSeloBemAvaliado('$1::uuid')} AS selo_bem_avaliado
+           FROM avaliacoes WHERE avaliado_id = $1`,
+        [req.usuario.id]
+      )
+      const a = av.rows[0]
+      usuario.avaliacoes = { total: a.total, media: parseFloat(a.media), cinco_estrelas: a.cinco_estrelas }
+      usuario.selo_bem_avaliado = a.selo_bem_avaliado
+    }
+    res.json({ usuario, assinatura: assinaturaResult.rows[0] || null })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar perfil' })
   }
