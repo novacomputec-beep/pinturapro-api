@@ -1325,13 +1325,15 @@ const entregarPushOuEmail = async ({ usuario_id, ator_id, push_token, email, nom
 // outro hash e sai. Sem usuario_id, sem id de demanda em `data` ou id que não é UUID: envia sem
 // claim (nunca segura um aviso por falta de chave). Essas linhas NÃO contam no teto diário do
 // e-mail de demanda nova (reivindicarEmailsNovaDemanda exclui 'aviso:%').
+// `chave_email` (opcional, '<evento>#<n>'): substitui '<data.tipo>#<hash8>' — lembrete que repete
+// o MESMO texto (repetirLembreteAgendar) sai um e-mail por ciclo, não um só para sempre.
 // Lembretes (resposta de horário, chegada, confirmação de conclusão, cancelamentos frequentes,
 // contato) NÃO passam por aqui: continuam em entregarPushOuEmail (push ou, sem ele, e-mail).
 // Nunca lança. Devolve as vias que saíram ('push+e-mail', 'push', 'e-mail', 'push+e-mail já
 // enviado', …), 'sem contato' ou 'falha'.
 const UUID_RE_AVISO = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const hash8 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 8)
-const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, data, rotulo }) => {
+const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, data, rotulo, chave_email }) => {
   if (ehOProprioAutor({ usuario_id, ator_id, rotulo })) return 'autor'
   const vias = []
   try {
@@ -1343,11 +1345,14 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
     if (!destino) return vias.length ? vias.join('+') : 'sem contato'
     const demandaId = String(data?.obra_id || data?.reparo_id || '')
     const evento = String(data?.tipo || '')
-    if (usuario_id && UUID_RE_AVISO.test(demandaId) && /^[a-z_]+$/.test(evento)) {
+    const chave = chave_email
+      ? (/^[a-z_]+#[0-9]+$/.test(chave_email) ? chave_email : null)
+      : (/^[a-z_]+$/.test(evento) ? `${evento}#${hash8(`${titulo}\n${corpo}`)}` : null)
+    if (usuario_id && UUID_RE_AVISO.test(demandaId) && chave) {
       const claim = await pool.query(
         `INSERT INTO email_alertas (tipo, demanda_id, usuario_id) VALUES ($1, $2, $3)
          ON CONFLICT (tipo, demanda_id, usuario_id) DO NOTHING RETURNING usuario_id`,
-        [`aviso:${evento}#${hash8(`${titulo}\n${corpo}`)}`, demandaId, usuario_id]
+        [`aviso:${chave}`, demandaId, usuario_id]
       )
       if (claim.rowCount === 0) { vias.push('e-mail já enviado'); return vias.join('+') }
     }
@@ -1621,6 +1626,83 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
   }
 })
 
+// "Agende seu atendimento" REPETIDO — complementa (não substitui) as antecedências fixas acima:
+// enquanto o match vive sem horário (o mesmo SQL_BASE_AGENDAR: nada proposto, aceito, declarado,
+// confirmado nem "a caminho"; demanda 'aberta'; prazo à frente), repete o aviso ao PROFISSIONAL
+// por push + e-mail (entregarPushEEmail). Cadência pela janela W da demanda (sqlJanelaHoras):
+//   W < 4h → 30 min · W < 24h → 2h · W < 7 dias → 6h · W ≥ 7 dias → 12h
+// contada do último ciclo (lembrete_agendar_ultimo_em) ou, no 1º, do match_feito_em.
+// Silêncio 22:00–07:00 (America/Sao_Paulo): o ciclo devido nesse intervalo fica para o 1º tique
+// das 07:00. Do 2º ciclo DESTE match em diante (já havia lembrete_agendar_ultimo_em) avisa
+// também o DONO, no máx. uma vez por dia (SP) — lembrete_agendar_dono_em. Claim atômico
+// (UPDATE ... WHERE devido RETURNING): o WHERE é reavaliado sob o lock da linha, então réplicas e
+// restarts nunca repetem um ciclo. E-mail com chave por ciclo (aviso:agendar#n /
+// aviso:agendar_dono#n); n = lembrete_agendar_ciclo, que nunca zera (ver a migração).
+// ultimo_em e dono_em são zerados em SQL_ZERAR_AGENDA.
+// Guarda de autor: dono e profissional na mesma conta não recebem aviso sobre si mesmos.
+// Cadência dos lembretes repetidos (agendar e resposta de horário), pela janela W da demanda.
+const sqlIntervaloRepetirAgendar = (lado) => {
+  const w = sqlJanelaHoras(LADOS_LEMBRETE.find(l => l.tabela === lado.tabela))
+  return `(CASE WHEN ${w} < 4   THEN INTERVAL '30 minutes'
+                WHEN ${w} < 24  THEN INTERVAL '2 hours'
+                WHEN ${w} < 168 THEN INTERVAL '6 hours'
+                ELSE INTERVAL '12 hours' END)`
+}
+const SQL_HORA_SP = `EXTRACT(HOUR FROM (NOW() AT TIME ZONE '${TZ_AGENDA}'))`
+const SQL_FORA_SILENCIO = `${SQL_HORA_SP} >= 7 AND ${SQL_HORA_SP} < 22`
+const sqlClaimRepetirAgendar = (lado) => `
+      UPDATE ${lado.tabela} d SET lembrete_agendar_ultimo_em = NOW(),
+             lembrete_agendar_ciclo = d.lembrete_agendar_ciclo + 1,
+             lembrete_agendar_dono_em = CASE
+               WHEN d.lembrete_agendar_ultimo_em IS NOT NULL
+                AND (d.lembrete_agendar_dono_em IS NULL
+                     OR (d.lembrete_agendar_dono_em AT TIME ZONE '${TZ_AGENDA}')::date < (NOW() AT TIME ZONE '${TZ_AGENDA}')::date)
+               THEN NOW() ELSE d.lembrete_agendar_dono_em END
+        FROM usuarios p, usuarios o
+       WHERE p.id = d.match_usuario_id AND o.id = d.criado_por
+         AND ${SQL_BASE_AGENDAR} AND ${SQL_PRAZO_CHEGADA} > NOW()
+         AND NOW() >= COALESCE(d.lembrete_agendar_ultimo_em, d.match_feito_em) + ${sqlIntervaloRepetirAgendar(lado)}
+         AND ${SQL_FORA_SILENCIO}
+   RETURNING d.id, d.titulo, d.match_usuario_id, d.criado_por, d.lembrete_agendar_ciclo AS ciclo,
+             (d.lembrete_agendar_dono_em = NOW()) AS avisar_dono, ${sqlReparoCurto(lado)} AS curto,
+             p.push_token, p.email, p.nome,
+             o.push_token AS dono_push_token, o.email AS dono_email, o.nome AS dono_nome`
+const TITULO_AGENDAR_DONO = '⏳ Horário ainda não proposto'
+const corpoAgendarDono = (d) => `O profissional ainda não propôs horário para "${d.titulo}". Você pode sugerir um no app.`
+const repetirLembreteAgendar = semSobreposicao('repetirLembreteAgendar', async () => {
+  for (const lado of Object.values(LADOS_MATCH)) {
+    try {
+      const claim = await pool.query(sqlClaimRepetirAgendar(lado))
+      for (const d of claim.rows) {
+        // Mesmo data dos pushes de match ao profissional (abre o detalhe); ao dono, o tipo
+        // genérico da negociação de chegada, que o app já roteia ao detalhe nos dois lados.
+        const via = await entregarPushEEmail({
+          usuario_id: d.match_usuario_id, ator_id: d.criado_por,
+          push_token: d.push_token, email: d.email, nome: d.nome,
+          titulo: TITULO_AGENDAR, corpo: corpoAgendar(lado, d),
+          data: { tipo: lado.tipoPush, [lado.chave]: d.id },
+          chave_email: `agendar#${d.ciclo}`,
+          rotulo: `agendar repetido ${lado.tabela} ${d.id} #${d.ciclo}`,
+        })
+        let viaDono = '-'
+        if (d.avisar_dono) {
+          viaDono = await entregarPushEEmail({
+            usuario_id: d.criado_por, ator_id: d.match_usuario_id,
+            push_token: d.dono_push_token, email: d.dono_email, nome: d.dono_nome,
+            titulo: TITULO_AGENDAR_DONO, corpo: corpoAgendarDono(d),
+            data: { tipo: 'chegada_prevista', [lado.chave]: d.id },
+            chave_email: `agendar_dono#${d.ciclo}`,
+            rotulo: `agendar repetido dono ${lado.tabela} ${d.id} #${d.ciclo}`,
+          })
+        }
+        console.log(`[AgendarRepetido] ${lado.tabela} ${d.id} #${d.ciclo} → profissional via ${via}; dono via ${viaDono}`)
+      }
+    } catch (err) {
+      console.error(`[AgendarRepetido] erro em ${lado.tabela}:`, err.message)
+    }
+  }
+})
+
 // "Responda o horário proposto" — à parte que DEVE RESPONDER uma proposta/contraproposta de
 // horário pendente (chegada_pendente_em): quem NÃO propôs — proposta do profissional
 // (COALESCE(chegada_proposta_por, match_usuario_id) = match_usuario_id) → dono; do dono →
@@ -1638,6 +1720,8 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
 // data do push = o tipo que cada lado já recebe nesta negociação (dono: chegada_prevista_pendente;
 // profissional: chegada_contraproposta) + obra_id/reparo_id — o toque abre o detalhe.
 // Entrega por entregarPushOuEmail (push; sem token ou push falho, e-mail em texto puro).
+// Desde 29/10/2026 só para o PROFISSIONAL (proposta do dono): o dono que deve responder a uma
+// proposta do profissional recebe o lembrete REPETIDO de repetirRespostaHorarioDono.
 const TITULO_RESPOSTA_HORARIO = '⏳ Responda o horário proposto'
 const SQL_QUEM_PROPOS = `COALESCE(d.chegada_proposta_por, d.match_usuario_id)`
 const SQL_QUEM_RESPONDE = `CASE WHEN ${SQL_QUEM_PROPOS} = d.match_usuario_id THEN d.criado_por ELSE d.match_usuario_id END`
@@ -1655,6 +1739,7 @@ const sqlClaimRespostaHorario = (lado, l) => `
        WHERE d.status = 'aberta' AND d.match_usuario_id IS NOT NULL
          AND d.chegada_pendente_em IS NOT NULL AND d.chegada_proposta_em IS NOT NULL
          AND u.id = ${SQL_QUEM_RESPONDE} AND p.id = ${SQL_QUEM_PROPOS}
+         AND ${SQL_QUEM_PROPOS} <> d.match_usuario_id
          AND d.${l.coluna} IS NULL
          AND NOW() >= ${l.dispara} AND NOW() < ${l.dispara} + INTERVAL '${LEMBRETE_AGENDA_JANELA}'
          AND NOW() < d.chegada_pendente_em
@@ -1682,6 +1767,50 @@ const lembrarRespostaHorario = semSobreposicao('lembrarRespostaHorario', async (
       } catch (err) {
         console.error(`[RespostaHorario] erro em ${lado.tabela} ${l.coluna}:`, err.message)
       }
+    }
+  }
+})
+
+// "Responda o horário proposto" REPETIDO ao DONO — proposta/contraproposta do PROFISSIONAL
+// pendente (chegada_pendente_em, proposta por match_usuario_id). Mesma cadência do agendar
+// repetido (sqlIntervaloRepetirAgendar: 30 min / 2h / 6h / 12h pela janela W), contada do
+// último ciclo ou, no 1º, de chegada_proposta_em; silêncio 22–07 SP (SQL_FORA_SILENCIO) adia
+// para as 07:00. Push + e-mail (entregarPushEEmail, chave aviso:resposta_horario#n, n =
+// lembrete_resposta_ciclo, que nunca zera), guarda de autor (ator = profissional).
+// Para no mesmo tique em que o dono responde (aceite/recusa zeram chegada_pendente_em; a
+// contraproposta dele troca o proponente), quando o horário proposto passa, a demanda sai de
+// 'aberta' ou o match cai. Claim atômico em lembrete_resposta_ultimo_em, zerado a cada proposta.
+const sqlClaimRepetirRespostaDono = (lado) => `
+      UPDATE ${lado.tabela} d SET lembrete_resposta_ultimo_em = NOW(),
+             lembrete_resposta_ciclo = d.lembrete_resposta_ciclo + 1
+        FROM usuarios u, usuarios p
+       WHERE d.status = 'aberta' AND d.match_usuario_id IS NOT NULL
+         AND d.chegada_pendente_em IS NOT NULL AND d.chegada_proposta_em IS NOT NULL
+         AND ${SQL_QUEM_PROPOS} = d.match_usuario_id
+         AND u.id = d.criado_por AND p.id = d.match_usuario_id
+         AND NOW() < d.chegada_pendente_em
+         AND NOW() >= COALESCE(d.lembrete_resposta_ultimo_em, d.chegada_proposta_em) + ${sqlIntervaloRepetirAgendar(lado)}
+         AND ${SQL_FORA_SILENCIO}
+   RETURNING d.id, d.titulo, d.chegada_pendente_em, d.criado_por, d.match_usuario_id,
+             d.lembrete_resposta_ciclo AS ciclo, true AS para_dono,
+             u.push_token, u.email, u.nome, p.nome AS nome_proponente`
+const repetirRespostaHorarioDono = semSobreposicao('repetirRespostaHorarioDono', async () => {
+  for (const lado of Object.values(LADOS_MATCH)) {
+    try {
+      const claim = await pool.query(sqlClaimRepetirRespostaDono(lado))
+      for (const d of claim.rows) {
+        const via = await entregarPushEEmail({
+          usuario_id: d.criado_por, ator_id: d.match_usuario_id,
+          push_token: d.push_token, email: d.email, nome: d.nome,
+          titulo: TITULO_RESPOSTA_HORARIO, corpo: corpoRespostaHorario(d),
+          data: { tipo: 'chegada_prevista_pendente', [lado.chave]: d.id },
+          chave_email: `resposta_horario#${d.ciclo}`,
+          rotulo: `resposta horário repetido ${lado.tabela} ${d.id} #${d.ciclo}`,
+        })
+        console.log(`[RespostaHorarioDono] ${lado.tabela} ${d.id} #${d.ciclo} → dono via ${via}`)
+      }
+    } catch (err) {
+      console.error(`[RespostaHorarioDono] erro em ${lado.tabela}:`, err.message)
     }
   }
 })
@@ -2617,6 +2746,10 @@ module.exports = {
   lembrarPrazoChegada,
   lembrarAgendamento,
   lembrarAgendarAtendimento,
+  repetirLembreteAgendar,
+  sqlClaimRepetirAgendar,
+  repetirRespostaHorarioDono,
+  sqlClaimRepetirRespostaDono,
   sqlClaimAgendar,
   OFFSETS_AGENDAR,
   entregarPushOuEmail,
