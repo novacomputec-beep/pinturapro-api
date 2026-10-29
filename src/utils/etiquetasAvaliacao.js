@@ -8,8 +8,7 @@
 // ESPECIALIDADES_OBRA). Reparo cujas categorias não caem em grupo nenhum (só 'outros')
 // aceita apenas as universais.
 //
-// TABELA PROVISÓRIA: os textos abaixo são placeholders coerentes com cada grupo e serão
-// substituídos pela tabela definitiva do dono (mesma forma: 3 por grupo e nível).
+// Tabela DEFINITIVA aprovada pelo dono em 2026-10-29 (3 etiquetas por grupo e nível).
 //
 // Escrita (POST /avaliacoes): nota 1–5 + etiquetas[] validadas contra o(s) grupo(s) da
 // demanda avaliada e o nível escolhido (validarEtiquetas). Sem texto livre.
@@ -31,82 +30,82 @@ const ETIQUETAS_UNIVERSAIS = {
 const GRUPO_OBRA = { chave: 'construcao_pintura', nome: 'Construção e pintura', especialidades: ESPECIALIDADES_OBRA }
 
 const ETIQUETAS_POR_GRUPO = {
-  construcao_pintura: {
-    5: ['Acabamento impecável', 'Obra no prazo', 'Deixou tudo limpo'],
-    4: ['Bom acabamento', 'Cumpriu o combinado', 'Organizado'],
-    3: ['Acabamento mediano', 'Pequenos atrasos', 'Precisou de retoques'],
-    2: ['Acabamento ruim', 'Atrasou muito', 'Deixou sujeira'],
-    1: ['Obra inacabada', 'Trabalho malfeito', 'Abandonou a obra'],
+  construcao_pintura: { // Construção e pintura (toda obra)
+    5: ['Acabamento perfeito', 'Trabalho caprichado', 'Deixou tudo limpo'],
+    4: ['Bom acabamento', 'Bem organizado', 'Cumpriu o combinado'],
+    3: ['Acabamento simples', 'Faltou capricho', 'Um pouco de sujeira'],
+    2: ['Acabamento ruim', 'Desperdiçou material', 'Deixou sujeira'],
+    1: ['Serviço mal feito', 'Abandonou a obra', 'Estragou material'],
   },
-  eletrica_tec: {
-    5: ['Resolveu de primeira', 'Instalação segura', 'Explicou tudo'],
-    4: ['Resolveu o problema', 'Serviço limpo', 'Boa comunicação'],
-    3: ['Resolveu parcialmente', 'Demorou mais que o previsto', 'Faltou explicar'],
-    2: ['Problema voltou', 'Instalação malfeita', 'Pouco cuidado'],
-    1: ['Não resolveu', 'Deixou risco de segurança', 'Danificou algo'],
+  reparos_casa: { // Reparos da casa
+    5: ['Resolveu de vez', 'Serviço impecável', 'Deixou tudo limpo'],
+    4: ['Resolveu o problema', 'Bom serviço', 'Organizado'],
+    3: ['Resolveu em parte', 'Faltou capricho', 'Um pouco de sujeira'],
+    2: ['Problema voltou', 'Serviço mal feito', 'Deixou sujeira'],
+    1: ['Não resolveu', 'Piorou o problema', 'Estragou algo'],
   },
-  reparos_casa: {
-    5: ['Reparo perfeito', 'Rápido e caprichoso', 'Deixou tudo limpo'],
-    4: ['Reparo bem feito', 'Dentro do prazo', 'Cuidadoso'],
-    3: ['Reparo mediano', 'Demorou', 'Faltou acabamento'],
-    2: ['Reparo malfeito', 'Deixou bagunça', 'Pouco cuidado'],
-    1: ['Não resolveu', 'Piorou o problema', 'Danificou algo'],
+  eletrica_tec: { // Elétrica e tecnologia
+    5: ['Resolveu de vez', 'Serviço muito seguro', 'Super organizado'],
+    4: ['Resolveu o problema', 'Serviço seguro', 'Organizado'],
+    3: ['Resolveu em parte', 'Faltou capricho', 'Pouco organizado'],
+    2: ['Problema voltou', 'Serviço inseguro', 'Desorganizado'],
+    1: ['Não resolveu', 'Serviço perigoso', 'Estragou algo'],
   },
-  limpeza: {
-    5: ['Limpeza impecável', 'Detalhista', 'Cuidou de tudo'],
-    4: ['Limpeza bem feita', 'Caprichoso', 'Cuidou dos objetos'],
-    3: ['Limpeza superficial', 'Faltaram detalhes', 'Demorou'],
-    2: ['Limpeza malfeita', 'Deixou cantos sujos', 'Pouco cuidado'],
-    1: ['Não limpou', 'Danificou objetos', 'Abandonou o serviço'],
+  limpeza: { // Limpeza e cuidados da casa
+    5: ['Ficou impecável', 'Muito caprichoso', 'Super atencioso'],
+    4: ['Ficou limpo', 'Caprichoso', 'Atencioso'],
+    3: ['Limpeza básica', 'Faltou capricho', 'Esqueceu partes'],
+    2: ['Deixou a desejar', 'Pouco caprichoso', 'Esqueceu muita coisa'],
+    1: ['Não limpou direito', 'Desleixado', 'Estragou algo'],
   },
-  beleza: {
-    5: ['Resultado perfeito', 'Higiene impecável', 'Mãos de fada'],
-    4: ['Bom resultado', 'Material limpo', 'Atencioso'],
-    3: ['Resultado mediano', 'Demorou', 'Pouca atenção'],
-    2: ['Resultado ruim', 'Higiene fraca', 'Machucou'],
-    1: ['Resultado péssimo', 'Sem higiene', 'Causou dano'],
+  beleza: { // Beleza
+    5: ['Ficou perfeito', 'Muito cuidadoso', 'Higiene impecável'],
+    4: ['Ficou bonito', 'Cuidadoso', 'Higiênico'],
+    3: ['Ficou razoável', 'Pouco cuidado', 'Higiene regular'],
+    2: ['Não ficou como pedi', 'Descuidado', 'Pouca higiene'],
+    1: ['Ficou muito ruim', 'Machucou', 'Sem higiene'],
   },
-  festas: {
-    5: ['Festa impecável', 'Animou todo mundo', 'Tudo no horário'],
-    4: ['Bom serviço', 'Organizado', 'Boa apresentação'],
-    3: ['Serviço mediano', 'Faltou organização', 'Pequenos atrasos'],
-    2: ['Serviço ruim', 'Desorganizado', 'Faltou material'],
-    1: ['Não compareceu', 'Estragou a festa', 'Abandonou o evento'],
+  festas: { // Festas e eventos
+    5: ['Superou expectativas', 'Animou a festa', 'Muito profissional'],
+    4: ['Caprichou', 'Agradou', 'Profissional'],
+    3: ['Cumpriu o básico', 'Faltou capricho', 'Pouco animado'],
+    2: ['Deixou a desejar', 'Pouco profissional', 'Desorganizado'],
+    1: ['Estragou a festa', 'Faltou ao combinado', 'Nada profissional'],
   },
-  cuidado: {
-    5: ['Muito atencioso', 'Confiança total', 'Carinhoso'],
-    4: ['Atencioso', 'Responsável', 'Comunicativo'],
-    3: ['Atenção mediana', 'Pouco comunicativo', 'Distraído'],
-    2: ['Desatento', 'Pouco cuidado', 'Não seguiu orientações'],
-    1: ['Negligente', 'Situação de risco', 'Abandonou o cuidado'],
+  cuidado: { // Cuidado (babá, cuidador, pet)
+    5: ['Extremamente carinhoso', 'Muito responsável', 'Total confiança'],
+    4: ['Carinhoso', 'Responsável', 'Confiável'],
+    3: ['Atenção básica', 'Pouco carinho', 'Faltou cuidado'],
+    2: ['Pouca atenção', 'Pouco responsável', 'Descuidado'],
+    1: ['Negligente', 'Irresponsável', 'Não confio'],
   },
-  transporte: {
-    5: ['Direção segura', 'Carga intacta', 'Pontualidade total'],
-    4: ['Direção cuidadosa', 'Carga bem tratada', 'Comunicativo'],
-    3: ['Direção mediana', 'Pequenos danos', 'Pequenos atrasos'],
-    2: ['Direção imprudente', 'Carga danificada', 'Muito atraso'],
-    1: ['Não compareceu', 'Perdeu ou quebrou itens', 'Comportamento de risco'],
+  transporte: { // Transporte e mecânica
+    5: ['Muito cuidadoso', 'Resolveu de vez', 'Super ágil'],
+    4: ['Cuidadoso', 'Resolveu o problema', 'Ágil'],
+    3: ['Pouco cuidadoso', 'Resolveu em parte', 'Um pouco lento'],
+    2: ['Descuidado', 'Problema voltou', 'Demorou demais'],
+    1: ['Danificou algo', 'Não resolveu', 'Imprudente'],
   },
-  seguranca: {
-    5: ['Atento o tempo todo', 'Postura exemplar', 'Confiança total'],
-    4: ['Atento', 'Boa postura', 'Responsável'],
-    3: ['Atenção mediana', 'Distraído às vezes', 'Pouca iniciativa'],
-    2: ['Desatento', 'Postura inadequada', 'Ausentou-se'],
-    1: ['Abandonou o posto', 'Negligente', 'Comportamento de risco'],
+  seguranca: { // Segurança
+    5: ['Muito atento', 'Total confiança', 'Muito profissional'],
+    4: ['Atento', 'Confiável', 'Profissional'],
+    3: ['Pouco atento', 'Cumpriu o básico', 'Faltou postura'],
+    2: ['Desatento', 'Pouco confiável', 'Pouco profissional'],
+    1: ['Negligente', 'Não confio', 'Nada profissional'],
   },
-  digital_aulas: {
-    5: ['Entrega perfeita', 'Didático', 'Superou expectativas'],
-    4: ['Boa entrega', 'Claro e objetivo', 'Dentro do prazo'],
-    3: ['Entrega mediana', 'Precisou de ajustes', 'Atrasou entregas'],
-    2: ['Entrega ruim', 'Pouco claro', 'Muitos atrasos'],
-    1: ['Não entregou', 'Trabalho inutilizável', 'Sumiu'],
+  digital_aulas: { // Digital e aulas
+    5: ['Superou expectativas', 'Muito didático', 'Muito criativo'],
+    4: ['Entregou bem', 'Didático', 'Criativo'],
+    3: ['Entrega razoável', 'Pouco claro', 'Pouco criativo'],
+    2: ['Entregou mal', 'Confuso', 'Fora do combinado'],
+    1: ['Não entregou', 'Muito confuso', 'Nada do combinado'],
   },
-  arte: {
-    5: ['Trabalho impecável', 'Criativo', 'Acabamento perfeito'],
-    4: ['Bom trabalho', 'Caprichoso', 'Cumpriu o combinado'],
-    3: ['Trabalho mediano', 'Faltou acabamento', 'Demorou'],
-    2: ['Trabalho ruim', 'Diferente do combinado', 'Pouco cuidado'],
-    1: ['Trabalho inutilizável', 'Não entregou', 'Danificou material'],
+  arte: { // Arte e criação
+    5: ['Ficou perfeito', 'Muito criativo', 'Acabamento lindo'],
+    4: ['Ficou bonito', 'Criativo', 'Bom acabamento'],
+    3: ['Ficou razoável', 'Faltou capricho', 'Acabamento simples'],
+    2: ['Não ficou como pedi', 'Fora do combinado', 'Acabamento ruim'],
+    1: ['Ficou muito ruim', 'Nada do combinado', 'Estragou o material'],
   },
 }
 
