@@ -30,4 +30,30 @@ const ERRO_REFERENCIA_PROPRIA = {
   codigo: 'REFERENCIA_PROPRIA',
 }
 
-module.exports = { normalizarNome, referenciaPropria, temReferenciaPropria, ERRO_REFERENCIA_PROPRIA }
+// Telefone de referência comparável: só dígitos, sem o DDI 55 (quando o número vem com ele) e
+// sem zeros à esquerda (0 de longa distância) — "(81) 99999-0000", "+55 81 99999-0000" e
+// "081999990000" são o mesmo número.
+const telefoneNormalizado = (v) => {
+  let d = digitos(v)
+  if (d.length >= 12 && d.startsWith('55')) d = d.slice(2)
+  return d.replace(/^0+/, '')
+}
+const ERRO_REFERENCIAS_TELEFONE = {
+  erro: 'Use duas pessoas diferentes, e não o seu próprio telefone.',
+  codigo: 'REFERENCIAS_TELEFONE_REPETIDO',
+}
+// Erro de telefone das referências (null = ok): duas referências com o mesmo número, ou uma com
+// o número do próprio profissional. Vale em todo caminho que grava usuarios.referencias.
+const erroTelefoneReferencias = (refs, usuario) => {
+  if (!Array.isArray(refs)) return null
+  const tels = refs.map(r => telefoneNormalizado(r?.telefone)).filter(Boolean)
+  if (new Set(tels).size !== tels.length) return ERRO_REFERENCIAS_TELEFONE
+  const meu = telefoneNormalizado(usuario?.telefone)
+  if (meu && tels.includes(meu)) return ERRO_REFERENCIAS_TELEFONE
+  return null
+}
+
+module.exports = {
+  normalizarNome, referenciaPropria, temReferenciaPropria, ERRO_REFERENCIA_PROPRIA,
+  telefoneNormalizado, erroTelefoneReferencias, ERRO_REFERENCIAS_TELEFONE,
+}
