@@ -9,7 +9,7 @@ const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, multip
 const { registrarPlataforma } = require('../utils/plataforma')
 const { municipioExiste } = require('../utils/geoBusca')
 const { normalizarCodigo, recalcularIndicador } = require('../utils/indicacoes')
-const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA } = require('../utils/referencias')
+const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias } = require('../utils/referencias')
 // Resumo de avaliações + selo "bem avaliado" no perfil do profissional (utils/etiquetasAvaliacao).
 const { sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
 const nodemailer = require('nodemailer')
@@ -127,6 +127,12 @@ const cadastrar = async (req, res) => {
 
     // Referência própria (telefone igual ao do cadastro, ou nome igual/contido no nome
     // completo) é recusada antes de abrir a transação — regra única em utils/referencias.
+    // Telefone repetido entre as referências ou igual ao do cadastro: mensagem própria.
+    const erroTel = erroTelefoneReferencias(referencias, { telefone })
+    if (erroTel) {
+      console.log(`[CADASTRO][${ts}] ✗ 400 telefone de referencia repetido/proprio`)
+      return res.status(400).json(erroTel)
+    }
     if (temReferenciaPropria(referencias, { nome, telefone })) {
       console.log(`[CADASTRO][${ts}] ✗ 400 referencia propria`)
       return res.status(400).json(ERRO_REFERENCIA_PROPRIA)

@@ -6459,7 +6459,7 @@ const URL_DOC_VERIFICACAO = /^https:\/\/res\.cloudinary\.com\/\S+$/
 const REFERENCIAS_VERIFICACAO_MAX = 2
 // Referência própria (mesmo telefone / mesmo nome do usuário) é recusada — regra única em
 // utils/referencias, a mesma do cadastro e do campo `propria` da ficha do admin.
-const { referenciaPropria, temReferenciaPropria, ERRO_REFERENCIA_PROPRIA } = require('../utils/referencias')
+const { referenciaPropria, temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias } = require('../utils/referencias')
 router.post('/auth/verificacao', autenticar, async (req, res) => {
   try {
     const { verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url } = req.body || {}
@@ -6492,7 +6492,10 @@ router.post('/auth/verificacao', autenticar, async (req, res) => {
       })
     }
     // Referência não pode ser o próprio usuário (telefone igual ou nome igual/contido).
+    // Telefone repetido entre as referências ou igual ao do profissional: mensagem própria.
     const eu = (await pool.query(`SELECT nome, telefone FROM usuarios WHERE id = $1`, [req.usuario.id])).rows[0]
+    const erroTel = erroTelefoneReferencias(refs, eu)
+    if (erroTel) return res.status(400).json(erroTel)
     if (eu && temReferenciaPropria(refs, eu)) return res.status(400).json(ERRO_REFERENCIA_PROPRIA)
 
     const r = await pool.query(
