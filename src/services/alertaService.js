@@ -916,20 +916,18 @@ const listarCandidatosLembrete = async (db = pool) => {
 // Vive aqui (e não em routes/index.js) porque a aprovação AUTOMÁTICA adia este aviso: quem
 // o dispara nesse caminho é o claim de push_aprovada_enviado_em em enviarPushNovoPendente.
 const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
-  const info = await pool.query(
-    `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
-    [obraId]
-  )
-  const { push_token, titulo } = info.rows[0] || {}
-  if (!push_token) return
-  await enviarPushNotificacao(
-    push_token,
-    aprovada ? '✅ Obra aprovada!' : '❌ Obra não aprovada',
-    aprovada
+  const info = await pool.query(`SELECT criado_por, titulo FROM obras WHERE id = $1`, [obraId])
+  const { criado_por, titulo } = info.rows[0] || {}
+  if (!criado_por) return
+  // Push + e-mail sempre (política de 29/10/2026).
+  await avisarUsuario(criado_por, {
+    titulo: aprovada ? '✅ Obra aprovada!' : '❌ Obra não aprovada',
+    corpo: aprovada
       ? `"${titulo}" já está publicada e visível para os pintores.`
       : `"${titulo}" não foi publicada desta vez. Toque para rever os detalhes e cadastrar novamente.`,
-    { tipo: aprovada ? 'obra_aprovada' : 'obra_recusada', obra_id: obraId }
-  )
+    data: { tipo: aprovada ? 'obra_aprovada' : 'obra_recusada', obra_id: obraId },
+    rotulo: `análise obra ${obraId}`,
+  })
 }
 
 // Claim do push "nova obra / novo serviço disponível" — ÚNICO caminho que grava
@@ -1355,7 +1353,9 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
     const evento = String(data?.tipo || '')
     const chave = lembrete
       ? `lembrete#${diaSP()}`
-      : (/^[a-z_]+$/.test(evento) ? `${evento}#${hash8(`${titulo}\n${corpo}`)}` : null)
+      // data entra no hash: avisos de MESMO texto sobre coisas diferentes (2º candidato, 2ª
+      // pergunta) levam um discriminador em data (candidatura_id, pergunta_id) e saem.
+      : (/^[a-z_]+$/.test(evento) ? `${evento}#${hash8(`${titulo}\n${corpo}\n${JSON.stringify(data)}`)}` : null)
     const temChave = !!(usuario_id && UUID_RE_AVISO.test(demandaId) && chave)
     if (lembrete && !temChave) return vias.length ? vias.join('+') : 'sem contato'
     if (temChave) {
@@ -2078,21 +2078,21 @@ const notificarMatchDesfeito = async (tabela, demanda) => {
   const { chave, profissional, artigo, volta } = ROTULOS_MATCH_DESFEITO[tabela]
   const alvos = [demanda.criado_por, demanda.match_usuario_id].filter(Boolean)
   if (alvos.length === 0) return
-  // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail) — mesma
-  // entrega dos avisos de atraso; resultado no log em vez do catch vazio de antes.
+  // Push + e-mail sempre (política de 29/10/2026); resultado no log. match_feito_em em data
+  // distingue um match expirado de outro no dedupe do e-mail.
   const contatos = await pool.query(
     `SELECT id, push_token, email, nome FROM usuarios WHERE id = ANY($1::uuid[])`,
     [alvos]
   )
   for (const u of contatos.rows) {
     const paraDono = u.id === demanda.criado_por
-    const via = await entregarPushOuEmail({
-      ...u,
+    const via = await entregarPushEEmail({
+      usuario_id: u.id, ...u,
       titulo: '⏰ Prazo expirado!',
       corpo: paraDono
         ? `O ${profissional} não chegou a tempo para "${demanda.titulo}". ${artigo} está disponível novamente.`
         : `O prazo para chegar em "${demanda.titulo}" acabou. ${volta} para o feed.`,
-      data: { tipo: 'match_expirado', [chave]: demanda.id },
+      data: { tipo: 'match_expirado', [chave]: demanda.id, match_feito_em: demanda.match_feito_em || null },
       rotulo: `match expirado ${tabela} ${demanda.id}`,
     })
     console.log(`[MatchDesfeito] ${tabela} ${demanda.id} → ${paraDono ? 'dono' : 'profissional'} via ${via}`)
@@ -2237,25 +2237,24 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
       WHERE u.id = r.criado_por
         AND r.match_usuario_id IS NOT NULL
         AND r.notif_5min_enviada = false
-        AND u.push_token IS NOT NULL
+        AND (u.push_token IS NOT NULL OR NULLIF(btrim(u.email), '') IS NOT NULL)
         AND r.chegada_declarada_em IS NULL
         AND r.chegada_confirmada_em IS NULL
         -- Dono já avisado do atraso ("tolerância até HH:MM", atrasoChegadaService): o "faltam
         -- 5 minutos" seria o 2º push sobre o mesmo fato — só sai quando aquele não saiu.
         AND r.aviso_atraso_enviado_em IS NULL
         AND ${sqlLimiteChegada('r.')} BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
-      RETURNING r.id, r.titulo, u.push_token
+      RETURNING r.id, r.titulo, r.criado_por, u.push_token, u.email, u.nome
     `)
 
-    if (cincoMin.rows.length > 0) {
-      for (const reparo of cincoMin.rows) {
-        await enviarPushNotificacao(
-          reparo.push_token,
-          '⏰ O prestador ainda não chegou?',
-          'Faltam 5 minutos. Se ele ainda não chegou, você pode aumentar o prazo ou aguardar o cronômetro zerar.',
-          { tipo: 'reparo_5min_restantes', reparo_id: reparo.id }
-        )
-      }
+    // Contagem regressiva = regra de lembrete: push sempre, no máx. 1 e-mail/dia por demanda.
+    for (const reparo of cincoMin.rows) {
+      await entregarLembrete({
+        usuario_id: reparo.criado_por, push_token: reparo.push_token, email: reparo.email, nome: reparo.nome,
+        titulo: '⏰ O prestador ainda não chegou?',
+        corpo: 'Faltam 5 minutos. Se ele ainda não chegou, você pode aumentar o prazo ou aguardar o cronômetro zerar.',
+        data: { tipo: 'reparo_5min_restantes', reparo_id: reparo.id }, rotulo: `5 min reparos ${reparo.id}`,
+      })
     }
 
     // (b) Cronômetro zerou → devolve o reparo ao feed e limpa o match,
@@ -2289,7 +2288,7 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
     // depois de o dono recusar a janela, e sem nenhuma outra valendo, não gera falta nem bloqueio.
     // chegada_proposta_por: de quem era a pendência (só a do profissional isenta).
     const candidatos = await pool.query(`
-      SELECT id, titulo, criado_por, match_usuario_id,
+      SELECT id, titulo, criado_por, match_usuario_id, match_feito_em,
              chegada_recusada_em, chegada_pendente_em, chegada_prevista_em, chegada_proposta_por
         FROM reparos WHERE ${PRED_EXPIRADOS_REPAROS}
     `)
@@ -2397,24 +2396,23 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
         AND o.status = 'aberta'
         AND o.match_usuario_id IS NOT NULL
         AND o.notif_5min_enviada = false
-        AND u.push_token IS NOT NULL
+        AND (u.push_token IS NOT NULL OR NULLIF(btrim(u.email), '') IS NOT NULL)
         AND o.chegada_declarada_em IS NULL
         AND o.chegada_confirmada_em IS NULL
         -- Mesma regra do cron de reparos: sem 2º push quando o aviso de atraso já saiu.
         AND o.aviso_atraso_enviado_em IS NULL
         AND ${sqlLimiteChegada('o.')} BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
-      RETURNING o.id, o.titulo, u.push_token
+      RETURNING o.id, o.titulo, o.criado_por, u.push_token, u.email, u.nome
     `)
 
-    if (cincoMin.rows.length > 0) {
-      for (const obra of cincoMin.rows) {
-        await enviarPushNotificacao(
-          obra.push_token,
-          '⏰ O pintor ainda não chegou?',
-          'Faltam 5 minutos. Se ele ainda não chegou, você pode aumentar o prazo ou aguardar o cronômetro zerar.',
-          { tipo: 'obra_5min_restantes', obra_id: obra.id }
-        )
-      }
+    // Contagem regressiva = regra de lembrete: push sempre, no máx. 1 e-mail/dia por demanda.
+    for (const obra of cincoMin.rows) {
+      await entregarLembrete({
+        usuario_id: obra.criado_por, push_token: obra.push_token, email: obra.email, nome: obra.nome,
+        titulo: '⏰ O pintor ainda não chegou?',
+        corpo: 'Faltam 5 minutos. Se ele ainda não chegou, você pode aumentar o prazo ou aguardar o cronômetro zerar.',
+        data: { tipo: 'obra_5min_restantes', obra_id: obra.id }, rotulo: `5 min obras ${obra.id}`,
+      })
     }
 
     // (b) Cronômetro zerou → devolve a obra ao feed e limpa o match, reiniciando a contagem
@@ -2435,7 +2433,7 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
 
     // Mesma isenção do cron de reparos (ver isentoPorRecusa).
     const candidatos = await pool.query(`
-      SELECT id, titulo, criado_por, match_usuario_id,
+      SELECT id, titulo, criado_por, match_usuario_id, match_feito_em,
              chegada_recusada_em, chegada_pendente_em, chegada_prevista_em, chegada_proposta_por
         FROM obras WHERE ${PRED_EXPIRADOS_OBRAS}
     `)

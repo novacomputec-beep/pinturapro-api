@@ -1,5 +1,5 @@
 const { pool } = require('./supabase')
-const { enviarPushNotificacao } = require('../services/alertaService')
+const { avisarUsuario } = require('../services/alertaService')
 
 // Recusa as demais candidaturas/interesses da demanda e notifica os perdedores.
 //
@@ -44,18 +44,15 @@ const rejeitarConcorrentes = async (tipoDemanda, demandaId, vencedorUsuarioId) =
   const ids = rejeitados.rows.map(r => r.usuario_id)
   if (ids.length === 0) return 0
 
-  const tokens = await pool.query(
-    `SELECT push_token FROM usuarios WHERE id = ANY($1) AND push_token IS NOT NULL`,
-    [ids]
-  )
-  tokens.rows.forEach(r => {
-    enviarPushNotificacao(
-      r.push_token,
-      '❌ Outro profissional foi selecionado',
-      cfg.mensagem,
-      { tipo: cfg.tipo, [cfg.chavePayload]: demandaId }
-    ).catch(() => {})
-  })
+  // Recusa: push + e-mail sempre (política de 29/10/2026). avisarUsuario nunca lança.
+  for (const usuarioId of ids) {
+    avisarUsuario(usuarioId, {
+      titulo: '❌ Outro profissional foi selecionado',
+      corpo: cfg.mensagem,
+      data: { tipo: cfg.tipo, [cfg.chavePayload]: demandaId },
+      rotulo: `recusa concorrente ${tipoDemanda} ${demandaId}`,
+    })
+  }
   return ids.length
 }
 
