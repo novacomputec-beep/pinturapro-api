@@ -151,10 +151,11 @@ const contato = async (usuarioId, db = pool) => {
 // pedido de cancelamento, recusa e expiração do acordo são avisos críticos pós-match.
 // ambos: false → push ou, sem ele, e-mail (entregarPushOuEmail): só o aviso de cancelamentos
 // frequentes, que é penalidade/lembrete e não tem demanda.
-const avisar = async (usuarioId, { titulo, corpo, data, rotulo }, { ambos = true } = {}) => {
+// ator: quem executou a ação — a guarda dos helpers nunca avisa o próprio autor (ator_id).
+const avisar = async (usuarioId, { titulo, corpo, data, rotulo }, { ambos = true, ator = null } = {}) => {
   try {
     const u = await contato(usuarioId)
-    if (u) await (ambos ? entregarPushEEmail : entregarPushOuEmail)({ ...u, titulo, corpo, data, rotulo })
+    if (u) await (ambos ? entregarPushEEmail : entregarPushOuEmail)({ ...u, ator_id: ator, titulo, corpo, data, rotulo })
   } catch (err) {
     console.error(`[CancelarMatch] aviso ${rotulo}:`, err.message)
   }
@@ -185,7 +186,11 @@ const avisarCancelamentosFrequentes = async (usuarioId) => {
 
 // Cancela de fato. canceladoPor = quem assume o cancelamento (no acordo, quem pediu).
 // Devolve { ok: true, encerrada } ou { ok: false } quando a linha mudou na corrida.
-const executar = async ({ lado, d, canceladoPor, motivo, detalhe, acordo, tardio, manterAberta }) => {
+// atorId = quem executou a ação AGORA (cancelamento livre: o próprio canceladoPor; aceite de
+// acordo: quem ACEITOU, que não é o canceladoPor). O aviso vai sempre à outra parte do ator:
+// no aceite de acordo, ao pedinte ("aceitaram seu pedido"), nunca a quem acabou de aceitar —
+// antes o aceitante recebia "O cliente/profissional cancelou…" e o pedinte não recebia nada.
+const executar = async ({ lado, d, canceladoPor, atorId = canceladoPor, motivo, detalhe, acordo, tardio, manterAberta }) => {
   const papel = papelDe(d, canceladoPor)
   const profissionalId = d.match_usuario_id
   const encerrar = papel === 'dono' && (motivo === 'nao_preciso' || manterAberta === false)
@@ -227,11 +232,23 @@ const executar = async ({ lado, d, canceladoPor, motivo, detalhe, acordo, tardio
   const corpoOutro = papel === 'dono'
     ? `O cliente cancelou "${d.titulo}". Motivo: ${textoMotivo(motivo, detalhe)}.${acordo ? ' Cancelamento por acordo, sem penalidade.' : ''}`
     : `O ${lado.profissional} cancelou "${d.titulo}". Motivo: ${textoMotivo(motivo, detalhe)}. ${lado.artigo} voltou ao feed para outros profissionais.${acordo ? ' Cancelamento por acordo, sem penalidade.' : ''}`
-  avisar(outroId, {
-    titulo: lado.tituloCancelado, corpo: corpoOutro,
-    data: { tipo: 'match_cancelado', [lado.chave]: d.id, motivo, por: papel, acordo: !!acordo },
-    rotulo: `match cancelado ${lado.tipo} ${d.id}`,
-  })
+  if (String(outroId) === String(atorId)) {
+    // Aceite de acordo: o "outro" do cancelamento é quem acabou de aceitar. Quem precisa saber é
+    // o PEDINTE (canceladoPor): o pedido dele foi aceito e o atendimento acabou.
+    const papelAceitante = papelDe(d, atorId)
+    avisar(canceladoPor, {
+      titulo: '✅ Cancelamento aceito',
+      corpo: `${quemFala(papelAceitante, lado)} aceitou cancelar "${d.titulo}" de comum acordo. Sem penalidade para ninguém.`,
+      data: { tipo: 'match_cancelado', [lado.chave]: d.id, motivo, por: papelAceitante, acordo: true },
+      rotulo: `acordo aceito ${lado.tipo} ${d.id}`,
+    }, { ator: atorId })
+  } else {
+    avisar(outroId, {
+      titulo: lado.tituloCancelado, corpo: corpoOutro,
+      data: { tipo: 'match_cancelado', [lado.chave]: d.id, motivo, por: papel, acordo: !!acordo },
+      rotulo: `match cancelado ${lado.tipo} ${d.id}`,
+    }, { ator: atorId })
+  }
   if (!encerrar) reanunciarDemanda(lado.tabela, d.id).catch(() => {})
   avisarCancelamentosFrequentes(canceladoPor)
   return { ok: true, encerrada: encerrar }
@@ -293,7 +310,7 @@ const handlers = (tabela) => {
         corpo: `${quemFala(papel, lado)} pediu para cancelar "${d.titulo}" de comum acordo. Motivo: ${textoMotivo(lido.motivo, lido.detalhe)}. Responda no app em até ${ACORDO_VALIDADE_HORAS}h.`,
         data: { tipo: 'pedido_cancelamento', [lado.chave]: d.id, motivo: lido.motivo, por: papel },
         rotulo: `pedido cancelamento ${lado.tipo} ${d.id}`,
-      })
+      }, { ator: req.usuario.id })
       res.status(201).json({ mensagem: 'Pedido enviado. A outra parte tem 2 horas para responder.', expira_em: expiraEm, pedido_cancelamento: { por: papel, meu: true, motivo: lido.motivo, detalhe: lido.detalhe, expira_em: expiraEm } })
     } catch (err) {
       console.error(`[CancelarMatch] acordo ${tabela} ${req.params.id}:`, err.message)
@@ -313,7 +330,7 @@ const handlers = (tabela) => {
       const pedidoPor = d.cancelamento_pedido_por
       const papelPedinte = papelDe(d, pedidoPor) || 'profissional'
       if (req.body.aceitar) {
-        const r = await executar({ lado, d, canceladoPor: pedidoPor, motivo: d.cancelamento_pedido_motivo, detalhe: d.cancelamento_pedido_detalhe, acordo: true, tardio: false, manterAberta: true })
+        const r = await executar({ lado, d, canceladoPor: pedidoPor, atorId: req.usuario.id, motivo: d.cancelamento_pedido_motivo, detalhe: d.cancelamento_pedido_detalhe, acordo: true, tardio: false, manterAberta: true })
         if (!r.ok) return res.status(409).json({ erro: 'O atendimento mudou. Atualize a tela.', codigo: 'ESTADO_MUDOU' })
         return res.json({ mensagem: 'Cancelamento aceito. Sem penalidade para ninguém.', acordo: true, demanda_encerrada: r.encerrada })
       }
@@ -331,7 +348,7 @@ const handlers = (tabela) => {
         corpo: `${quemFala(papel, lado)} não aceitou cancelar "${d.titulo}" de comum acordo. O atendimento continua valendo.`,
         data: { tipo: 'pedido_cancelamento_recusado', [lado.chave]: d.id, por: papel },
         rotulo: `acordo recusado ${lado.tipo} ${d.id}`,
-      })
+      }, { ator: req.usuario.id })
       void papelPedinte
       res.json({ mensagem: 'Pedido recusado. O atendimento continua.', acordo: false })
     } catch (err) {
@@ -432,7 +449,7 @@ const cancelarPorAdmin = async ({ tabela, id, adminId, motivo }) => {
         titulo: lado.tituloCancelado, corpo,
         data: { tipo: 'match_cancelado', [lado.chave]: id, por: 'admin' },
         rotulo: `admin cancelou ${lado.tipo} ${id}`,
-      })
+      }, { ator: adminId })
     }
   }
   return { status: 200, status_anterior: d.status, tinha_match: matchReal, match_orfao_limpo: !!d.match_usuario_id && !matchReal, notificados: matchReal ? 2 : 0 }

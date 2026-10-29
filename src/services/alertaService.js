@@ -1288,7 +1288,16 @@ const textoEmailAviso = (nome, titulo, corpo) => {
   const primeiro = String(nome || '').trim().split(/\s+/)[0]
   return `${primeiro ? `Olá, ${primeiro}!\n\n` : ''}${titulo}\n\n${corpo}\n\nAbra o app ${MARCA} para responder.`
 }
-const entregarPushOuEmail = async ({ push_token, email, nome, titulo, corpo, data, rotulo }) => {
+// Guarda "nunca avisar o autor da própria ação": `ator_id` (opcional) é quem executou a ação;
+// se o destinatário (`usuario_id`) é o mesmo, nada sai e o log registra. Vale para os dois
+// helpers 1:1. Sem ator_id ou sem usuario_id a guarda não se aplica (lembretes, crons).
+const ehOProprioAutor = ({ usuario_id, ator_id, rotulo }) => {
+  if (!ator_id || !usuario_id || String(ator_id) !== String(usuario_id)) return false
+  console.warn(`[Entrega] ${rotulo}: destinatário é o próprio autor da ação (${usuario_id}) — aviso suprimido`)
+  return true
+}
+const entregarPushOuEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, data, rotulo }) => {
+  if (ehOProprioAutor({ usuario_id, ator_id, rotulo })) return 'autor'
   try {
     if (push_token) {
       const r = await enviarPushNotificacao(push_token, titulo, corpo, data)
@@ -1322,7 +1331,8 @@ const entregarPushOuEmail = async ({ push_token, email, nome, titulo, corpo, dat
 // enviado', …), 'sem contato' ou 'falha'.
 const UUID_RE_AVISO = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const hash8 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 8)
-const entregarPushEEmail = async ({ usuario_id, push_token, email, nome, titulo, corpo, data, rotulo }) => {
+const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, data, rotulo }) => {
+  if (ehOProprioAutor({ usuario_id, ator_id, rotulo })) return 'autor'
   const vias = []
   try {
     if (push_token) {
@@ -2526,6 +2536,7 @@ const autoEncerrarPendentes = async () => {
         if (alvo.rows[0]) {
           const via = await entregarPushEEmail({
             usuario_id: avisarId,
+            ator_id: d.encerramento_solicitado_por, // quem pediu nunca recebe o aviso do próprio pedido
             ...alvo.rows[0],
             titulo: '✅ Encerrado automaticamente',
             corpo: `Sem confirmação em ${rotuloPrazo(lado.encerrarApos)}, ${lado.rotulo} "${d.titulo}" foi encerrad${lado.tabela === 'obras' ? 'a' : 'o'} automaticamente.`,

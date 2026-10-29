@@ -186,6 +186,7 @@ const pedir = async ({ tabela, id, usuarioId, minutos, motivo, legado = false })
       corpo: `${mot ? `Motivo: ${mot}. ` : ''}Para chegar em "${d.titulo}". Aceitar ou recusar? Sem resposta em ${RESPOSTA_AUTO_MIN} min, o pedido é aceito.`,
       data: { tipo: 'pedido_atraso', [lado.chave]: d.id },
       rotulo: `pedido atraso ${tabela} ${d.id}`,
+      ator_id: usuarioId,
     })
     console.log(`[Atraso] ${tabela} ${d.id}: pedido de ${min} min → dono via ${via}`)
   })().catch(err => console.error(`[Atraso] ${tabela} ${d.id} aviso do pedido:`, err.message))
@@ -219,6 +220,7 @@ const avisarAceite = async (tabela, d, automatico) => {
     corpo: `${automatico ? `O cliente não respondeu em ${RESPOSTA_AUTO_MIN} min. ` : ''}Novo limite de chegada em "${d.titulo}": ${hora}. Depois disso conta como falta.`,
     data: { tipo: 'atraso_aceito', [lado.chave]: d.id },
     rotulo: `atraso aceito ${tabela} ${d.id}`,
+    ator_id: automatico ? null : d.criado_por, // aceite manual é ação do dono; automático não tem autor
   })
   let viaDono = 'não se aplica'
   if (automatico) {
@@ -293,6 +295,7 @@ const responder = async ({ tabela, id, usuarioId, aceitar }) => {
       corpo: `O solicitante não aceitou. ${lado.artigo} voltou para disponível.`,
       data: { tipo: 'tempo_recusado', [lado.chave]: d.id },
       rotulo: `atraso recusado ${tabela} ${d.id}`,
+      ator_id: usuarioId,
     })
     console.log(`[Atraso] ${tabela} ${d.id}: recusado, match desfeito → profissional via ${via}`)
   })().catch(err => console.error(`[Atraso] ${tabela} ${d.id} aviso de recusa:`, err.message))
@@ -425,6 +428,7 @@ const handlersLegados = (tabela) => {
             corpo: `O solicitante quer saber quantos minutos a mais você precisa para chegar em "${d.titulo}". Seu pedido atual: ${d.pedido_atraso_minutos} min.`,
             data: { tipo: 'perguntar_tempo', [lado.chave]: d.id },
             rotulo: `perguntar tempo ${tabela} ${d.id}`,
+            ator_id: req.usuario.id,
           }).catch(() => {})
         }
         res.json({ mensagem: `${lado.profissional === 'pintor' ? 'Pintor' : 'Prestador'} notificado para informar o tempo.`, ...camposAtraso(d) })
@@ -459,6 +463,7 @@ const handlersLegados = (tabela) => {
           corpo: `Ele precisa de ${min} minuto(s) a mais para chegar em "${d.titulo}". Aceitar ou recusar? Sem resposta em ${RESPOSTA_AUTO_MIN} min, o pedido é aceito.`,
           data: { tipo: 'pedido_atraso', [lado.chave]: d.id },
           rotulo: `informar tempo ${tabela} ${d.id}`,
+          ator_id: req.usuario.id,
         }).catch(() => {})
         res.json({ mensagem: 'Dono notificado para aprovar o tempo.', pedido_atraso: pedidoDe(d), pedidos_atraso_restantes: restantes(d), ...camposAtraso(d) })
       } catch (err) {
