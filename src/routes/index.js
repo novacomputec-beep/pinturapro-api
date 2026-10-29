@@ -3720,7 +3720,7 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
         // avisos de horário. Erro de ticket é logado dentro do helper; aqui fica o resultado.
         if (dono.rows[0]) {
           entregarPushEEmail({
-            usuario_id: obra.rows[0].criado_por,
+            usuario_id: obra.rows[0].criado_por, ator_id: req.usuario.id,
             ...dono.rows[0],
             titulo: `🚗 ${nome} está a caminho!`,
             corpo: `O pintor saiu para "${obra.rows[0].titulo}". O telefone dele já aparece no app.`,
@@ -3823,7 +3823,7 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
         // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
         if (outro.rows[0]) {
           entregarPushEEmail({
-            usuario_id: outroId,
+            usuario_id: outroId, ator_id: req.usuario.id,
             ...outro.rows[0],
             titulo: `✅ ${nome} terminou a obra`,
             corpo: `"${o.titulo}" foi concluída. Confira e confirme no app para avaliar.`,
@@ -3851,7 +3851,7 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
     // virar 500 para um encerramento que aconteceu.
     // Push E e-mail (entregarPushEEmail, dedupe em email_alertas); resultado no log.
     const avisarEncerramento = (destino, titulo, corpo) => entregarPushEEmail({
-      ...destino, titulo, corpo, data: { tipo: 'obra_encerrada', obra_id: req.params.id }, rotulo: `obra encerrada ${req.params.id}`,
+      ...destino, ator_id: req.usuario.id, titulo, corpo, data: { tipo: 'obra_encerrada', obra_id: req.params.id }, rotulo: `obra encerrada ${req.params.id}`,
     }).then(via => console.log(`[Encerrar] obras ${req.params.id}: ${titulo} → via ${via}`))
       .catch(err => console.error(`[Encerrar] obras ${req.params.id} aviso de encerramento:`, err.message))
     if (ehDono && o.match_usuario_id) {
@@ -4833,7 +4833,7 @@ router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) 
         // avisos de horário. Erro de ticket é logado dentro do helper; aqui fica o resultado.
         if (dono.rows[0]) {
           entregarPushEEmail({
-            usuario_id: reparo.rows[0].criado_por,
+            usuario_id: reparo.rows[0].criado_por, ator_id: req.usuario.id,
             ...dono.rows[0],
             titulo: `🚗 ${nome} está a caminho!`,
             corpo: `O prestador saiu para "${reparo.rows[0].titulo}". O telefone dele já aparece no app.`,
@@ -5129,7 +5129,7 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
         // Push ou, sem token / push falho, e-mail (entregarPushOuEmail); resultado no log.
         if (outro.rows[0]) {
           entregarPushEEmail({
-            usuario_id: outroId,
+            usuario_id: outroId, ator_id: req.usuario.id,
             ...outro.rows[0],
             titulo: `✅ ${nome} terminou o serviço`,
             corpo: `"${r.titulo}" foi concluído. Confira e confirme no app para avaliar.`,
@@ -5153,7 +5153,7 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
     )
     // Push E e-mail (entregarPushEEmail, dedupe em email_alertas); resultado no log.
     const avisarEncerramento = (destino, titulo, corpo) => entregarPushEEmail({
-      ...destino, titulo, corpo, data: { tipo: 'reparo_encerrado', reparo_id: req.params.id }, rotulo: `reparo encerrado ${req.params.id}`,
+      ...destino, ator_id: req.usuario.id, titulo, corpo, data: { tipo: 'reparo_encerrado', reparo_id: req.params.id }, rotulo: `reparo encerrado ${req.params.id}`,
     }).then(via => console.log(`[Encerrar] reparos ${req.params.id}: ${titulo} → via ${via}`))
       .catch(err => console.error(`[Encerrar] reparos ${req.params.id} aviso de encerramento:`, err.message))
     if (ehDono && r.match_usuario_id) {
@@ -5406,7 +5406,7 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
         // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
         if (dono.rows[0]) {
           entregarPushEEmail({
-            usuario_id: alvo.rows[0].criado_por,
+            usuario_id: alvo.rows[0].criado_por, ator_id: req.usuario.id,
             ...dono.rows[0],
             titulo: `📅 ${nome} propôs ${formatarDataHoraSP(dh.prevista)}`,
             corpo: `Horário de chegada para "${alvo.rows[0].titulo}". Aceitar ou sugerir outro?`,
@@ -5519,7 +5519,7 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
         // Dois textos porque são duas perguntas diferentes: um informa, o outro PEDE resposta.
         // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
         entregarPushEEmail({
-          usuario_id: alvo.rows[0].criado_por,
+          usuario_id: alvo.rows[0].criado_por, ator_id: req.usuario.id,
           ...dono.rows[0],
           titulo: pendente ? '📅 Chegada depois do prazo' : '📅 Previsão de chegada!',
           corpo: pendente
@@ -5642,7 +5642,7 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
     // Profissional declarou → o dono precisa confirmar.
     if (contatoDono) {
       entregarPushEEmail({
-        usuario_id: d.criado_por, ...contatoDono,
+        usuario_id: d.criado_por, ator_id: req.usuario.id, ...contatoDono,
         titulo: '📍 Chegada informada!',
         corpo: `O ${profissional} informou que chegou em "${d.titulo}". Confirme no app.`,
         data: { tipo: 'chegada_declarada', [chave]: req.params.id },
@@ -5653,7 +5653,7 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
     // quanto para o dono confirmando uma declaração anterior do profissional.
     if (contatoProf) {
       entregarPushEEmail({
-        usuario_id: d.match_usuario_id, ...contatoProf,
+        usuario_id: d.match_usuario_id, ator_id: req.usuario.id, ...contatoProf,
         titulo: '✅ Chegada confirmada!',
         corpo: `O solicitante confirmou sua chegada em "${d.titulo}".`,
         data: { tipo: 'chegada_confirmada', [chave]: req.params.id },
@@ -5810,7 +5810,7 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
     // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
     const rotuloPendente = descreverPendente(d)
     const entregar = (titulo, corpo, tipo) => entregarPushEEmail({
-      usuario_id: outroId, ...outro.rows[0], titulo, corpo, data: { tipo, [chave]: req.params.id },
+      usuario_id: outroId, ator_id: req.usuario.id, ...outro.rows[0], titulo, corpo, data: { tipo, [chave]: req.params.id },
       rotulo: `${modo} horário ${tabela} ${req.params.id}`,
     }).catch(() => {})
     if (modo === 'aceitar') {
@@ -5931,7 +5931,7 @@ const criarHandlerConfirmarComparecimento = (tabela) => async (req, res) => {
     if (!prof.rows[0]) return
     // Push E e-mail (entregarPushEEmail): aviso crítico pós-match, dedupe em email_alertas.
     const avisarProf = (titulo, corpo, tipo) => entregarPushEEmail({
-      usuario_id: d.match_usuario_id, ...prof.rows[0], titulo, corpo,
+      usuario_id: d.match_usuario_id, ator_id: req.usuario.id, ...prof.rows[0], titulo, corpo,
       data: { tipo, [chave]: req.params.id }, rotulo: `${tipo} ${tabela} ${req.params.id}`,
     }).catch(() => {})
     if (resposta === 'sim') {
