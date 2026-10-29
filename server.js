@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, lembrarRespostaHorario, repetirRespostaHorarioDono, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, entregarLembrete, lembrarRespostaHorario, repetirRespostaHorarioDono, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -699,7 +699,7 @@ const lembrarAvaliacaoPendente = async () => {
       // Por avaliador_id, e não por contrato: linhas legadas prestador→dono não podem contar
       // como avaliação do dono. (Em produção não há nenhuma, mas o predicado não depende disso.)
       const candidatos = await pool.query(`
-        SELECT d.id, d.titulo, d.encerrado_em, d.aval_marco_1_em, d.aval_marco_2_em, u.push_token
+        SELECT d.id, d.titulo, d.encerrado_em, d.aval_marco_1_em, d.aval_marco_2_em, d.criado_por, u.push_token, u.email, u.nome
           FROM ${lado.tabela} d
           JOIN usuarios u ON u.id = d.criado_por
          WHERE d.status = 'encerrada'
@@ -709,7 +709,7 @@ const lembrarAvaliacaoPendente = async () => {
            AND (d.aval_marco_1_em IS NULL OR d.aval_marco_2_em IS NULL)
            AND d.encerrado_em <= NOW() - INTERVAL '${MARCOS_AVALIACAO[0].dias} days'
            AND d.encerrado_em >  NOW() - INTERVAL '${TETO_LEMBRETE_AVALIACAO_DIAS} days'
-           AND u.push_token IS NOT NULL AND u.push_token <> ''
+           AND (NULLIF(u.push_token, '') IS NOT NULL OR NULLIF(btrim(u.email), '') IS NOT NULL)
            AND NOT EXISTS (
              SELECT 1 FROM avaliacoes a
               WHERE a.contrato_tipo = '${lado.tipo}'
@@ -741,8 +741,12 @@ const lembrarAvaliacaoPendente = async () => {
         const corpo = alvo.n === 1
           ? `Avalie ${lado.profissional} de "${d.titulo}". Leva 10 segundos e ajuda outros solicitantes.`
           : `Você ainda não avaliou ${lado.rotulo} "${d.titulo}". Sua nota ajuda quem for contratar depois.`
-        enviarPushNotificacao(d.push_token, titulo, corpo,
-          { tipo: 'avaliacao_pendente', [lado.chave]: d.id }).catch(() => {})
+        // Lembrete: push sempre + no máx. 1 e-mail/dia por demanda (política de 29/10/2026).
+        entregarLembrete({
+          usuario_id: d.criado_por, push_token: d.push_token || null, email: d.email, nome: d.nome,
+          titulo, corpo, data: { tipo: 'avaliacao_pendente', [lado.chave]: d.id },
+          rotulo: `lembrete avaliação ${lado.tabela} ${d.id}`,
+        })
         totalEnviados++
       }
     }
@@ -911,9 +915,11 @@ const iniciarAgendador = () => {
         invalidarCachesUsuario(p.id)
         // Indicação conta na aprovação: recalcula bônus/embaixador de quem o indicou (nunca lança).
         recalcularIndicador(p.id)
-        if (p.push_token) {
-          await enviarPushNotificacao(p.push_token, '✅ Cadastro aprovado!', `Bem-vindo ao ${MARCA}! Seu acesso está liberado.`, { tipo: 'verificacao_aprovada' }).catch(() => {})
-        }
+        // Conta aprovada: push + e-mail sempre (política de 29/10/2026).
+        await avisarUsuario(p.id, {
+          titulo: '✅ Cadastro aprovado!', corpo: `Bem-vindo ao ${MARCA}! Seu acesso está liberado.`,
+          data: { tipo: 'verificacao_aprovada' }, rotulo: `cadastro aprovado (timeout) ${p.id}`,
+        })
         aprovados++
       }
       console.log(`[Timeout] ${aprovados} prestadores auto-aprovados por timeout de 15s (Modo Auto ON)`)

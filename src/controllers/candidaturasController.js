@@ -1,7 +1,7 @@
 const { pool } = require('../utils/supabase')
 const { enviarContratoObra } = require('./contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
-const { enviarPushNotificacao, avisarMatchFeito } = require('../services/alertaService')
+const { enviarPushNotificacao, avisarMatchFeito, avisarUsuario } = require('../services/alertaService')
 // Colunas do agendamento zeradas junto com as chegada_* no match (mesma lista de routes/index.js).
 const { SQL_ZERAR_AGENDA } = require('../utils/agendamento')
 // Máscara de leitura do texto livre que o dono vê (utils/tentativasContato).
@@ -281,12 +281,13 @@ const recusar = async (req, res) => {
 
     // Aviso ao pintor recusado (D82): mesmo push de POST /obras/:id/candidatura/:cid/responder
     // e do lado reparo — este caminho (painel) era o único que recusava em silêncio.
-    const pintor = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [existe.rows[0].usuario_id])
-    if (pintor.rows[0]?.push_token) {
-      enviarPushNotificacao(pintor.rows[0].push_token, '❌ Candidatura não aceita',
-        `Sua candidatura para "${obraCheck.rows[0].titulo}" não foi selecionada desta vez.`,
-        { tipo: 'candidatura_recusada', obra_id: existe.rows[0].obra_id }).catch(() => {})
-    }
+    // Push + e-mail sempre (política de 29/10/2026).
+    avisarUsuario(existe.rows[0].usuario_id, {
+      ator_id: req.usuario.id,
+      titulo: '❌ Candidatura não aceita',
+      corpo: `Sua candidatura para "${obraCheck.rows[0].titulo}" não foi selecionada desta vez.`,
+      data: { tipo: 'candidatura_recusada', obra_id: existe.rows[0].obra_id }, rotulo: `candidatura recusada (painel) ${id}`,
+    })
 
   } catch (err) {
     console.error('Erro ao recusar candidatura:', err)

@@ -668,8 +668,14 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          AND ${sqlCasaCategorias('$4')}
          ${sqlSemManifestacao(lado.interesse, '$5')}
          AND ${sqlNaoMesmoCpfDoCriador(tabela, '$5')}
+         -- Lembrete "ainda aberto" ($7): no máx. UM e-mail de lembrete por demanda × prestador
+         -- por dia de São Paulo (política de 29/10/2026), além do UNIQUE por fatia.
+         AND (NOT $7::boolean OR NOT EXISTS (
+               SELECT 1 FROM email_alertas ea
+                WHERE ea.demanda_id = $5 AND ea.usuario_id = u.id AND ea.tipo LIKE 'lembrete\\_%'
+                  AND ea.created_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')))
        ORDER BY u.id`,
-      [lado.tipoPrestador, cidade, uf, categorias, demandaId, lado.somenteSemToken === true]
+      [lado.tipoPrestador, cidade, uf, categorias, demandaId, lado.somenteSemToken === true, /^lembrete_/.test(lado.tipo)]
     )
     if (elegiveis.rows.length === 0) return null
 
@@ -910,20 +916,18 @@ const listarCandidatosLembrete = async (db = pool) => {
 // Vive aqui (e não em routes/index.js) porque a aprovação AUTOMÁTICA adia este aviso: quem
 // o dispara nesse caminho é o claim de push_aprovada_enviado_em em enviarPushNovoPendente.
 const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
-  const info = await pool.query(
-    `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
-    [obraId]
-  )
-  const { push_token, titulo } = info.rows[0] || {}
-  if (!push_token) return
-  await enviarPushNotificacao(
-    push_token,
-    aprovada ? '✅ Obra aprovada!' : '❌ Obra não aprovada',
-    aprovada
+  const info = await pool.query(`SELECT criado_por, titulo FROM obras WHERE id = $1`, [obraId])
+  const { criado_por, titulo } = info.rows[0] || {}
+  if (!criado_por) return
+  // Push + e-mail sempre (política de 29/10/2026).
+  await avisarUsuario(criado_por, {
+    titulo: aprovada ? '✅ Obra aprovada!' : '❌ Obra não aprovada',
+    corpo: aprovada
       ? `"${titulo}" já está publicada e visível para os pintores.`
       : `"${titulo}" não foi publicada desta vez. Toque para rever os detalhes e cadastrar novamente.`,
-    { tipo: aprovada ? 'obra_aprovada' : 'obra_recusada', obra_id: obraId }
-  )
+    data: { tipo: aprovada ? 'obra_aprovada' : 'obra_recusada', obra_id: obraId },
+    rotulo: `análise obra ${obraId}`,
+  })
 }
 
 // Claim do push "nova obra / novo serviço disponível" — ÚNICO caminho que grava
@@ -1264,18 +1268,13 @@ const rotuloRestante = (restanteMin) =>
   (Number(restanteMin) >= 59 ? '1h' : `${Math.max(1, Math.round(Number(restanteMin)))} min`)
 const tituloLembreteChegada = (d) => `⏰ Prazo de chegada vence em ${rotuloRestante(d.restante_min)}`
 
-// Push ao profissional ou, sem token, e-mail (nunca os dois). Erro só no log.
-const entregarAoProfissional = async ({ lado, demanda, titulo, corpo, rotulo }) => {
-  const data = { tipo: lado.tipoPush, [lado.chave]: demanda.id }
-  if (demanda.push_token) {
-    await enviarPushNotificacao(demanda.push_token, titulo, corpo, data)
-    return 'push'
-  }
-  if (!demanda.email) return 'sem contato'
-  const html = htmlEmailNovaDemanda({ nome: demanda.nome?.split(' ')[0] || 'profissional', titulo, corpo, aba: lado.aba })
-  await comTimeout(enviarEmailBrevo({ para: demanda.email, assunto: titulo, html }), EMAIL_ALERTAS_TIMEOUT_MS, `Brevo ${rotulo}`)
-  return 'e-mail'
-}
+// LEMBRETE ao profissional casado (lembrarPrazoChegada, lembrarAgendamento,
+// lembrarAgendarAtendimento): push sempre + no máx. 1 e-mail/dia por demanda (entregarLembrete).
+// `demanda` traz match_usuario_id, push_token, email e nome. Nunca lança.
+const entregarAoProfissional = ({ lado, demanda, titulo, corpo, rotulo }) => entregarLembrete({
+  usuario_id: demanda.match_usuario_id, push_token: demanda.push_token, email: demanda.email, nome: demanda.nome,
+  titulo, corpo, data: { tipo: lado.tipoPush, [lado.chave]: demanda.id }, rotulo,
+})
 
 // Push com reserva de e-mail para avisos a QUALQUER lado (dono ou profissional) — negociação de
 // horário em routes (proposta, contraproposta, aceite, recusa) e lembrarRespostaHorario. Push
@@ -1325,15 +1324,22 @@ const entregarPushOuEmail = async ({ usuario_id, ator_id, push_token, email, nom
 // outro hash e sai. Sem usuario_id, sem id de demanda em `data` ou id que não é UUID: envia sem
 // claim (nunca segura um aviso por falta de chave). Essas linhas NÃO contam no teto diário do
 // e-mail de demanda nova (reivindicarEmailsNovaDemanda exclui 'aviso:%').
-// `chave_email` (opcional, '<evento>#<n>'): substitui '<data.tipo>#<hash8>' — lembrete que repete
-// o MESMO texto (repetirLembreteAgendar) sai um e-mail por ciclo, não um só para sempre.
-// Lembretes (resposta de horário, chegada, confirmação de conclusão, cancelamentos frequentes,
-// contato) NÃO passam por aqui: continuam em entregarPushOuEmail (push ou, sem ele, e-mail).
+// POLÍTICA DE CANAIS (dono, 29/10/2026):
+//   eventos críticos (demanda nova, match, horário, a caminho, chegada, conclusão, encerramento,
+//   cancelamento, avaliação recebida, conta aprovada/reprovada/suspensa/liberada) → aqui, push +
+//   e-mail SEMPRE (dedupe pelo hash do texto, acima);
+//   LEMBRETES repetidos (`lembrete: true`, via entregarLembrete) → push a CADA ciclo e no máx. UM
+//   e-mail por demanda × destinatário × dia de São Paulo: a chave vira 'lembrete#AAAAMMDD',
+//   comum a TODOS os lembretes — o 1º do dia leva o e-mail, os demais saem só por push. Sem
+//   usuario_id ou id de demanda não há como contar o dia: lembrete sai só por push;
+//   boas-vindas e avisos/promoções do painel → só push (fora daqui).
 // Nunca lança. Devolve as vias que saíram ('push+e-mail', 'push', 'e-mail', 'push+e-mail já
 // enviado', …), 'sem contato' ou 'falha'.
 const UUID_RE_AVISO = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const hash8 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 8)
-const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, data, rotulo, chave_email }) => {
+const FMT_DIA_SP = new Intl.DateTimeFormat('en-CA', { timeZone: TZ_AGENDA, year: 'numeric', month: '2-digit', day: '2-digit' })
+const diaSP = (agora = new Date()) => FMT_DIA_SP.format(agora).replace(/-/g, '')
+const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, data, rotulo, lembrete = false }) => {
   if (ehOProprioAutor({ usuario_id, ator_id, rotulo })) return 'autor'
   const vias = []
   try {
@@ -1345,10 +1351,14 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
     if (!destino) return vias.length ? vias.join('+') : 'sem contato'
     const demandaId = String(data?.obra_id || data?.reparo_id || '')
     const evento = String(data?.tipo || '')
-    const chave = chave_email
-      ? (/^[a-z_]+#[0-9]+$/.test(chave_email) ? chave_email : null)
-      : (/^[a-z_]+$/.test(evento) ? `${evento}#${hash8(`${titulo}\n${corpo}`)}` : null)
-    if (usuario_id && UUID_RE_AVISO.test(demandaId) && chave) {
+    const chave = lembrete
+      ? `lembrete#${diaSP()}`
+      // data entra no hash: avisos de MESMO texto sobre coisas diferentes (2º candidato, 2ª
+      // pergunta) levam um discriminador em data (candidatura_id, pergunta_id) e saem.
+      : (/^[a-z_]+$/.test(evento) ? `${evento}#${hash8(`${titulo}\n${corpo}\n${JSON.stringify(data)}`)}` : null)
+    const temChave = !!(usuario_id && UUID_RE_AVISO.test(demandaId) && chave)
+    if (lembrete && !temChave) return vias.length ? vias.join('+') : 'sem contato'
+    if (temChave) {
       const claim = await pool.query(
         `INSERT INTO email_alertas (tipo, demanda_id, usuario_id) VALUES ($1, $2, $3)
          ON CONFLICT (tipo, demanda_id, usuario_id) DO NOTHING RETURNING usuario_id`,
@@ -1362,6 +1372,19 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
   } catch (err) {
     console.error(`[Entrega] ${rotulo} falhou:`, err.message)
     return vias.length ? `${vias.join('+')}+falha` : 'falha'
+  }
+}
+// Lembretes repetidos: push sempre, e-mail no máx. 1x por demanda × destinatário × dia (SP).
+const entregarLembrete = (args) => entregarPushEEmail({ ...args, lembrete: true })
+// Evento crítico a um usuário pelo id (lê push_token/e-mail/nome). Nunca lança.
+const avisarUsuario = async (usuarioId, args) => {
+  try {
+    const u = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [usuarioId])
+    if (!u.rows[0]) return 'sem contato'
+    return await entregarPushEEmail({ usuario_id: usuarioId, ...u.rows[0], ...args })
+  } catch (err) {
+    console.error(`[Entrega] ${args?.rotulo}:`, err.message)
+    return 'falha'
   }
 }
 
@@ -1381,7 +1404,12 @@ const avisarMatchFeito = (tabela, demandaId, usuarioId) => {
       [demandaId, usuarioId]
     )
     if (claim.rowCount === 0) return
-    const via = await entregarAoProfissional({ lado, demanda: claim.rows[0], ...TEXTO_MATCH_FEITO, rotulo: `match feito ${tabela} ${demandaId}` })
+    // Evento crítico (match): push + e-mail sempre — é o e-mail de match do profissional.
+    const u = claim.rows[0]
+    const via = await entregarPushEEmail({
+      usuario_id: usuarioId, push_token: u.push_token, email: u.email, nome: u.nome, ...TEXTO_MATCH_FEITO,
+      data: { tipo: lado.tipoPush, [lado.chave]: demandaId }, rotulo: `match feito ${tabela} ${demandaId}`,
+    })
     console.log(`[MatchFeito] ${tabela} ${demandaId} → profissional ${usuarioId} via ${via}`)
   })().catch(err => console.error(`[MatchFeito] ${tabela} ${demandaId}:`, err.message))
 }
@@ -1629,15 +1657,14 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
 // "Agende seu atendimento" REPETIDO — complementa (não substitui) as antecedências fixas acima:
 // enquanto o match vive sem horário (o mesmo SQL_BASE_AGENDAR: nada proposto, aceito, declarado,
 // confirmado nem "a caminho"; demanda 'aberta'; prazo à frente), repete o aviso ao PROFISSIONAL
-// por push + e-mail (entregarPushEEmail). Cadência pela janela W da demanda (sqlJanelaHoras):
+// por push a cada ciclo + no máx. 1 e-mail/dia (entregarLembrete). Cadência pela janela W (sqlJanelaHoras):
 //   W < 4h → 30 min · W < 24h → 2h · W < 7 dias → 6h · W ≥ 7 dias → 12h
 // contada do último ciclo (lembrete_agendar_ultimo_em) ou, no 1º, do match_feito_em.
 // Silêncio 22:00–07:00 (America/Sao_Paulo): o ciclo devido nesse intervalo fica para o 1º tique
 // das 07:00. Do 2º ciclo DESTE match em diante (já havia lembrete_agendar_ultimo_em) avisa
 // também o DONO, no máx. uma vez por dia (SP) — lembrete_agendar_dono_em. Claim atômico
 // (UPDATE ... WHERE devido RETURNING): o WHERE é reavaliado sob o lock da linha, então réplicas e
-// restarts nunca repetem um ciclo. E-mail com chave por ciclo (aviso:agendar#n /
-// aviso:agendar_dono#n); n = lembrete_agendar_ciclo, que nunca zera (ver a migração).
+// restarts nunca repetem um ciclo. lembrete_agendar_ciclo (nunca zera) numera o ciclo no log.
 // ultimo_em e dono_em são zerados em SQL_ZERAR_AGENDA.
 // Guarda de autor: dono e profissional na mesma conta não recebem aviso sobre si mesmos.
 // Cadência dos lembretes repetidos (agendar e resposta de horário), pela janela W da demanda.
@@ -1676,22 +1703,20 @@ const repetirLembreteAgendar = semSobreposicao('repetirLembreteAgendar', async (
       for (const d of claim.rows) {
         // Mesmo data dos pushes de match ao profissional (abre o detalhe); ao dono, o tipo
         // genérico da negociação de chegada, que o app já roteia ao detalhe nos dois lados.
-        const via = await entregarPushEEmail({
+        const via = await entregarLembrete({
           usuario_id: d.match_usuario_id, ator_id: d.criado_por,
           push_token: d.push_token, email: d.email, nome: d.nome,
           titulo: TITULO_AGENDAR, corpo: corpoAgendar(lado, d),
           data: { tipo: lado.tipoPush, [lado.chave]: d.id },
-          chave_email: `agendar#${d.ciclo}`,
           rotulo: `agendar repetido ${lado.tabela} ${d.id} #${d.ciclo}`,
         })
         let viaDono = '-'
         if (d.avisar_dono) {
-          viaDono = await entregarPushEEmail({
+          viaDono = await entregarLembrete({
             usuario_id: d.criado_por, ator_id: d.match_usuario_id,
             push_token: d.dono_push_token, email: d.dono_email, nome: d.dono_nome,
             titulo: TITULO_AGENDAR_DONO, corpo: corpoAgendarDono(d),
             data: { tipo: 'chegada_prevista', [lado.chave]: d.id },
-            chave_email: `agendar_dono#${d.ciclo}`,
             rotulo: `agendar repetido dono ${lado.tabela} ${d.id} #${d.ciclo}`,
           })
         }
@@ -1719,7 +1744,7 @@ const repetirLembreteAgendar = semSobreposicao('repetirLembreteAgendar', async (
 // Idempotência: lembrete_resposta_{1h,antes}_em — claim UPDATE ... WHERE IS NULL RETURNING.
 // data do push = o tipo que cada lado já recebe nesta negociação (dono: chegada_prevista_pendente;
 // profissional: chegada_contraproposta) + obra_id/reparo_id — o toque abre o detalhe.
-// Entrega por entregarPushOuEmail (push; sem token ou push falho, e-mail em texto puro).
+// Entrega por entregarLembrete (push sempre; e-mail no máx. 1x/dia por demanda).
 // Desde 29/10/2026 só para o PROFISSIONAL (proposta do dono): o dono que deve responder a uma
 // proposta do profissional recebe o lembrete REPETIDO de repetirRespostaHorarioDono.
 const TITULO_RESPOSTA_HORARIO = '⏳ Responda o horário proposto'
@@ -1745,7 +1770,7 @@ const sqlClaimRespostaHorario = (lado, l) => `
          AND NOW() < d.chegada_pendente_em
          ${l.extra}
    RETURNING d.id, d.titulo, d.chegada_pendente_em, (u.id = d.criado_por) AS para_dono,
-             u.push_token, u.email, u.nome, p.nome AS nome_proponente`
+             u.id AS usuario_id, u.push_token, u.email, u.nome, p.nome AS nome_proponente`
 const corpoRespostaHorario = (d) => {
   const quem = String(d.nome_proponente || '').trim().split(/\s+/)[0] || (d.para_dono ? 'O profissional' : 'O solicitante')
   return `${quem} propôs ${formatarDataHoraSP(d.chegada_pendente_em)} para "${d.titulo}". Confirme ou sugira outro.`
@@ -1756,8 +1781,8 @@ const lembrarRespostaHorario = semSobreposicao('lembrarRespostaHorario', async (
       try {
         const claim = await pool.query(sqlClaimRespostaHorario(lado, l))
         for (const d of claim.rows) {
-          const via = await entregarPushOuEmail({
-            push_token: d.push_token, email: d.email, nome: d.nome,
+          const via = await entregarLembrete({
+            usuario_id: d.usuario_id, push_token: d.push_token, email: d.email, nome: d.nome,
             titulo: TITULO_RESPOSTA_HORARIO, corpo: corpoRespostaHorario(d),
             data: { tipo: d.para_dono ? 'chegada_prevista_pendente' : 'chegada_contraproposta', [lado.chave]: d.id },
             rotulo: `resposta horário ${l.coluna} ${lado.tabela} ${d.id}`,
@@ -1775,8 +1800,8 @@ const lembrarRespostaHorario = semSobreposicao('lembrarRespostaHorario', async (
 // pendente (chegada_pendente_em, proposta por match_usuario_id). Mesma cadência do agendar
 // repetido (sqlIntervaloRepetirAgendar: 30 min / 2h / 6h / 12h pela janela W), contada do
 // último ciclo ou, no 1º, de chegada_proposta_em; silêncio 22–07 SP (SQL_FORA_SILENCIO) adia
-// para as 07:00. Push + e-mail (entregarPushEEmail, chave aviso:resposta_horario#n, n =
-// lembrete_resposta_ciclo, que nunca zera), guarda de autor (ator = profissional).
+// para as 07:00. Push a cada ciclo + no máx. 1 e-mail/dia (entregarLembrete); guarda de autor
+// (ator = profissional). lembrete_resposta_ciclo (nunca zera) numera o ciclo no log.
 // Para no mesmo tique em que o dono responde (aceite/recusa zeram chegada_pendente_em; a
 // contraproposta dele troca o proponente), quando o horário proposto passa, a demanda sai de
 // 'aberta' ou o match cai. Claim atômico em lembrete_resposta_ultimo_em, zerado a cada proposta.
@@ -1799,12 +1824,11 @@ const repetirRespostaHorarioDono = semSobreposicao('repetirRespostaHorarioDono',
     try {
       const claim = await pool.query(sqlClaimRepetirRespostaDono(lado))
       for (const d of claim.rows) {
-        const via = await entregarPushEEmail({
+        const via = await entregarLembrete({
           usuario_id: d.criado_por, ator_id: d.match_usuario_id,
           push_token: d.push_token, email: d.email, nome: d.nome,
           titulo: TITULO_RESPOSTA_HORARIO, corpo: corpoRespostaHorario(d),
           data: { tipo: 'chegada_prevista_pendente', [lado.chave]: d.id },
-          chave_email: `resposta_horario#${d.ciclo}`,
           rotulo: `resposta horário repetido ${lado.tabela} ${d.id} #${d.ciclo}`,
         })
         console.log(`[RespostaHorarioDono] ${lado.tabela} ${d.id} #${d.ciclo} → dono via ${via}`)
@@ -1827,19 +1851,17 @@ const vigiarComparecimento = semSobreposicao('vigiarComparecimento', async () =>
             -- 1h depois do LIMITE (horário + tolerância de 15 min, ou a extensão aceita —
             -- utils/agendamento.sqlLimiteChegada), não do horário cru: a tolerância vale aqui também.
             AND NOW() >= ${sqlLimiteChegada('d.')} + INTERVAL '${VIGIA_ATRASO}'
-      RETURNING d.id, d.titulo, d.chegada_prevista_em, u.push_token`
+      RETURNING d.id, d.titulo, d.chegada_prevista_em, d.criado_por, u.push_token, u.email, u.nome`
       )
+      // Lembrete: push + no máx. 1 e-mail/dia por demanda (entregarLembrete) — sem token, só o e-mail.
       for (const d of claim.rows) {
-        if (!d.push_token) {
-          console.log(`[Vigia] ${lado.tabela} ${d.id}: dono sem push_token — sem aviso (o cron espera a resposta até 3h mesmo assim)`)
-          continue
-        }
-        await enviarPushNotificacao(
-          d.push_token,
-          '🤔 O profissional veio?',
-          `O horário combinado em "${d.titulo}" (${formatarDataHoraSP(d.chegada_prevista_em)}) já passou e nenhuma chegada foi registrada. O profissional chegou? Responda no app.`,
-          { tipo: 'confirmar_comparecimento', [lado.chave]: d.id }
-        )
+        await entregarLembrete({
+          usuario_id: d.criado_por, push_token: d.push_token, email: d.email, nome: d.nome,
+          titulo: '🤔 O profissional veio?',
+          corpo: `O horário combinado em "${d.titulo}" (${formatarDataHoraSP(d.chegada_prevista_em)}) já passou e nenhuma chegada foi registrada. O profissional chegou? Responda no app.`,
+          data: { tipo: 'confirmar_comparecimento', [lado.chave]: d.id },
+          rotulo: `vigia comparecimento ${lado.tabela} ${d.id}`,
+        })
       }
       if (claim.rowCount > 0) console.log(`[Vigia] ${lado.tabela}: ${claim.rowCount} dono(s) perguntado(s)`)
     } catch (err) {
@@ -1872,20 +1894,20 @@ const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaix
           SELECT 1 FROM candidaturas c
           WHERE c.obra_id = o.id AND c.status IS DISTINCT FROM 'recusado'
         )
-        AND u.push_token IS NOT NULL
-      RETURNING o.id, o.titulo, o.total_visitas, u.push_token
+        AND (u.push_token IS NOT NULL OR NULLIF(btrim(u.email), '') IS NOT NULL)
+      RETURNING o.id, o.titulo, o.total_visitas, o.criado_por, u.push_token, u.email, u.nome
     `)
 
-    if (obras.rows.length > 0) {
-      // Envio individual aqui pois a mensagem inclui total_visitas específico de cada obra
-      for (const obra of obras.rows) {
-        await enviarPushNotificacao(
-          obra.push_token,
-          '💡 Considere aumentar sua oferta',
-          `Sua obra "${obra.titulo}" teve ${obra.total_visitas} visitas e nenhum profissional se interessou. Considere aumentar o prazo ou revisar o texto.`,
-          { tipo: 'baixo_engajamento', obra_id: obra.id }
-        )
-      }
+    // Lembrete ao dono: push + no máx. 1 e-mail/dia por demanda (entregarLembrete). Envio
+    // individual pois a mensagem inclui total_visitas específico de cada obra.
+    for (const obra of obras.rows) {
+      await entregarLembrete({
+        usuario_id: obra.criado_por, push_token: obra.push_token, email: obra.email, nome: obra.nome,
+        titulo: '💡 Considere aumentar sua oferta',
+        corpo: `Sua obra "${obra.titulo}" teve ${obra.total_visitas} visitas e nenhum profissional se interessou. Considere aumentar o prazo ou revisar o texto.`,
+        data: { tipo: 'baixo_engajamento', obra_id: obra.id },
+        rotulo: `baixo engajamento obras ${obra.id}`,
+      })
     }
 
     // Mesmo claim atômico do lado obra (ver acima).
@@ -1908,19 +1930,18 @@ const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaix
           SELECT 1 FROM interesse_reparos ir
           WHERE ir.reparo_id = r.id AND ir.status IS DISTINCT FROM 'recusado'
         )
-        AND u.push_token IS NOT NULL
-      RETURNING r.id, r.titulo, r.total_visitas, u.push_token
+        AND (u.push_token IS NOT NULL OR NULLIF(btrim(u.email), '') IS NOT NULL)
+      RETURNING r.id, r.titulo, r.total_visitas, r.criado_por, u.push_token, u.email, u.nome
     `)
 
-    if (reparos.rows.length > 0) {
-      for (const reparo of reparos.rows) {
-        await enviarPushNotificacao(
-          reparo.push_token,
-          '💡 Considere aumentar sua oferta',
-          `Seu serviço "${reparo.titulo}" teve ${reparo.total_visitas} visitas e nenhum profissional se interessou. Considere aumentar o prazo ou revisar o texto.`,
-          { tipo: 'baixo_engajamento_reparo', reparo_id: reparo.id }
-        )
-      }
+    for (const reparo of reparos.rows) {
+      await entregarLembrete({
+        usuario_id: reparo.criado_por, push_token: reparo.push_token, email: reparo.email, nome: reparo.nome,
+        titulo: '💡 Considere aumentar sua oferta',
+        corpo: `Seu serviço "${reparo.titulo}" teve ${reparo.total_visitas} visitas e nenhum profissional se interessou. Considere aumentar o prazo ou revisar o texto.`,
+        data: { tipo: 'baixo_engajamento_reparo', reparo_id: reparo.id },
+        rotulo: `baixo engajamento reparos ${reparo.id}`,
+      })
     }
 
     console.log(`Engajamento: ${obras.rows.length} obras e ${reparos.rows.length} reparos notificados`)
@@ -1942,7 +1963,7 @@ const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaix
 // garantem no máximo um disparo por run, então o 1º run pós-deploy não gera rajada de alertas.
 //
 // Elegibilidade: status='aberta', match_usuario_id IS NULL, sem interesse (obras: NOT EXISTS
-// candidaturas; reparos: NOT EXISTS interesse_reparos), dono com push_token entregável. Obras
+// candidaturas; reparos: NOT EXISTS interesse_reparos), dono com push_token ou e-mail. Obras
 // exigem status_aprovacao='aprovada' (reparos não, por decisão).
 //
 // Claim-then-send replica-safe: o SELECT reúne candidatos; o UPDATE ... WHERE marco_N_em IS NULL
@@ -1986,13 +2007,13 @@ const verificarMarcosExpiracao = async () => {
       // o create usa para o expira_em dessas linhas (e o que os dois crons já usam nas obras).
       const candidatos = await pool.query(`
         SELECT d.id, d.titulo, COALESCE(d.${lado.janelaCol}, 720) AS janela, d.expira_em,
-               d.marco_1_em, d.marco_2_em, d.marco_3_em, u.push_token
+               d.marco_1_em, d.marco_2_em, d.marco_3_em, d.criado_por, u.push_token, u.email, u.nome
         FROM ${lado.tabela} d
         JOIN usuarios u ON d.criado_por = u.id
         WHERE d.status = 'aberta'
           ${lado.statusAprovacao}
           AND d.match_usuario_id IS NULL
-          AND u.push_token IS NOT NULL AND u.push_token <> ''
+          AND (NULLIF(u.push_token, '') IS NOT NULL OR NULLIF(btrim(u.email), '') IS NOT NULL)
           AND NOT EXISTS (${lado.interesse})
           AND (d.marco_1_em IS NULL OR d.marco_2_em IS NULL OR d.marco_3_em IS NULL)
           AND d.expira_em > NOW()
@@ -2027,12 +2048,12 @@ const verificarMarcosExpiracao = async () => {
         const corpo = alvo.n === 3
           ? `Última chance: ${lado.substantivo.toLowerCase()} '${d.titulo}' expira em menos de ${label} e ainda não tem interessados. ${lado.verbo} agora.`
           : `${lado.substantivo} '${d.titulo}' expira em menos de ${label} e ainda não tem interessados. ${lado.verbo}.`
-        await enviarPushEmLote(
-          [{ push_token: d.push_token }],
-          titulo,
-          corpo,
-          { tipo: `${lado.tipoPrefixo}_${alvo.n}`, [lado.idKey]: d.id }
-        )
+        // Lembrete ao dono: push + no máx. 1 e-mail/dia por demanda (entregarLembrete).
+        await entregarLembrete({
+          usuario_id: d.criado_por, push_token: d.push_token || null, email: d.email, nome: d.nome,
+          titulo, corpo, data: { tipo: `${lado.tipoPrefixo}_${alvo.n}`, [lado.idKey]: d.id },
+          rotulo: `marco ${alvo.n} ${lado.tabela} ${d.id}`,
+        })
         totalEnviados++
       }
     }
@@ -2057,21 +2078,21 @@ const notificarMatchDesfeito = async (tabela, demanda) => {
   const { chave, profissional, artigo, volta } = ROTULOS_MATCH_DESFEITO[tabela]
   const alvos = [demanda.criado_por, demanda.match_usuario_id].filter(Boolean)
   if (alvos.length === 0) return
-  // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail) — mesma
-  // entrega dos avisos de atraso; resultado no log em vez do catch vazio de antes.
+  // Push + e-mail sempre (política de 29/10/2026); resultado no log. match_feito_em em data
+  // distingue um match expirado de outro no dedupe do e-mail.
   const contatos = await pool.query(
     `SELECT id, push_token, email, nome FROM usuarios WHERE id = ANY($1::uuid[])`,
     [alvos]
   )
   for (const u of contatos.rows) {
     const paraDono = u.id === demanda.criado_por
-    const via = await entregarPushOuEmail({
-      ...u,
+    const via = await entregarPushEEmail({
+      usuario_id: u.id, ...u,
       titulo: '⏰ Prazo expirado!',
       corpo: paraDono
         ? `O ${profissional} não chegou a tempo para "${demanda.titulo}". ${artigo} está disponível novamente.`
         : `O prazo para chegar em "${demanda.titulo}" acabou. ${volta} para o feed.`,
-      data: { tipo: 'match_expirado', [chave]: demanda.id },
+      data: { tipo: 'match_expirado', [chave]: demanda.id, match_feito_em: demanda.match_feito_em || null },
       rotulo: `match expirado ${tabela} ${demanda.id}`,
     })
     console.log(`[MatchDesfeito] ${tabela} ${demanda.id} → ${paraDono ? 'dono' : 'profissional'} via ${via}`)
@@ -2109,7 +2130,9 @@ const reanunciarDemanda = async (tabela, demandaId) => {
       excluirManifestados: { interesse: lembrete.interesse, demandaId },
       demanda: { tabela, id: demandaId },
     })
-    await enviarEmailsNovaDemanda(tabela, demandaId, { tipo: `reaberta_${lado.tipo}`, interesse: lembrete.interesse, somenteSemToken: true })
+    // Reanúncio = demanda nova de novo no feed: e-mail a TODOS os elegíveis, como a demanda nova
+    // (política de 29/10/2026); antes só a quem não tinha token.
+    await enviarEmailsNovaDemanda(tabela, demandaId, { tipo: `reaberta_${lado.tipo}`, interesse: lembrete.interesse, somenteSemToken: false })
   } catch (err) {
     console.error(`[Reanuncio] ${tabela} ${demandaId}:`, err.message)
   }
@@ -2177,11 +2200,12 @@ const registrarFaltaUsuario = async (tabela, demandaId, usuarioId) => {
     // consultam o banco direto, mas os feeds e a criação de proposta dependem do cache.
     invalidarCacheAssinatura(usuarioId)
     console.log(`[Faltas] usuario ${usuarioId} suspenso — ${c.rows[0].n} faltas em ${JANELA_FALTAS}`)
-    if (upd.rows[0]?.push_token) {
-      enviarPushNotificacao(upd.rows[0].push_token, '🚫 Conta suspensa',
-        `Sua conta foi suspensa por ${MOTIVO_SUSPENSAO}. Fale com o suporte para regularizar.`,
-        { tipo: 'conta_suspensa' }).catch(() => {})
-    }
+    // Evento crítico (conta suspensa): push + e-mail sempre.
+    avisarUsuario(usuarioId, {
+      titulo: '🚫 Conta suspensa',
+      corpo: `Sua conta foi suspensa por ${MOTIVO_SUSPENSAO}. Fale com o suporte para regularizar.`,
+      data: { tipo: 'conta_suspensa' }, rotulo: `conta suspensa (faltas) ${usuarioId}`,
+    })
   } catch (err) {
     console.error(`[Faltas] Erro ao registrar falta em ${tabela}:`, err.message)
   }
@@ -2213,25 +2237,24 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
       WHERE u.id = r.criado_por
         AND r.match_usuario_id IS NOT NULL
         AND r.notif_5min_enviada = false
-        AND u.push_token IS NOT NULL
+        AND (u.push_token IS NOT NULL OR NULLIF(btrim(u.email), '') IS NOT NULL)
         AND r.chegada_declarada_em IS NULL
         AND r.chegada_confirmada_em IS NULL
         -- Dono já avisado do atraso ("tolerância até HH:MM", atrasoChegadaService): o "faltam
         -- 5 minutos" seria o 2º push sobre o mesmo fato — só sai quando aquele não saiu.
         AND r.aviso_atraso_enviado_em IS NULL
         AND ${sqlLimiteChegada('r.')} BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
-      RETURNING r.id, r.titulo, u.push_token
+      RETURNING r.id, r.titulo, r.criado_por, u.push_token, u.email, u.nome
     `)
 
-    if (cincoMin.rows.length > 0) {
-      for (const reparo of cincoMin.rows) {
-        await enviarPushNotificacao(
-          reparo.push_token,
-          '⏰ O prestador ainda não chegou?',
-          'Faltam 5 minutos. Se ele ainda não chegou, você pode aumentar o prazo ou aguardar o cronômetro zerar.',
-          { tipo: 'reparo_5min_restantes', reparo_id: reparo.id }
-        )
-      }
+    // Contagem regressiva = regra de lembrete: push sempre, no máx. 1 e-mail/dia por demanda.
+    for (const reparo of cincoMin.rows) {
+      await entregarLembrete({
+        usuario_id: reparo.criado_por, push_token: reparo.push_token, email: reparo.email, nome: reparo.nome,
+        titulo: '⏰ O prestador ainda não chegou?',
+        corpo: 'Faltam 5 minutos. Se ele ainda não chegou, você pode aumentar o prazo ou aguardar o cronômetro zerar.',
+        data: { tipo: 'reparo_5min_restantes', reparo_id: reparo.id }, rotulo: `5 min reparos ${reparo.id}`,
+      })
     }
 
     // (b) Cronômetro zerou → devolve o reparo ao feed e limpa o match,
@@ -2265,7 +2288,7 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
     // depois de o dono recusar a janela, e sem nenhuma outra valendo, não gera falta nem bloqueio.
     // chegada_proposta_por: de quem era a pendência (só a do profissional isenta).
     const candidatos = await pool.query(`
-      SELECT id, titulo, criado_por, match_usuario_id,
+      SELECT id, titulo, criado_por, match_usuario_id, match_feito_em,
              chegada_recusada_em, chegada_pendente_em, chegada_prevista_em, chegada_proposta_por
         FROM reparos WHERE ${PRED_EXPIRADOS_REPAROS}
     `)
@@ -2373,24 +2396,23 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
         AND o.status = 'aberta'
         AND o.match_usuario_id IS NOT NULL
         AND o.notif_5min_enviada = false
-        AND u.push_token IS NOT NULL
+        AND (u.push_token IS NOT NULL OR NULLIF(btrim(u.email), '') IS NOT NULL)
         AND o.chegada_declarada_em IS NULL
         AND o.chegada_confirmada_em IS NULL
         -- Mesma regra do cron de reparos: sem 2º push quando o aviso de atraso já saiu.
         AND o.aviso_atraso_enviado_em IS NULL
         AND ${sqlLimiteChegada('o.')} BETWEEN NOW() AND NOW() + INTERVAL '5 minutes'
-      RETURNING o.id, o.titulo, u.push_token
+      RETURNING o.id, o.titulo, o.criado_por, u.push_token, u.email, u.nome
     `)
 
-    if (cincoMin.rows.length > 0) {
-      for (const obra of cincoMin.rows) {
-        await enviarPushNotificacao(
-          obra.push_token,
-          '⏰ O pintor ainda não chegou?',
-          'Faltam 5 minutos. Se ele ainda não chegou, você pode aumentar o prazo ou aguardar o cronômetro zerar.',
-          { tipo: 'obra_5min_restantes', obra_id: obra.id }
-        )
-      }
+    // Contagem regressiva = regra de lembrete: push sempre, no máx. 1 e-mail/dia por demanda.
+    for (const obra of cincoMin.rows) {
+      await entregarLembrete({
+        usuario_id: obra.criado_por, push_token: obra.push_token, email: obra.email, nome: obra.nome,
+        titulo: '⏰ O pintor ainda não chegou?',
+        corpo: 'Faltam 5 minutos. Se ele ainda não chegou, você pode aumentar o prazo ou aguardar o cronômetro zerar.',
+        data: { tipo: 'obra_5min_restantes', obra_id: obra.id }, rotulo: `5 min obras ${obra.id}`,
+      })
     }
 
     // (b) Cronômetro zerou → devolve a obra ao feed e limpa o match, reiniciando a contagem
@@ -2411,7 +2433,7 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
 
     // Mesma isenção do cron de reparos (ver isentoPorRecusa).
     const candidatos = await pool.query(`
-      SELECT id, titulo, criado_por, match_usuario_id,
+      SELECT id, titulo, criado_por, match_usuario_id, match_feito_em,
              chegada_recusada_em, chegada_pendente_em, chegada_prevista_em, chegada_proposta_por
         FROM obras WHERE ${PRED_EXPIRADOS_OBRAS}
     `)
@@ -2519,7 +2541,8 @@ const encerramentoAutomaticoEm = (tabela, d) => {
 // colunas lembrete_encerramento_30m_em / _2h_em, zeradas quando uma solicitação nova é
 // registrada). Só com a demanda ainda aberta e a solicitação ainda pendente — fechou (pelo
 // dono ou pelo cron) ou foi limpa, nada sai. O de 30 min não sai se já passou das 2h (o de 2h
-// cobre; evita dois pushes no mesmo tique depois de uma queda). Push ou e-mail (entregarPushOuEmail).
+// cobre; evita dois pushes no mesmo tique depois de uma queda). Push sempre + no máx. 1 e-mail/dia
+// por demanda (entregarLembrete).
 const LEMBRETES_ENCERRAMENTO = [
   { coluna: 'lembrete_encerramento_30m_em', apos: '30 minutes', teto: '2 hours' },
   { coluna: 'lembrete_encerramento_2h_em',  apos: '2 hours',    teto: null },
@@ -2543,8 +2566,8 @@ const lembrarConfirmacaoEncerramento = semSobreposicao('lembrarConfirmacaoEncerr
           const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [d.criado_por])
           if (!dono.rows[0]) continue
           const nome = String(d.profissional_nome || '').trim().split(/\s+/)[0] || 'O profissional'
-          const via = await entregarPushOuEmail({
-            ...dono.rows[0],
+          const via = await entregarLembrete({
+            usuario_id: d.criado_por, ...dono.rows[0],
             titulo: '⏰ Falta confirmar a conclusão',
             corpo: `${nome} aguarda sua confirmação de "${d.titulo}".`,
             data: { tipo: 'encerramento_solicitado', [chave]: d.id },
@@ -2568,8 +2591,8 @@ const lembrarConfirmacaoEncerramento = semSobreposicao('lembrarConfirmacaoEncerr
 // tique a partir das 07:00. Claim atômico em lembrete_conclusao_em (UPDATE … WHERE a coluna é
 // anterior ao início da fatia atual, RETURNING só o que ESTE tique reivindicou): réplicas,
 // boots e tiques repetidos nunca duplicam; a coluna é zerada no match novo (SQL_LIMPAR_CHEGADA,
-// routes/index.js). Canal dos lembretes: push ou, sem token / push falho, e-mail
-// (entregarPushOuEmail). Cron de 5 min em server.js (INTERVALO_LEMBRETE).
+// routes/index.js). Canal: push a cada fatia + no máx. 1 e-mail/dia por demanda
+// (entregarLembrete). Cron de 5 min em server.js (INTERVALO_LEMBRETE).
 const LEMBRETE_CONCLUSAO = {
   obras:   { chave: 'obra_id',   intervalo: '3 days',  acao: 'Concluí a obra' },
   reparos: { chave: 'reparo_id', intervalo: '6 hours', acao: 'Concluí o serviço' },
@@ -2595,11 +2618,11 @@ const lembrarConclusaoPendente = semSobreposicao('lembrarConclusaoPendente', asy
            AND (d.lembrete_conclusao_em IS NULL OR d.lembrete_conclusao_em < ${sqlInicioFatiaConclusao(l.intervalo)})
            AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'America/Sao_Paulo')) >= $1::int
            AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'America/Sao_Paulo')) <  $2::int
-        RETURNING d.id, d.titulo, u.push_token, u.email, u.nome`,
+        RETURNING d.id, d.titulo, d.match_usuario_id, u.push_token, u.email, u.nome`,
         [LEMBRETE_CONCLUSAO_HORA_INICIO, LEMBRETE_CONCLUSAO_HORA_FIM])
       for (const d of claim.rows) {
-        const via = await entregarPushOuEmail({
-          push_token: d.push_token, email: d.email, nome: d.nome,
+        const via = await entregarLembrete({
+          usuario_id: d.match_usuario_id, push_token: d.push_token, email: d.email, nome: d.nome,
           titulo: TITULO_LEMBRETE_CONCLUSAO,
           corpo: `Quando terminar "${d.titulo}", toque em ${l.acao} para o cliente confirmar.`,
           data: { tipo: 'lembrete_conclusao', [l.chave]: d.id },
@@ -2702,12 +2725,12 @@ const autoEncerrarPendentes = async () => {
         // (o app trata os dois igual); só o texto muda, porque aqui o dono NÃO confirmou —
         // venceu o prazo. Mesma construção do aviso de encerramento automático acima.
         if (!c.match_usuario_id) continue
-        const prof = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [c.match_usuario_id])
-        if (prof.rows[0]?.push_token) {
-          enviarPushNotificacao(prof.rows[0].push_token, '✅ Chegada confirmada!',
-            `Sem confirmação do solicitante em ${lado.chegadaRotulo}, sua chegada em "${c.titulo}" foi confirmada automaticamente.`,
-            { tipo: 'chegada_confirmada', [lado.chave]: c.id }).catch(() => {})
-        }
+        // Evento crítico (chegada confirmada): push + e-mail sempre.
+        avisarUsuario(c.match_usuario_id, {
+          titulo: '✅ Chegada confirmada!',
+          corpo: `Sem confirmação do solicitante em ${lado.chegadaRotulo}, sua chegada em "${c.titulo}" foi confirmada automaticamente.`,
+          data: { tipo: 'chegada_confirmada', [lado.chave]: c.id }, rotulo: `chegada auto-confirmada ${lado.tabela} ${c.id}`,
+        })
       }
       if (chegadas.rows.length > 0) {
         console.log(`[AutoConfirmarChegada] ${lado.tabela}: ${chegadas.rows.length} chegada(s) confirmada(s) por decurso de prazo`)
@@ -2746,6 +2769,9 @@ module.exports = {
   lembrarPrazoChegada,
   lembrarAgendamento,
   lembrarAgendarAtendimento,
+  entregarLembrete,
+  avisarUsuario,
+  diaSP,
   repetirLembreteAgendar,
   sqlClaimRepetirAgendar,
   repetirRespostaHorarioDono,

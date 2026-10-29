@@ -14,7 +14,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, encerramentoAutomaticoEm } = require('../services/alertaService')
+const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, avisarUsuario, encerramentoAutomaticoEm } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { moderarDemanda, avisarModeracao, sanitizarTexto, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
@@ -3269,17 +3269,15 @@ const criarHandlerPergunta = (tabela) => async (req, res) => {
     )
     if (ins.rowCount === 0) return res.status(409).json({ erro: 'Você já fez sua pergunta neste pedido' })
     if (lido.removido) registrarTentativaContato({ usuario_id: req.usuario.id, tipo: `pergunta_${lado.tipo}`, demanda_id: req.params.id, campo: 'pergunta', conta: lido.conta })
-    const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [demanda.criado_por])
     res.status(201).json({ ...ins.rows[0], minha: true })
-    if (dono.rows[0]) {
-      entregarPushOuEmail({
-        ...dono.rows[0],
-        titulo: '❓ Nova pergunta sobre seu pedido',
-        corpo: `${demanda.titulo}: responda para atrair propostas`,
-        data: { tipo: 'nova_pergunta', [lado.chave]: req.params.id },
-        rotulo: `pergunta ${tabela} ${req.params.id}`,
-      }).catch(() => {})
-    }
+    // Push + e-mail sempre (política de 29/10/2026); pergunta_id distingue as perguntas no dedupe.
+    avisarUsuario(demanda.criado_por, {
+      ator_id: req.usuario.id,
+      titulo: '❓ Nova pergunta sobre seu pedido',
+      corpo: `${demanda.titulo}: responda para atrair propostas`,
+      data: { tipo: 'nova_pergunta', [lado.chave]: req.params.id, pergunta_id: ins.rows[0].id },
+      rotulo: `pergunta ${tabela} ${req.params.id}`,
+    })
   } catch (err) {
     console.error(`[Perguntas] ${tabela} ${req.params.id}:`, err.message)
     res.status(500).json({ erro: 'Erro ao enviar a pergunta' })
@@ -3315,17 +3313,15 @@ const criarHandlerResposta = (tabela) => async (req, res) => {
     if (upd.rowCount === 0) return res.status(409).json({ erro: 'Esta pergunta já foi respondida' })
     if (lido.removido) registrarTentativaContato({ usuario_id: req.usuario.id, tipo: `resposta_${lado.tipo}`, demanda_id: req.params.id, campo: 'resposta', conta: lido.conta })
     const { autor_id, ...pergunta } = upd.rows[0]
-    const autor = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [autor_id])
     res.json({ ...pergunta, minha: false })
-    if (autor.rows[0]) {
-      entregarPushOuEmail({
-        ...autor.rows[0],
-        titulo: '💬 O cliente respondeu sua pergunta',
-        corpo: demanda.titulo,
-        data: { tipo: 'pergunta_respondida', [lado.chave]: req.params.id },
-        rotulo: `resposta pergunta ${tabela} ${req.params.id}`,
-      }).catch(() => {})
-    }
+    // Push + e-mail sempre (política de 29/10/2026).
+    avisarUsuario(autor_id, {
+      ator_id: req.usuario.id,
+      titulo: '💬 O cliente respondeu sua pergunta',
+      corpo: demanda.titulo,
+      data: { tipo: 'pergunta_respondida', [lado.chave]: req.params.id, pergunta_id: pergunta.id },
+      rotulo: `resposta pergunta ${tabela} ${req.params.id}`,
+    })
   } catch (err) {
     console.error(`[Perguntas] resposta ${tabela} ${req.params.id}/${req.params.pid}:`, err.message)
     res.status(500).json({ erro: 'Erro ao responder a pergunta' })
@@ -3516,14 +3512,16 @@ router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssin
       [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
     )
     registrarContato() // só depois de a candidatura entrar: envio recusado não é tentativa
-    const donoInfo = await pool.query(
-      `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
-      [req.params.id]
-    )
-    if (donoInfo.rows[0]?.push_token) {
-      enviarPushNotificacao(donoInfo.rows[0].push_token, '🎨 Novo candidato!',
-        `Um pintor se candidatou na obra "${donoInfo.rows[0].titulo}"`,
-        { tipo: 'nova_candidatura', obra_id: req.params.id }).catch(() => {})
+    const donoInfo = await pool.query(`SELECT criado_por, titulo FROM obras WHERE id = $1`, [req.params.id])
+    // Push + e-mail sempre (política de 29/10/2026); candidatura_id distingue os candidatos no dedupe.
+    if (donoInfo.rows[0]) {
+      avisarUsuario(donoInfo.rows[0].criado_por, {
+        ator_id: req.usuario.id,
+        titulo: '🎨 Novo candidato!',
+        corpo: `Um pintor se candidatou na obra "${donoInfo.rows[0].titulo}"`,
+        data: { tipo: 'nova_candidatura', obra_id: req.params.id, candidatura_id: result.rows[0].id },
+        rotulo: `nova candidatura obras ${req.params.id}`,
+      })
     }
     res.status(201).json(result.rows[0])
   } catch (err) {
@@ -3610,11 +3608,12 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
         return res.status(409).json({ erro: 'Esta candidatura não está mais em negociação.' })
       }
       await pool.query(`UPDATE candidaturas SET status = 'recusado' WHERE id = $1`, [candidaturaId])
-      if (cand.push_token) {
-        enviarPushNotificacao(cand.push_token, '❌ Candidatura não aceita',
-          `Sua candidatura para "${obra.rows[0].titulo}" não foi selecionada desta vez.`,
-          { tipo: 'candidatura_recusada', obra_id }).catch(() => {})
-      }
+      avisarUsuario(cand.usuario_id, {
+        ator_id: req.usuario.id,
+        titulo: '❌ Candidatura não aceita',
+        corpo: `Sua candidatura para "${obra.rows[0].titulo}" não foi selecionada desta vez.`,
+        data: { tipo: 'candidatura_recusada', obra_id }, rotulo: `candidatura recusada obras ${obra_id}`,
+      })
       return res.json({ mensagem: 'Candidatura recusada.' })
     }
     if (action === 'contraproposta') {
@@ -3631,11 +3630,13 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
         `UPDATE candidaturas SET status = 'contraproposta_dono', valor_contraproposta = $2 WHERE id = $1`,
         [candidaturaId, valor]
       )
-      if (cand.push_token) {
-        enviarPushNotificacao(cand.push_token, '💬 Contraproposta recebida!',
-          `O solicitante fez uma contraproposta para "${obra.rows[0].titulo}". Veja no app!`,
-          { tipo: 'contraproposta_dono', obra_id }).catch(() => {})
-      }
+      // valor em data: cada rodada com outro valor é outro aviso no dedupe do e-mail.
+      avisarUsuario(cand.usuario_id, {
+        ator_id: req.usuario.id,
+        titulo: '💬 Contraproposta recebida!',
+        corpo: `O solicitante fez uma contraproposta para "${obra.rows[0].titulo}". Veja no app!`,
+        data: { tipo: 'contraproposta_dono', obra_id, valor: Number(valor) }, rotulo: `contraproposta dono obras ${obra_id}`,
+      })
       return res.json({ mensagem: 'Contraproposta enviada!' })
     }
     res.status(400).json({ erro: 'Ação inválida' })
@@ -3667,16 +3668,16 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
       return res.status(400).json({ erro: 'Não há contraproposta pendente' })
     }
     const obra = await pool.query(`SELECT titulo, criado_por FROM obras WHERE id = $1`, [obra_id])
-    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [obra.rows[0].criado_por])
     if (action === 'contraproposta') {
       if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
       // Volta para 'pendente' com o novo valor para reentrar no fluxo de resposta do dono
       await pool.query(`UPDATE candidaturas SET status = 'pendente', valor_proposto = $2, valor_contraproposta = NULL WHERE id = $1`, [candidaturaId, valor])
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '💬 Nova contraproposta do profissional!',
-          `O pintor propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${obra.rows[0].titulo}". Veja no app!`,
-          { tipo: 'contra_oferta', obra_id }).catch(() => {})
-      }
+      avisarUsuario(obra.rows[0].criado_por, {
+        ator_id: req.usuario.id,
+        titulo: '💬 Nova contraproposta do profissional!',
+        corpo: `O pintor propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${obra.rows[0].titulo}". Veja no app!`,
+        data: { tipo: 'contra_oferta', obra_id, candidatura_id: candidaturaId }, rotulo: `contraproposta pintor obras ${obra_id}`,
+      })
       return res.json({ mensagem: 'Contraproposta enviada!' })
     }
     if (action === 'aceitar') {
@@ -3694,11 +3695,13 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [req.usuario.id, obra_id]
       )
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '🎉 Deu match!',
-          `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
-          { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
-      }
+      // Match ao dono: push + e-mail sempre (política de 29/10/2026).
+      avisarUsuario(obra.rows[0].criado_por, {
+        ator_id: req.usuario.id,
+        titulo: '🎉 Deu match!',
+        corpo: `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
+        data: { tipo: 'candidatura_aceita', obra_id }, rotulo: `match dono obras ${obra_id}`,
+      })
       avisarMatchFeito('obras', obra_id, req.usuario.id)
       enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
       // Recusa os demais candidatos e os notifica (ver POST .../responder).
@@ -3707,11 +3710,12 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
     }
     if (action === 'recusar') {
       await pool.query(`UPDATE candidaturas SET status = 'recusado' WHERE id = $1`, [candidaturaId])
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '❌ Proposta recusada',
-          `O pintor recusou sua contraproposta para "${obra.rows[0].titulo}".`,
-          { tipo: 'candidatura_recusada', obra_id }).catch(() => {})
-      }
+      avisarUsuario(obra.rows[0].criado_por, {
+        ator_id: req.usuario.id,
+        titulo: '❌ Proposta recusada',
+        corpo: `O pintor recusou sua contraproposta para "${obra.rows[0].titulo}".`,
+        data: { tipo: 'candidatura_recusada', obra_id, candidatura_id: candidaturaId }, rotulo: `contraproposta recusada obras ${obra_id}`,
+      })
       return res.json({ mensagem: 'Proposta recusada.' })
     }
     res.status(400).json({ erro: 'Ação inválida' })
@@ -3782,17 +3786,15 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
       `UPDATE obras SET a_caminho_em = NOW() WHERE id = $1 AND match_usuario_id = $2 AND a_caminho_em IS NULL`,
       [req.params.id, req.usuario.id]
     )
-    const dono = await pool.query(
-      `SELECT u.push_token FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
-      [req.params.id]
-    )
-    // Responde imediatamente; push e contrato rodam em segundo plano (não bloquear o cliente)
+    // Responde imediatamente; aviso e contrato rodam em segundo plano (não bloquear o cliente)
     res.json({ mensagem: 'Match confirmado! Contagem regressiva iniciada.', match_feito_em: new Date() })
-    if (dono.rows[0]?.push_token) {
-      enviarPushNotificacao(dono.rows[0].push_token, '🚀 Pintor a caminho!',
-        `Um pintor confirmou que está indo até você para "${obra.rows[0].titulo}"`,
-        { tipo: 'match_obra', obra_id: req.params.id }).catch(err => console.error('[obras/match] push falhou:', err.message))
-    }
+    // Match + a caminho ao dono: push + e-mail sempre (política de 29/10/2026).
+    avisarUsuario(obra.rows[0].criado_por, {
+      ator_id: req.usuario.id,
+      titulo: '🚀 Pintor a caminho!',
+      corpo: `Um pintor confirmou que está indo até você para "${obra.rows[0].titulo}"`,
+      data: { tipo: 'match_obra', obra_id: req.params.id }, rotulo: `match a caminho obras ${req.params.id}`,
+    })
     avisarMatchFeito('obras', req.params.id, req.usuario.id)
     enviarContratoObra(candidaturaAceita.rows[0].id).catch(err => console.error('Erro ao enviar contrato obra:', err))
     // Recusa os demais candidatos e os notifica — pós-resposta, não bloqueia o cliente
@@ -4000,22 +4002,22 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     if (upd.rowCount === 0) {
       return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
     }
-    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [o.criado_por])
-    // Os dois lados são avisados: o dono porque a obra voltou ao feed, o pintor porque perdeu
-    // o match E o acesso a esta obra. Antes só o dono sabia.
-    const pintor = pintorId
-      ? await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [pintorId])
-      : { rows: [] }
+    // Os dois lados são avisados (menos quem acionou): o dono porque a obra voltou ao feed, o
+    // pintor porque perdeu o match E o acesso a esta obra. Push + e-mail sempre (política de
+    // 29/10/2026); match_feito_em em data distingue um match expirado de outro no dedupe.
     res.json({ mensagem: 'Match expirado, obra disponível novamente' })
-    if (dono.rows[0]?.push_token) {
-      enviarPushNotificacao(dono.rows[0].push_token, '⏰ Prazo expirado!',
-        `O pintor não chegou a tempo para "${o.titulo}". A obra está disponível novamente.`,
-        { tipo: 'match_expirado', obra_id: req.params.id }).catch(() => {})
-    }
-    if (pintor.rows[0]?.push_token) {
-      enviarPushNotificacao(pintor.rows[0].push_token, '⏰ Prazo expirado!',
-        `O prazo para chegar em "${o.titulo}" acabou. A obra voltou para o feed.`,
-        { tipo: 'match_expirado', obra_id: req.params.id }).catch(() => {})
+    const dataExpirado = { tipo: 'match_expirado', obra_id: req.params.id, match_feito_em: o.match_feito_em }
+    avisarUsuario(o.criado_por, {
+      ator_id: req.usuario.id, titulo: '⏰ Prazo expirado!',
+      corpo: `O pintor não chegou a tempo para "${o.titulo}". A obra está disponível novamente.`,
+      data: dataExpirado, rotulo: `match expirado obras ${req.params.id} (dono)`,
+    })
+    if (pintorId) {
+      avisarUsuario(pintorId, {
+        ator_id: req.usuario.id, titulo: '⏰ Prazo expirado!',
+        corpo: `O prazo para chegar em "${o.titulo}" acabou. A obra voltou para o feed.`,
+        data: dataExpirado, rotulo: `match expirado obras ${req.params.id} (pintor)`,
+      })
     }
     return
   } catch (err) {
@@ -4396,20 +4398,18 @@ router.get('/reparos/aprovacao', autenticar, exigirAdmin, async (req, res) => {
 // Espelho de notificarDonoSobreAnaliseObra (D77): o dono do reparo passa a saber do desfecho
 // da análise, como o dono de obra já sabia. Mesmo formato; muda só o substantivo e a chave.
 const notificarDonoSobreAnaliseReparo = async (reparoId, aprovada) => {
-  const info = await pool.query(
-    `SELECT u.push_token, r.titulo FROM reparos r JOIN usuarios u ON r.criado_por = u.id WHERE r.id = $1`,
-    [reparoId]
-  )
-  const { push_token, titulo } = info.rows[0] || {}
-  if (!push_token) return
-  await enviarPushNotificacao(
-    push_token,
-    aprovada ? '✅ Serviço aprovado!' : '❌ Serviço não aprovado',
-    aprovada
+  const info = await pool.query(`SELECT criado_por, titulo FROM reparos WHERE id = $1`, [reparoId])
+  const { criado_por, titulo } = info.rows[0] || {}
+  if (!criado_por) return
+  // Push + e-mail sempre (política de 29/10/2026).
+  await avisarUsuario(criado_por, {
+    titulo: aprovada ? '✅ Serviço aprovado!' : '❌ Serviço não aprovado',
+    corpo: aprovada
       ? `"${titulo}" já está publicado e visível para os prestadores.`
       : `"${titulo}" não foi publicado desta vez. Toque para rever os detalhes e cadastrar novamente.`,
-    { tipo: aprovada ? 'reparo_aprovado' : 'reparo_recusado', reparo_id: reparoId }
-  )
+    data: { tipo: aprovada ? 'reparo_aprovado' : 'reparo_recusado', reparo_id: reparoId },
+    rotulo: `análise reparo ${reparoId}`,
+  })
 }
 
 router.post('/reparos/aprovacao/:id/aprovar', autenticar, exigirAdmin, async (req, res) => {
@@ -4764,15 +4764,17 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
       [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
     )
     registrarContato() // só depois de o interesse entrar: envio recusado não é tentativa
-    // Notify dono
-    const donoInfo = await pool.query(
-      `SELECT u.push_token, r.titulo FROM reparos r JOIN usuarios u ON r.criado_por = u.id WHERE r.id = $1`,
-      [req.params.id]
-    )
-    if (donoInfo.rows[0]?.push_token) {
-      enviarPushNotificacao(donoInfo.rows[0].push_token, '🔧 Novo interesse!',
-        `Um prestador demonstrou interesse no serviço "${donoInfo.rows[0].titulo}"`,
-        { tipo: 'novo_interesse', reparo_id: req.params.id }).catch(() => {})
+    // Avisa o dono: push + e-mail sempre (política de 29/10/2026); interesse_id distingue os
+    // interessados no dedupe.
+    const donoInfo = await pool.query(`SELECT criado_por, titulo FROM reparos WHERE id = $1`, [req.params.id])
+    if (donoInfo.rows[0]) {
+      avisarUsuario(donoInfo.rows[0].criado_por, {
+        ator_id: req.usuario.id,
+        titulo: '🔧 Novo interesse!',
+        corpo: `Um prestador demonstrou interesse no serviço "${donoInfo.rows[0].titulo}"`,
+        data: { tipo: 'novo_interesse', reparo_id: req.params.id, interesse_id: result.rows[0].id },
+        rotulo: `novo interesse reparos ${req.params.id}`,
+      })
     }
     res.status(201).json(result.rows[0])
   } catch (err) {
@@ -4895,20 +4897,15 @@ router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) 
       `UPDATE reparos SET a_caminho_em = NOW() WHERE id = $1 AND match_usuario_id = $2 AND a_caminho_em IS NULL`,
       [req.params.id, req.usuario.id]
     )
-    const dono = await pool.query(
-      `SELECT u.push_token FROM reparos r JOIN usuarios u ON r.criado_por = u.id WHERE r.id = $1`,
-      [req.params.id]
-    )
-    // Responde imediatamente; push e contrato rodam em segundo plano (não bloquear o cliente)
+    // Responde imediatamente; aviso e contrato rodam em segundo plano (não bloquear o cliente)
     res.json({ mensagem: 'Match confirmado! Contagem regressiva iniciada.', match_feito_em: new Date() })
-    if (dono.rows[0]?.push_token) {
-      enviarPushNotificacao(
-        dono.rows[0].push_token,
-        '🚀 Profissional a caminho!',
-        `Um prestador confirmou que está indo até você para "${reparo.rows[0].titulo}"`,
-        { tipo: 'match_reparo', reparo_id: req.params.id }
-      ).catch(err => console.error('[reparos/match] push falhou:', err.message))
-    }
+    // Match + a caminho ao dono: push + e-mail sempre (política de 29/10/2026).
+    avisarUsuario(reparo.rows[0].criado_por, {
+      ator_id: req.usuario.id,
+      titulo: '🚀 Profissional a caminho!',
+      corpo: `Um prestador confirmou que está indo até você para "${reparo.rows[0].titulo}"`,
+      data: { tipo: 'match_reparo', reparo_id: req.params.id }, rotulo: `match a caminho reparos ${req.params.id}`,
+    })
     avisarMatchFeito('reparos', req.params.id, req.usuario.id)
     // Envia contrato por e-mail para dono e prestador
     enviarContratoReparo(req.params.id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
@@ -5005,11 +5002,12 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
         return res.status(409).json({ erro: 'Esta proposta não está mais em negociação.' })
       }
       await pool.query(`UPDATE interesse_reparos SET status = 'recusado' WHERE id = $1`, [interesse_id])
-      if (int.push_token) {
-        enviarPushNotificacao(int.push_token, '❌ Proposta não aceita',
-          `Sua proposta para "${reparo.rows[0].titulo}" não foi selecionada desta vez.`,
-          { tipo: 'interesse_recusado', reparo_id }).catch(() => {})
-      }
+      avisarUsuario(int.usuario_id, {
+        ator_id: req.usuario.id,
+        titulo: '❌ Proposta não aceita',
+        corpo: `Sua proposta para "${reparo.rows[0].titulo}" não foi selecionada desta vez.`,
+        data: { tipo: 'interesse_recusado', reparo_id }, rotulo: `interesse recusado reparos ${reparo_id}`,
+      })
       return res.json({ mensagem: 'Proposta recusada.' })
     }
 
@@ -5026,11 +5024,13 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
         `UPDATE interesse_reparos SET status = 'contraproposta_dono', valor_contraproposta = $2, rodada = 2 WHERE id = $1`,
         [interesse_id, valor]
       )
-      if (int.push_token) {
-        enviarPushNotificacao(int.push_token, '💬 Contraproposta recebida!',
-          `O solicitante fez uma contraproposta para "${reparo.rows[0].titulo}". Veja no app!`,
-          { tipo: 'contraproposta_dono', reparo_id }).catch(() => {})
-      }
+      // valor em data: cada rodada com outro valor é outro aviso no dedupe do e-mail.
+      avisarUsuario(int.usuario_id, {
+        ator_id: req.usuario.id,
+        titulo: '💬 Contraproposta recebida!',
+        corpo: `O solicitante fez uma contraproposta para "${reparo.rows[0].titulo}". Veja no app!`,
+        data: { tipo: 'contraproposta_dono', reparo_id, valor: Number(valor) }, rotulo: `contraproposta dono reparos ${reparo_id}`,
+      })
       return res.json({ mensagem: 'Contraproposta enviada!' })
     }
 
@@ -5064,17 +5064,17 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
     }
 
     const reparo = await pool.query(`SELECT titulo, criado_por FROM reparos WHERE id = $1`, [reparo_id])
-    const dono = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [reparo.rows[0].criado_por])
 
     if (action === 'contraproposta') {
       if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
       // Volta para 'pendente' com o novo valor para reentrar no fluxo de resposta do dono
       await pool.query(`UPDATE interesse_reparos SET status = 'pendente', valor_proposto = $2, valor_contraproposta = NULL WHERE id = $1`, [interesse_id, valor])
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '💬 Nova contraproposta do profissional!',
-          `O prestador propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${reparo.rows[0].titulo}". Veja no app!`,
-          { tipo: 'contra_oferta', reparo_id }).catch(() => {})
-      }
+      avisarUsuario(reparo.rows[0].criado_por, {
+        ator_id: req.usuario.id,
+        titulo: '💬 Nova contraproposta do profissional!',
+        corpo: `O prestador propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${reparo.rows[0].titulo}". Veja no app!`,
+        data: { tipo: 'contra_oferta', reparo_id, interesse_id }, rotulo: `contraproposta prestador reparos ${reparo_id}`,
+      })
       return res.json({ mensagem: 'Contraproposta enviada!' })
     }
 
@@ -5090,11 +5090,13 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [req.usuario.id, reparo_id]
       )
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '🎉 Deu match!',
-          `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
-          { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
-      }
+      // Match ao dono: push + e-mail sempre (política de 29/10/2026).
+      avisarUsuario(reparo.rows[0].criado_por, {
+        ator_id: req.usuario.id,
+        titulo: '🎉 Deu match!',
+        corpo: `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
+        data: { tipo: 'interesse_aceito', reparo_id }, rotulo: `match dono reparos ${reparo_id}`,
+      })
       avisarMatchFeito('reparos', reparo_id, req.usuario.id)
       // match_usuario_id já foi definido acima, então o contrato pode sair agora.
       enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
@@ -5105,11 +5107,12 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
 
     if (action === 'recusar') {
       await pool.query(`UPDATE interesse_reparos SET status = 'recusado' WHERE id = $1`, [interesse_id])
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '❌ Proposta recusada',
-          `O prestador recusou sua contraproposta para "${reparo.rows[0].titulo}".`,
-          { tipo: 'interesse_recusado', reparo_id }).catch(() => {})
-      }
+      avisarUsuario(reparo.rows[0].criado_por, {
+        ator_id: req.usuario.id,
+        titulo: '❌ Proposta recusada',
+        corpo: `O prestador recusou sua contraproposta para "${reparo.rows[0].titulo}".`,
+        data: { tipo: 'interesse_recusado', reparo_id, interesse_id }, rotulo: `contraproposta recusada reparos ${reparo_id}`,
+      })
       return res.json({ mensagem: 'Proposta recusada.' })
     }
 
@@ -5303,20 +5306,21 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
       return res.status(409).json({ erro: 'Chegada já declarada — o match não pode mais expirar' })
     }
     // Este endpoint não notificava NINGUÉM. Agora avisa os dois lados, como o de obra.
-    const donoR = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [r.criado_por])
-    const prestadorR = prestadorId
-      ? await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [prestadorId])
-      : { rows: [] }
+    // Push + e-mail sempre (política de 29/10/2026), menos a quem acionou; match_feito_em em
+    // data distingue um match expirado de outro no dedupe.
     res.json({ mensagem: 'Match expirado, serviço disponível novamente' })
-    if (donoR.rows[0]?.push_token) {
-      enviarPushNotificacao(donoR.rows[0].push_token, '⏰ Prazo expirado!',
-        `O prestador não chegou a tempo para "${r.titulo}". O serviço está disponível novamente.`,
-        { tipo: 'match_expirado', reparo_id: req.params.id }).catch(() => {})
-    }
-    if (prestadorR.rows[0]?.push_token) {
-      enviarPushNotificacao(prestadorR.rows[0].push_token, '⏰ Prazo expirado!',
-        `O prazo para chegar em "${r.titulo}" acabou. O serviço voltou para o feed.`,
-        { tipo: 'match_expirado', reparo_id: req.params.id }).catch(() => {})
+    const dataExpirado = { tipo: 'match_expirado', reparo_id: req.params.id, match_feito_em: r.match_feito_em }
+    avisarUsuario(r.criado_por, {
+      ator_id: req.usuario.id, titulo: '⏰ Prazo expirado!',
+      corpo: `O prestador não chegou a tempo para "${r.titulo}". O serviço está disponível novamente.`,
+      data: dataExpirado, rotulo: `match expirado reparos ${req.params.id} (dono)`,
+    })
+    if (prestadorId) {
+      avisarUsuario(prestadorId, {
+        ator_id: req.usuario.id, titulo: '⏰ Prazo expirado!',
+        corpo: `O prazo para chegar em "${r.titulo}" acabou. O serviço voltou para o feed.`,
+        data: dataExpirado, rotulo: `match expirado reparos ${req.params.id} (prestador)`,
+      })
     }
     return
   } catch (err) {
@@ -6943,21 +6947,15 @@ router.post('/verificacao/modo-automatico', autenticar, exigirSuperAdmin, async 
         invalidarCachesUsuario(p.id)
         recalcularIndicador(p.id)
 
-        // Notificação push — mesmo tratamento do /verificacao/:id/aprovar. Sem token: arma
-        // aviso_aprovacao_em = NULL (= aviso pendente, enviado quando o token for registrado);
-        // com token: envia e marca NOW().
+        // Conta aprovada: push + e-mail sempre (política de 29/10/2026). Sem token: o e-mail sai
+        // agora e aviso_aprovacao_em = NULL arma o push pendente (enviado quando o token for
+        // registrado); com token: push + e-mail agora e marca NOW().
         const pushToken = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [p.id])
-        if (pushToken.rows[0]?.push_token) {
-          await enviarPushNotificacao(
-            pushToken.rows[0].push_token,
-            '✅ Cadastro aprovado!',
-            `Sua identidade foi verificada. Bem-vindo ao ${MARCA}!`,
-            { tipo: 'verificacao_aprovada' }
-          )
-          await pool.query(`UPDATE usuarios SET aviso_aprovacao_em = NOW() WHERE id = $1`, [p.id])
-        } else {
-          await pool.query(`UPDATE usuarios SET aviso_aprovacao_em = NULL WHERE id = $1`, [p.id])
-        }
+        await avisarUsuario(p.id, {
+          titulo: '✅ Cadastro aprovado!', corpo: `Sua identidade foi verificada. Bem-vindo ao ${MARCA}!`,
+          data: { tipo: 'verificacao_aprovada' }, rotulo: `cadastro aprovado (modo auto) ${p.id}`,
+        })
+        await pool.query(`UPDATE usuarios SET aviso_aprovacao_em = ${pushToken.rows[0]?.push_token ? 'NOW()' : 'NULL'} WHERE id = $1`, [p.id])
         aprovados++
       }
       console.log(`[Modo automático] ${aprovados} prestadores aprovados automaticamente`)
@@ -7481,20 +7479,19 @@ router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiv
     )
     registrarContato() // só depois de a candidatura entrar: envio recusado não é tentativa
     const valor_oferta = valor_proposto
-    const dono = await pool.query(
-      `SELECT u.push_token, o.titulo FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
-      [obra_id]
-    )
-    if (dono.rows[0]?.push_token) {
+    const dono = await pool.query(`SELECT criado_por, titulo FROM obras WHERE id = $1`, [obra_id])
+    // Push + e-mail sempre (política de 29/10/2026); candidatura_id distingue os candidatos no dedupe.
+    if (dono.rows[0]) {
       const temOferta = valor_oferta && valor_oferta > 0
-      await enviarPushNotificacao(
-        dono.rows[0].push_token,
-        temOferta ? '🎨 Nova contra-oferta recebida!' : '👀 Novo interesse na sua obra!',
-        temOferta
+      await avisarUsuario(dono.rows[0].criado_por, {
+        ator_id: req.usuario.id,
+        titulo: temOferta ? '🎨 Nova contra-oferta recebida!' : '👀 Novo interesse na sua obra!',
+        corpo: temOferta
           ? `Um pintor fez uma oferta de R$ ${Number(valor_oferta).toLocaleString('pt-BR')} para "${dono.rows[0].titulo}"`
           : `Um pintor demonstrou interesse em "${dono.rows[0].titulo}"`,
-        { tipo: 'nova_candidatura', obra_id }
-      )
+        data: { tipo: 'nova_candidatura', obra_id, candidatura_id: result.rows[0].id },
+        rotulo: `nova candidatura obras ${obra_id}`,
+      })
     }
     res.status(201).json(result.rows[0])
   } catch (err) {
@@ -8437,11 +8434,12 @@ router.post('/admin/suspensos/:id/liberar', autenticar, exigirAdmin, async (req,
       usuario_id: alvo.rows[0].id,
       faltas_perdoadas: perdoadas.rowCount,
     })
-    if (alvo.rows[0].push_token) {
-      enviarPushNotificacao(alvo.rows[0].push_token, '✅ Conta liberada',
-        'Sua suspensão foi removida. Você já pode voltar a pegar trabalhos.',
-        { tipo: 'conta_liberada' }).catch(() => {})
-    }
+    // Conta liberada: push + e-mail sempre (política de 29/10/2026).
+    avisarUsuario(alvo.rows[0].id, {
+      titulo: '✅ Conta liberada',
+      corpo: 'Sua suspensão foi removida. Você já pode voltar a pegar trabalhos.',
+      data: { tipo: 'conta_liberada' }, rotulo: `conta liberada (admin) ${alvo.rows[0].id}`,
+    })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
     console.error('[admin/suspensos/liberar]', err.message)

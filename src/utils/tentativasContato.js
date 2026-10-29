@@ -41,7 +41,10 @@ const CORPO_SUSPENSAO = `Sua conta foi suspensa por ${DIAS_SUSPENSAO_CONTATO} di
 
 // alertaService carregado na hora do uso (ele puxa Expo, Brevo e meia API): este módulo é
 // requerido por routes e controllers logo no boot, e o aviso só acontece em escrita suja.
+// Avisos 1 e 2: push ou, sem ele, e-mail. Suspensão e liberação são eventos de CONTA: push +
+// e-mail sempre (política de 29/10/2026).
 const entregar = (args) => require('../services/alertaService').entregarPushOuEmail(args)
+const entregarSempre = (args) => require('../services/alertaService').entregarPushEEmail(args)
 
 // Conta as tentativas do usuário na janela e aplica o degrau correspondente. Nunca lança.
 const aplicarPenalidadeContato = async (usuarioId, db = pool) => {
@@ -76,8 +79,8 @@ const aplicarPenalidadeContato = async (usuarioId, db = pool) => {
     if (upd.rowCount === 0) return 'ja_suspenso'
     invalidarCacheAssinatura(usuarioId)
     console.log(`[TentativaContato] usuario ${usuarioId} suspenso por ${DIAS_SUSPENSAO_CONTATO} dias — ${n} tentativas em ${JANELA_PENALIDADE_DIAS} dias`)
-    await entregar({
-      ...usuario, titulo: TITULO_SUSPENSAO, corpo: CORPO_SUSPENSAO,
+    await entregarSempre({
+      usuario_id: usuarioId, ...usuario, titulo: TITULO_SUSPENSAO, corpo: CORPO_SUSPENSAO,
       data: { tipo: 'conta_suspensa', motivo: 'contato', dias: DIAS_SUSPENSAO_CONTATO }, rotulo: `suspensao contato ${usuarioId}`,
     })
     return 'suspenso'
@@ -111,10 +114,18 @@ const liberarSuspensoesContato = async (db = pool) => {
     const r = await db.query(
       `UPDATE usuarios SET suspenso_em = NULL, suspenso_motivo = NULL
         WHERE suspenso_motivo = $1 AND suspenso_em <= NOW() - ($2::int * INTERVAL '1 day')
-        RETURNING id`,
+        RETURNING id, push_token, email, nome`,
       [MOTIVO_SUSPENSAO_CONTATO, DIAS_SUSPENSAO_CONTATO]
     )
     for (const { id } of r.rows) invalidarCacheAssinatura(id)
+    // Conta liberada: push + e-mail (antes a liberação automática não avisava ninguém).
+    for (const u of r.rows) {
+      await entregarSempre({
+        usuario_id: u.id, push_token: u.push_token, email: u.email, nome: u.nome,
+        titulo: '✅ Conta liberada', corpo: 'Sua suspensão terminou. Você já pode voltar a enviar propostas e publicar pedidos.',
+        data: { tipo: 'conta_liberada' }, rotulo: `conta liberada (contato) ${u.id}`,
+      })
+    }
     if (r.rowCount > 0) console.log(`[TentativaContato] ${r.rowCount} suspensão(ões) por contato vencida(s) liberada(s)`)
     return r.rows.map(x => x.id)
   } catch (err) {
