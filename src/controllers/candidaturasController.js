@@ -6,6 +6,8 @@ const { enviarPushNotificacao, avisarMatchFeito } = require('../services/alertaS
 const { SQL_ZERAR_AGENDA } = require('../utils/agendamento')
 // Máscara de leitura do texto livre que o dono vê (utils/tentativasContato).
 const { mascararLista } = require('../utils/tentativasContato')
+// Selo "bem avaliado" (3× 5★) nos candidatos que o dono vê (utils/etiquetasAvaliacao).
+const { sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
 
 const minhas = async (req, res) => {
   try {
@@ -80,7 +82,8 @@ const porObra = async (req, res) => {
               NULL as telefone,
               u.cidade, u.anos_experiencia, u.tamanho_equipe, u.especialidades, u.embaixador,
               (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_total,
-              (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_media
+              (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_media,
+              ${sqlSeloBemAvaliado('u.id')} AS selo_bem_avaliado
        FROM candidaturas c
        JOIN usuarios u ON c.usuario_id = u.id
        WHERE c.obra_id = $1

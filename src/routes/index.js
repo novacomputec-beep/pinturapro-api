@@ -55,7 +55,9 @@ const { nomeCurto, fotoOtimizada } = require('../utils/donoResumo')
 const { normalizarCodigo, recalcularIndicador, LINK_INDICACAO } = require('../utils/indicacoes')
 // Grupos de categorias relacionadas (mapa público em GET /config/grupos-categorias) e o teto de
 // categorias por reparo (POST /reparos/dono grava reparos.categorias; categoria = a primeira).
-const { GRUPOS_RELACIONADOS, gruposRelacionadosAtivo } = require('../utils/gruposCategorias')
+const { GRUPOS_RELACIONADOS, CHAVE_DO_GRUPO, gruposRelacionadosAtivo } = require('../utils/gruposCategorias')
+// Etiquetas da avaliação (fonte única): catálogo público, validação da escrita e selo.
+const { NIVEIS, catalogoEtiquetas, gruposDaDemanda, validarEtiquetas, sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
 const CATEGORIAS_MAX_REPARO = 3
 // Grupo chegada_* zerado NO MESMO UPDATE que cria um match (A1/A2 da auditoria externa): o
 // match novo nasce sem rastro de chegada de uma rodada anterior — uma declaração/confirmação
@@ -1200,6 +1202,10 @@ const migracaoPronta = (async () => {
       )
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS avaliacoes_avaliado_idx ON avaliacoes (avaliado_id)`)
+    // Etiquetas da avaliação (utils/etiquetasAvaliacao): lista fechada por grupo × nível, sem
+    // texto livre. Linhas antigas ficam com '{}'. Índice parcial para o selo (3× 5★).
+    await client.query(`ALTER TABLE avaliacoes ADD COLUMN IF NOT EXISTS etiquetas TEXT[] NOT NULL DEFAULT '{}'`)
+    await client.query(`CREATE INDEX IF NOT EXISTS avaliacoes_cinco_estrelas_idx ON avaliacoes (avaliado_id) WHERE estrelas = 5`)
     // Lembrete de avaliação pendente — MESMO padrão dos marcos de vencimento da assinatura
     // (assinaturas.marco_1_em/2_em/3_em): a coluna É o claim, preenchida no mesmo UPDATE que
     // reivindica o envio, então re-run ou segunda réplica nunca mandam duas vezes.
@@ -3395,7 +3401,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
                 CASE WHEN c.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
                 CASE WHEN c.usuario_id = $2 AND $3::boolean THEN u.telefone ELSE NULL END as telefone,
                 (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = c.usuario_id) AS avaliacoes_total,
-                (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = c.usuario_id) AS avaliacoes_media
+                (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = c.usuario_id) AS avaliacoes_media,
+                ${sqlSeloBemAvaliado('c.usuario_id')} AS selo_bem_avaliado
          FROM candidaturas c JOIN usuarios u ON u.id = c.usuario_id
          WHERE c.obra_id = $1 ORDER BY c.criado_em DESC`,
         [req.params.id, obra.match_usuario_id, !!obra.a_caminho_em]
@@ -6014,7 +6021,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
                 CASE WHEN ir.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
                 CASE WHEN ir.usuario_id = $2 AND $3::boolean THEN u.telefone ELSE NULL END as telefone,
                 (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_total,
-                (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_media
+                (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_media,
+                ${sqlSeloBemAvaliado('ir.usuario_id')} AS selo_bem_avaliado
          FROM interesse_reparos ir
          JOIN usuarios u ON ir.usuario_id = u.id
          WHERE ir.reparo_id = $1
@@ -7152,6 +7160,15 @@ router.get('/config/lancamento', async (req, res) => {
 // agora vêm de configuracoes (utils/versaoApp: semente do env na migração, atual sobe sozinha
 // pelo que os aparelhos reportam, minima é manual no painel). Config faltando vira '0.0.0',
 // que nenhuma versão instalada fica abaixo — nunca bloqueia ninguém. Cache de 60s por processo.
+// GET /config/etiquetas-avaliacao — catálogo (pré-login, somente leitura) das etiquetas da
+// avaliação: níveis, universais por nível e os 11 grupos × 5 níveis × 3 etiquetas, mais o
+// teto por avaliação e a regra do selo. Fonte única: utils/etiquetasAvaliacao — o app nunca
+// grava a tabela em código. Conteúdo é constante do processo: cache público de 1h.
+router.get('/config/etiquetas-avaliacao', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=3600')
+  res.json(catalogoEtiquetas())
+})
+
 router.get('/config/versao-app', async (req, res) => {
   try {
     res.json(await versoesPublicas())
@@ -7470,16 +7487,27 @@ router.post('/candidaturas/:id/recusar',  autenticar, candidaturasCtrl.recusar)
 // nenhum padrão /:id, mas seguem a convenção de registro dedicado como meus-contratos.
 
 // POST /avaliacoes — só o dono do contrato avalia o prestador do match (unilateral).
+// Corpo: { contrato_tipo, contrato_id, nota (ou estrelas, legado) 1–5, etiquetas?: [] }.
+// etiquetas validadas contra o(s) grupo(s) da demanda e o nível da nota (utils/
+// etiquetasAvaliacao — mesma tabela de GET /config/etiquetas-avaliacao). SEM texto livre:
+// qualquer campo de comentário é recusado com 400 (nunca houve coluna para ele).
+// Depois de gravar, o profissional é avisado (push + e-mail, entregarPushEEmail; ator = dono).
+const CAMPOS_TEXTO_LIVRE_AVALIACAO = ['comentario', 'comentarios', 'texto', 'observacao', 'observacoes', 'mensagem']
 router.post('/avaliacoes', autenticar, async (req, res) => {
   try {
-    const { contrato_tipo, contrato_id, estrelas } = req.body
+    const body = req.body || {}
+    const { contrato_tipo, contrato_id, etiquetas } = body
+    const campoLivre = CAMPOS_TEXTO_LIVRE_AVALIACAO.find(c => Object.prototype.hasOwnProperty.call(body, c))
+    if (campoLivre) {
+      return res.status(400).json({ erro: `A avaliação não aceita texto livre (campo "${campoLivre}"). Use nota e etiquetas.` })
+    }
 
     if (!['reparo', 'obra'].includes(contrato_tipo)) {
       return res.status(400).json({ erro: 'contrato_tipo deve ser reparo ou obra' })
     }
-    const estrelasInt = parseInt(estrelas)
-    if (!estrelasInt || estrelasInt < 1 || estrelasInt > 5) {
-      return res.status(400).json({ erro: 'estrelas deve ser um número de 1 a 5' })
+    const notaInt = parseInt(body.nota ?? body.estrelas)
+    if (!notaInt || notaInt < 1 || notaInt > 5) {
+      return res.status(400).json({ erro: 'nota deve ser um número de 1 a 5' })
     }
     if (!contrato_id) {
       return res.status(400).json({ erro: 'contrato_id é obrigatório' })
@@ -7488,7 +7516,7 @@ router.post('/avaliacoes', autenticar, async (req, res) => {
     // contrato_tipo já validado contra whitelist acima — interpolação de tabela é segura.
     const tabela = contrato_tipo === 'reparo' ? 'reparos' : 'obras'
     const contrato = await pool.query(
-      `SELECT criado_por, match_usuario_id, status FROM ${tabela} WHERE id = $1`,
+      `SELECT criado_por, match_usuario_id, status, titulo, categoria${tabela === 'reparos' ? ', categorias' : ''} FROM ${tabela} WHERE id = $1`,
       [contrato_id]
     )
     if (contrato.rows.length === 0) return res.status(404).json({ erro: 'Contrato não encontrado' })
@@ -7514,18 +7542,42 @@ router.post('/avaliacoes', autenticar, async (req, res) => {
       return res.status(403).json({ erro: 'Você não participou deste contrato' })
     }
 
+    const grupos = gruposDaDemanda(tabela, c)
+    const etq = validarEtiquetas(etiquetas, grupos, notaInt)
+    if (etq.erro) return res.status(400).json({ erro: etq.erro, grupos })
+
     const result = await pool.query(
-      `INSERT INTO avaliacoes (contrato_tipo, contrato_id, avaliador_id, avaliado_id, estrelas)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO avaliacoes (contrato_tipo, contrato_id, avaliador_id, avaliado_id, estrelas, etiquetas)
+       VALUES ($1, $2, $3, $4, $5, $6::text[])
        ON CONFLICT (contrato_tipo, contrato_id, avaliador_id) DO NOTHING
        RETURNING id`,
-      [contrato_tipo, contrato_id, uid, avaliado_id, estrelasInt]
+      [contrato_tipo, contrato_id, uid, avaliado_id, notaInt, etq.valor]
     )
     if (result.rows.length === 0) {
       return res.status(409).json({ erro: 'Você já avaliou este contrato' })
     }
 
-    res.status(201).json({ mensagem: 'Avaliação registrada!', id: result.rows[0].id })
+    res.status(201).json({ mensagem: 'Avaliação registrada!', id: result.rows[0].id, nota: notaInt, nivel: NIVEIS[notaInt], etiquetas: etq.valor })
+
+    // Aviso ao profissional avaliado — depois da resposta; falha só no log.
+    try {
+      const [prof, cliente] = await Promise.all([
+        pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [avaliado_id]),
+        primeiroNome(uid),
+      ])
+      if (prof.rows[0]) {
+        const via = await entregarPushEEmail({
+          usuario_id: avaliado_id, ator_id: uid, ...prof.rows[0],
+          titulo: `⭐ Nova avaliação: ${NIVEIS[notaInt]}!`,
+          corpo: `${cliente} avaliou "${c.titulo}" com ${notaInt} estrela(s). Toque para ver.`,
+          data: { tipo: 'avaliacao_recebida', [tabela === 'reparos' ? 'reparo_id' : 'obra_id']: contrato_id, nota: notaInt },
+          rotulo: `avaliacao recebida ${tabela} ${contrato_id}`,
+        })
+        console.log(`[Avaliacoes] ${tabela} ${contrato_id}: ${notaInt}★ → profissional ${avaliado_id} via ${via}`)
+      }
+    } catch (err) {
+      console.error(`[Avaliacoes] aviso ao profissional ${avaliado_id}:`, err.message)
+    }
   } catch (err) {
     console.error('[Avaliacoes] Erro:', err.message)
     res.status(500).json({ erro: 'Erro ao registrar avaliação' })
@@ -7589,11 +7641,22 @@ router.post('/avaliacoes/dispensar', autenticar, async (req, res) => {
 router.get('/avaliacoes/media/:usuario_id', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT COUNT(*)::int AS total, COALESCE(ROUND(AVG(estrelas)::numeric, 1), 0) AS media
+      `SELECT COUNT(*)::int AS total, COALESCE(ROUND(AVG(estrelas)::numeric, 1), 0) AS media,
+              COUNT(*) FILTER (WHERE estrelas = 5)::int AS cinco_estrelas,
+              ${sqlSeloBemAvaliado('$1::uuid')} AS selo_bem_avaliado
        FROM avaliacoes WHERE avaliado_id = $1`,
       [req.params.usuario_id]
     )
-    res.json({ total: result.rows[0].total, media: parseFloat(result.rows[0].media) })
+    // Etiquetas mais recebidas (agregado, sem expor avaliador nem linha individual).
+    const etiquetas = await pool.query(
+      `SELECT e AS etiqueta, COUNT(*)::int AS total
+         FROM avaliacoes a, unnest(a.etiquetas) AS e
+        WHERE a.avaliado_id = $1
+        GROUP BY e ORDER BY total DESC, e ASC LIMIT 10`,
+      [req.params.usuario_id]
+    )
+    const r = result.rows[0]
+    res.json({ total: r.total, media: parseFloat(r.media), cinco_estrelas: r.cinco_estrelas, selo_bem_avaliado: r.selo_bem_avaliado, etiquetas: etiquetas.rows })
   } catch (err) {
     console.error('[Avaliacoes] Erro média:', err.message)
     res.status(500).json({ erro: 'Erro ao buscar avaliações' })
@@ -7625,8 +7688,17 @@ router.get('/avaliacoes/recebidas', autenticar, async (req, res) => {
               COUNT(*) FILTER (WHERE estrelas = 2)::int AS e2,
               COUNT(*) FILTER (WHERE estrelas = 3)::int AS e3,
               COUNT(*) FILTER (WHERE estrelas = 4)::int AS e4,
-              COUNT(*) FILTER (WHERE estrelas = 5)::int AS e5
+              COUNT(*) FILTER (WHERE estrelas = 5)::int AS e5,
+              ${sqlSeloBemAvaliado('$1::uuid')} AS selo_bem_avaliado
        FROM avaliacoes WHERE avaliado_id = $1`,
+      [uid]
+    )
+    // Etiquetas recebidas, agregadas por texto (continua sem expor avaliador nem linha).
+    const etiquetas = await pool.query(
+      `SELECT e AS etiqueta, COUNT(*)::int AS total
+         FROM avaliacoes a, unnest(a.etiquetas) AS e
+        WHERE a.avaliado_id = $1
+        GROUP BY e ORDER BY total DESC, e ASC`,
       [uid]
     )
 
@@ -7636,7 +7708,9 @@ router.get('/avaliacoes/recebidas', autenticar, async (req, res) => {
     res.json({
       media: parseFloat(r.media),
       total: r.total,
-      distribuicao: { '1': r.e1, '2': r.e2, '3': r.e3, '4': r.e4, '5': r.e5 }
+      distribuicao: { '1': r.e1, '2': r.e2, '3': r.e3, '4': r.e4, '5': r.e5 },
+      selo_bem_avaliado: r.selo_bem_avaliado,
+      etiquetas: etiquetas.rows,
     })
   } catch (err) {
     console.error('[Avaliacoes] Erro recebidas:', err.message)
@@ -9280,14 +9354,9 @@ router.get('/admin/crescimento', autenticar, exigirAdmin, async (req, res) => {
 // contadores admin (EMAILS_ESPECIAIS, $3) e mesmo filtro de cidade ($2, dobrada). Só leitura.
 // Resposta: { semanas, cidade, nichos: [{ chave, nome, especialidades }],
 //             serie: [{ semana_inicio, semana_fim, total, nichos: { chave: n, … } }] }.
-const CHAVES_NICHO = {
-  'Elétrica e tecnologia': 'eletrica_tec', 'Reparos da casa': 'reparos_casa',
-  'Limpeza e cuidados da casa': 'limpeza', 'Beleza': 'beleza', 'Festas e eventos': 'festas',
-  'Cuidado': 'cuidado', 'Transporte': 'transporte', 'Segurança': 'seguranca',
-  'Digital e aulas': 'digital_aulas', 'Arte e criação': 'arte',
-}
+// Chaves dos nichos = CHAVE_DO_GRUPO (utils/gruposCategorias), as mesmas das etiquetas de avaliação.
 const NICHOS_CRESCIMENTO = Object.entries(GRUPOS_RELACIONADOS).map(([nome, especialidades]) =>
-  ({ chave: CHAVES_NICHO[nome] || normalizar(nome).replace(/[^a-z0-9]+/g, '_'), nome, especialidades }))
+  ({ chave: CHAVE_DO_GRUPO[nome], nome, especialidades }))
 const SLUGS_COM_NICHO = NICHOS_CRESCIMENTO.flatMap(n => n.especialidades)
 const SQL_SEMANA_ATUAL_SP = `date_trunc('week', NOW() AT TIME ZONE 'America/Sao_Paulo')`
 
