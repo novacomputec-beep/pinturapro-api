@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, lembrarRespostaHorario, repetirRespostaHorarioDono, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, lembrarRespostaHorario, repetirRespostaHorarioDono, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -911,9 +911,11 @@ const iniciarAgendador = () => {
         invalidarCachesUsuario(p.id)
         // Indicação conta na aprovação: recalcula bônus/embaixador de quem o indicou (nunca lança).
         recalcularIndicador(p.id)
-        if (p.push_token) {
-          await enviarPushNotificacao(p.push_token, '✅ Cadastro aprovado!', `Bem-vindo ao ${MARCA}! Seu acesso está liberado.`, { tipo: 'verificacao_aprovada' }).catch(() => {})
-        }
+        // Conta aprovada: push + e-mail sempre (política de 29/10/2026).
+        await avisarUsuario(p.id, {
+          titulo: '✅ Cadastro aprovado!', corpo: `Bem-vindo ao ${MARCA}! Seu acesso está liberado.`,
+          data: { tipo: 'verificacao_aprovada' }, rotulo: `cadastro aprovado (timeout) ${p.id}`,
+        })
         aprovados++
       }
       console.log(`[Timeout] ${aprovados} prestadores auto-aprovados por timeout de 15s (Modo Auto ON)`)

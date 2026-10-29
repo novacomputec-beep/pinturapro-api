@@ -14,7 +14,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, encerramentoAutomaticoEm } = require('../services/alertaService')
+const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, avisarUsuario, encerramentoAutomaticoEm } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { moderarDemanda, avisarModeracao, sanitizarTexto, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
@@ -3694,11 +3694,13 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [req.usuario.id, obra_id]
       )
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '🎉 Deu match!',
-          `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
-          { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
-      }
+      // Match ao dono: push + e-mail sempre (política de 29/10/2026).
+      avisarUsuario(obra.rows[0].criado_por, {
+        ator_id: req.usuario.id,
+        titulo: '🎉 Deu match!',
+        corpo: `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
+        data: { tipo: 'candidatura_aceita', obra_id }, rotulo: `match dono obras ${obra_id}`,
+      })
       avisarMatchFeito('obras', obra_id, req.usuario.id)
       enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
       // Recusa os demais candidatos e os notifica (ver POST .../responder).
@@ -3782,17 +3784,15 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
       `UPDATE obras SET a_caminho_em = NOW() WHERE id = $1 AND match_usuario_id = $2 AND a_caminho_em IS NULL`,
       [req.params.id, req.usuario.id]
     )
-    const dono = await pool.query(
-      `SELECT u.push_token FROM obras o JOIN usuarios u ON o.criado_por = u.id WHERE o.id = $1`,
-      [req.params.id]
-    )
-    // Responde imediatamente; push e contrato rodam em segundo plano (não bloquear o cliente)
+    // Responde imediatamente; aviso e contrato rodam em segundo plano (não bloquear o cliente)
     res.json({ mensagem: 'Match confirmado! Contagem regressiva iniciada.', match_feito_em: new Date() })
-    if (dono.rows[0]?.push_token) {
-      enviarPushNotificacao(dono.rows[0].push_token, '🚀 Pintor a caminho!',
-        `Um pintor confirmou que está indo até você para "${obra.rows[0].titulo}"`,
-        { tipo: 'match_obra', obra_id: req.params.id }).catch(err => console.error('[obras/match] push falhou:', err.message))
-    }
+    // Match + a caminho ao dono: push + e-mail sempre (política de 29/10/2026).
+    avisarUsuario(obra.rows[0].criado_por, {
+      ator_id: req.usuario.id,
+      titulo: '🚀 Pintor a caminho!',
+      corpo: `Um pintor confirmou que está indo até você para "${obra.rows[0].titulo}"`,
+      data: { tipo: 'match_obra', obra_id: req.params.id }, rotulo: `match a caminho obras ${req.params.id}`,
+    })
     avisarMatchFeito('obras', req.params.id, req.usuario.id)
     enviarContratoObra(candidaturaAceita.rows[0].id).catch(err => console.error('Erro ao enviar contrato obra:', err))
     // Recusa os demais candidatos e os notifica — pós-resposta, não bloqueia o cliente
@@ -4895,20 +4895,15 @@ router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) 
       `UPDATE reparos SET a_caminho_em = NOW() WHERE id = $1 AND match_usuario_id = $2 AND a_caminho_em IS NULL`,
       [req.params.id, req.usuario.id]
     )
-    const dono = await pool.query(
-      `SELECT u.push_token FROM reparos r JOIN usuarios u ON r.criado_por = u.id WHERE r.id = $1`,
-      [req.params.id]
-    )
-    // Responde imediatamente; push e contrato rodam em segundo plano (não bloquear o cliente)
+    // Responde imediatamente; aviso e contrato rodam em segundo plano (não bloquear o cliente)
     res.json({ mensagem: 'Match confirmado! Contagem regressiva iniciada.', match_feito_em: new Date() })
-    if (dono.rows[0]?.push_token) {
-      enviarPushNotificacao(
-        dono.rows[0].push_token,
-        '🚀 Profissional a caminho!',
-        `Um prestador confirmou que está indo até você para "${reparo.rows[0].titulo}"`,
-        { tipo: 'match_reparo', reparo_id: req.params.id }
-      ).catch(err => console.error('[reparos/match] push falhou:', err.message))
-    }
+    // Match + a caminho ao dono: push + e-mail sempre (política de 29/10/2026).
+    avisarUsuario(reparo.rows[0].criado_por, {
+      ator_id: req.usuario.id,
+      titulo: '🚀 Profissional a caminho!',
+      corpo: `Um prestador confirmou que está indo até você para "${reparo.rows[0].titulo}"`,
+      data: { tipo: 'match_reparo', reparo_id: req.params.id }, rotulo: `match a caminho reparos ${req.params.id}`,
+    })
     avisarMatchFeito('reparos', req.params.id, req.usuario.id)
     // Envia contrato por e-mail para dono e prestador
     enviarContratoReparo(req.params.id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
@@ -5090,11 +5085,13 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [req.usuario.id, reparo_id]
       )
-      if (dono.rows[0]?.push_token) {
-        enviarPushNotificacao(dono.rows[0].push_token, '🎉 Deu match!',
-          `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
-          { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
-      }
+      // Match ao dono: push + e-mail sempre (política de 29/10/2026).
+      avisarUsuario(reparo.rows[0].criado_por, {
+        ator_id: req.usuario.id,
+        titulo: '🎉 Deu match!',
+        corpo: `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
+        data: { tipo: 'interesse_aceito', reparo_id }, rotulo: `match dono reparos ${reparo_id}`,
+      })
       avisarMatchFeito('reparos', reparo_id, req.usuario.id)
       // match_usuario_id já foi definido acima, então o contrato pode sair agora.
       enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
@@ -6943,21 +6940,15 @@ router.post('/verificacao/modo-automatico', autenticar, exigirSuperAdmin, async 
         invalidarCachesUsuario(p.id)
         recalcularIndicador(p.id)
 
-        // Notificação push — mesmo tratamento do /verificacao/:id/aprovar. Sem token: arma
-        // aviso_aprovacao_em = NULL (= aviso pendente, enviado quando o token for registrado);
-        // com token: envia e marca NOW().
+        // Conta aprovada: push + e-mail sempre (política de 29/10/2026). Sem token: o e-mail sai
+        // agora e aviso_aprovacao_em = NULL arma o push pendente (enviado quando o token for
+        // registrado); com token: push + e-mail agora e marca NOW().
         const pushToken = await pool.query(`SELECT push_token FROM usuarios WHERE id = $1`, [p.id])
-        if (pushToken.rows[0]?.push_token) {
-          await enviarPushNotificacao(
-            pushToken.rows[0].push_token,
-            '✅ Cadastro aprovado!',
-            `Sua identidade foi verificada. Bem-vindo ao ${MARCA}!`,
-            { tipo: 'verificacao_aprovada' }
-          )
-          await pool.query(`UPDATE usuarios SET aviso_aprovacao_em = NOW() WHERE id = $1`, [p.id])
-        } else {
-          await pool.query(`UPDATE usuarios SET aviso_aprovacao_em = NULL WHERE id = $1`, [p.id])
-        }
+        await avisarUsuario(p.id, {
+          titulo: '✅ Cadastro aprovado!', corpo: `Sua identidade foi verificada. Bem-vindo ao ${MARCA}!`,
+          data: { tipo: 'verificacao_aprovada' }, rotulo: `cadastro aprovado (modo auto) ${p.id}`,
+        })
+        await pool.query(`UPDATE usuarios SET aviso_aprovacao_em = ${pushToken.rows[0]?.push_token ? 'NOW()' : 'NULL'} WHERE id = $1`, [p.id])
         aprovados++
       }
       console.log(`[Modo automático] ${aprovados} prestadores aprovados automaticamente`)
@@ -8437,11 +8428,12 @@ router.post('/admin/suspensos/:id/liberar', autenticar, exigirAdmin, async (req,
       usuario_id: alvo.rows[0].id,
       faltas_perdoadas: perdoadas.rowCount,
     })
-    if (alvo.rows[0].push_token) {
-      enviarPushNotificacao(alvo.rows[0].push_token, '✅ Conta liberada',
-        'Sua suspensão foi removida. Você já pode voltar a pegar trabalhos.',
-        { tipo: 'conta_liberada' }).catch(() => {})
-    }
+    // Conta liberada: push + e-mail sempre (política de 29/10/2026).
+    avisarUsuario(alvo.rows[0].id, {
+      titulo: '✅ Conta liberada',
+      corpo: 'Sua suspensão foi removida. Você já pode voltar a pegar trabalhos.',
+      data: { tipo: 'conta_liberada' }, rotulo: `conta liberada (admin) ${alvo.rows[0].id}`,
+    })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
     console.error('[admin/suspensos/liberar]', err.message)
