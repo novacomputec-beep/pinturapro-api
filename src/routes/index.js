@@ -8814,11 +8814,14 @@ router.post('/admin/respostas-equipe', autenticar, exigirAdmin, async (req, res)
 
     const criada = inserida.rows[0]
     res.status(201).json(criada)
-    if (push_token) {
-      enviarPushNotificacao(push_token, '💬 A equipe ProTudo respondeu você',
-        'Toque para ver a resposta à sua mensagem.',
-        { tipo: 'resposta_equipe', id: criada.id }).catch(() => {})
-    }
+    // Push + e-mail sempre (política de 29/10/2026). Sem id de demanda o e-mail sai sem claim:
+    // um por resposta (cada resposta é uma linha nova de respostas_equipe).
+    avisarUsuario(usuario_id, {
+      ator_id: req.usuario.id,
+      titulo: '💬 A equipe ProTudo respondeu você',
+      corpo: 'Toque para ver a resposta à sua mensagem.',
+      data: { tipo: 'resposta_equipe', id: criada.id }, rotulo: `resposta equipe ${criada.id}`,
+    })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
     console.error('[RespostasEquipe] Erro ao responder:', err.message)
