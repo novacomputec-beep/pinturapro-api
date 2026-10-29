@@ -1633,11 +1633,14 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
 //   W < 4h → 30 min · W < 24h → 2h · W < 7 dias → 6h · W ≥ 7 dias → 12h
 // contada do último ciclo (lembrete_agendar_ultimo_em) ou, no 1º, do match_feito_em.
 // Silêncio 22:00–07:00 (America/Sao_Paulo): o ciclo devido nesse intervalo fica para o 1º tique
-// das 07:00. Do 2º ciclo em diante avisa também o DONO, no máx. uma vez por dia (SP) —
-// lembrete_agendar_dono_em. Claim atômico (UPDATE ... WHERE devido RETURNING): o WHERE é
-// reavaliado sob o lock da linha, então réplicas e restarts nunca repetem um ciclo. E-mail com
-// chave por ciclo (aviso:agendar#n / aviso:agendar_dono#n). Colunas zeradas em SQL_ZERAR_AGENDA.
+// das 07:00. Do 2º ciclo DESTE match em diante (já havia lembrete_agendar_ultimo_em) avisa
+// também o DONO, no máx. uma vez por dia (SP) — lembrete_agendar_dono_em. Claim atômico
+// (UPDATE ... WHERE devido RETURNING): o WHERE é reavaliado sob o lock da linha, então réplicas e
+// restarts nunca repetem um ciclo. E-mail com chave por ciclo (aviso:agendar#n /
+// aviso:agendar_dono#n); n = lembrete_agendar_ciclo, que nunca zera (ver a migração).
+// ultimo_em e dono_em são zerados em SQL_ZERAR_AGENDA.
 // Guarda de autor: dono e profissional na mesma conta não recebem aviso sobre si mesmos.
+// Cadência dos lembretes repetidos (agendar e resposta de horário), pela janela W da demanda.
 const sqlIntervaloRepetirAgendar = (lado) => {
   const w = sqlJanelaHoras(LADOS_LEMBRETE.find(l => l.tabela === lado.tabela))
   return `(CASE WHEN ${w} < 4   THEN INTERVAL '30 minutes'
@@ -1651,7 +1654,7 @@ const sqlClaimRepetirAgendar = (lado) => `
       UPDATE ${lado.tabela} d SET lembrete_agendar_ultimo_em = NOW(),
              lembrete_agendar_ciclo = d.lembrete_agendar_ciclo + 1,
              lembrete_agendar_dono_em = CASE
-               WHEN d.lembrete_agendar_ciclo + 1 >= 2
+               WHEN d.lembrete_agendar_ultimo_em IS NOT NULL
                 AND (d.lembrete_agendar_dono_em IS NULL
                      OR (d.lembrete_agendar_dono_em AT TIME ZONE '${TZ_AGENDA}')::date < (NOW() AT TIME ZONE '${TZ_AGENDA}')::date)
                THEN NOW() ELSE d.lembrete_agendar_dono_em END
@@ -1717,6 +1720,8 @@ const repetirLembreteAgendar = semSobreposicao('repetirLembreteAgendar', async (
 // data do push = o tipo que cada lado já recebe nesta negociação (dono: chegada_prevista_pendente;
 // profissional: chegada_contraproposta) + obra_id/reparo_id — o toque abre o detalhe.
 // Entrega por entregarPushOuEmail (push; sem token ou push falho, e-mail em texto puro).
+// Desde 29/10/2026 só para o PROFISSIONAL (proposta do dono): o dono que deve responder a uma
+// proposta do profissional recebe o lembrete REPETIDO de repetirRespostaHorarioDono.
 const TITULO_RESPOSTA_HORARIO = '⏳ Responda o horário proposto'
 const SQL_QUEM_PROPOS = `COALESCE(d.chegada_proposta_por, d.match_usuario_id)`
 const SQL_QUEM_RESPONDE = `CASE WHEN ${SQL_QUEM_PROPOS} = d.match_usuario_id THEN d.criado_por ELSE d.match_usuario_id END`
@@ -1734,6 +1739,7 @@ const sqlClaimRespostaHorario = (lado, l) => `
        WHERE d.status = 'aberta' AND d.match_usuario_id IS NOT NULL
          AND d.chegada_pendente_em IS NOT NULL AND d.chegada_proposta_em IS NOT NULL
          AND u.id = ${SQL_QUEM_RESPONDE} AND p.id = ${SQL_QUEM_PROPOS}
+         AND ${SQL_QUEM_PROPOS} <> d.match_usuario_id
          AND d.${l.coluna} IS NULL
          AND NOW() >= ${l.dispara} AND NOW() < ${l.dispara} + INTERVAL '${LEMBRETE_AGENDA_JANELA}'
          AND NOW() < d.chegada_pendente_em
@@ -1761,6 +1767,50 @@ const lembrarRespostaHorario = semSobreposicao('lembrarRespostaHorario', async (
       } catch (err) {
         console.error(`[RespostaHorario] erro em ${lado.tabela} ${l.coluna}:`, err.message)
       }
+    }
+  }
+})
+
+// "Responda o horário proposto" REPETIDO ao DONO — proposta/contraproposta do PROFISSIONAL
+// pendente (chegada_pendente_em, proposta por match_usuario_id). Mesma cadência do agendar
+// repetido (sqlIntervaloRepetirAgendar: 30 min / 2h / 6h / 12h pela janela W), contada do
+// último ciclo ou, no 1º, de chegada_proposta_em; silêncio 22–07 SP (SQL_FORA_SILENCIO) adia
+// para as 07:00. Push + e-mail (entregarPushEEmail, chave aviso:resposta_horario#n, n =
+// lembrete_resposta_ciclo, que nunca zera), guarda de autor (ator = profissional).
+// Para no mesmo tique em que o dono responde (aceite/recusa zeram chegada_pendente_em; a
+// contraproposta dele troca o proponente), quando o horário proposto passa, a demanda sai de
+// 'aberta' ou o match cai. Claim atômico em lembrete_resposta_ultimo_em, zerado a cada proposta.
+const sqlClaimRepetirRespostaDono = (lado) => `
+      UPDATE ${lado.tabela} d SET lembrete_resposta_ultimo_em = NOW(),
+             lembrete_resposta_ciclo = d.lembrete_resposta_ciclo + 1
+        FROM usuarios u, usuarios p
+       WHERE d.status = 'aberta' AND d.match_usuario_id IS NOT NULL
+         AND d.chegada_pendente_em IS NOT NULL AND d.chegada_proposta_em IS NOT NULL
+         AND ${SQL_QUEM_PROPOS} = d.match_usuario_id
+         AND u.id = d.criado_por AND p.id = d.match_usuario_id
+         AND NOW() < d.chegada_pendente_em
+         AND NOW() >= COALESCE(d.lembrete_resposta_ultimo_em, d.chegada_proposta_em) + ${sqlIntervaloRepetirAgendar(lado)}
+         AND ${SQL_FORA_SILENCIO}
+   RETURNING d.id, d.titulo, d.chegada_pendente_em, d.criado_por, d.match_usuario_id,
+             d.lembrete_resposta_ciclo AS ciclo, true AS para_dono,
+             u.push_token, u.email, u.nome, p.nome AS nome_proponente`
+const repetirRespostaHorarioDono = semSobreposicao('repetirRespostaHorarioDono', async () => {
+  for (const lado of Object.values(LADOS_MATCH)) {
+    try {
+      const claim = await pool.query(sqlClaimRepetirRespostaDono(lado))
+      for (const d of claim.rows) {
+        const via = await entregarPushEEmail({
+          usuario_id: d.criado_por, ator_id: d.match_usuario_id,
+          push_token: d.push_token, email: d.email, nome: d.nome,
+          titulo: TITULO_RESPOSTA_HORARIO, corpo: corpoRespostaHorario(d),
+          data: { tipo: 'chegada_prevista_pendente', [lado.chave]: d.id },
+          chave_email: `resposta_horario#${d.ciclo}`,
+          rotulo: `resposta horário repetido ${lado.tabela} ${d.id} #${d.ciclo}`,
+        })
+        console.log(`[RespostaHorarioDono] ${lado.tabela} ${d.id} #${d.ciclo} → dono via ${via}`)
+      }
+    } catch (err) {
+      console.error(`[RespostaHorarioDono] erro em ${lado.tabela}:`, err.message)
     }
   }
 })
@@ -2698,6 +2748,8 @@ module.exports = {
   lembrarAgendarAtendimento,
   repetirLembreteAgendar,
   sqlClaimRepetirAgendar,
+  repetirRespostaHorarioDono,
+  sqlClaimRepetirRespostaDono,
   sqlClaimAgendar,
   OFFSETS_AGENDAR,
   entregarPushOuEmail,

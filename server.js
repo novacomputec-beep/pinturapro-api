@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, lembrarRespostaHorario, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, lembrarRespostaHorario, repetirRespostaHorarioDono, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -807,6 +807,9 @@ const iniciarAgendador = () => {
   // "Responda o horário proposto": à parte que deve responder uma proposta de horário pendente,
   // 1h depois da proposta e 1h antes do horário. Mesma cadência; fora do warm-up (janela de 60 min).
   setInterval(() => { lembrarRespostaHorario() }, INTERVALO_CRONOMETRO)
+  // Ao DONO, proposta do profissional pendente: o mesmo aviso REPETIDO (push + e-mail) com a
+  // cadência do agendar repetido, silêncio 22–07 (SP), até ele responder ou o horário passar.
+  setInterval(() => { repetirRespostaHorarioDono() }, INTERVALO_CRONOMETRO)
   setInterval(() => { vigiarComparecimento() }, INTERVALO_CRONOMETRO)
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
   // Poda das tentativas de auth: a tabela acumula linhas de e-mails inexistentes, que é o

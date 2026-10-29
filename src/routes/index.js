@@ -448,11 +448,18 @@ const migracaoPronta = (async () => {
       // atômico por array_append; zerado em SQL_ZERAR_AGENDA junto com as demais do match.
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agendar_offsets INTEGER[] NOT NULL DEFAULT '{}'`)
       // "Agende seu atendimento" REPETIDO (alertaService.repetirLembreteAgendar): instante do
-      // último ciclo (claim; a cadência conta dele, ou do match no 1º), nº do ciclo (chave do
-      // e-mail aviso:agendar#n) e o último aviso ao dono (no máx. 1 por dia). Zeradas em SQL_ZERAR_AGENDA.
+      // último ciclo (claim; a cadência conta dele, ou do match no 1º) e o último aviso ao dono
+      // (no máx. 1 por dia) — zeradas em SQL_ZERAR_AGENDA; e o nº do ciclo, chave do e-mail
+      // aviso:agendar#n, que NUNCA zera: o UNIQUE de email_alertas é por demanda+usuário, e o
+      // dono (ou o mesmo profissional) de um match seguinte teria o e-mail #n já reivindicado.
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agendar_ultimo_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agendar_ciclo INTEGER NOT NULL DEFAULT 0`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agendar_dono_em TIMESTAMPTZ`)
+      // "Responda o horário proposto" REPETIDO ao dono (alertaService.repetirRespostaHorarioDono):
+      // claim do último ciclo — zerado a cada proposta nova e em SQL_ZERAR_AGENDA — e o nº do
+      // ciclo (chave aviso:resposta_horario#n), que nunca zera pelo mesmo motivo acima.
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_resposta_ultimo_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_resposta_ciclo INTEGER NOT NULL DEFAULT 0`)
       // Negociação de horário: quando a proposta PENDENTE foi feita (toda escrita de proposta
       // grava NOW()) e as duas marcas do "Responda o horário proposto"
       // (alertaService.lembrarRespostaHorario: 1h depois da proposta / 1h antes do horário),
@@ -5415,7 +5422,7 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
            chegada_pendente_em = $2::timestamptz,
            chegada_proposta_por = $3::uuid,
            chegada_proposta_em = NOW(),
-           lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL,
+           lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL, lembrete_resposta_ultimo_em = NULL,
            chegada_pendente_rodada = d.chegada_pendente_rodada + 1,
            sugestoes_horario_profissional = d.sugestoes_horario_profissional + 1
          WHERE d.id = $1 AND d.match_usuario_id = $3
@@ -5794,7 +5801,7 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
            chegada_pendente_em = $3::timestamptz,
            chegada_proposta_por = $2::uuid,
            chegada_proposta_em = NOW(),
-           lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL,
+           lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL, lembrete_resposta_ultimo_em = NULL,
            chegada_pendente_rodada = chegada_pendente_rodada + 1,
            ${colSugestoes} = ${colSugestoes} + 1
          ${guard} AND ${colSugestoes} < $5::int
