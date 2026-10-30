@@ -81,6 +81,7 @@ const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 const { ESPECIALIDADES_REPARADOR, validarEspecialidades } = require('../utils/especialidades')
 const { enviarEmail } = require('../services/emailService')
 const { sqlTipoConta, tipoDeTipoConta, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL } = require('../utils/tipoConta')
+const { registrarReinstalacao } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
 const { sqlNaoDemandaPropria, sqlNaoMesmoCpf, ERRO_DEMANDA_PROPRIA, ehDemandaPropria } = require('../utils/demandaPropria')
@@ -235,6 +236,20 @@ const migracaoPronta = (async () => {
     // Quando usuarios.plataforma foi gravada/alterada pela última vez (usuarios.atualizado_em
     // não é mantido). NULL = plataforma nunca gravada, ou gravada antes desta coluna existir.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plataforma_em TIMESTAMPTZ`)
+    // Desinstalação provável (utils/desinstalacoes): DeviceNotRegistered do Expo marca
+    // desinstalado_em (só se NULL) e abre uma linha no histórico; novo push-token ou login pelo
+    // app limpa a coluna e preenche reinstalado_em. Lido por GET /admin/desinstalacoes.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS desinstalado_em TIMESTAMPTZ`)
+    await client.query(`CREATE TABLE IF NOT EXISTS desinstalacoes (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      detectado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      plataforma TEXT,
+      token_prefix TEXT,
+      reinstalado_em TIMESTAMPTZ
+    )`)
+    await client.query(`CREATE INDEX IF NOT EXISTS desinstalacoes_detectado_idx ON desinstalacoes (detectado_em)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS desinstalacoes_aberta_idx ON desinstalacoes (usuario_id) WHERE reinstalado_em IS NULL`)
     // Opt-out de push promocional (PATCH /auth/preferencias). Default true: quem nunca mexeu recebe.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS aceita_promocoes BOOLEAN NOT NULL DEFAULT true`)
     // Histórico dos envios feitos pelo painel admin (POST /admin/notificacoes/enviar): uma
@@ -1916,6 +1931,8 @@ router.post('/auth/push-token', autenticar, async (req, res) => {
     } else {
       await pool.query(`UPDATE usuarios SET push_token = $1, push_status = 'concedida', push_status_em = NOW() WHERE id = $2`, [token, req.usuario.id])
     }
+    // Token novo registrado = app de volta no aparelho: fecha a desinstalação provável aberta.
+    registrarReinstalacao(req.usuario.id)
     // Aviso de aprovação pendente (aprovado sem token no /verificacao/:id/aprovar):
     // claim-then-send no MESMO UPDATE — segunda réplica/re-registro vê a coluna preenchida
     // e não manda de novo. try/catch próprio: falha aqui não muda a resposta do registro.
@@ -9372,6 +9389,51 @@ router.get('/admin/crescimento', autenticar, exigirAdmin, async (req, res) => {
   } catch (err) {
     console.error('[admin/crescimento]', err.message)
     res.status(500).json({ erro: 'Erro ao calcular o crescimento' })
+  }
+})
+
+// GET /admin/desinstalacoes?dias=30 — desinstalações PROVÁVEIS (DeviceNotRegistered do Expo,
+// tabela desinstalacoes) por dia de detecção (America/Sao_Paulo), mesma janela de
+// /admin/crescimento ($1 dias terminando hoje, 1..365, padrão 30). Cada dia traz totais por
+// plataforma (NULL = app antigo que não reportou → 'desconhecida') e a lista de contas.
+// dias_de_uso = dias inteiros entre cadastro e detecção; ultimo_acesso = último ultimo_em em
+// versoes_app_vistas (null se o app nunca reportou versão). Só leitura.
+router.get('/admin/desinstalacoes', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const diasBruto = parseInt(req.query.dias)
+    const dias = Number.isInteger(diasBruto) ? Math.min(Math.max(diasBruto, 1), 365) : 30
+    const r = await pool.query(
+      `SELECT to_char((d.detectado_em AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS data,
+              d.detectado_em, d.plataforma, d.reinstalado_em,
+              u.id AS usuario_id, u.nome, u.role, ${sqlTipoConta('u')} AS tipo, u.cidade, u.uf,
+              u.criado_em AS cadastro,
+              floor(EXTRACT(EPOCH FROM (d.detectado_em - u.criado_em)) / 86400)::int AS dias_de_uso,
+              (SELECT MAX(v.ultimo_em) FROM versoes_app_vistas v WHERE v.usuario_id = u.id) AS ultimo_acesso
+         FROM desinstalacoes d
+         JOIN usuarios u ON u.id = d.usuario_id
+        WHERE d.detectado_em >= ${SQL_INICIO_JANELA}
+        ORDER BY d.detectado_em DESC`,
+      [dias]
+    )
+    const porDia = new Map()
+    const totais = { total: 0, android: 0, ios: 0, desconhecida: 0, reinstalaram: 0 }
+    for (const l of r.rows) {
+      if (!porDia.has(l.data)) porDia.set(l.data, { data: l.data, total: 0, android: 0, ios: 0, desconhecida: 0, usuarios: [] })
+      const dia = porDia.get(l.data)
+      const plat = l.plataforma === 'android' || l.plataforma === 'ios' ? l.plataforma : 'desconhecida'
+      for (const alvo of [dia, totais]) { alvo.total++; alvo[plat]++ }
+      if (l.reinstalado_em) totais.reinstalaram++
+      dia.usuarios.push({
+        usuario_id: l.usuario_id, nome: l.nome, role: l.role, tipo: l.tipo, cidade: l.cidade, uf: l.uf,
+        plataforma: l.plataforma, cadastro: l.cadastro, detectado_em: l.detectado_em,
+        dias_de_uso: l.dias_de_uso, ultimo_acesso: l.ultimo_acesso,
+        reinstalou: !!l.reinstalado_em, reinstalado_em: l.reinstalado_em,
+      })
+    }
+    res.json({ dias, ...totais, serie: [...porDia.values()] })
+  } catch (err) {
+    console.error('[admin/desinstalacoes]', err.message)
+    res.status(500).json({ erro: 'Erro ao listar desinstalações' })
   }
 })
 

@@ -6,7 +6,8 @@ const { registrarTentativa, limparTentativas } = require('../utils/tentativasAut
 const { MARCA } = require('../utils/marca')
 const { validarEspecialidades } = require('../utils/especialidades')
 const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, multiplasContasAtivo } = require('../utils/tipoConta')
-const { registrarPlataforma } = require('../utils/plataforma')
+const { registrarPlataforma, detectarPlataforma } = require('../utils/plataforma')
+const { registrarReinstalacao } = require('../utils/desinstalacoes')
 const { municipioExiste } = require('../utils/geoBusca')
 const { normalizarCodigo, recalcularIndicador } = require('../utils/indicacoes')
 const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias } = require('../utils/referencias')
@@ -544,6 +545,8 @@ const login = async (req, res) => {
 
     const token = gerarToken(usuario)
     registrarPlataforma(usuario.id, req)
+    // Login vindo do APP (não do painel/site no navegador) fecha a desinstalação provável.
+    if (detectarPlataforma(req)) registrarReinstalacao(usuario.id)
 
     res.json({
       usuario: {
