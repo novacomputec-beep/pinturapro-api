@@ -158,7 +158,9 @@ const aplicarMinimaObrigatoria = async (db = pool, plataformas = PLATAFORMAS) =>
 
 // Painel: por plataforma, usuários ATIVOS distintos (usuarios.ativo) na versão mais recente
 // que cada um reportou (versoes_app_vistas, última por ultimo_em), partidos em >= minima e
-// < minima. Lê o mesmo registro que a promoção automática.
+// < minima. Lê o mesmo registro que a promoção automática. Só exibição: ignora desinstalação
+// provável (regra do painel, utils/desinstalacoes) — candidatosPromocao, que decide a promoção,
+// não muda.
 const contarUsuariosPorMinima = async (db = pool, cfg) => {
   const saida = {}
   for (const p of PLATAFORMAS) {
@@ -166,7 +168,7 @@ const contarUsuariosPorMinima = async (db = pool, cfg) => {
       `WITH ultima AS (
          SELECT DISTINCT ON (v.usuario_id) v.usuario_id, v.versao
            FROM versoes_app_vistas v JOIN usuarios u ON u.id = v.usuario_id
-          WHERE v.plataforma = $1 AND u.ativo = true
+          WHERE v.plataforma = $1 AND u.ativo = true AND u.desinstalado_em IS NULL
           ORDER BY v.usuario_id, v.ultimo_em DESC)
        SELECT count(*) FILTER (WHERE ${SQL_VERSAO_INT('versao')} >= ${SQL_VERSAO_INT('$2::text')})::int AS na_minima_ou_acima,
               count(*) FILTER (WHERE ${SQL_VERSAO_INT('versao')} <  ${SQL_VERSAO_INT('$2::text')})::int AS abaixo_da_minima

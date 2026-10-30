@@ -81,7 +81,7 @@ const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 const { ESPECIALIDADES_REPARADOR, validarEspecialidades } = require('../utils/especialidades')
 const { enviarEmail } = require('../services/emailService')
 const { sqlTipoConta, tipoDeTipoConta, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL } = require('../utils/tipoConta')
-const { registrarReinstalacao } = require('../utils/desinstalacoes')
+const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
 const { sqlNaoDemandaPropria, sqlNaoMesmoCpf, ERRO_DEMANDA_PROPRIA, ehDemandaPropria } = require('../utils/demandaPropria')
@@ -6374,7 +6374,7 @@ router.post('/admin/buscar-usuario', autenticar, exigirAdmin, async (req, res) =
     const { email } = req.body
     if (!email) return res.status(400).json({ erro: 'E-mail obrigatório' })
     const result = await pool.query(
-      `SELECT id, nome, email, role, ativo, ${sqlTipoConta()} AS tipo FROM usuarios
+      `SELECT id, nome, email, role, ativo, ${sqlTipoConta()} AS tipo, desinstalado_em FROM usuarios
         WHERE email = $1 ORDER BY criado_em ASC, id ASC`,
       [email.toLowerCase().trim()]
     )
@@ -6556,7 +6556,7 @@ router.get('/verificacao/pendentes', autenticar, exigirAdmin, async (req, res) =
              u.verificacao_doc_verso_url, u.verificacao_selfie_url,
              u.referencias, u.pix_reembolso, u.criado_em,
              u.anos_experiencia, u.tamanho_equipe,
-             u.rg, u.rg_orgao, u.rg_estado, u.aprovado_automaticamente,
+             u.rg, u.rg_orgao, u.rg_estado, u.aprovado_automaticamente, u.desinstalado_em,
              a.plano, a.status as assinatura_status
       FROM usuarios u
       LEFT JOIN assinaturas a ON a.usuario_id = u.id
@@ -8145,7 +8145,7 @@ router.get('/admin/usuarios/:id/verificacao', autenticar, exigirAdmin, async (re
       `SELECT id, nome, email, telefone, cidade, uf, role, tipo_prestador, tipo_dono, criado_em,
               cpf_cnpj, rg, rg_orgao, rg_estado, referencias, pix_reembolso,
               verificacao_status, verificacao_enviada_em, aprovado_automaticamente,
-              verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url
+              verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url, desinstalado_em
          FROM usuarios WHERE id = $1`, [id]
     )
     if (r.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
@@ -8174,6 +8174,7 @@ router.get('/admin/usuarios/:id/verificacao', autenticar, exigirAdmin, async (re
       usuario: {
         id: u.id, nome: u.nome, email: u.email, telefone: u.telefone, cidade: u.cidade, uf: u.uf,
         role: u.role, tipo_prestador: u.tipo_prestador, tipo_dono: u.tipo_dono, criado_em: u.criado_em,
+        desinstalado_em: u.desinstalado_em,
       },
       verificacao: {
         status,
@@ -8225,14 +8226,17 @@ router.get('/dashboard', autenticar, exigirAdmin, async (req, res) => {
       // - ativos: todas as assinaturas ativas
       // - gratuitos: ativas marcadas como gratuito OU sem valor mensal
       // - receita: soma do valor_mensal apenas dos pagantes (exclui gratuitos e valor 0)
+      // ativos/gratuitos ignoram desinstalação provável (regra do painel); receita NÃO — é
+      // dinheiro contratado, que continua sendo cobrado com o app desinstalado.
       pool.query(`
         SELECT
-          COUNT(*) FILTER (WHERE status = 'ativa') AS ativos,
-          COUNT(*) FILTER (WHERE status = 'ativa' AND (tipo = 'gratuito' OR valor_mensal = 0)) AS gratuitos,
-          COALESCE(SUM(valor_mensal) FILTER (
-            WHERE status = 'ativa' AND tipo IS DISTINCT FROM 'gratuito' AND valor_mensal > 0
+          COUNT(*) FILTER (WHERE a.status = 'ativa' AND ${sqlInstalado('u')}) AS ativos,
+          COUNT(*) FILTER (WHERE a.status = 'ativa' AND (a.tipo = 'gratuito' OR a.valor_mensal = 0) AND ${sqlInstalado('u')}) AS gratuitos,
+          COALESCE(SUM(a.valor_mensal) FILTER (
+            WHERE a.status = 'ativa' AND a.tipo IS DISTINCT FROM 'gratuito' AND a.valor_mensal > 0
           ), 0) AS receita
-        FROM assinaturas
+        FROM assinaturas a
+        LEFT JOIN usuarios u ON u.id = a.usuario_id
       `),
       pool.query(`SELECT COUNT(*) FROM candidaturas WHERE status = 'pendente'`),
       // D84: propostas pendentes do lado reparo nunca entravam no painel — só candidaturas
@@ -8373,7 +8377,7 @@ router.get('/admin/suspensos', autenticar, exigirAdmin, async (req, res) => {
 
     const lista = await pool.query(
       `SELECT u.id, u.nome, u.email, u.telefone, u.role, u.tipo_prestador,
-              u.suspenso_em, u.suspenso_motivo,
+              u.suspenso_em, u.suspenso_motivo, u.desinstalado_em,
               (SELECT COUNT(*)::int FROM faltas_profissional f
                 WHERE f.usuario_id = u.id
                   AND f.perdoada_em IS NULL
@@ -8508,7 +8512,7 @@ router.get('/admin/tentativas-contato', autenticar, exigirAdmin, async (req, res
               (SELECT COUNT(*)::int FROM tentativas_contato x
                 WHERE x.usuario_id = t.usuario_id AND x.conta AND x.criado_em > NOW() - (${JANELA_PENALIDADE_DIAS} * INTERVAL '1 day')) AS tentativas_janela,
               (SELECT MAX(x.criado_em) FROM tentativas_contato x WHERE x.usuario_id = t.usuario_id) AS ultima_tentativa_em,
-              u.suspenso_em, u.suspenso_motivo`
+              u.suspenso_em, u.suspenso_motivo, u.desinstalado_em`
     const lista = await pool.query(
       `SELECT t.id, t.usuario_id, u.nome, u.email, u.role, u.tipo_prestador,
               t.tipo, t.demanda_id, t.campo, t.criado_em, t.conta,
@@ -8532,7 +8536,7 @@ router.get('/admin/tentativas-contato', autenticar, exigirAdmin, async (req, res
               ${SQL_PENALIDADE}
          FROM tentativas_contato t JOIN usuarios u ON u.id = t.usuario_id
          ${filtro}
-        GROUP BY t.usuario_id, u.nome, u.email, u.role, u.suspenso_em, u.suspenso_motivo
+        GROUP BY t.usuario_id, u.nome, u.email, u.role, u.suspenso_em, u.suspenso_motivo, u.desinstalado_em
         ORDER BY tentativas DESC, ultima_em DESC
         LIMIT 20`,
       [dias, usuarioId]
@@ -9277,6 +9281,7 @@ router.get('/admin/especialidades-resumo', autenticar, exigirAdmin, async (req, 
         WHERE u.role IN ('prestador', 'pintor')
           AND u.ativo = true
           AND u.suspenso_em IS NULL
+          AND ${sqlInstalado('u')}
           AND NULLIF(btrim(e.especialidade), '') IS NOT NULL
           AND ($1::text IS NULL OR ${sqlNormalizarCidade('u.cidade')} = $1::text)
         GROUP BY u.tipo_prestador, e.especialidade
@@ -9311,7 +9316,9 @@ const SQL_PAPEL_PROFISSIONAL = `u.role IN ('prestador', 'pintor', 'assinante')`
 const SQL_PAPEL_CLIENTE = `u.role = 'dono_obra'`
 const SQL_PUSH_ATIVO = `(u.push_token IS NOT NULL AND u.push_token <> '')`
 // Base comum das duas consultas: contas contadas, filtro de cidade ($2) e e-mails especiais ($3).
+// Desinstalação provável fica fora de todos os números (regra do painel, utils/desinstalacoes).
 const SQL_CONTAS_CRESCIMENTO = `(${SQL_PAPEL_PROFISSIONAL} OR ${SQL_PAPEL_CLIENTE})
+        AND ${sqlInstalado('u')}
         AND LOWER(u.email) <> ALL($3::text[])
         AND ($2::text IS NULL OR ${sqlNormalizarCidade('u.cidade')} = $2::text)`
 // Hoje (data SP) e o primeiro instante (timestamptz) do primeiro dia da janela de $1 dias.
@@ -9470,6 +9477,7 @@ router.get('/admin/crescimento-nichos', autenticar, exigirAdmin, async (req, res
                 COALESCE(u.especialidades, '{}'::text[]) AS especialidades
            FROM usuarios u
           WHERE u.role = 'prestador'
+            AND ${sqlInstalado('u')}
             AND LOWER(u.email) <> ALL($3::text[])
             AND ($2::text IS NULL OR ${sqlNormalizarCidade('u.cidade')} = $2::text)
             AND u.criado_em >= ((${SQL_SEMANA_ATUAL_SP} - (($1::int - 1) * INTERVAL '1 week')) AT TIME ZONE 'America/Sao_Paulo')
