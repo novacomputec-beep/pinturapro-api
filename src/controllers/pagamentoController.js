@@ -503,6 +503,10 @@ const darAcessoGratuito = async (req, res) => {
 const { sqlTipoConta } = require('../utils/tipoConta')
 const SQL_PLATAFORMA = `COALESCE(u.plataforma, u.push_plataforma)`
 const SQL_PAPEIS_CLIENTE = `u.role IN ('assinante', 'prestador', 'dono_obra', 'pintor')`
+// Contagens (totais, por_plano, cidades) ignoram desinstalação provável (utils/desinstalacoes);
+// a lista paginada continua trazendo essas contas, com desinstalado_em.
+const { sqlInstalado } = require('../utils/desinstalacoes')
+const SQL_CLIENTE_CONTADO = `${SQL_PAPEIS_CLIENTE} AND ${sqlInstalado('u')}`
 const totaisDeUsuarios = async () => {
   const r = await pool.query(`
     SELECT COUNT(*)::int                                                         AS total_contas,
@@ -516,9 +520,10 @@ const totaisDeUsuarios = async () => {
            COUNT(*) FILTER (WHERE ${SQL_PLATAFORMA} = 'ios')::int               AS iphone,
            COUNT(*) FILTER (WHERE ${SQL_PLATAFORMA} IS NULL)::int               AS sem_plataforma,
            COUNT(*) FILTER (WHERE u.ativo = true)::int                          AS ativos,
-           COUNT(*) FILTER (WHERE u.suspenso_em IS NOT NULL)::int               AS suspensos
+           COUNT(*) FILTER (WHERE u.suspenso_em IS NOT NULL)::int               AS suspensos,
+           (SELECT COUNT(*)::int FROM usuarios u WHERE ${SQL_PAPEIS_CLIENTE} AND NOT ${sqlInstalado('u')}) AS desinstalados
       FROM usuarios u
-     WHERE ${SQL_PAPEIS_CLIENTE}`)
+     WHERE ${SQL_CLIENTE_CONTADO}`)
   const t = r.rows[0]
   // por_plano: assinaturas ATIVAS (mesma regra de "assinatura ativa" das guardas: status 'ativa'
   // e vencimento no futuro ou nulo) das contas de cliente, por valor mensal contratado —
@@ -530,7 +535,7 @@ const totaisDeUsuarios = async () => {
            COUNT(*)::int AS ativas
       FROM assinaturas a
       JOIN usuarios u ON u.id = a.usuario_id
-     WHERE ${SQL_PAPEIS_CLIENTE}
+     WHERE ${SQL_CLIENTE_CONTADO}
        AND a.status = 'ativa' AND (a.proximo_vencimento IS NULL OR a.proximo_vencimento > NOW())`)
   const pl = p.rows[0]
   return {
@@ -538,6 +543,8 @@ const totaisDeUsuarios = async () => {
     pessoas: t.pessoas,
     ativos: t.ativos,
     suspensos: t.suspensos,
+    // Fora de todos os números acima (desinstalação provável); só informativo.
+    desinstalados_excluidos: t.desinstalados,
     por_tipo: { prestador: t.prestador, construtor_pintor: t.construtor_pintor, dono_servico: t.dono_servico, dono_obra: t.dono_obra, outros: t.outros },
     por_plataforma: { android: t.android, iphone: t.iphone, sem_plataforma: t.sem_plataforma },
     por_plano: { plano_49_90: pl.plano_49_90, plano_99_90: pl.plano_99_90, ativas: pl.ativas },
@@ -554,12 +561,12 @@ const cidadesClientes = async (req, res) => {
     const r = await pool.query(`
       SELECT ${sqlNormalizarCidade('u.cidade')} AS cidade, COUNT(*)::int AS total
         FROM usuarios u
-       WHERE ${SQL_PAPEIS_CLIENTE} AND btrim(COALESCE(u.cidade, '')) <> ''
+       WHERE ${SQL_CLIENTE_CONTADO} AND btrim(COALESCE(u.cidade, '')) <> ''
        GROUP BY 1
        ORDER BY total DESC, cidade`)
     const s = await pool.query(`
       SELECT COUNT(*)::int AS sem_cidade FROM usuarios u
-       WHERE ${SQL_PAPEIS_CLIENTE} AND btrim(COALESCE(u.cidade, '')) = ''`)
+       WHERE ${SQL_CLIENTE_CONTADO} AND btrim(COALESCE(u.cidade, '')) = ''`)
     res.json({ total_cidades: r.rows.length, sem_cidade: s.rows[0].sem_cidade, cidades: r.rows })
   } catch (err) {
     console.error('Erro nas cidades de clientes:', err.message)
@@ -625,6 +632,7 @@ const listarAssinantes = async (req, res) => {
       SELECT u.id, u.nome, u.email, u.telefone, u.cidade, u.bairro, u.role, u.cpf_cnpj,
              u.tipo_dono, u.tipo_prestador, u.verificacao_status, u.aprovado_automaticamente,
              u.referencias, u.especialidades, ${SQL_PLATAFORMA} AS plataforma, u.criado_em AS cadastrado_em,
+             u.desinstalado_em,
              a.status, a.plano, a.tipo, a.valor_mensal, a.criado_em,
              COUNT(*) OVER()::int AS _total
       FROM usuarios u

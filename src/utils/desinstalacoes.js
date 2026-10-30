@@ -47,4 +47,10 @@ const registrarReinstalacao = (usuarioId, db = pool) => {
   ).catch(err => console.error('[Desinstalacao] Erro ao registrar reinstalação:', err.message))
 }
 
-module.exports = { marcarDesinstalados, registrarReinstalacao }
+// Regra do dono: toda CONTAGEM de população do painel (cards, totais, cidades, planos,
+// plataformas, crescimento, nichos, adoção de versão) ignora a desinstalação provável. Listas
+// continuam trazendo essas contas, com desinstalado_em para o painel marcá-las. Não vale para
+// endpoints do app nem para público de notificação (quem desinstalou já não tem push_token).
+const sqlInstalado = (alias = 'u') => `${alias}.desinstalado_em IS NULL`
+
+module.exports = { marcarDesinstalados, registrarReinstalacao, sqlInstalado }
