@@ -39,6 +39,8 @@ const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZE
 // públicos (broadcastPaginado e reivindicarEmailsNovaDemanda). utils/gruposCategorias só importa
 // utils/supabase e utils/categoriasApp — sem ciclo.
 const { expandirCategoria } = require('../utils/gruposCategorias')
+// DeviceNotRegistered → desinstalação provável. utils/desinstalacoes só importa utils/supabase.
+const { marcarDesinstalados } = require('../utils/desinstalacoes')
 // Predicado único categoria × especialidades dos dois públicos: `param` = placeholder text[]
 // (NULL no lado obra = sem filtro). 'outros' na lista = todo profissional com ao menos uma
 // especialidade; senão, basta UMA especialidade em comum (&&). expandirCategoria só deixa
@@ -50,7 +52,8 @@ const sqlCasaCategorias = (param) =>
 const expo = new Expo()
 
 // Consulta os recibos de entrega (depois de um intervalo, pois o Expo processa a
-// entrega de forma assíncrona) e remove tokens reportados como DeviceNotRegistered.
+// entrega de forma assíncrona) e remove tokens reportados como DeviceNotRegistered,
+// marcando a desinstalação provável (removerTokensDesinstalados).
 // Recebe pares { ticket, pushToken } de tickets já confirmados como 'ok'.
 // É chamada em fire-and-forget — qualquer erro é apenas logado, nunca propagado.
 const processarRecibos = async (ticketsComToken, delayMs = 15000) => {
@@ -85,16 +88,18 @@ const processarRecibos = async (ticketsComToken, delayMs = 15000) => {
     }
   }
 
-  if (tokensInvalidos.size > 0) {
-    try {
-      await pool.query(
-        `UPDATE usuarios SET push_token = NULL WHERE push_token = ANY($1)`,
-        [[...tokensInvalidos]]
-      )
-      console.log(`[Push] ${tokensInvalidos.size} token(s) inválido(s) removido(s) (DeviceNotRegistered)`)
-    } catch (err) {
-      console.error('[Push] Erro ao remover tokens inválidos:', err.message)
-    }
+  await removerTokensDesinstalados([...tokensInvalidos])
+}
+
+// DeviceNotRegistered (recibo OU ticket): nula o token e marca a desinstalação provável
+// (utils/desinstalacoes). Nunca lança.
+const removerTokensDesinstalados = async (tokens) => {
+  if (tokens.length === 0) return
+  try {
+    const { removidos, novos } = await marcarDesinstalados(tokens)
+    console.log(`[Push] ${tokens.length} token(s) inválido(s) removido(s) (DeviceNotRegistered) | contas: ${removidos} | desinstalações novas: ${novos}`)
+  } catch (err) {
+    console.error('[Push] Erro ao remover tokens inválidos:', err.message)
   }
 }
 
@@ -123,6 +128,7 @@ const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}) => {
         '| detalhe:', ticket.details?.error || 'n/a',
         '→', pushToken.substring(0, 30)
       )
+      if (ticket.details?.error === 'DeviceNotRegistered') removerTokensDesinstalados([pushToken])
       return 'falha'
     }
     console.log('[Push] Enviado:', titulo, '→', pushToken.substring(0, 30))
@@ -174,6 +180,7 @@ const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}
   // Expo recomenda chunks de até 100 mensagens por chamada
   const chunks = expo.chunkPushNotifications(mensagens)
   const ticketsComToken = []
+  const tokensNaoRegistrados = []
   let offset = 0
   for (const chunk of chunks) {
     try {
@@ -189,6 +196,7 @@ const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}
             '| detalhe:', ticket.details?.error || 'n/a',
             '→', pushToken.substring(0, 30)
           )
+          if (ticket.details?.error === 'DeviceNotRegistered') tokensNaoRegistrados.push(pushToken)
         } else {
           alvo.resultado = 'enviado'
           ticketsComToken.push({ ticket, pushToken })
@@ -206,6 +214,8 @@ const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}
     processarRecibos(ticketsComToken).catch(err =>
       console.error('[Push] Erro no processamento de recibos:', err.message))
   }
+  // Fire-and-forget como os recibos: não atrasa o retorno ao broadcast.
+  removerTokensDesinstalados(tokensNaoRegistrados)
 
   return resultados
 }
