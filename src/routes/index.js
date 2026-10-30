@@ -9406,7 +9406,7 @@ router.get('/admin/desinstalacoes', autenticar, exigirAdmin, async (req, res) =>
       `SELECT to_char((d.detectado_em AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS data,
               d.detectado_em, d.plataforma, d.reinstalado_em,
               u.id AS usuario_id, u.nome, u.role, ${sqlTipoConta('u')} AS tipo, u.cidade, u.uf,
-              u.criado_em AS cadastro,
+              COALESCE(u.especialidades, '{}') AS especialidades, u.criado_em AS cadastro,
               floor(EXTRACT(EPOCH FROM (d.detectado_em - u.criado_em)) / 86400)::int AS dias_de_uso,
               (SELECT MAX(v.ultimo_em) FROM versoes_app_vistas v WHERE v.usuario_id = u.id) AS ultimo_acesso
          FROM desinstalacoes d
@@ -9425,7 +9425,7 @@ router.get('/admin/desinstalacoes', autenticar, exigirAdmin, async (req, res) =>
       if (l.reinstalado_em) totais.reinstalaram++
       dia.usuarios.push({
         usuario_id: l.usuario_id, nome: l.nome, role: l.role, tipo: l.tipo, cidade: l.cidade, uf: l.uf,
-        plataforma: l.plataforma, cadastro: l.cadastro, detectado_em: l.detectado_em,
+        especialidades: l.especialidades, plataforma: l.plataforma, cadastro: l.cadastro, detectado_em: l.detectado_em,
         dias_de_uso: l.dias_de_uso, ultimo_acesso: l.ultimo_acesso,
         reinstalou: !!l.reinstalado_em, reinstalado_em: l.reinstalado_em,
       })
