@@ -2332,6 +2332,7 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
             -- Mesmo re-armamento do lado obra (ver o comentário lá): sem isto o reparo volta
             -- ao feed com prazo novo e marcos velhos, e não recebe aviso de expiração nenhum.
             marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL,
+            escolha_aviso_24h_em = NULL, escolha_aviso_2h_em = NULL, escolha_expirou_em = NULL,
             pedido_tempo_status = NULL,
             pedido_tempo_motivo = NULL,
             pedido_tempo_minutos = NULL,
@@ -2480,6 +2481,7 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
             -- já gastos da PRIMEIRA vida e não recebia aviso nenhum na segunda — o candidato
             -- da query de marcos exige ao menos um marco NULL, então ela nem era varrida.
             marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL,
+            escolha_aviso_24h_em = NULL, escolha_aviso_2h_em = NULL, escolha_expirou_em = NULL,
             -- pedido_tempo_* zerados como o cron de reparos já fazia (D76): sem isto a obra
             -- voltava ao feed carregando o pedido de tempo do pintor que furou, e o próximo
             -- match nascia "aguardando aprovação" de alguém que já saiu.
