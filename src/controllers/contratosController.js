@@ -2,6 +2,8 @@ const { pool } = require('../utils/supabase')
 const { gerarContratoPDF } = require('../services/contratoService')
 const { enviarEmailComAnexo } = require('../services/brevoService')
 const { MARCA } = require('../utils/marca')
+// Valor acordado (contraproposta → proposta → pedido da demanda): fonte única, ver utils/valorAcordado.
+const { sqlValorAcordadoReparo, sqlValorAcordadoObra } = require('../utils/valorAcordado')
 // Rótulo (sem emoji) da categoria para o contrato — mesmo mapa que o push usa, cobrindo
 // reparos.categoria E obras.categoria. Slug vazio OU fora do mapa cai no padrão do
 // chamador: o contrato nunca imprime slug cru.
@@ -28,9 +30,9 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
   const prazoHoras = reparo.prazo_atendimento_horas
     ? Math.ceil(reparo.prazo_atendimento_horas * 1.2)
     : null
-  // Valor ACORDADO (D9), não a estimativa do dono: COALESCE(valor_contraproposta,
-  // valor_proposto) do interesse aceito, igual a /admin/finalizadas. Null (sem valor
-  // negociado) NÃO cai para valor_estimado — imprime "a combinar", nunca a estimativa.
+  // Valor ACORDADO (D9): sqlValorAcordadoReparo do interesse aceito, igual a
+  // /admin/finalizadas — contraproposta, proposta ou, se o prestador aceitou o valor como
+  // está (as duas NULL), o valor_estimado. Null só sem valor nenhum — imprime "a combinar".
   const valor = reparo.valor_acordado
   const marca = MARCA
 
@@ -143,9 +145,9 @@ const gerarContratoReparo = ({ dono, prestador, reparo }) => {
 // ============================================================
 const gerarContratoObra = ({ dono, prestador, obra, candidatura }) => {
   const prazoContrato = Math.ceil((obra.prazo_execucao_dias || 7) * 1.2)
-  // Valor ACORDADO (D9): COALESCE(valor_contraproposta, valor_proposto) da candidatura
-  // aceita, igual a /admin/finalizadas. Não usa mais valor_oferta nem o obra.valor (pedido
-  // do dono). Null NÃO cai para o pedido do dono — imprime "a combinar".
+  // Valor ACORDADO (D9): sqlValorAcordadoObra da candidatura aceita, igual a
+  // /admin/finalizadas — contraproposta, proposta ou, se o pintor aceitou o valor como está
+  // (as duas NULL), o obra.valor. Não usa valor_oferta. Null só sem valor nenhum — "a combinar".
   const valor = candidatura.valor_acordado
   const marca = MARCA
 
@@ -248,7 +250,7 @@ const enviarContratoReparo = async (reparoId) => {
                 WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
                   AND ir.status = 'aceito'
                 ORDER BY ir.criado_em DESC LIMIT 1) as interesse_id,
-              (SELECT COALESCE(ir.valor_contraproposta, ir.valor_proposto) FROM interesse_reparos ir
+              (SELECT ${sqlValorAcordadoReparo('ir', 'r')} FROM interesse_reparos ir
                 WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
                   AND ir.status = 'aceito'
                 ORDER BY ir.criado_em DESC LIMIT 1) as valor_acordado
@@ -357,7 +359,7 @@ const enviarContratoObra = async (candidaturaId) => {
   try {
     const result = await pool.query(
       `SELECT c.valor_oferta, c.mensagem_oferta,
-              COALESCE(c.valor_contraproposta, c.valor_proposto) as valor_acordado, o.*,
+              ${sqlValorAcordadoObra('c', 'o')} as valor_acordado, o.*,
               u_dono.nome  as dono_nome,  u_dono.email  as dono_email,
               u_dono.telefone  as dono_telefone,  u_dono.cpf_cnpj  as dono_cpf,
               u_dono.cidade  as dono_cidade,
