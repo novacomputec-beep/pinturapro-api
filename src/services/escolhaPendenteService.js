@@ -13,17 +13,20 @@ const { entregarPushEEmail, entregarLembrete, semSobreposicao } = require('./ale
 //       avisou na hora) e só fora das últimas 24h antes de expira_em (ali valem os avisos 2).
 //       Push a cada dia + no máx. 1 e-mail/dia (entregarLembrete → claim 'lembrete#AAAAMMDD'
 //       em email_alertas).
-//   (2) aviso ao dono 24h e 2h antes de expira_em (escolha_aviso_24h_em / _2h_em), bandas
-//       disjuntas (2h, 24h] e (0, 2h]; o de 2h grava também o de 24h. Só quando a demanda viveu
-//       mais que o marco (anúncio de 12h nunca recebe o "24h" no minuto em que surge o 1º
-//       interessado).
+//   (2) aviso ao dono 24h e 2h antes de expira_em (escolha_aviso_24h_em / _2h_em). Roda o de
+//       2h primeiro, e ele grava também o de 24h. Só quando a demanda viveu mais que o marco
+//       (anúncio de 12h nunca recebe o "24h" no minuto em que surge o 1º interessado).
+//       Silêncio 22:00–07:00 SP nos dois: o de 24h é ADIADO (banda (0, 24h], sai no 1º tique
+//       das 07:00 — o texto diz "menos de 2 horas" se já for o caso); o de 2h é PULADO quando o
+//       seu horário (expira_em − 2h) cai no silêncio, mesmo que o tique chegue depois das 07:00.
 //   (3) no vencimento (escolha_expirou_em): dono "Seu pedido expirou" e CADA interessado
-//       pendente "O cliente não escolheu a tempo". Só até EXPIROU_JANELA_HORAS depois de
-//       expira_em — vencidas antigas não recebem rajada no deploy. O interesse segue 'pendente':
-//       o dono ainda pode aceitar, e estendendo o prazo a demanda volta ao feed.
+//       pendente "O cliente não escolheu a tempo". Silêncio 22:00–07:00 SP: adiado para o 1º
+//       tique das 07:00. Só até EXPIROU_JANELA_HORAS depois de expira_em — vencidas antigas não
+//       recebem rajada no deploy (a noite inteira cabe nessa janela). O interesse segue
+//       'pendente': o dono ainda pode aceitar, e estendendo o prazo a demanda volta ao feed.
 //   (4) avisarPrazoEstendido — chamada por POST /…/estender quando a demanda já tinha passado
 //       por (3): cada interessado pendente sabe que o prazo foi aumentado e o interesse vale.
-// (2) e (3) são eventos críticos: push + e-mail sempre (entregarPushEEmail), sem silêncio. O
+// (2) e (3) são eventos críticos: push + e-mail sempre (entregarPushEEmail). O
 // expira_em entra em `data` para o dedupe do e-mail (hash de título+corpo+data) distinguir um
 // ciclo do outro depois de uma extensão.
 // Sem sobreposição com os marcos "Aumente o prazo" (verificarMarcosExpiracao) nem com o baixo
@@ -52,6 +55,11 @@ const sqlPendenteMaisAntigo = (lado) => `(SELECT min(x.criado_em) FROM ${lado.in
 const SQL_BASE = (lado) => `d.status = 'aberta' AND d.match_usuario_id IS NULL ${lado.aprovacao}`
 const SQL_HORA_SP = `EXTRACT(HOUR FROM (NOW() AT TIME ZONE '${TZ_AGENDA}'))`
 const SQL_FORA_SILENCIO = `${SQL_HORA_SP} >= 7 AND ${SQL_HORA_SP} < 22`
+// O mesmo teste para um instante qualquer (o horário "devido" do aviso de 2h).
+const sqlForaSilencioEm = (instante) => {
+  const h = `EXTRACT(HOUR FROM ((${instante}) AT TIME ZONE '${TZ_AGENDA}'))`
+  return `${h} >= 7 AND ${h} < 22`
+}
 const RETORNO = (lado) => `d.id, d.titulo, d.criado_por, d.expira_em, ${sqlPendentes(lado)} AS pendentes,
              u.push_token, u.email, u.nome`
 
@@ -87,26 +95,31 @@ const lembrarDiario = async (lado) => {
 }
 
 const MARCOS = [
-  // Ordem importa: o de 2h roda antes e grava também o de 24h.
-  { nome: '2h',  rotulo: '2 horas',  min: '0 hours', max: '2 hours',  set: 'escolha_aviso_2h_em = NOW(), escolha_aviso_24h_em = COALESCE(d.escolha_aviso_24h_em, NOW())', col: 'escolha_aviso_2h_em' },
-  { nome: '24h', rotulo: '24 horas', min: '2 hours', max: '24 hours', set: 'escolha_aviso_24h_em = NOW()', col: 'escolha_aviso_24h_em' },
+  // Ordem importa: o de 2h roda antes e grava também o de 24h. O de 2h exige que o seu horário
+  // devido esteja fora do silêncio (senão é pulado de vez); o de 24h só exige o AGORA fora do
+  // silêncio (adiado), e a banda dele vai até 0 para o adiado ainda sair de manhã.
+  { nome: '2h',  max: '2 hours',  set: 'escolha_aviso_2h_em = NOW(), escolha_aviso_24h_em = COALESCE(d.escolha_aviso_24h_em, NOW())', col: 'escolha_aviso_2h_em',
+    silencio: `${SQL_FORA_SILENCIO} AND ${sqlForaSilencioEm(`d.expira_em - INTERVAL '2 hours'`)}` },
+  { nome: '24h', max: '24 hours', set: 'escolha_aviso_24h_em = NOW()', col: 'escolha_aviso_24h_em', silencio: SQL_FORA_SILENCIO },
 ]
+const rotuloRestante = (restanteMin) => (Number(restanteMin) <= 120 ? '2 horas' : '24 horas')
 const avisarAntesDeExpirar = async (lado) => {
   for (const m of MARCOS) {
     const claim = await pool.query(`
       UPDATE ${lado.tabela} d SET ${m.set}
         FROM usuarios u
        WHERE u.id = d.criado_por AND ${SQL_BASE(lado)}
-         AND d.expira_em > NOW() + INTERVAL '${m.min}' AND d.expira_em <= NOW() + INTERVAL '${m.max}'
+         AND d.expira_em > NOW() AND d.expira_em <= NOW() + INTERVAL '${m.max}'
          AND d.expira_em - ${lado.ancora} > INTERVAL '${m.max}'
          AND d.${m.col} IS NULL
          AND ${sqlPendentes(lado)} > 0
-   RETURNING ${RETORNO(lado)}`)
+         AND ${m.silencio}
+   RETURNING ${RETORNO(lado)}, EXTRACT(EPOCH FROM (d.expira_em - NOW())) / 60 AS restante_min`)
     for (const d of claim.rows) {
       const via = await entregarPushEEmail({
         usuario_id: d.criado_por, push_token: d.push_token, email: d.email, nome: d.nome,
         titulo: '⏰ Seu pedido vai expirar',
-        corpo: `"${d.titulo}" expira em menos de ${m.rotulo} e ${profissionais(d.pendentes)} sua escolha. Escolha um profissional ou aumente o prazo.`,
+        corpo: `"${d.titulo}" expira em menos de ${rotuloRestante(d.restante_min)} e ${profissionais(d.pendentes)} sua escolha. Escolha um profissional ou aumente o prazo.`,
         data: dataDono(lado, `${lado.prefixoDono}_escolha_${m.nome}`, d),
         rotulo: `escolha pendente ${m.nome} ${lado.tabela} ${d.id}`,
       })
@@ -123,6 +136,7 @@ const avisarExpirou = async (lado) => {
        AND d.expira_em <= NOW() AND d.expira_em > NOW() - INTERVAL '${EXPIROU_JANELA_HORAS} hours'
        AND d.escolha_expirou_em IS NULL
        AND ${sqlPendentes(lado)} > 0
+       AND ${SQL_FORA_SILENCIO}
  RETURNING ${RETORNO(lado)}`)
   for (const d of claim.rows) {
     const via = await entregarPushEEmail({
