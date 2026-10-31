@@ -7,6 +7,8 @@ const { pool } = require('../utils/supabase')
 const { MARCA } = require('../utils/marca')
 // Valor acordado (contraproposta → proposta → pedido da demanda): fonte única, ver utils/valorAcordado.
 const { sqlValorAcordadoReparo, sqlValorAcordadoObra } = require('../utils/valorAcordado')
+// Ao estender uma demanda que já tinha vencido com interessados pendentes, avisa esses interessados.
+const { avisarPrazoEstendido } = require('../services/escolhaPendenteService')
 const authCtrl         = require('../controllers/authController')
 const obrasCtrl        = require('../controllers/obrasController')
 const candidaturasCtrl = require('../controllers/candidaturasController')
@@ -577,6 +579,14 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_1_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_2_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS marco_3_em TIMESTAMPTZ`)
+    // Claims dos avisos de "escolha pendente" (services/escolhaPendenteService): lembrete diário
+    // ao dono, avisos 24h/2h antes de expira_em e aviso de vencimento. Os três últimos são
+    // zerados junto com marco_N_em (estender e devolução ao feed); o diário não (é por dia).
+    for (const t of ['reparos', 'obras']) {
+      for (const c of ['escolha_lembrete_em', 'escolha_aviso_24h_em', 'escolha_aviso_2h_em', 'escolha_expirou_em']) {
+        await client.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS ${c} TIMESTAMPTZ`)
+      }
+    }
     // Idempotência de POST /reparos/:id/estender e de POST /obras/:id/estender — nenhum dos dois
     // tem client_request_id, então a chave de dedupe é a própria última extensão aplicada:
     // (instante, horas). Um retry com o MESMO horas dentro da janela curta devolve o prazo atual em
@@ -3055,16 +3065,21 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
     // colunas NULL: sem ele a comparação vira NULL, o NOT propaga NULL e o UPDATE não aplicaria a
     // PRIMEIRA extensão. Fail-open é o lado certo: na dúvida, estende.
     const upd = await pool.query(
+      // a.expirou_antes: escolha_expirou_em ANTES deste UPDATE zerá-lo (o RETURNING de obras já
+      // veria NULL) — decide se os interessados pendentes recebem "prazo aumentado".
       `UPDATE obras SET expira_em = $1,
          marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL,
+         escolha_aviso_24h_em = NULL, escolha_aviso_2h_em = NULL, escolha_expirou_em = NULL,
          ultima_extensao_em = NOW(), ultima_extensao_horas = $5::numeric
-       WHERE id = $2 AND criado_por = $3
+       FROM (SELECT id, escolha_expirou_em IS NOT NULL AS expirou_antes FROM obras WHERE id = $2) a
+       WHERE obras.id = a.id AND obras.id = $2 AND criado_por = $3
          AND NOT COALESCE(
                ultima_extensao_em > NOW() - ($4::numeric * INTERVAL '1 minute')
                AND ultima_extensao_horas = $5::numeric, FALSE)
-       RETURNING expira_em`,
+       RETURNING obras.expira_em, a.expirou_antes`,
       [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id, DEDUPE_ESTENDER_OBRA_MINUTOS, horas]
     )
+    if (upd.rows[0]?.expirou_antes) avisarPrazoEstendido('obras', req.params.id, req.usuario.id)
 
     // rowCount = 0 → o predicado de dedupe barrou (retry do mesmo horas na janela). Não é erro: o
     // cliente pediu um estado que o servidor já tem, então devolve o prazo ATUAL como sucesso, com
@@ -4387,16 +4402,20 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
     // colunas NULL: sem ele a comparação vira NULL, o NOT propaga NULL e o UPDATE não aplicaria a
     // PRIMEIRA extensão. Fail-open é o lado certo: na dúvida, estende.
     const upd = await pool.query(
+      // a.expirou_antes: ver POST /obras/:id/estender.
       `UPDATE reparos SET expira_em = $1,
          marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL,
+         escolha_aviso_24h_em = NULL, escolha_aviso_2h_em = NULL, escolha_expirou_em = NULL,
          ultima_extensao_em = NOW(), ultima_extensao_horas = $5::numeric
-       WHERE id = $2 AND criado_por = $3
+       FROM (SELECT id, escolha_expirou_em IS NOT NULL AS expirou_antes FROM reparos WHERE id = $2) a
+       WHERE reparos.id = a.id AND reparos.id = $2 AND criado_por = $3
          AND NOT COALESCE(
                ultima_extensao_em > NOW() - ($4::numeric * INTERVAL '1 minute')
                AND ultima_extensao_horas = $5::numeric, FALSE)
-       RETURNING expira_em`,
+       RETURNING reparos.expira_em, a.expirou_antes`,
       [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id, DEDUPE_ESTENDER_REPARO_MINUTOS, horas]
     )
+    if (upd.rows[0]?.expirou_antes) avisarPrazoEstendido('reparos', req.params.id, req.usuario.id)
 
     // rowCount = 0 → o predicado de dedupe barrou (retry do mesmo horas na janela). Não é erro: o
     // cliente pediu um estado que o servidor já tem, então devolve o prazo ATUAL como sucesso, com
