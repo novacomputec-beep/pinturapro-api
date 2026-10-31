@@ -5,6 +5,8 @@ const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa
 const { registrarVisita } = require('../utils/visitas')
 const { pool } = require('../utils/supabase')
 const { MARCA } = require('../utils/marca')
+// Valor acordado (contraproposta → proposta → pedido da demanda): fonte única, ver utils/valorAcordado.
+const { sqlValorAcordadoReparo, sqlValorAcordadoObra } = require('../utils/valorAcordado')
 const authCtrl         = require('../controllers/authController')
 const obrasCtrl        = require('../controllers/obrasController')
 const candidaturasCtrl = require('../controllers/candidaturasController')
@@ -2446,7 +2448,7 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
           ORDER BY c.criado_em DESC, c.id DESC
           LIMIT 1) as candidatura_pendente_recente_id,
         (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa,
-        (SELECT COALESCE(c.valor_contraproposta, c.valor_proposto)
+        (SELECT ${sqlValorAcordadoObra('c', 'o')}
            FROM candidaturas c
           WHERE c.obra_id = o.id AND c.usuario_id = o.match_usuario_id
           LIMIT 1) as valor_acordado
@@ -2484,7 +2486,7 @@ router.get('/obras/meus-contratos', autenticar, async (req, res) => {
               o.match_feito_em, o.status,
               u.id AS dono_id, u.nome AS dono_nome, u.telefone AS dono_telefone,
               (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) AS foto_capa,
-              COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado,
+              ${sqlValorAcordadoObra('c', 'o')} AS valor_acordado,
               EXISTS (
                 SELECT 1 FROM avaliacoes a
                 WHERE a.contrato_tipo = 'obra' AND a.contrato_id = o.id AND a.avaliador_id = $1
@@ -2526,7 +2528,7 @@ router.get('/obras/meus-contratos-dono', autenticar, async (req, res) => {
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
               u.logradouro, u.numero, u.bairro,
               (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) AS foto_capa,
-              COALESCE(c.valor_contraproposta, c.valor_proposto) AS valor_acordado,
+              ${sqlValorAcordadoObra('c', 'o')} AS valor_acordado,
               EXISTS (
                 SELECT 1 FROM avaliacoes a
                 WHERE a.contrato_tipo = 'obra' AND a.contrato_id = o.id AND a.avaliador_id = $1
@@ -4095,7 +4097,7 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
           ORDER BY ir.criado_em DESC, ir.id DESC
           LIMIT 1) as interesse_pendente_recente_id,
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa,
-        (SELECT COALESCE(ir.valor_contraproposta, ir.valor_proposto)
+        (SELECT ${sqlValorAcordadoReparo('ir', 'r')}
            FROM interesse_reparos ir
           WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
           LIMIT 1) as valor_acordado
@@ -4626,7 +4628,7 @@ router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
               r.match_feito_em, r.status,
               u.id AS dono_id, u.nome AS dono_nome, u.telefone AS dono_telefone,
               (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) AS foto_capa,
-              COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado,
+              ${sqlValorAcordadoReparo('ir', 'r')} AS valor_acordado,
               EXISTS (
                 SELECT 1 FROM avaliacoes a
                 WHERE a.contrato_tipo = 'reparo' AND a.contrato_id = r.id AND a.avaliador_id = $1
@@ -4662,7 +4664,7 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
               u.logradouro, u.numero, u.bairro,
               (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) AS foto_capa,
-              COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado,
+              ${sqlValorAcordadoReparo('ir', 'r')} AS valor_acordado,
               EXISTS (
                 SELECT 1 FROM avaliacoes a
                 WHERE a.contrato_tipo = 'reparo' AND a.contrato_id = r.id AND a.avaliador_id = $1
@@ -8886,13 +8888,13 @@ router.post('/admin/respostas-equipe', autenticar, exigirAdmin, async (req, res)
 // trabalho de moderação, então 'aprovador' entra. Nada aqui escreve — é só leitura.
 // Paginação pelo helper compartilhado paginacaoAdmin, sem cópia nova.
 //
-// valor_acordado sai do PROPOSTA ACEITA, nunca de obras.valor / reparos.valor_estimado:
-// essas duas são o orçamento/estimativa de quem PUBLICOU a demanda, não o preço de
-// fechamento. A convenção do repo para o número final é COALESCE(valor_contraproposta,
-// valor_proposto) — contraproposta quando houve negociação, proposta original quando não —
-// vinda de candidaturas (obras) e interesse_reparos (reparos), sempre em status='aceito'.
+// valor_acordado sai da PROPOSTA ACEITA (utils/valorAcordado): COALESCE(valor_contraproposta,
+// valor_proposto, pedido) — contraproposta quando houve negociação, proposta quando não, e o
+// pedido da demanda (obras.valor / reparos.valor_estimado) quando o profissional aceitou o
+// valor como está (proposta e contraproposta NULL). Vem de candidaturas (obras) e
+// interesse_reparos (reparos), sempre em status='aceito'.
 // Os JOINs são LEFT de propósito: demanda encerrada SEM aceite registrado continua na
-// lista, com valor_acordado NULL. Sumir com a linha esconderia justamente o caso
+// lista, com valor_acordado NULL (o pedido só entra quando há proposta aceita). Sumir com a linha esconderia justamente o caso
 // interessante (encerrou sem fechar preço), e a contagem de finalizadas passaria a
 // discordar do total real.
 // Não há risco de a linha duplicar por dois aceites: candidaturas_aceito_unica_idx e
@@ -8928,7 +8930,7 @@ const SQL_FINALIZADAS = `
          NULL AS prazo_atendimento_horas,
          d.nome AS dono_nome, d.email AS dono_email, d.telefone AS dono_telefone,
          u.nome AS profissional_nome,
-         COALESCE(cd.valor_contraproposta, cd.valor_proposto) AS valor_acordado
+         ${sqlValorAcordadoObra('cd', 'o')} AS valor_acordado
     FROM obras o
     LEFT JOIN usuarios d      ON d.id = o.criado_por
     LEFT JOIN usuarios u      ON u.id = o.match_usuario_id
@@ -8940,7 +8942,7 @@ const SQL_FINALIZADAS = `
          r.prazo_atendimento_horas,
          d.nome AS dono_nome, d.email AS dono_email, d.telefone AS dono_telefone,
          u.nome AS profissional_nome,
-         COALESCE(ir.valor_contraproposta, ir.valor_proposto) AS valor_acordado
+         ${sqlValorAcordadoReparo('ir', 'r')} AS valor_acordado
     FROM reparos r
     LEFT JOIN usuarios d           ON d.id = r.criado_por
     LEFT JOIN usuarios u           ON u.id = r.match_usuario_id
