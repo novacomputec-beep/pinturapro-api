@@ -1358,6 +1358,32 @@ const migracaoPronta = (async () => {
     // Índice PARCIAL só do que a rede de segurança procura: falhas ainda repescáveis. A PK
     // cobre o lookup por demanda; este evita varrer as linhas 'enviado' (a maioria).
     await client.query(`CREATE INDEX IF NOT EXISTS push_entregas_falha_idx ON push_entregas (tipo, demanda_id, ultima_tentativa_em) WHERE resultado = 'falha' AND tentativas < 3`)
+    // Diagnóstico de push (utils/pushRecibos): uma linha por mensagem enviada ao Expo, com o
+    // ticket do envio e o recibo consultado ~15 s depois (processarRecibos). Só observação —
+    // nada no envio lê esta tabela. tipo = data.tipo do push; demanda_id = reparo_id/obra_id
+    // (polimórfico, sem FK, como push_entregas). status_ticket 'erro_http' = a chamada ao Expo
+    // estourou (sem ticket). Poda de 30 dias no cron diário.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS push_recibos (
+        id            BIGSERIAL PRIMARY KEY,
+        usuario_id    UUID REFERENCES usuarios(id) ON DELETE CASCADE,
+        tipo          TEXT,
+        demanda_id    UUID,
+        ticket_id     TEXT,
+        enviado_em    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        status_ticket TEXT,
+        erro_ticket   TEXT,
+        status_recibo TEXT,
+        erro_recibo   TEXT,
+        recibo_em     TIMESTAMPTZ
+      )
+    `)
+    await client.query(`CREATE INDEX IF NOT EXISTS push_recibos_demanda_idx ON push_recibos (demanda_id, enviado_em)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS push_recibos_usuario_idx ON push_recibos (usuario_id, enviado_em)`)
+    // O UPDATE do recibo procura por ticket_id; parcial porque ticket com erro não tem id.
+    await client.query(`CREATE INDEX IF NOT EXISTS push_recibos_ticket_idx ON push_recibos (ticket_id) WHERE ticket_id IS NOT NULL`)
+    // A poda diária varre por idade.
+    await client.query(`CREATE INDEX IF NOT EXISTS push_recibos_enviado_idx ON push_recibos (enviado_em)`)
     // E-mail do aviso "nova obra / novo serviço" (alertaService.enviarEmailsNovaDemanda): vai a
     // TODO prestador elegível do broadcast, com ou sem push_token (desde 28/10/2026; antes só
     // a quem não tinha token). Lembrete/reanúncio seguem só para quem não tem token.

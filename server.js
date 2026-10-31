@@ -29,6 +29,8 @@ const { autoAceitarPedidosAtraso, avisarAtrasados } = require('./src/services/at
 // Poda de links de assinatura pela web nunca usados (> 7 dias) — mesmo agendamento diário
 // de limparTentativasAntigas, sem mecanismo novo.
 const { limparLinksAssinaturaAntigos } = require('./src/controllers/assinaturaLinkController')
+// Poda de 30 dias do diagnóstico de push (push_recibos) — mesmo agendamento diário.
+const { purgarPushRecibosAntigos } = require('./src/utils/pushRecibos')
 // Mesmo caminho de e-mail do reset/link de assinatura (SMTP/nodemailer do authController).
 const { transporter } = require('./src/controllers/authController')
 const { MARCA } = require('./src/utils/marca')
@@ -781,6 +783,7 @@ const iniciarAgendador = () => {
     deletarMidiasAntigas()
     limparTentativasAntigas()
     limparLinksAssinaturaAntigos()
+    purgarPushRecibosAntigos()
   }, 60 * 1000)
 
   setInterval(() => { verificarObrasComBaixoEngajamento() }, INTERVALO_ENGAJAMENTO)
@@ -818,7 +821,7 @@ const iniciarAgendador = () => {
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
   // Poda das tentativas de auth: a tabela acumula linhas de e-mails inexistentes, que é o
   // preço de contar TODOS (o que fecha o oráculo de existência de conta).
-  setInterval(() => { limparTentativasAntigas(); limparLinksAssinaturaAntigos() }, 24 * 60 * 60 * 1000)
+  setInterval(() => { limparTentativasAntigas(); limparLinksAssinaturaAntigos(); purgarPushRecibosAntigos() }, 24 * 60 * 60 * 1000)
   setInterval(() => { expirarAssinaturasVencidas() }, 60 * 60 * 1000)
   // Suspensões por contato (7 dias) vencidas: de hora em hora, como a expiração de assinatura —
   // a folga de até 1h num prazo de 7 dias é irrelevante. Fora do warm-up: a próxima hora pega.
