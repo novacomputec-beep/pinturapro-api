@@ -41,6 +41,8 @@ const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZE
 const { expandirCategoria } = require('../utils/gruposCategorias')
 // DeviceNotRegistered → desinstalação provável. utils/desinstalacoes só importa utils/supabase.
 const { marcarDesinstalados } = require('../utils/desinstalacoes')
+// Diagnóstico: ticket e recibo de cada push em push_recibos. Fire-and-forget, nunca lança.
+const { registrarTickets, registrarRecibos } = require('../utils/pushRecibos')
 // Predicado único categoria × especialidades dos dois públicos: `param` = placeholder text[]
 // (NULL no lado obra = sem filtro). 'outros' na lista = todo profissional com ao menos uma
 // especialidade; senão, basta UMA especialidade em comum (&&). expandirCategoria só deixa
@@ -74,6 +76,7 @@ const processarRecibos = async (ticketsComToken, delayMs = 15000) => {
   for (const chunk of idChunks) {
     try {
       const receipts = await expo.getPushNotificationReceiptsAsync(chunk)
+      registrarRecibos(receipts)
       for (const [receiptId, receipt] of Object.entries(receipts)) {
         if (receipt.status === 'error') {
           const erro = receipt.details?.error
@@ -106,21 +109,29 @@ const removerTokensDesinstalados = async (tokens) => {
 // Nunca lança. Devolve 'enviado' (ticket ok), 'falha' (ticket 'error' ou exceção) ou
 // 'invalido' (token ausente/não-Expo) — os chamadores antigos ignoram o retorno; a reserva de
 // e-mail (entregarPushOuEmail) usa-o para decidir se ainda precisa mandar o e-mail.
-const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}) => {
+// usuarioId (opcional) só identifica a linha de diagnóstico em push_recibos.
+const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}, usuarioId = null) => {
   if (!Expo.isExpoPushToken(pushToken)) {
     console.warn('[Push] Token inválido ou ausente:', pushToken ? pushToken.substring(0, 30) : 'null')
     return 'invalido'
   }
   try {
-    const tickets = await expo.sendPushNotificationsAsync([{
-      to: pushToken,
-      sound: 'default',
-      channelId: 'default_v3',
-      title: titulo,
-      body: corpo,
-      data,
-    }])
+    let tickets
+    try {
+      tickets = await expo.sendPushNotificationsAsync([{
+        to: pushToken,
+        sound: 'default',
+        channelId: 'default_v3',
+        title: titulo,
+        body: corpo,
+        data,
+      }])
+    } catch (err) {
+      registrarTickets([{ usuarioId, pushToken, data, erroEnvio: err.message }])
+      throw err
+    }
     const ticket = tickets[0]
+    registrarTickets([{ usuarioId, pushToken, data, ticket }])
     if (ticket && ticket.status === 'error') {
       console.error(
         '[Push] Falha no envio:', titulo,
@@ -185,6 +196,9 @@ const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}
   for (const chunk of chunks) {
     try {
       const tickets = await expo.sendPushNotificationsAsync(chunk)
+      registrarTickets(tickets.map((ticket, i) => ({
+        usuarioId: destinatarios[validos[offset + i]].id, pushToken: chunk[i].to, data: chunk[i].data, ticket,
+      })))
       tickets.forEach((ticket, i) => {
         const alvo = resultados[validos[offset + i]]
         const pushToken = chunk[i].to
@@ -205,6 +219,9 @@ const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}
     } catch (err) {
       // Chunk inteiro sem resposta: todo mundo dele é 'falha' (e agora fica registrado).
       for (let i = 0; i < chunk.length; i++) resultados[validos[offset + i]].resultado = 'falha'
+      registrarTickets(chunk.map((m, i) => ({
+        usuarioId: destinatarios[validos[offset + i]].id, pushToken: m.to, data: m.data, erroEnvio: err.message,
+      })))
       console.error('Erro ao enviar chunk de notificações:', err)
     }
     offset += chunk.length
@@ -1309,7 +1326,7 @@ const entregarPushOuEmail = async ({ usuario_id, ator_id, push_token, email, nom
   if (ehOProprioAutor({ usuario_id, ator_id, rotulo })) return 'autor'
   try {
     if (push_token) {
-      const r = await enviarPushNotificacao(push_token, titulo, corpo, data)
+      const r = await enviarPushNotificacao(push_token, titulo, corpo, data, usuario_id)
       if (r === 'enviado') return 'push'
     }
     const destino = String(email || '').trim()
@@ -1354,7 +1371,7 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
   const vias = []
   try {
     if (push_token) {
-      const r = await enviarPushNotificacao(push_token, titulo, corpo, data)
+      const r = await enviarPushNotificacao(push_token, titulo, corpo, data, usuario_id)
       if (r === 'enviado') vias.push('push')
     }
     const destino = String(email || '').trim()
