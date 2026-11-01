@@ -1366,7 +1366,9 @@ const UUID_RE_AVISO = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const hash8 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 8)
 const FMT_DIA_SP = new Intl.DateTimeFormat('en-CA', { timeZone: TZ_AGENDA, year: 'numeric', month: '2-digit', day: '2-digit' })
 const diaSP = (agora = new Date()) => FMT_DIA_SP.format(agora).replace(/-/g, '')
-const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, data, rotulo, lembrete = false }) => {
+// corpoEmail (opcional): texto do e-mail quando precisa diferir do push (ex.: o caminho no app,
+// que no push é o próprio toque). Sem ele, o e-mail repete o corpo do push.
+const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, corpoEmail, data, rotulo, lembrete = false }) => {
   if (ehOProprioAutor({ usuario_id, ator_id, rotulo })) return 'autor'
   const vias = []
   try {
@@ -1393,7 +1395,7 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
       )
       if (claim.rowCount === 0) { vias.push('e-mail já enviado'); return vias.join('+') }
     }
-    await comTimeout(enviarEmailBrevo({ para: destino, assunto: titulo, texto: textoEmailAviso(nome, titulo, corpo) }), EMAIL_ALERTAS_TIMEOUT_MS, `Brevo ${rotulo}`)
+    await comTimeout(enviarEmailBrevo({ para: destino, assunto: titulo, texto: textoEmailAviso(nome, titulo, corpoEmail || corpo) }), EMAIL_ALERTAS_TIMEOUT_MS, `Brevo ${rotulo}`)
     vias.push('e-mail')
     return vias.join('+')
   } catch (err) {
