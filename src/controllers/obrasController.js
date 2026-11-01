@@ -8,6 +8,7 @@ const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra } = require('../utils/totalExtensao')
 const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { sqlNaoDemandaPropria } = require('../utils/demandaPropria')
+const { mascararLista } = require('../utils/tentativasContato')
 
 const listar = async (req, res) => {
   try {
@@ -103,8 +104,10 @@ const listar = async (req, res) => {
 
     const result = await pool.query(query, params)
 
+    // Título mascarado na leitura (linha antiga, gravada antes do filtro de contato) — o mesmo
+    // tratamento de GET /obras/:id. Só o título sai no card do feed.
     res.json({
-      obras: result.rows,
+      obras: mascararLista(result.rows, ['titulo']),
       pagina: parseInt(page),
       total: result.rows.length,
       filtro: filtroMeta,
