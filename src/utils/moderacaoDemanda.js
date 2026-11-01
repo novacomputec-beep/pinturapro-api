@@ -46,13 +46,17 @@ const RE_EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/gi
 // @ + qualquer handle (1+ chars até espaço/pontuação de frase): "@jo", "@joão_pinta", "@a.b".
 const RE_HANDLE = /(?<![\w.])@[^\s@,;!?()[\]"']+/g
 const RE_URL = /\bhttps?:\/\/\S+|\bwww\.\S+/gi
-// Domínio nu: palavra.palavra com TLD de 2–6 LETRAS minúsculas ("casa.xyz", "t.me", "loja.com.br",
-// "meusite.online/x"). O rótulo antes do TLD precisa ter letra ("1.500.mil" não é domínio) e o
-// TLD é case-sensitive de propósito: "fim da obra.Preciso de..." (ponto sem espaço + maiúscula)
-// não vira contato. Abreviações comuns em ABREVIACOES ficam de fora ("p.ex").
-const RE_DOMINIO = /\b(?:[A-Za-z0-9-]+\.)*[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*\.[a-z]{2,6}\b(?:\/\S*)?/g
-const ABREVIACOES = new Set(['p.ex', 'a.c', 'd.c', 'e.g', 'i.e', 'etc.etc'])
-const ehDominio = (m) => !ABREVIACOES.has(m.toLowerCase().replace(/\/.*$/, ''))
+// Domínio nu: palavra.palavra com TLD de uma LISTA FECHADA de terminações reais ("casa.xyz",
+// "t.me", "loja.com.br", "meusite.online/x"). Lista fechada de propósito: quem escreve sem
+// espaço depois do ponto ("amanha.pode", "ok.valeu", "obra.hoje") não vira contato. O rótulo
+// antes do TLD precisa ter letra ("1.500.mil" não é domínio). Compostos (.com.br) antes dos
+// simples; "eu"/"ai"/"us" ficam de fora por serem palavras do português.
+const TLDS = [
+  'com.br', 'net.br', 'org.br', 'art.br', 'eng.br', 'adv.br', 'arq.br', 'eco.br', 'emp.br', 'ind.br', 'srv.br', 'blog.br', 'tv.br', 'app.br', 'dev.br',
+  'com', 'net', 'org', 'br', 'app', 'io', 'me', 'bio', 'link', 'site', 'shop', 'online', 'pro', 'xyz', 'info', 'store', 'tv', 'co', 'dev',
+  'blog', 'top', 'club', 'digital', 'tech', 'art', 'page', 'live', 'cloud', 'space', 'web', 'website', 'vip', 'bet', 'pics', 'pt', 'uk',
+]
+const RE_DOMINIO = new RegExp(`\\b(?:[a-z0-9-]+\\.)*[a-z0-9-]*[a-z][a-z0-9-]*\\.(?:${TLDS.map(t => t.replace('.', '\\.')).join('|')})\\b(?:\\/\\S*)?`, 'gi')
 // "chame no whatsapp", "me chama no zap", "manda mensagem no direct", "fale pelo insta",
 // "whatsapp:" / "zap:" — acentos opcionais no próprio padrão (texto não dobrado).
 const CANAIS = '(?:whats\\s?app|whats|wpp|zap|direct|insta(?:gram)?|telegram|messenger|dm)'
@@ -93,7 +97,7 @@ const removerContatos = (texto) => {
   t = t.replace(RE_EMAIL, MARCA_CONTATO)
   t = t.replace(RE_HANDLE, MARCA_CONTATO)
   t = t.replace(RE_URL, MARCA_CONTATO)
-  t = t.replace(RE_DOMINIO, (m) => (ehDominio(m) ? MARCA_CONTATO : m))
+  t = t.replace(RE_DOMINIO, MARCA_CONTATO)
   t = t.replace(RE_CHAME, MARCA_CONTATO)
   t = t.replace(RE_CANAL_NUMERO, (m) => (contarDigitos(m) >= 6 ? MARCA_CONTATO : m))
   t = t.replace(RE_CANAL_DOIS_PONTOS, MARCA_CONTATO)
@@ -116,7 +120,7 @@ const sanitizarTexto = (v) => (typeof v === 'string' ? removerContatos(v) : v)
 // search() ignora o lastIndex dos regex /g; match() idem.
 const temContatoClaro = (v) => {
   if (typeof v !== 'string' || !v) return false
-  if (v.search(RE_EMAIL) >= 0 || v.search(RE_URL) >= 0 || (v.match(RE_DOMINIO) || []).some(ehDominio)) return true
+  if (v.search(RE_EMAIL) >= 0 || v.search(RE_URL) >= 0 || v.search(RE_DOMINIO) >= 0) return true
   if ((v.match(RE_CANAL_NUMERO) || []).some(m => contarDigitos(m) >= 6)) return true
   return (v.match(RE_TELEFONE) || []).some(ehTelefone)
 }

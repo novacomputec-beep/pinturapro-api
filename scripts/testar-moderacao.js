@@ -40,6 +40,16 @@ const casos = [
   ['nº 1234, apto 5', false],
   ['Preço 1.500 por 2 dias', false],
   ['dois quartos e uma sala', false],
+  // ponto sem espaço (usuário com pouca letra) — fora da lista fechada de TLDs
+  ['amanha.pode ser?', false],
+  ['ok.valeu', false],
+  ['vou ver a obra.hoje a tarde', false],
+  ['fiz o reboco.falta pintar', false],
+  ['sim.eu posso ir', false],
+  ['ta bom.me avisa', true], // ".me" é TLD real (t.me): limite aceito, mascara
+  ['pintor.pro', true],
+  ['loja.net.br/joao', true],
+  ['CASA.COM', true],
 ]
 
 // [anteriores], nova, espera
@@ -53,6 +63,11 @@ const partidos = [
   [[], '34 9988', false],
   [['R$ 4.500 à vista'], 'ou 10 x 450', false],
   [['Entrega 15/11 às 14h'], 'até 20/11 às 18:30', false],
+  // O corte "só as 2 últimas mensagens do autor, últimas 24h" é feito no SQL
+  // (routes/index.js textosAnterioresAutor) e não entra aqui; estes simulam o que chega:
+  [['Tenho 12 portas', 'e 20 janelas'], 'mais 25 tomadas', false], // 2 últimas legítimas: 6 dígitos
+  [['34 99'], '881 7102', true],                                    // 2 últimas dentro das 24h: mascara
+  [['e 20 janelas'], 'fica uns 450 metros no total', false],        // unidade depois do número: fora
 ]
 
 let falhas = 0

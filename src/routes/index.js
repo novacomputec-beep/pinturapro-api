@@ -3287,20 +3287,28 @@ const lerTextoPergunta = (valor, campo, max) => {
 // mensagens ANTERIORES do mesmo autor na mesma demanda são somados aos da nova
 // (moderacaoDemanda.mascararDigitosPartidos): 8+ no total → os números da nova viram
 // "[contato removido]" e a tentativa é registrada (sem punir: conta segue o que já era).
-//   pergunta (profissional): a mensagem da candidatura/interesse dele nesta demanda.
-//   resposta (dono): título + descrição do pedido e as respostas já dadas nesta demanda.
+// Só as 2 ÚLTIMAS mensagens do autor nesta demanda, das últimas 24h — não o histórico todo:
+// número legítimo espalhado por dias ("12 portas" hoje, "20 janelas" semana passada) não soma.
+//   pergunta (profissional): mensagem da candidatura/interesse dele nesta demanda.
+//   resposta (dono): título + descrição do pedido (uma "mensagem", na data de criação) e as
+//   respostas já dadas nesta demanda.
 const textosAnterioresAutor = async (lado, demandaId, autorId, papel) => {
-  if (papel === 'profissional') {
-    const r = lado.tipo === 'obra'
-      ? await pool.query(`SELECT mensagem, mensagem_oferta FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`, [demandaId, autorId])
-      : await pool.query(`SELECT mensagem FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [demandaId, autorId])
-    return r.rows.flatMap(x => [x.mensagem, x.mensagem_oferta]).filter(t => typeof t === 'string')
-  }
-  const [dem, resp] = await Promise.all([
-    pool.query(`SELECT titulo, descricao FROM ${lado.tabela} WHERE id = $1`, [demandaId]),
-    pool.query(`SELECT resposta FROM perguntas_demanda WHERE tipo = $1 AND demanda_id = $2 AND resposta IS NOT NULL`, [lado.tipo, demandaId]),
-  ])
-  return [dem.rows[0]?.titulo, dem.rows[0]?.descricao, ...resp.rows.map(x => x.resposta)].filter(t => typeof t === 'string')
+  const sql = papel === 'profissional'
+    ? (lado.tipo === 'obra'
+      ? `SELECT concat_ws(E'\\n', mensagem, mensagem_oferta) AS texto, criado_em AS quando
+           FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`
+      : `SELECT mensagem AS texto, criado_em AS quando
+           FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`)
+    : `SELECT concat_ws(E'\\n', titulo, descricao) AS texto, criado_em AS quando
+         FROM ${lado.tabela} WHERE id = $1 AND criado_por = $2
+       UNION ALL
+       SELECT resposta AS texto, respondido_em AS quando
+         FROM perguntas_demanda WHERE tipo = '${lado.tipo}' AND demanda_id = $1 AND resposta IS NOT NULL`
+  const r = await pool.query(
+    `SELECT texto FROM (${sql}) m WHERE quando > NOW() - INTERVAL '24 hours' ORDER BY quando DESC LIMIT 2`,
+    [demandaId, autorId]
+  )
+  return r.rows.map(x => x.texto).filter(t => typeof t === 'string' && t)
 }
 const aplicarDigitosPartidos = (lido, anteriores) => {
   const partido = mascararDigitosPartidos(anteriores, lido.texto)
