@@ -38,7 +38,7 @@ const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZE
 // do seu grupo (chave grupos_relacionados_ativo) antes do casamento com especialidades, nos DOIS
 // públicos (broadcastPaginado e reivindicarEmailsNovaDemanda). utils/gruposCategorias só importa
 // utils/supabase e utils/categoriasApp — sem ciclo.
-const { expandirCategoria } = require('../utils/gruposCategorias')
+const { publicoDemanda } = require('../utils/gruposCategorias')
 // DeviceNotRegistered → desinstalação provável. utils/desinstalacoes só importa utils/supabase.
 const { marcarDesinstalados } = require('../utils/desinstalacoes')
 // Diagnóstico: ticket e recibo de cada push em push_recibos. Fire-and-forget, nunca lança.
@@ -48,8 +48,11 @@ const { registrarTickets, registrarRecibos } = require('../utils/pushRecibos')
 // especialidade; senão, basta UMA especialidade em comum (&&). expandirCategoria só deixa
 // 'outros' chegar aqui quando ele é a ÚNICA categoria da demanda. Cada usuário sai UMA vez da
 // consulta (é uma linha por u.id), então ninguém é avisado duas vezes por evento.
+// Casamento especialidades × lista de slugs (publicoDemanda, utils/gruposCategorias): NULL = sem
+// filtro (todo elegível da cidade); lista = quem tem ao menos um dos slugs — inclusive 'outros',
+// que aqui é um slug como outro qualquer (quem marcou "Outros" no perfil).
 const sqlCasaCategorias = (param) =>
-  `(${param}::text[] IS NULL OR (cardinality(u.especialidades) > 0 AND ('outros' = ANY(${param}::text[]) OR u.especialidades && ${param}::text[])))`
+  `(${param}::text[] IS NULL OR u.especialidades && ${param}::text[])`
 
 const expo = new Expo()
 
@@ -304,13 +307,12 @@ const PAGINA_BROADCAST = 500
 // (const em TDZ derrubou o boot em 25/08).
 //
 // categoria (opcional, só o lado reparo passa): casa a categoria da demanda com
-// usuarios.especialidades NO SQL (sqlCasaCategorias) —
+// usuarios.especialidades NO SQL (sqlCasaCategorias), pela lista `push` de publicoDemanda —
 //   - null (lado obra): sem filtro, comportamento de sempre;
-//   - só 'outros': todo reparador ativo da cidade que tenha AO MENOS UMA especialidade;
-//   - qualquer outra: quem tem esse slug no array OU, com grupos_relacionados_ativo ligada,
-//     qualquer slug do mesmo grupo (expandirCategoria, utils/gruposCategorias). 'outros'
-//     junto de outra categoria é descartado lá — vale só a(s) escolhida(s) + grupos.
-// Array NULL ou vazio nunca recebe nada, nem 'outros' (cardinality(NULL) é NULL → falso).
+//   - COM 'outros' (sozinho ou não): TODO reparador elegível da cidade, sem olhar especialidade
+//     (decisão do dono, 01/11/2026 — o e-mail é que fica restrito, ver reivindicarEmailsNovaDemanda);
+//   - sem 'outros': quem tem esse slug no array OU, com grupos_relacionados_ativo ligada,
+//     qualquer slug do mesmo grupo (expandirCategoria, utils/gruposCategorias).
 // Registro por destinatário em push_entregas (routes/index.js, migração). Um statement por
 // página. ON CONFLICT: a linha já existe quando é RE-tentativa (rede de segurança) ou quando o
 // claim da demanda deu ROLLBACK e o broadcast inteiro rodou de novo — nos dois casos o
@@ -349,7 +351,7 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
   // Lista de slugs a casar (categoria + grupo, ou só ela; null no lado obra), resolvida UMA vez
   // por broadcast — a chave de config é lida aqui, não a cada página.
-  const categorias = await expandirCategoria(categoria)
+  const { push: categorias } = await publicoDemanda(categoria)
   let cursor = null
   for (;;) {
     // Filtros opcionais entram no SQL E na lista de parâmetros JUNTOS: o pg recusa parâmetro
@@ -377,6 +379,7 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
          -- cron de proximidade (server.js, verificarPrestadoresProximos): quem dispara é o
          -- servidor, não o prestador, então o middleware exigirNaoSuspenso não passa por aqui.
          AND u.suspenso_em IS NULL
+         AND u.desinstalado_em IS NULL
          AND NULLIF(btrim(u.cidade), '') IS NOT NULL
          AND NULLIF(btrim(u.uf), '')     IS NOT NULL
          AND ${SQL_CIDADE_PRESTADOR} = $2
@@ -492,9 +495,9 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     // "IS DISTINCT FROM 'pintor'" antigo incluía NULL/legado, que recebia o push e caía em
     // 403 TIER_INCORRETO ao tocar. Paridade com o broadcast de obra (= 'pintor').
     // Paginado por u.id (A5), mesmo helper do lado obra.
-    // categoria: só quem declarou esse serviço em especialidades recebe; 'outros' SOZINHO vai a
-    // todo reparador da cidade com ao menos uma especialidade; junto de outra categoria é
-    // descartado (expandirCategoria — ver broadcastPaginado).
+    // categoria: só quem declarou esse serviço em especialidades recebe; com 'outros' entre as
+    // categorias o push vai a todo reparador elegível da cidade (publicoDemanda — ver
+    // broadcastPaginado); o e-mail segue restrito (reivindicarEmailsNovaDemanda).
     // Os DOIS chamadores (POST /reparos/dono e a rota de aprovação) passam por aqui.
     await broadcastPaginado({
       tipoPrestador: 'reparador', cidade: cidadeReparo, uf: ufReparo, categoria: categoriasDoReparo(reparo),
@@ -597,7 +600,14 @@ const notificarOfertaAumentadaReparo = async (reparoId) => {
 // algumas unidades — é rede de segurança contra disparo em massa, não cota exata.
 // Um e-mail POR destinatário (nunca vários `to` num envio: exporia os endereços entre si),
 // sequencial, erro de um não derruba os demais.
+// Teto diário TOTAL de e-mails de alerta (dia de São Paulo) e a RESERVA para os avisos críticos
+// 1:1 de entregarPushEEmail (match, aceite, prazo/expiração, encerramento, avaliação — claims
+// 'aviso:%', que não contam no teto nem são cortados por ele). O que sobra é o teto dos e-mails
+// de DEMANDA (demanda nova, lembrete "ainda aberto", reanúncio): param em 190/dia e nunca
+// consomem a reserva.
 const EMAIL_ALERTAS_TETO_DIA = 250
+const EMAIL_ALERTAS_RESERVA_CRITICOS = 60
+const EMAIL_ALERTAS_TETO_DEMANDA = EMAIL_ALERTAS_TETO_DIA - EMAIL_ALERTAS_RESERVA_CRITICOS
 const EMAIL_ALERTAS_URL_BAIXAR = 'https://protudo.app.br/baixar'
 // Página pública da demanda (routes/paginaPublica.js, via redirect do site): o botão principal
 // do e-mail aponta para ela quando a linha tem codigo_publico; sem código (linha anterior à
@@ -672,9 +682,11 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     const cidade = normalizar(demanda.cidade)
     const uf = String(demanda.uf || '').trim().toUpperCase()
     if (!cidade || !uf) return null // mesmo silêncio do push: sem lugar não há alvo
-    // Mesma expansão por grupo do push (expandirCategoria sobre TODAS as categorias do reparo);
-    // null no lado obra.
-    const categorias = await expandirCategoria(lado.comCategoria ? categoriasDoReparo(demanda) : null, client)
+    // Lista `email` de publicoDemanda (utils/gruposCategorias): categorias + grupos; com 'outros'
+    // entre elas, só os grupos das OUTRAS categorias ou, 'outros' sozinho, só quem marcou
+    // 'outros' — o push é que vai a todos. null no lado obra (pintor não tem 'outros' no
+    // vocabulário de especialidades, então o lado obra segue sem filtro).
+    const { email: categorias } = await publicoDemanda(lado.comCategoria ? categoriasDoReparo(demanda) : null, client)
 
     // Elegíveis (espelho de broadcastPaginado, sem exigir token e exigindo e-mail). Com
     // lado.somenteSemToken ($6) só quem NÃO tem push_token entra (lembrete/reanúncio). Ordem
@@ -688,6 +700,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          AND (NOT $6::boolean OR u.push_token IS NULL)
          AND NULLIF(btrim(u.email), '') IS NOT NULL
          AND u.suspenso_em IS NULL
+         AND u.desinstalado_em IS NULL
          AND NULLIF(btrim(u.cidade), '') IS NOT NULL
          AND NULLIF(btrim(u.uf), '')     IS NOT NULL
          AND ${SQL_CIDADE_PRESTADOR} = $2
@@ -711,9 +724,9 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
         WHERE created_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')
           AND tipo NOT LIKE 'aviso:%'`
     )
-    const restante = EMAIL_ALERTAS_TETO_DIA - hoje.rows[0].n
+    const restante = EMAIL_ALERTAS_TETO_DEMANDA - hoje.rows[0].n
     if (restante <= 0) {
-      console.warn(`[EmailAlerta] ${lado.tipo} ${demandaId}: teto diário de ${EMAIL_ALERTAS_TETO_DIA} e-mails atingido — ${elegiveis.rows.length} elegível(is) sem aviso`)
+      console.warn(`[EmailAlerta] ${lado.tipo} ${demandaId}: teto diário de ${EMAIL_ALERTAS_TETO_DEMANDA} e-mails de demanda atingido (${EMAIL_ALERTAS_RESERVA_CRITICOS} reservados aos avisos críticos) — ${elegiveis.rows.length} elegível(is) sem aviso`)
       return null
     }
     const candidatos = elegiveis.rows.slice(0, restante)
@@ -2791,6 +2804,9 @@ module.exports = {
   enviarEmailsNovaDemanda,
   montarEmailNovaDemanda,
   EMAIL_ALERTAS_TETO_DIA,
+  EMAIL_ALERTAS_RESERVA_CRITICOS,
+  EMAIL_ALERTAS_TETO_DEMANDA,
+  sqlCasaCategorias,
   enviarPushNovoPendente,
   lembrarDemandasSemResposta,
   listarCandidatosLembrete,

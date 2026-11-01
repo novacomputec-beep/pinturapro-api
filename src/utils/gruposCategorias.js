@@ -71,12 +71,10 @@ const gruposRelacionadosAtivo = async (db = pool) => {
 // quando não há categoria (lado obra). Aceita um slug (reparo antigo) ou a lista `categorias`
 // (até 3): a saída é a UNIÃO de cada slug com o seu grupo. Chave desligada ou slug fora de
 // grupo: só os próprios slugs. A chave é lida UMA vez por chamada.
-// 'outros' só vale SOZINHO (→ todo profissional da cidade com ≥1 especialidade, via
-// sqlCasaCategorias). Acompanhado de outra categoria é DESCARTADO: o público passa a ser só
-// as categorias escolhidas + seus grupos (decisão do dono, 28/10/2026). Como esta é a única
-// porta dos públicos (push de demanda nova e rede de segurança, oferta aumentada, lembrete,
-// e-mail), a regra não diverge entre caminhos; a repescagem por destinatário (push_entregas)
-// reenvia só a quem o broadcast original já escolheu.
+// 'outros' só vale SOZINHO (→ casa com quem marcou 'outros' em especialidades, via
+// sqlCasaCategorias). Acompanhado de outra categoria é DESCARTADO: a lista passa a ser só
+// as categorias escolhidas + seus grupos (decisão do dono, 28/10/2026). O público por CANAL
+// (push × e-mail) é publicoDemanda, abaixo — o push com 'outros' vai a todos.
 const expandirCategoria = async (categoria, db = pool) => {
   if (categoria == null) return null
   let slugs = (Array.isArray(categoria) ? categoria : [categoria]).filter(s => s != null).map(String)
@@ -93,4 +91,21 @@ const expandirCategoria = async (categoria, db = pool) => {
   return [...saida]
 }
 
-module.exports = { GRUPOS_RELACIONADOS, CHAVE_DO_GRUPO, CHAVE_DO_SLUG, CHAVE_GRUPOS_ATIVO, gruposRelacionadosAtivo, expandirCategoria }
+// Público de uma demanda por canal (decisão do dono, 01/11/2026): { push, email }, cada um uma
+// lista de slugs para sqlCasaCategorias ou null (= sem filtro de especialidade).
+//   - sem categoria (lado obra, reparo antigo sem nada): push e e-mail sem filtro;
+//   - COM 'outros' entre as categorias: PUSH a TODO profissional elegível da cidade (null);
+//     E-MAIL só aos grupos das outras categorias escolhidas (expandirCategoria descarta o
+//     'outros') ou, 'outros' sozinho, só a quem marcou 'outros' em especialidades;
+//   - sem 'outros': push e e-mail iguais, categorias + grupos (expandirCategoria).
+// É a única porta dos públicos de demanda (demanda nova, rede de segurança, oferta aumentada,
+// lembrete, reanúncio e os e-mails de cada um), então a regra não diverge entre caminhos.
+const publicoDemanda = async (categoria, db = pool) => {
+  const email = await expandirCategoria(categoria, db)
+  if (email === null) return { push: null, email: null }
+  const slugs = (Array.isArray(categoria) ? categoria : [categoria]).filter(s => s != null).map(String)
+  const temOutros = slugs.includes('outros')
+  return { push: temOutros ? null : email, email }
+}
+
+module.exports = { GRUPOS_RELACIONADOS, CHAVE_DO_GRUPO, CHAVE_DO_SLUG, CHAVE_GRUPOS_ATIVO, gruposRelacionadosAtivo, expandirCategoria, publicoDemanda }
