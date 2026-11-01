@@ -163,6 +163,9 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tipo_dono VARCHAR(50)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS pix_reembolso VARCHAR(200)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS referencias TEXT`)
+    // Última alteração das referências pelo próprio usuário (PUT /auth/referencias); NULL = nunca
+    // mexeu depois do cadastro/verificação. Sai na ficha do admin.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS referencias_alteradas_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg VARCHAR(20)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_orgao VARCHAR(20)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_estado VARCHAR(2)`)
@@ -6560,7 +6563,49 @@ const URL_DOC_VERIFICACAO = /^https:\/\/res\.cloudinary\.com\/\S+$/
 const REFERENCIAS_VERIFICACAO_MAX = 2
 // Referência própria (mesmo telefone / mesmo nome do usuário) é recusada — regra única em
 // utils/referencias, a mesma do cadastro e do campo `propria` da ficha do admin.
-const { referenciaPropria, temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias } = require('../utils/referencias')
+const { referenciaPropria, temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias,
+  lerReferencias, problemaReferencias, lerReferenciasBody, erroReferencias } = require('../utils/referencias')
+
+// GET /auth/referencias — as referências gravadas do usuário logado e o problema que elas têm
+// hoje pelas regras atuais (null | 'propria' | 'repetido'): linha antiga pode ter sido gravada
+// antes de uma regra existir. PUT /auth/referencias — troca as referências (1 a 2, mesmas
+// validações e códigos do cadastro/verificação) e carimba referencias_alteradas_em. Só quem JÁ
+// tem referências pode trocar (409 SEM_REFERENCIAS): a primeira entrega continua sendo do
+// cadastro ou do POST /auth/verificacao, junto com documento e selfie.
+router.get('/auth/referencias', autenticar, async (req, res) => {
+  try {
+    const u = (await pool.query(`SELECT nome, telefone, referencias FROM usuarios WHERE id = $1`, [req.usuario.id])).rows[0]
+    if (!u) return res.status(404).json({ erro: 'Usuário não encontrado' })
+    const referencias = lerReferencias(u.referencias)
+    res.json({ referencias, problema: problemaReferencias(referencias, u) })
+  } catch (err) {
+    console.error('Erro ao buscar referencias:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar referências' })
+  }
+})
+router.put('/auth/referencias', autenticar, async (req, res) => {
+  try {
+    const lido = lerReferenciasBody(req.body?.referencias)
+    if (lido.erro) return res.status(400).json(lido.erro)
+    const u = (await pool.query(`SELECT nome, telefone, referencias FROM usuarios WHERE id = $1`, [req.usuario.id])).rows[0]
+    if (!u) return res.status(404).json({ erro: 'Usuário não encontrado' })
+    if (lerReferencias(u.referencias).length === 0) {
+      return res.status(409).json({ erro: 'Você ainda não informou referências. Envie pela verificação do cadastro.', codigo: 'SEM_REFERENCIAS' })
+    }
+    const erro = erroReferencias(lido.refs, u)
+    if (erro) return res.status(400).json(erro)
+    await pool.query(
+      `UPDATE usuarios SET referencias = $2, referencias_alteradas_em = NOW() WHERE id = $1`,
+      [req.usuario.id, JSON.stringify(lido.refs)]
+    )
+    console.log(`[REFERENCIAS] alteradas pelo usuário | usuario_id=${req.usuario.id}`)
+    res.json({ referencias: lido.refs, problema: null })
+  } catch (err) {
+    console.error('Erro ao alterar referencias:', err.message)
+    res.status(500).json({ erro: 'Erro ao salvar referências' })
+  }
+})
+
 router.post('/auth/verificacao', autenticar, async (req, res) => {
   try {
     const { verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url } = req.body || {}
@@ -8227,7 +8272,7 @@ router.get('/admin/usuarios/:id/verificacao', autenticar, exigirAdmin, async (re
     if (!RE_UUID.test(id)) return res.status(400).json({ erro: 'id inválido' })
     const r = await pool.query(
       `SELECT id, nome, email, telefone, cidade, uf, role, tipo_prestador, tipo_dono, criado_em,
-              cpf_cnpj, rg, rg_orgao, rg_estado, referencias, pix_reembolso,
+              cpf_cnpj, rg, rg_orgao, rg_estado, referencias, referencias_alteradas_em, pix_reembolso,
               verificacao_status, verificacao_enviada_em, aprovado_automaticamente,
               verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url, desinstalado_em
          FROM usuarios WHERE id = $1`, [id]
@@ -8280,6 +8325,8 @@ router.get('/admin/usuarios/:id/verificacao', autenticar, exigirAdmin, async (re
         verificacao_selfie_url_assinada: gerarUrlAssinadaVerificacao(u.verificacao_selfie_url),
       },
       referencias,
+      // Última troca pelo próprio usuário (PUT /auth/referencias); null = nunca trocou.
+      referencias_alteradas_em: u.referencias_alteradas_em || null,
       cpf_cnpj_mascarado: mascararCpfCnpj(u.cpf_cnpj),
       rg: u.rg ? { numero: u.rg, orgao: u.rg_orgao || null, estado: u.rg_estado || null } : null,
       pix_reembolso: u.pix_reembolso || null,

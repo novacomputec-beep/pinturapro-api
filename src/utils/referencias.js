@@ -54,7 +54,55 @@ const erroTelefoneReferencias = (refs, usuario) => {
   return null
 }
 
+// usuarios.referencias é TEXT com JSON de [{ nome, telefone[, relacao] }] (cadastro e
+// verificação); linhas legadas podem ter um nome solto. Devolve sempre uma lista de
+// { nome, telefone } (string ou null), nunca lança.
+const lerReferencias = (bruto) => {
+  let v = bruto
+  try { if (typeof v === 'string') v = JSON.parse(v) } catch (_) { v = bruto }
+  if (Array.isArray(v)) {
+    return v.filter(x => x && typeof x === 'object').map(x => ({ nome: x.nome ?? null, telefone: x.telefone ?? null }))
+  }
+  if (typeof v === 'string' && v.trim()) return [{ nome: v.trim(), telefone: null }]
+  return []
+}
+
+// Problema das referências gravadas, pelas mesmas regras que recusam na escrita:
+// 'repetido' (telefone repetido entre elas ou igual ao do usuário), 'propria' (nome igual ao
+// do usuário) ou null. Lista vazia = null (sem referência não há problema a apontar).
+const problemaReferencias = (refs, usuario) => {
+  if (!Array.isArray(refs) || refs.length === 0) return null
+  if (erroTelefoneReferencias(refs, usuario)) return 'repetido'
+  if (temReferenciaPropria(refs, usuario)) return 'propria'
+  return null
+}
+
+const REFERENCIAS_MAX = 2
+const ERRO_REFERENCIAS_OBRIGATORIAS = {
+  erro: `Informe de 1 a ${REFERENCIAS_MAX} referências, cada uma com nome e telefone`,
+  codigo: 'REFERENCIAS_OBRIGATORIAS',
+}
+// Lê { referencias } do body: 1 a 2 itens, cada um com nome (≤ 200) e telefone (≤ 30), aparados.
+// Devolve { refs } ou { erro } (corpo pronto para o 400) — mesmas regras do POST /auth/verificacao.
+const lerReferenciasBody = (referencias) => {
+  const texto = (v) => typeof v === 'string' ? v.trim() : ''
+  const refs = Array.isArray(referencias)
+    ? referencias.map(r => ({ nome: texto(r?.nome), telefone: texto(r?.telefone) }))
+    : []
+  if (refs.length < 1 || refs.length > REFERENCIAS_MAX
+      || refs.some(r => !r.nome || !r.telefone || r.nome.length > 200 || r.telefone.length > 30)) {
+    return { erro: ERRO_REFERENCIAS_OBRIGATORIAS }
+  }
+  return { refs }
+}
+// Validação completa de uma lista já lida contra o usuário (telefone antes de nome, como no
+// cadastro e na verificação). Devolve o corpo do 400 ou null.
+const erroReferencias = (refs, usuario) =>
+  erroTelefoneReferencias(refs, usuario) || (temReferenciaPropria(refs, usuario) ? ERRO_REFERENCIA_PROPRIA : null)
+
 module.exports = {
   normalizarNome, referenciaPropria, temReferenciaPropria, ERRO_REFERENCIA_PROPRIA,
   telefoneNormalizado, erroTelefoneReferencias, ERRO_REFERENCIAS_TELEFONE,
+  lerReferencias, problemaReferencias, lerReferenciasBody, erroReferencias,
+  REFERENCIAS_MAX, ERRO_REFERENCIAS_OBRIGATORIAS,
 }

@@ -10,7 +10,7 @@ const { registrarPlataforma, detectarPlataforma } = require('../utils/plataforma
 const { registrarReinstalacao } = require('../utils/desinstalacoes')
 const { municipioExiste } = require('../utils/geoBusca')
 const { normalizarCodigo, recalcularIndicador } = require('../utils/indicacoes')
-const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias } = require('../utils/referencias')
+const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias, lerReferencias, problemaReferencias } = require('../utils/referencias')
 // Resumo de avaliações + selo "bem avaliado" no perfil do profissional (utils/etiquetasAvaliacao).
 const { sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
 const nodemailer = require('nodemailer')
@@ -578,7 +578,7 @@ const login = async (req, res) => {
 const perfil = async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, aceita_promocoes, verificacao_status FROM usuarios WHERE id = $1',
+      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, aceita_promocoes, verificacao_status, referencias FROM usuarios WHERE id = $1',
       [req.usuario.id]
     )
     const assinaturaResult = await pool.query(
@@ -589,6 +589,15 @@ const perfil = async (req, res) => {
     )
     registrarPlataforma(req.usuario.id, req)
     const usuario = result.rows[0]
+    // tem_referencias / referencias_problema (null | 'propria' | 'repetido'): o app decide se
+    // mostra "trocar referências" (PUT /auth/referencias) e se avisa de uma gravada antes da
+    // regra atual. A lista em si não sai aqui — GET /auth/referencias.
+    if (usuario) {
+      const refs = lerReferencias(usuario.referencias)
+      delete usuario.referencias
+      usuario.tem_referencias = refs.length > 0
+      usuario.referencias_problema = problemaReferencias(refs, usuario)
+    }
     // Profissional: resumo das avaliações recebidas + selo "bem avaliado" (3× 5★) no payload
     // do perfil, para o app mostrar sem segunda chamada. Dono/admin não recebem o bloco.
     if (usuario && usuario.role === 'prestador') {
