@@ -2,8 +2,9 @@
 // caminho que GRAVA usuarios.referencias (cadastro, POST /auth/verificacao) e na ficha do admin
 // (GET /admin/usuarios/:id/verificacao, campo `propria`):
 //   - telefone: dígitos da referência iguais aos dígitos do telefone do próprio usuário; ou
-//   - nome: nome normalizado (minúsculas, sem acento, espaços colapsados, sem pontas) igual ao
-//     nome completo normalizado do usuário, ou um contido no outro.
+//   - nome: nome normalizado (minúsculas, sem acento, espaços colapsados, sem pontas) IGUAL ao
+//     nome completo normalizado do usuário. Só igualdade: "um contido no outro" barrava a
+//     referência "José" (um homônimo, o pai, um colega) para o usuário "José Carlos".
 // Lado vazio (sem telefone / sem nome) não casa — nunca inventa coincidência.
 const normalizarNome = (v) => String(v || '')
   .normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -18,7 +19,7 @@ const referenciaPropria = (ref, usuario) => {
   if (tel && meuTel && tel === meuTel) return true
   const nome = normalizarNome(ref.nome)
   const meuNome = normalizarNome(usuario?.nome)
-  if (nome && meuNome && (nome === meuNome || nome.includes(meuNome) || meuNome.includes(nome))) return true
+  if (nome && meuNome && nome === meuNome) return true
   return false
 }
 
