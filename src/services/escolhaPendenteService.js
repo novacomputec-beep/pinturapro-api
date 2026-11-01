@@ -13,12 +13,16 @@ const { entregarPushEEmail, entregarLembrete, semSobreposicao } = require('./ale
 //       avisou na hora) e só fora das últimas 24h antes de expira_em (ali valem os avisos 2).
 //       Push a cada dia + no máx. 1 e-mail/dia (entregarLembrete → claim 'lembrete#AAAAMMDD'
 //       em email_alertas).
-//   (2) aviso ao dono 24h e 2h antes de expira_em (escolha_aviso_24h_em / _2h_em). Roda o de
-//       2h primeiro, e ele grava também o de 24h. Só quando a demanda viveu mais que o marco
-//       (anúncio de 12h nunca recebe o "24h" no minuto em que surge o 1º interessado).
-//       Silêncio 22:00–07:00 SP nos dois: o de 24h é ADIADO (banda (0, 24h], sai no 1º tique
-//       das 07:00 — o texto diz "menos de 2 horas" se já for o caso); o de 2h é PULADO quando o
-//       seu horário (expira_em − 2h) cai no silêncio, mesmo que o tique chegue depois das 07:00.
+//   (2) dois avisos ao dono antes de expira_em, PROPORCIONAIS à vida da demanda
+//       L = expira_em − âncora (criado_em; obra: publicado_em): o primeiro quando falta
+//       ≤ min(24h, 25% de L) (escolha_aviso_24h_em) e o final quando falta ≤ min(2h, 10% de L)
+//       (escolha_aviso_2h_em). Pedido de 24h ("amanhã"): avisos a 6h e 2h do fim — nunca no
+//       minuto em que surge o 1º interessado, como acontecia com a banda fixa de 24h. O final
+//       é PULADO quando cairia a menos de 1h do primeiro (pela banda, ou porque o primeiro
+//       saiu adiado há menos de 1h). Roda o final primeiro, e ele grava também o primeiro.
+//       Silêncio 22:00–07:00 SP nos dois: o primeiro é ADIADO (banda vai até 0, sai no 1º tique
+//       das 07:00 — o texto diz quantas horas faltam de fato); o final é PULADO quando o seu
+//       horário devido (expira_em − banda) cai no silêncio, mesmo que o tique chegue depois.
 //   (3) no vencimento (escolha_expirou_em): dono "Seu pedido expirou" e CADA interessado
 //       pendente "O cliente não escolheu a tempo". Silêncio 22:00–07:00 SP: adiado para o 1º
 //       tique das 07:00. Só até EXPIROU_JANELA_HORAS depois de expira_em — vencidas antigas não
@@ -94,26 +98,48 @@ const lembrarDiario = async (lado) => {
   }
 }
 
+// Bandas proporcionais: banda = min(teto, fração × L), L = expira_em − âncora. Os nomes '24h' e
+// '2h' ficam (colunas, data.tipo e rótulos de log são os de sempre); o que muda é a banda.
+const MARCO_PRIMEIRO = { nome: '24h', teto: '24 hours', fracao: 0.25, col: 'escolha_aviso_24h_em' }
+const MARCO_FINAL = { nome: '2h', teto: '2 hours', fracao: 0.10, col: 'escolha_aviso_2h_em' }
+const sqlVida = (lado) => `(d.expira_em - ${lado.ancora})`
+const sqlBanda = (lado, m) => `LEAST(INTERVAL '${m.teto}', ${sqlVida(lado)} * ${m.fracao})`
+// Condições de TEMPO do marco (sem silêncio, sem interessados, sem claim) — exportadas para o
+// teste avaliar a janela contra linhas sintéticas. Banda vai até 0 (restante > 0) nos dois: o
+// primeiro para sair adiado depois do silêncio; o final porque o seu silêncio é pelo horário
+// devido, não pelo agora.
+const sqlJanelaMarco = (lado, m) => {
+  const base = `d.expira_em > NOW() AND d.expira_em - NOW() <= ${sqlBanda(lado, m)}`
+  if (m !== MARCO_FINAL) return base
+  // Final pulado quando cairia a menos de 1h do primeiro: pela banda (vida curta) ou porque o
+  // primeiro saiu (adiado pelo silêncio) há menos de 1h.
+  return `${base}
+         AND ${sqlBanda(lado, MARCO_PRIMEIRO)} - ${sqlBanda(lado, MARCO_FINAL)} >= INTERVAL '1 hour'
+         AND (d.escolha_aviso_24h_em IS NULL OR d.escolha_aviso_24h_em <= NOW() - INTERVAL '1 hour')`
+}
 const MARCOS = [
-  // Ordem importa: o de 2h roda antes e grava também o de 24h. O de 2h exige que o seu horário
-  // devido esteja fora do silêncio (senão é pulado de vez); o de 24h só exige o AGORA fora do
-  // silêncio (adiado), e a banda dele vai até 0 para o adiado ainda sair de manhã.
-  { nome: '2h',  max: '2 hours',  set: 'escolha_aviso_2h_em = NOW(), escolha_aviso_24h_em = COALESCE(d.escolha_aviso_24h_em, NOW())', col: 'escolha_aviso_2h_em',
-    silencio: `${SQL_FORA_SILENCIO} AND ${sqlForaSilencioEm(`d.expira_em - INTERVAL '2 hours'`)}` },
-  { nome: '24h', max: '24 hours', set: 'escolha_aviso_24h_em = NOW()', col: 'escolha_aviso_24h_em', silencio: SQL_FORA_SILENCIO },
+  // Ordem importa: o final roda antes e grava também o primeiro. O final exige que o seu horário
+  // devido (expira_em − banda) esteja fora do silêncio (senão é pulado de vez); o primeiro só
+  // exige o AGORA fora do silêncio (adiado).
+  { ...MARCO_FINAL, set: 'escolha_aviso_2h_em = NOW(), escolha_aviso_24h_em = COALESCE(d.escolha_aviso_24h_em, NOW())',
+    silencio: (lado) => `${SQL_FORA_SILENCIO} AND ${sqlForaSilencioEm(`d.expira_em - ${sqlBanda(lado, MARCO_FINAL)}`)}` },
+  { ...MARCO_PRIMEIRO, set: 'escolha_aviso_24h_em = NOW()', silencio: () => SQL_FORA_SILENCIO },
 ]
-const rotuloRestante = (restanteMin) => (Number(restanteMin) <= 120 ? '2 horas' : '24 horas')
+// "menos de N horas", com o que falta de fato (o aviso pode sair adiado pelo silêncio).
+const rotuloRestante = (restanteMin) => {
+  const h = Math.max(1, Math.ceil(Number(restanteMin) / 60))
+  return h === 1 ? '1 hora' : `${h} horas`
+}
 const avisarAntesDeExpirar = async (lado) => {
   for (const m of MARCOS) {
     const claim = await pool.query(`
       UPDATE ${lado.tabela} d SET ${m.set}
         FROM usuarios u
        WHERE u.id = d.criado_por AND ${SQL_BASE(lado)}
-         AND d.expira_em > NOW() AND d.expira_em <= NOW() + INTERVAL '${m.max}'
-         AND d.expira_em - ${lado.ancora} > INTERVAL '${m.max}'
+         AND ${sqlJanelaMarco(lado, m)}
          AND d.${m.col} IS NULL
          AND ${sqlPendentes(lado)} > 0
-         AND ${m.silencio}
+         AND ${m.silencio(lado)}
    RETURNING ${RETORNO(lado)}, EXTRACT(EPOCH FROM (d.expira_em - NOW())) / 60 AS restante_min`)
     for (const d of claim.rows) {
       const via = await entregarPushEEmail({
@@ -192,4 +218,8 @@ const avisarPrazoEstendido = async (tabela, demandaId, atorId) => {
   }
 }
 
-module.exports = { verificarEscolhaPendente, avisarPrazoEstendido, LEMBRETE_CARENCIA_HORAS, EXPIROU_JANELA_HORAS }
+module.exports = {
+  verificarEscolhaPendente, avisarPrazoEstendido, LEMBRETE_CARENCIA_HORAS, EXPIROU_JANELA_HORAS,
+  // Para o teste das bandas (scripts/testar-escolha-pendente.js): só SQL, nada roda.
+  LADOS, MARCO_PRIMEIRO, MARCO_FINAL, sqlBanda, sqlJanelaMarco, rotuloRestante,
+}
