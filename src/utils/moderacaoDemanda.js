@@ -43,9 +43,20 @@ const PALAVRAS_VENDA = [
 // @handle (senão sobra "joao" + "[contato removido]" com domínio solto), URL com esquema
 // antes do domínio nu.
 const RE_EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/gi
-const RE_HANDLE = /(?<![\w.])@[a-z0-9_.]{2,}/gi
+// @ + qualquer handle (1+ chars até espaço/pontuação de frase): "@jo", "@joão_pinta", "@a.b".
+const RE_HANDLE = /(?<![\w.])@[^\s@,;!?()[\]"']+/g
 const RE_URL = /\bhttps?:\/\/\S+|\bwww\.\S+/gi
-const RE_DOMINIO = /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com(?:\.br)?|net|org|app|io|me|bio|link|site|store|shop)\b(?:\/\S*)?/gi
+// Domínio nu: palavra.palavra com TLD de uma LISTA FECHADA de terminações reais ("casa.xyz",
+// "t.me", "loja.com.br", "meusite.online/x"). Lista fechada de propósito: quem escreve sem
+// espaço depois do ponto ("amanha.pode", "ok.valeu", "obra.hoje") não vira contato. O rótulo
+// antes do TLD precisa ter letra ("1.500.mil" não é domínio). Compostos (.com.br) antes dos
+// simples; "eu"/"ai"/"us" ficam de fora por serem palavras do português.
+const TLDS = [
+  'com.br', 'net.br', 'org.br', 'art.br', 'eng.br', 'adv.br', 'arq.br', 'eco.br', 'emp.br', 'ind.br', 'srv.br', 'blog.br', 'tv.br', 'app.br', 'dev.br',
+  'com', 'net', 'org', 'br', 'app', 'io', 'me', 'bio', 'link', 'site', 'shop', 'online', 'pro', 'xyz', 'info', 'store', 'tv', 'co', 'dev',
+  'blog', 'top', 'club', 'digital', 'tech', 'art', 'page', 'live', 'cloud', 'space', 'web', 'website', 'vip', 'bet', 'pics', 'pt', 'uk',
+]
+const RE_DOMINIO = new RegExp(`\\b(?:[a-z0-9-]+\\.)*[a-z0-9-]*[a-z][a-z0-9-]*\\.(?:${TLDS.map(t => t.replace('.', '\\.')).join('|')})\\b(?:\\/\\S*)?`, 'gi')
 // "chame no whatsapp", "me chama no zap", "manda mensagem no direct", "fale pelo insta",
 // "whatsapp:" / "zap:" — acentos opcionais no próprio padrão (texto não dobrado).
 const CANAIS = '(?:whats\\s?app|whats|wpp|zap|direct|insta(?:gram)?|telegram|messenger|dm)'
@@ -114,6 +125,51 @@ const temContatoClaro = (v) => {
   return (v.match(RE_TELEFONE) || []).some(ehTelefone)
 }
 
+// ───── Telefone PARTIDO entre mensagens ("34 9988" numa, "1 7102" na outra) ─────
+// Cada mensagem sozinha passa pelo sanitizador (menos de 8 dígitos); juntas formam o número.
+// fragmentosNumericos: trechos de dígitos (algarismos e por extenso) com 2+ dígitos que NÃO
+// são valor ("R$ 150", "150 reais"), medida ("120 m²", "3x4"), data ("15/11"), hora ("14h",
+// "14:30"), ano (1900–2099) nem ordinal ("nº 12"). mascararDigitosPartidos: soma os dígitos
+// dos fragmentos das mensagens ANTERIORES do mesmo autor na mesma demanda com os da nova; com
+// 8+ no total e pelo menos um fragmento novo, os fragmentos da NOVA viram "[contato removido]"
+// (o resto do texto fica). Só mascara, nunca pune (conta = false): "12 portas" + "20 janelas"
+// + "10 m lineares" é plausível — a tentativa é registrada para o admin ver.
+const RE_ANTES_VALOR = /(?:R\$|n[ºo°]\.?|#|[/:x×])\s*$/i
+const RE_DEPOIS_UNIDADE = /^\s*(?:m[²³23]?|cm|mm|km|kg|g|ml|l|lts?|litros?|reais|r\$|%|h|hs|hrs|horas?|min|dias?|semanas?|meses|m[êe]s|anos?|un|unid|unidades?|pe[çc]as?|pessoas?|lugares|metros?|[/:x×º°])(?![a-z])/i
+const RE_ANO = /^(?:19|20)\d{2}$/
+const fragmentosNumericos = (texto) => {
+  if (typeof texto !== 'string' || !texto) return []
+  const out = []
+  texto.replace(RE_TELEFONE_EXTENSO, (m, offset) => {
+    const limpo = m.trim()
+    const digitos = contarDigitosExtenso(limpo)
+    if (digitos < 2) return m
+    if (RE_ANO.test(limpo)) return m
+    if (RE_ANTES_VALOR.test(texto.slice(0, offset))) return m
+    if (RE_DEPOIS_UNIDADE.test(texto.slice(offset + m.length))) return m
+    out.push({ trecho: m, offset, digitos })
+    return m
+  })
+  return out
+}
+const mascararDigitosPartidos = (anteriores, novo) => {
+  if (typeof novo !== 'string' || !novo) return { texto: novo, removido: false }
+  const novos = fragmentosNumericos(novo)
+  if (novos.length === 0) return { texto: novo, removido: false }
+  const antes = (Array.isArray(anteriores) ? anteriores : [anteriores])
+    .flatMap(fragmentosNumericos).reduce((s, f) => s + f.digitos, 0)
+  const total = antes + novos.reduce((s, f) => s + f.digitos, 0)
+  if (antes === 0 || total < 8) return { texto: novo, removido: false }
+  let texto = ''
+  let cursor = 0
+  for (const f of novos) {
+    texto += novo.slice(cursor, f.offset) + MARCA_CONTATO
+    cursor = f.offset + f.trecho.length
+  }
+  texto += novo.slice(cursor)
+  return { texto, removido: true }
+}
+
 const valorVazio = (v) => {
   if (v === undefined || v === null) return true
   if (typeof v === 'string' && !v.trim()) return true
@@ -174,6 +230,8 @@ module.exports = {
   avisarModeracao,
   sanitizarTexto,
   temContatoClaro,
+  fragmentosNumericos,
+  mascararDigitosPartidos,
   MENSAGEM_REJEICAO,
   CODIGO_REJEICAO,
   MARCA_CONTATO,

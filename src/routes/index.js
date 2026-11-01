@@ -20,7 +20,7 @@ const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrl
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
 const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, avisarUsuario, encerramentoAutomaticoEm } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
-const { moderarDemanda, avisarModeracao, sanitizarTexto, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
+const { moderarDemanda, avisarModeracao, sanitizarTexto, mascararDigitosPartidos, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
 // Contato em texto livre entre as partes (mensagem de candidatura/interesse, referências,
 // pergunta/resposta, denúncia): limpo na escrita (+ linha em tentativas_contato) e mascarado
@@ -3282,6 +3282,39 @@ const lerTextoPergunta = (valor, campo, max) => {
   return { texto: limpo, removido: limpo !== texto, conta: temContatoClaro(texto) }
 }
 
+// Telefone PARTIDO entre mensagens: "34 9988" numa e "1 7102" na outra passam uma a uma pelo
+// sanitizador (menos de 8 dígitos) e juntas formam o número. Antes de gravar, os dígitos das
+// mensagens ANTERIORES do mesmo autor na mesma demanda são somados aos da nova
+// (moderacaoDemanda.mascararDigitosPartidos): 8+ no total → os números da nova viram
+// "[contato removido]" e a tentativa é registrada (sem punir: conta segue o que já era).
+// Só as 2 ÚLTIMAS mensagens do autor nesta demanda, das últimas 24h — não o histórico todo:
+// número legítimo espalhado por dias ("12 portas" hoje, "20 janelas" semana passada) não soma.
+//   pergunta (profissional): mensagem da candidatura/interesse dele nesta demanda.
+//   resposta (dono): título + descrição do pedido (uma "mensagem", na data de criação) e as
+//   respostas já dadas nesta demanda.
+const textosAnterioresAutor = async (lado, demandaId, autorId, papel) => {
+  const sql = papel === 'profissional'
+    ? (lado.tipo === 'obra'
+      ? `SELECT concat_ws(E'\\n', mensagem, mensagem_oferta) AS texto, criado_em AS quando
+           FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`
+      : `SELECT mensagem AS texto, criado_em AS quando
+           FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`)
+    : `SELECT concat_ws(E'\\n', titulo, descricao) AS texto, criado_em AS quando
+         FROM ${lado.tabela} WHERE id = $1 AND criado_por = $2
+       UNION ALL
+       SELECT resposta AS texto, respondido_em AS quando
+         FROM perguntas_demanda WHERE tipo = '${lado.tipo}' AND demanda_id = $1 AND resposta IS NOT NULL`
+  const r = await pool.query(
+    `SELECT texto FROM (${sql}) m WHERE quando > NOW() - INTERVAL '24 hours' ORDER BY quando DESC LIMIT 2`,
+    [demandaId, autorId]
+  )
+  return r.rows.map(x => x.texto).filter(t => typeof t === 'string' && t)
+}
+const aplicarDigitosPartidos = (lido, anteriores) => {
+  const partido = mascararDigitosPartidos(anteriores, lido.texto)
+  return partido.removido ? { ...lido, texto: partido.texto, removido: true } : lido
+}
+
 // Lista para os detalhes: id (o dono precisa dele para responder), textos e carimbos; minha =
 // true só na pergunta do próprio leitor. Nome e id do autor NUNCA saem — o profissional que
 // perguntou continua anônimo para o dono e para os concorrentes até se candidatar. Pergunta e
@@ -3304,8 +3337,8 @@ const listarPerguntas = async (tipo, demandaId, leitorId) => {
 const criarHandlerPergunta = (tabela) => async (req, res) => {
   const lado = LADOS_PERGUNTA[tabela]
   try {
-    const lido = lerTextoPergunta(req.body?.pergunta, 'pergunta', PERGUNTA_MAX)
-    if (lido.erro) return res.status(400).json({ erro: lido.erro })
+    const lidoBruto = lerTextoPergunta(req.body?.pergunta, 'pergunta', PERGUNTA_MAX)
+    if (lidoBruto.erro) return res.status(400).json({ erro: lidoBruto.erro })
     if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ erro: lado.erro404 })
     if (await ehDemandaPropria(tabela, req.params.id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
     // "Aberta e sem match" = a mesma expressão dos feeds e do armamento de proximidade:
@@ -3320,6 +3353,7 @@ const criarHandlerPergunta = (tabela) => async (req, res) => {
     const demanda = d.rows[0]
     if (demanda.criado_por === req.usuario.id) return res.status(403).json({ erro: 'Você não pode perguntar no seu próprio pedido' })
     if (!demanda.aberta) return res.status(409).json({ erro: 'Este pedido não está mais aberto a perguntas' })
+    const lido = aplicarDigitosPartidos(lidoBruto, await textosAnterioresAutor(lado, req.params.id, req.usuario.id, 'profissional'))
     const ins = await pool.query(
       `INSERT INTO perguntas_demanda (tipo, demanda_id, autor_id, pergunta)
        VALUES ($1, $2, $3, $4)
@@ -3351,8 +3385,8 @@ const criarHandlerPergunta = (tabela) => async (req, res) => {
 const criarHandlerResposta = (tabela) => async (req, res) => {
   const lado = LADOS_PERGUNTA[tabela]
   try {
-    const lido = lerTextoPergunta(req.body?.resposta, 'resposta', RESPOSTA_MAX)
-    if (lido.erro) return res.status(400).json({ erro: lido.erro })
+    const lidoBruto = lerTextoPergunta(req.body?.resposta, 'resposta', RESPOSTA_MAX)
+    if (lidoBruto.erro) return res.status(400).json({ erro: lidoBruto.erro })
     if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ erro: lado.erro404 })
     if (!UUID_RE.test(String(req.params.pid))) return res.status(404).json({ erro: 'Pergunta não encontrada' })
     const d = await pool.query(`SELECT titulo, criado_por FROM ${lado.tabela} WHERE id = $1`, [req.params.id])
@@ -3364,6 +3398,7 @@ const criarHandlerResposta = (tabela) => async (req, res) => {
       [req.params.pid, lado.tipo, req.params.id]
     )
     if (existe.rows.length === 0) return res.status(404).json({ erro: 'Pergunta não encontrada' })
+    const lido = aplicarDigitosPartidos(lidoBruto, await textosAnterioresAutor(lado, req.params.id, req.usuario.id, 'dono'))
     const upd = await pool.query(
       `UPDATE perguntas_demanda SET resposta = $2, respondido_em = NOW()
         WHERE id = $1 AND respondido_em IS NULL
@@ -4808,7 +4843,9 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
     query += ` OFFSET $${params.length}`
 
     const result = await pool.query(query, params)
-    res.json({ reparos: result.rows, page, limit, filtro: filtroMeta, escopo, ancora })
+    // Título mascarado na leitura (linha antiga, gravada antes do filtro de contato) — o mesmo
+    // tratamento de GET /reparos/:id. Só o título sai no card do feed.
+    res.json({ reparos: mascararLista(result.rows, ['titulo']), page, limit, filtro: filtroMeta, escopo, ancora })
   } catch (err) {
     console.error('Erro ao buscar reparos:', err)
     res.status(500).json({ erro: 'Erro ao buscar serviços' })
