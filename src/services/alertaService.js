@@ -56,6 +56,13 @@ const sqlCasaCategorias = (param) =>
 
 const expo = new Expo()
 
+// Opções comuns a TODA mensagem Expo (unitária e lote) — um só lugar, para não divergir.
+// priority 'high' (decisão do dono, 02/11/2026): FCM/APNs entregam na hora; com 'normal'/'default'
+// o Android (HyperOS, MIUI, Doze) pode segurar o push por minutos ou até abrir o app — foi o
+// caso de "a caminho"/"chegada" chegando só por e-mail. channelId 'default_v3' é o único canal
+// que o app cria (AuthContext); sound 'default' = som do sistema.
+const OPCOES_PUSH = Object.freeze({ sound: 'default', channelId: 'default_v3', priority: 'high' })
+
 // Consulta os recibos de entrega (depois de um intervalo, pois o Expo processa a
 // entrega de forma assíncrona) e remove tokens reportados como DeviceNotRegistered,
 // marcando a desinstalação provável (removerTokensDesinstalados).
@@ -123,8 +130,7 @@ const enviarPushNotificacao = async (pushToken, titulo, corpo, data = {}, usuari
     try {
       tickets = await expo.sendPushNotificationsAsync([{
         to: pushToken,
-        sound: 'default',
-        channelId: 'default_v3',
+        ...OPCOES_PUSH,
         title: titulo,
         body: corpo,
         data,
@@ -180,8 +186,7 @@ const enviarPushEmLoteDetalhado = async (destinatarios, titulo, corpo, data = {}
     validos.push(i)
     mensagens.push({
       to: d.push_token,
-      sound: 'default',
-      channelId: 'default_v3',
+      ...OPCOES_PUSH,
       title: titulo,
       body: corpo,
       // data por destinatario (d.data) tem precedencia sobre o data compartilhado da chamada
@@ -2791,6 +2796,7 @@ module.exports = {
   registrarFaltaUsuario,
   reanunciarDemanda,
   enviarPushNotificacao,
+  OPCOES_PUSH,
   // Exportada para o painel admin (POST /admin/notificacoes/enviar): mesmo lote, recibos e
   // limpeza de token morto do broadcast de demanda nova.
   enviarPushEmLoteDetalhado,

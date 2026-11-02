@@ -12,7 +12,11 @@ const enviarNotificacao = async (tokens, titulo, mensagem, dados = {}) => {
     }
     mensagens.push({
       to: token,
+      // Mesmas opções do alertaService (canal único do app + priority 'high'). Módulo legado,
+      // sem chamador hoje; mantido alinhado para não nascer um push sem canal/prioridade.
       sound: 'default',
+      channelId: 'default_v3',
+      priority: 'high',
       title: titulo,
       body: mensagem,
       data: dados,
