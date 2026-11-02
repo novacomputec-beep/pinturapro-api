@@ -10,7 +10,7 @@ const { registrarPlataforma, detectarPlataforma } = require('../utils/plataforma
 const { registrarReinstalacao } = require('../utils/desinstalacoes')
 const { municipioExiste } = require('../utils/geoBusca')
 const { normalizarCodigo, recalcularIndicador } = require('../utils/indicacoes')
-const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias, lerReferencias, problemaReferencias } = require('../utils/referencias')
+const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias, camposReferencias } = require('../utils/referencias')
 // Resumo de avaliações + selo "bem avaliado" no perfil do profissional (utils/etiquetasAvaliacao).
 const { sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
 const nodemailer = require('nodemailer')
@@ -380,6 +380,9 @@ const cadastrar = async (req, res) => {
     await client.query('COMMIT')
 
     const token = gerarToken(usuario)
+    // O app entra com este usuario (loginComToken) até reler o perfil: mesmos campos de
+    // referências do GET /auth/perfil, calculados do que acabou de ser gravado.
+    Object.assign(usuario, camposReferencias(referencias || [], usuario))
     console.log(`[CADASTRO][${ts}] ✓ commit ok — token gerado | usuario_id=${usuario.id} — respondendo 201`)
     res.status(201).json({ usuario, token, assinatura })
     registrarPlataforma(usuario.id, req)
@@ -474,7 +477,7 @@ const login = async (req, res) => {
 
     const result = await pool.query(
       // Mais ANTIGA primeiro: com 2+ contas e nenhum `tipo` no corpo (app antigo), é ela que entra.
-      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version, verificacao_status FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC',
+      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version, verificacao_status, referencias FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC',
       [emailNormalizado]
     )
 
@@ -560,7 +563,10 @@ const login = async (req, res) => {
         tipo_dono: usuario.tipo_dono || null,
         tipo_prestador: usuario.tipo_prestador || null,
         boas_vindas_exibida: usuario.boas_vindas_exibida ?? false,
-        verificacao_status: usuario.verificacao_status || 'nao_solicitada'
+        verificacao_status: usuario.verificacao_status || 'nao_solicitada',
+        // O app usa ESTE usuario até a próxima releitura do perfil (boot/revalidarSessao): sem
+        // os campos aqui, "Minhas referências" ficava escondido logo depois do login.
+        ...camposReferencias(usuario.referencias, usuario),
       },
       assinatura: assinaturaResult.rows[0] || null,
       token,
@@ -593,10 +599,8 @@ const perfil = async (req, res) => {
     // mostra "trocar referências" (PUT /auth/referencias) e se avisa de uma gravada antes da
     // regra atual. A lista em si não sai aqui — GET /auth/referencias.
     if (usuario) {
-      const refs = lerReferencias(usuario.referencias)
+      Object.assign(usuario, camposReferencias(usuario.referencias, usuario))
       delete usuario.referencias
-      usuario.tem_referencias = refs.length > 0
-      usuario.referencias_problema = problemaReferencias(refs, usuario)
     }
     // Profissional: resumo das avaliações recebidas + selo "bem avaliado" (3× 5★) no payload
     // do perfil, para o app mostrar sem segunda chamada. Dono/admin não recebem o bloco.
