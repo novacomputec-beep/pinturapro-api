@@ -54,16 +54,44 @@ const erroTelefoneReferencias = (refs, usuario) => {
   return null
 }
 
-// usuarios.referencias é TEXT com JSON de [{ nome, telefone[, relacao] }] (cadastro e
-// verificação); linhas legadas podem ter um nome solto. Devolve sempre uma lista de
-// { nome, telefone } (string ou null), nunca lança.
-const lerReferencias = (bruto) => {
+// usuarios.referencias guarda JSON de [{ nome, telefone[, relacao] }] (cadastro, verificação e
+// PUT /auth/referencias gravam JSON.stringify). O VALOR que chega aqui depende do tipo da coluna:
+// TEXT → a string JSON; json/jsonb → node-pg já entrega o array/objeto parseado (e uma linha
+// gravada duplamente codificada chega como string JSON dentro do JSON). Formas aceitas, em
+// qualquer tipo de coluna: lista de objetos, UM objeto solto (= uma referência), lista de
+// nomes (strings), { referencias: [...] }, string JSON com até 2 níveis de codificação e o
+// legado de um nome solto. Devolve sempre uma lista de { nome, telefone } (string aparada ou
+// null; com `relacao: true`, também relacao — ficha do admin), sem itens vazios; nunca lança.
+const campoTexto = (v) => {
+  if (v == null) return null
+  const s = String(v).trim()
+  return s || null
+}
+const lerReferencias = (bruto, { relacao = false } = {}) => {
   let v = bruto
-  try { if (typeof v === 'string') v = JSON.parse(v) } catch (_) { v = bruto }
-  if (Array.isArray(v)) {
-    return v.filter(x => x && typeof x === 'object').map(x => ({ nome: x.nome ?? null, telefone: x.telefone ?? null }))
+  for (let i = 0; i < 2 && typeof v === 'string'; i++) {
+    const s = v.trim()
+    if (!/^[[{"]/.test(s)) break
+    try { v = JSON.parse(s) } catch (_) { break }
   }
-  if (typeof v === 'string' && v.trim()) return [{ nome: v.trim(), telefone: null }]
+  if (v && typeof v === 'object' && !Array.isArray(v) && Array.isArray(v.referencias)) v = v.referencias
+  if (v && typeof v === 'object' && !Array.isArray(v)) v = [v]
+  if (Array.isArray(v)) {
+    return v
+      .map(x => (typeof x === 'string' ? { nome: x } : x))
+      .filter(x => x && typeof x === 'object' && !Array.isArray(x))
+      .map(x => {
+        const item = { nome: campoTexto(x.nome), telefone: campoTexto(x.telefone) }
+        if (relacao) item.relacao = campoTexto(x.relacao ?? x.parentesco)
+        return item
+      })
+      .filter(x => x.nome || x.telefone)
+  }
+  if (typeof v === 'string' && v.trim()) {
+    const item = { nome: v.trim(), telefone: null }
+    if (relacao) item.relacao = null
+    return [item]
+  }
   return []
 }
 
@@ -75,6 +103,14 @@ const problemaReferencias = (refs, usuario) => {
   if (erroTelefoneReferencias(refs, usuario)) return 'repetido'
   if (temReferenciaPropria(refs, usuario)) return 'propria'
   return null
+}
+
+// Os dois campos que o app lê do objeto `usuario` (GET /auth/perfil, POST /auth/login e a
+// resposta do cadastro — o app guarda o usuario do login até a próxima releitura do perfil, então
+// os três precisam trazê-los): tem_referencias e referencias_problema (null|'propria'|'repetido').
+const camposReferencias = (bruto, usuario) => {
+  const refs = lerReferencias(bruto)
+  return { tem_referencias: refs.length > 0, referencias_problema: problemaReferencias(refs, usuario) }
 }
 
 const REFERENCIAS_MAX = 2
@@ -103,6 +139,6 @@ const erroReferencias = (refs, usuario) =>
 module.exports = {
   normalizarNome, referenciaPropria, temReferenciaPropria, ERRO_REFERENCIA_PROPRIA,
   telefoneNormalizado, erroTelefoneReferencias, ERRO_REFERENCIAS_TELEFONE,
-  lerReferencias, problemaReferencias, lerReferenciasBody, erroReferencias,
+  lerReferencias, problemaReferencias, camposReferencias, lerReferenciasBody, erroReferencias,
   REFERENCIAS_MAX, ERRO_REFERENCIAS_OBRIGATORIAS,
 }

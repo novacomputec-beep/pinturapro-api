@@ -6669,7 +6669,9 @@ router.post('/auth/verificacao', autenticar, async (req, res) => {
       })
     }
     console.log(`[VERIFICACAO] documentos enviados após o cadastro | usuario_id=${req.usuario.id}`)
-    res.json({ mensagem: 'Documentos enviados. Você será avisado quando forem aprovados.', verificacao_status: 'pendente' })
+    // tem_referencias/referencias_problema: as referências acabaram de ser gravadas e validadas —
+    // o app pode mesclar no usuario local sem reler o perfil.
+    res.json({ mensagem: 'Documentos enviados. Você será avisado quando forem aprovados.', verificacao_status: 'pendente', tem_referencias: true, referencias_problema: null })
   } catch (err) {
     console.error('Erro ao salvar verificacao:', err.message)
     res.status(500).json({ erro: 'Erro ao enviar documentos' })
@@ -8281,21 +8283,9 @@ router.get('/admin/usuarios/:id/verificacao', autenticar, exigirAdmin, async (re
     const u = r.rows[0]
     console.log(`[Auditoria] admin ${req.usuario.id} consultou a verificação do usuário ${id} (status ${u.verificacao_status || 'nao_solicitada'})`)
 
-    let referencias = []
-    try {
-      const bruto = typeof u.referencias === 'string' ? JSON.parse(u.referencias) : u.referencias
-      if (Array.isArray(bruto)) {
-        referencias = bruto.filter(x => x && typeof x === 'object').map(x => ({
-          nome: x.nome ?? null, telefone: x.telefone ?? null, relacao: x.relacao ?? x.parentesco ?? null,
-        }))
-      } else if (typeof bruto === 'string' && bruto.trim()) {
-        referencias = [{ nome: bruto.trim(), telefone: null, relacao: null }]
-      }
-    } catch (_) {
-      if (typeof u.referencias === 'string' && u.referencias.trim()) referencias = [{ nome: u.referencias.trim(), telefone: null, relacao: null }]
-    }
+    // Mesmo parser do app (lerReferencias: TEXT ou json/jsonb, lista/objeto/legado), com relacao.
     // propria: a referência é o próprio usuário (mesma regra que recusa no cadastro/verificação).
-    referencias = referencias.map(x => ({ ...x, propria: referenciaPropria(x, u) }))
+    const referencias = lerReferencias(u.referencias, { relacao: true }).map(x => ({ ...x, propria: referenciaPropria(x, u) }))
 
     const temDocs = !!(u.verificacao_doc_frente_url || u.verificacao_doc_verso_url || u.verificacao_selfie_url)
     const status = u.verificacao_status || 'nao_solicitada'
