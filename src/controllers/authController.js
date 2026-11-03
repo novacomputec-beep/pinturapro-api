@@ -11,9 +11,6 @@ const { registrarReinstalacao } = require('../utils/desinstalacoes')
 const { municipioExiste } = require('../utils/geoBusca')
 const { normalizarCodigo, recalcularIndicador } = require('../utils/indicacoes')
 const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias, camposReferencias } = require('../utils/referencias')
-// Descrição de "Outros" (usuarios.outros_descricao): obrigatória com 'outros' nas especialidades,
-// NULL sem ele, contato mascarado — regra única de cadastro, PUT /auth/perfil e conta vinculada.
-const { lerOutrosDescricao, registrarOutrosDescricao } = require('../utils/outrosDescricao')
 // Resumo de avaliações + selo "bem avaliado" no perfil do profissional (utils/etiquetasAvaliacao).
 const { sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
 const nodemailer = require('nodemailer')
@@ -56,7 +53,7 @@ const cadastrar = async (req, res) => {
             cpf_cnpj, tipo_conta, plano, pix_reembolso, referencias,
             verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
             rg, rg_orgao, rg_estado, cep, latitude, longitude,
-            logradouro, numero, complemento, bairro, codigo_indicacao, outros_descricao } = req.body
+            logradouro, numero, complemento, bairro, codigo_indicacao } = req.body
 
     // PRESENÇA, nunca o valor: email e cpf_cnpj saíam em claro para o stdout e ficavam
     // retidos no log da Railway. Mesmo estilo booleano já usado no log de campos obrigatórios
@@ -118,12 +115,6 @@ const cadastrar = async (req, res) => {
     if (espCadastro.erro) {
       console.log(`[CADASTRO][${ts}] ✗ 400 especialidades | motivo=${espCadastro.erro}`)
       return res.status(400).json({ erro: espCadastro.erro })
-    }
-    // "Outros" nas especialidades exige dizer o quê (≤ 40 chars); sem 'outros' a coluna fica NULL.
-    const outrosCadastro = role === 'prestador' ? lerOutrosDescricao(outros_descricao, espCadastro.valor) : { valor: null }
-    if (outrosCadastro.erro) {
-      console.log(`[CADASTRO][${ts}] ✗ 400 outros_descricao | codigo=${outrosCadastro.erro.codigo}`)
-      return res.status(400).json(outrosCadastro.erro)
     }
 
     // Verificação ADIADA: profissional que se cadastra SEM nenhuma das três fotos nasce
@@ -299,10 +290,10 @@ const cadastrar = async (req, res) => {
         tipo_dono, pix_reembolso, referencias,
         verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
         verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador, cep, latitude, longitude,
-        logradouro, numero, complemento, bairro, indicado_por, codigo_indicacao, outros_descricao)
+        logradouro, numero, complemento, bairro, indicado_por, codigo_indicacao)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,
-               $30, CASE WHEN $31::boolean THEN gerar_codigo_indicacao() ELSE NULL END, $32)
-       RETURNING id, nome, email, telefone, cidade, role, tipo_dono, tipo_prestador, foto_url, outros_descricao`,
+               $30, CASE WHEN $31::boolean THEN gerar_codigo_indicacao() ELSE NULL END)
+       RETURNING id, nome, email, telefone, cidade, role, tipo_dono, tipo_prestador, foto_url`,
       [nome.trim(), emailNormalizado, telefone, senha_hash, cidade, uf || null,
        espCadastro.valor, anos_experiencia || 0,
        tamanho_equipe || 1, cpf_cnpj, role,
@@ -317,7 +308,7 @@ const cadastrar = async (req, res) => {
        tipo_prestador,
        cep || null, latitude ?? null, longitude ?? null,
        logradouro || null, numero || null, complemento || null, bairro || null,
-       indicadoPor, role === 'prestador', outrosCadastro.valor]
+       indicadoPor, role === 'prestador']
     )
 
     const usuario = result.rows[0]
@@ -394,8 +385,6 @@ const cadastrar = async (req, res) => {
     Object.assign(usuario, camposReferencias(referencias || [], usuario))
     console.log(`[CADASTRO][${ts}] ✓ commit ok — token gerado | usuario_id=${usuario.id} — respondendo 201`)
     res.status(201).json({ usuario, token, assinatura })
-    // Contato mascarado em outros_descricao: tentativa registrada só depois do COMMIT.
-    registrarOutrosDescricao(usuario.id, outrosCadastro)
     registrarPlataforma(usuario.id, req)
 
     // E-mails especiais de teste — aprovação automática imediata (configurar via EMAILS_ESPECIAIS no Railway)
@@ -488,7 +477,7 @@ const login = async (req, res) => {
 
     const result = await pool.query(
       // Mais ANTIGA primeiro: com 2+ contas e nenhum `tipo` no corpo (app antigo), é ela que entra.
-      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version, verificacao_status, referencias, outros_descricao FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC',
+      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version, verificacao_status, referencias FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC',
       [emailNormalizado]
     )
 
@@ -575,7 +564,6 @@ const login = async (req, res) => {
         tipo_prestador: usuario.tipo_prestador || null,
         boas_vindas_exibida: usuario.boas_vindas_exibida ?? false,
         verificacao_status: usuario.verificacao_status || 'nao_solicitada',
-        outros_descricao: usuario.outros_descricao || null,
         // O app usa ESTE usuario até a próxima releitura do perfil (boot/revalidarSessao): sem
         // os campos aqui, "Minhas referências" ficava escondido logo depois do login.
         ...camposReferencias(usuario.referencias, usuario),
@@ -596,7 +584,7 @@ const login = async (req, res) => {
 const perfil = async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, nome, email, telefone, cidade, especialidades, outros_descricao, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, aceita_promocoes, verificacao_status, referencias FROM usuarios WHERE id = $1',
+      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, aceita_promocoes, verificacao_status, referencias FROM usuarios WHERE id = $1',
       [req.usuario.id]
     )
     const assinaturaResult = await pool.query(
@@ -666,18 +654,6 @@ const atualizarPerfil = async (req, res) => {
       if (r.erro) return res.status(400).json({ erro: r.erro })
       especialidadesValidadas = r.valor
     }
-    // outros_descricao acompanha as especialidades: com a lista no body, é validada contra ELA
-    // (obrigatória se houver 'outros', NULL se não); só a descrição no body, contra a lista já
-    // gravada. Chave ausente nos dois = não mexe (mesma convenção dos outros campos).
-    const mexeOutros = mexeEspecialidades || Object.prototype.hasOwnProperty.call(req.body, 'outros_descricao')
-    let outrosLido = null
-    if (mexeOutros) {
-      const lista = mexeEspecialidades
-        ? especialidadesValidadas
-        : (await pool.query('SELECT especialidades FROM usuarios WHERE id = $1', [req.usuario.id])).rows[0]?.especialidades
-      outrosLido = lerOutrosDescricao(req.body.outros_descricao, lista)
-      if (outrosLido.erro) return res.status(400).json(outrosLido.erro)
-    }
 
     // cidade/uf são não-destrutivos: só sobrescrevem quando vem valor não-vazio.
     // Antes o UPDATE gravava cidade incondicionalmente, então salvar o perfil com o
@@ -689,7 +665,7 @@ const atualizarPerfil = async (req, res) => {
     // muda nada e devolve 200 como se tivesse salvo.
     const mexeCidade = Object.prototype.hasOwnProperty.call(req.body, 'cidade')
     const mexeUf = Object.prototype.hasOwnProperty.call(req.body, 'uf')
-    if (!mexeNome && !mexeTelefone && !mexeCidade && !mexeUf && !mexeEspecialidades && !mexeOutros) {
+    if (!mexeNome && !mexeTelefone && !mexeCidade && !mexeUf && !mexeEspecialidades) {
       return res.status(400).json({ erro: 'Nenhum campo para atualizar' })
     }
 
@@ -721,18 +697,15 @@ const atualizarPerfil = async (req, res) => {
               telefone = CASE WHEN $3::boolean THEN $4::text ELSE telefone END,
               cidade   = COALESCE(NULLIF(btrim($5), ''), cidade),
               uf       = COALESCE(NULLIF(btrim($6), ''), uf),
-              especialidades = CASE WHEN $8::boolean THEN $9::text[] ELSE especialidades END,
-              outros_descricao = CASE WHEN $10::boolean THEN $11::text ELSE outros_descricao END
+              especialidades = CASE WHEN $8::boolean THEN $9::text[] ELSE especialidades END
         WHERE id = $7
-        RETURNING id, nome, email, telefone, cidade, uf, foto_url, especialidades, outros_descricao`,
+        RETURNING id, nome, email, telefone, cidade, uf, foto_url, especialidades`,
       [mexeNome, mexeNome ? nome.trim() : null,
        mexeTelefone, mexeTelefone ? telefone : null,
        cidade || '', uf || '', req.usuario.id,
-       mexeEspecialidades, especialidadesValidadas,
-       mexeOutros, outrosLido ? outrosLido.valor : null]
+       mexeEspecialidades, especialidadesValidadas]
     )
     res.json(result.rows[0])
-    registrarOutrosDescricao(req.usuario.id, outrosLido)
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar perfil' })
   }
