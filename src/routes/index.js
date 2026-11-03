@@ -89,6 +89,9 @@ const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
 const { sqlNaoDemandaPropria, sqlNaoMesmoCpf, ERRO_DEMANDA_PROPRIA, ehDemandaPropria } = require('../utils/demandaPropria')
+// profissionais_avisados (GET /obras/:id e /reparos/:id, só para o dono): quantos profissionais
+// distintos receberam o aviso de demanda nova por push ou e-mail (utils/profissionaisAvisados).
+const { contarProfissionaisAvisados } = require('../utils/profissionaisAvisados')
 // Vídeo "Como funciona" (YouTube) + capítulos: chaves, padrão e validação (seed no boot,
 // PUT /admin/video-como-funciona aqui; leitura pública em routes/publico).
 const { CHAVE_VIDEO_ID, CHAVE_VIDEO_CAPITULOS, VIDEO_ID_RE, CAPITULOS_PADRAO, validarCapitulos, lerVideoComoFunciona } = require('../utils/videoComoFunciona')
@@ -3574,13 +3577,17 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // qualquer leitor que passou a guarda acima; minha = true só na do próprio leitor, nunca
     // nome ou id do autor (listarPerguntas).
     const perguntas = await listarPerguntas('obra', req.params.id, req.usuario.id)
+    // profissionais_avisados: SÓ para o dono (null para pintor do match, admin e assinantes) —
+    // quantos profissionais distintos receberam o aviso "Nova obra disponível!" por push ou
+    // e-mail; lembretes e reenvios não somam (utils/profissionaisAvisados).
+    const profissionais_avisados = ehDono ? await contarProfissionaisAvisados('obras', req.params.id, obra.criado_por) : null
     // pedido_cancelamento: pedido de acordo vigente (quem, motivo, expira_em) — só dono e pintor do match.
     const pedido_cancelamento = pedidoCancelamento(obra, req.usuario.id)
     // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
     // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
     // encerramento_automatico_em: quando o cron fecha sozinho a solicitação pendente do pintor
     // (solicitado_em + 2 dias — alertaService.encerramentoAutomaticoEm); null sem solicitação.
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, pedido_cancelamento, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -6210,6 +6217,10 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // qualquer leitor que passou a guarda acima; minha = true só na do próprio leitor, nunca
     // nome ou id do autor (listarPerguntas).
     const perguntas = await listarPerguntas('reparo', req.params.id, req.usuario.id)
+    // profissionais_avisados: SÓ para o dono (null para prestador do match, admin e assinantes) —
+    // quantos profissionais distintos receberam o aviso "Novo serviço disponível!" por push ou
+    // e-mail; lembretes e reenvios não somam (utils/profissionaisAvisados).
+    const profissionais_avisados = ehDono ? await contarProfissionaisAvisados('reparos', req.params.id, reparo.criado_por) : null
     res.json({
       reparo,
       midias: midias.rows,
@@ -6230,6 +6241,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       pode_aumentar_valor,
       valor_minimo_aumento,
       perguntas,
+      profissionais_avisados,
     })
 
     // Contador de visitas em memória (mesmo racional do GET /obras/:id, inclusive o dedupe
