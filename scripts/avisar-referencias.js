@@ -4,8 +4,10 @@
 // GET /auth/referencias): 'propria' (nome igual ao do usuário) ou 'repetido' (telefone repetido
 // entre elas ou igual ao do próprio). Linhas antigas, gravadas antes de uma regra existir.
 //
-//   node scripts/avisar-referencias.js            → DRY-RUN (padrão): só lista nome, problema e
-//                                                    se tem push token. Não grava, não envia.
+//   node scripts/avisar-referencias.js            → DRY-RUN (padrão): só lista nome, problema,
+//                                                    plataforma do push token (android/ios/none) e se já
+//                                                    foi avisado, com totais por plataforma. Não grava,
+//                                                    não envia.
 //   node scripts/avisar-referencias.js --enviar   → envia de verdade (push + e-mail via
 //                                                    entregarPushEEmail), com claim em email_alertas.
 //
@@ -37,9 +39,14 @@ const CORPO_EMAIL = `${CORPO}\n\nNo app: Perfil → Minhas referências.`
 
 const ROTULOS = { propria: 'própria (nome igual ao seu)', repetido: 'telefone repetido / próprio' }
 
+// plataforma: a do push token ('android' | 'ios', push_plataforma, ou a última vista — plataforma),
+// 'none' sem push token. referencias::text: a coluna pode ser TEXT ou json/jsonb — o cast vale
+// para as duas; lerReferencias decide o que é lista.
 const listarElegiveis = async () => {
   const r = await pool.query(`
     SELECT u.id, u.nome, u.email, u.telefone, u.push_token, u.referencias,
+           CASE WHEN u.push_token IS NULL THEN 'none'
+                ELSE COALESCE(u.push_plataforma, u.plataforma, 'desconhecida') END AS plataforma,
            EXISTS (SELECT 1 FROM email_alertas ea
                     WHERE ea.tipo = $1 AND ea.demanda_id = u.id AND ea.usuario_id = u.id) AS ja_avisado
       FROM usuarios u
@@ -47,7 +54,7 @@ const listarElegiveis = async () => {
        AND u.ativo = true
        AND u.suspenso_em IS NULL
        AND u.desinstalado_em IS NULL
-       AND NULLIF(btrim(u.referencias), '') IS NOT NULL
+       AND NULLIF(btrim(u.referencias::text), '') IS NOT NULL
      ORDER BY u.criado_em ASC`, [TIPO_CLAIM])
   return r.rows
     .map(u => ({ ...u, problema: problemaReferencias(lerReferencias(u.referencias), u) }))
@@ -70,8 +77,10 @@ const main = async () => {
   const elegiveis = await listarElegiveis()
   console.log(`${enviar ? 'ENVIO' : 'DRY-RUN'} — ${elegiveis.length} profissional(is) com referência com problema\n`)
   const contagem = { enviados: 0, pulados: 0, falhas: 0 }
+  const porPlataforma = {}
   for (const u of elegiveis) {
-    const linha = `${u.nome} <${u.email || 'sem e-mail'}> | ${ROTULOS[u.problema] || u.problema} | push token: ${u.push_token ? 'sim' : 'não'}${u.ja_avisado ? ' | JÁ AVISADO' : ''}`
+    porPlataforma[u.plataforma] = (porPlataforma[u.plataforma] || 0) + 1
+    const linha = `${u.nome} <${u.email || 'sem e-mail'}> | ${ROTULOS[u.problema] || u.problema} | plataforma: ${u.plataforma} | já avisado: ${u.ja_avisado ? 'sim' : 'não'}`
     if (!enviar) { console.log('  ' + linha); continue }
     if (u.ja_avisado || !(await reivindicar(u.id))) { contagem.pulados++; console.log('  pulado (já avisado): ' + linha); continue }
     const via = await entregarPushEEmail({
@@ -89,8 +98,10 @@ const main = async () => {
       console.log(`  enviado via ${via}: ` + linha)
     }
   }
-  if (enviar) console.log(`\n${contagem.enviados} enviado(s), ${contagem.pulados} pulado(s), ${contagem.falhas} falha(s)`)
-  else console.log(`\nNada enviado. Para enviar: node scripts/avisar-referencias.js --enviar`)
+  const totais = Object.entries(porPlataforma).sort().map(([p, n]) => `${p}: ${n}`).join(', ') || 'nenhum'
+  console.log(`\nTotais por plataforma — ${totais} | já avisados: ${elegiveis.filter(u => u.ja_avisado).length}`)
+  if (enviar) console.log(`${contagem.enviados} enviado(s), ${contagem.pulados} pulado(s), ${contagem.falhas} falha(s)`)
+  else console.log(`Nada enviado. Para enviar: node scripts/avisar-referencias.js --enviar`)
 }
 
 main()
