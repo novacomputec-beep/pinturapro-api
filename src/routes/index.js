@@ -83,6 +83,8 @@ const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 // o broadcast de reparo novo casa categoria × especialidades (alertaService). Só POST
 // /reparos/dono valida; a rota de aprovação não reavalia linha já gravada.
 const { ESPECIALIDADES_REPARADOR, validarEspecialidades } = require('../utils/especialidades')
+// Descrição de "Outros" (usuarios.outros_descricao): conta vinculada e GET /admin/outros-descricoes.
+const { lerOutrosDescricao, registrarOutrosDescricao } = require('../utils/outrosDescricao')
 const { enviarEmail } = require('../services/emailService')
 const { sqlTipoConta, tipoDeTipoConta, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL } = require('../utils/tipoConta')
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
@@ -166,6 +168,9 @@ const migracaoPronta = (async () => {
     // Última alteração das referências pelo próprio usuário (PUT /auth/referencias); NULL = nunca
     // mexeu depois do cadastro/verificação. Sai na ficha do admin.
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS referencias_alteradas_em TIMESTAMPTZ`)
+    // O que o profissional faz em "Outros" (utils/outrosDescricao): ≤ 40 chars na escrita,
+    // obrigatório quando 'outros' está nas especialidades, NULL quando não está.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS outros_descricao TEXT`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg VARCHAR(20)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_orgao VARCHAR(20)`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rg_estado VARCHAR(2)`)
@@ -6836,6 +6841,9 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
     // validados contra a lista do lado 'reparador'.
     const esp = validarEspecialidades(req.body?.especialidades || [], true, 'reparador')
     if (esp.erro) return res.status(400).json({ erro: esp.erro })
+    // "Outros" na lista exige a descrição (utils/outrosDescricao), como no cadastro.
+    const outros = lerOutrosDescricao(req.body?.outros_descricao, esp.valor)
+    if (outros.erro) return res.status(400).json(outros.erro)
     const planoEscolhido = req.body?.plano === 'anual' ? 'anual' : 'mensal'
     const valorMensal = planoEscolhido === 'anual' ? 499.00 : 49.90
 
@@ -6889,9 +6897,9 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
         tipo_dono, pix_reembolso, referencias,
         verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
         verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador, cep, latitude, longitude,
-        logradouro, numero, complemento, bairro, foto_url, codigo_indicacao)
+        logradouro, numero, complemento, bairro, foto_url, codigo_indicacao, outros_descricao)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'prestador',true,NULL,$11,$12,$13,$14,$15,$27,
-               $16,$17,$18,'reparador',$19,$20,$21,$22,$23,$24,$25,$26, gerar_codigo_indicacao())
+               $16,$17,$18,'reparador',$19,$20,$21,$22,$23,$24,$25,$26, gerar_codigo_indicacao(), $28)
        RETURNING id, nome, role, tipo_prestador, tipo_dono`,
       [origem.nome, emailNormalizado, origem.telefone, origem.senha_hash, origem.cidade, origem.uf,
        esp.valor, origem.anos_experiencia || 0, origem.tamanho_equipe || 1, origem.cpf_cnpj,
@@ -6900,7 +6908,7 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
        origem.rg, origem.rg_orgao, origem.rg_estado,
        origem.cep, origem.latitude, origem.longitude,
        origem.logradouro, origem.numero, origem.complemento, origem.bairro, origem.foto_url,
-       semDocs ? 'nao_solicitada' : 'pendente']
+       semDocs ? 'nao_solicitada' : 'pendente', outros.valor]
     )).rows[0]
 
     // Assinatura igual à do cadastro de reparador; a aprovação (abaixo) é quem ativa.
@@ -6933,6 +6941,7 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
 
     console.log(`[CONTA VINCULADA] pintor ${origem.id} → reparador ${novo.id} aprovada=${aprovada}`)
     res.status(201).json({ conta: { id: novo.id, tipo: tipoDaLinha(novo), nome: novo.nome }, aprovada })
+    registrarOutrosDescricao(novo.id, outros)
   } catch (err) {
     if (client) await client.query('ROLLBACK').catch(() => {})
     console.error('[CONTA VINCULADA] erro:', err.message)
@@ -9413,6 +9422,34 @@ router.get('/admin/especialidades-resumo', autenticar, exigirAdmin, async (req, 
   } catch (err) {
     console.error('[admin/especialidades-resumo]', err.message)
     res.status(500).json({ erro: 'Erro ao resumir especialidades' })
+  }
+})
+
+// GET /admin/outros-descricoes — o que os profissionais escrevem em "Outros" (usuarios.
+// outros_descricao), agrupado pelo texto NORMALIZADO (minúsculas, sem acento, espaços
+// colapsados — a mesma expressão SQL de cidade, sqlNormalizarCidade), do mais frequente ao
+// menos. População = a mesma de /admin/especialidades-resumo (prestador ativo, não suspenso,
+// instalado). Resposta: { descricoes: [{ texto, exemplo, total }] } — texto é a chave
+// normalizada; exemplo, uma grafia original (a menor em ordem alfabética) para o painel exibir.
+router.get('/admin/outros-descricoes', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT ${sqlNormalizarCidade('u.outros_descricao')} AS texto,
+              MIN(btrim(u.outros_descricao)) AS exemplo,
+              COUNT(*)::int AS total
+         FROM usuarios u
+        WHERE u.role = 'prestador'
+          AND u.ativo = true
+          AND u.suspenso_em IS NULL
+          AND ${sqlInstalado('u')}
+          AND NULLIF(btrim(u.outros_descricao), '') IS NOT NULL
+        GROUP BY 1
+        ORDER BY total DESC, texto ASC`
+    )
+    res.json({ descricoes: result.rows })
+  } catch (err) {
+    console.error('[admin/outros-descricoes]', err.message)
+    res.status(500).json({ erro: 'Erro ao listar descrições de "Outros"' })
   }
 })
 
