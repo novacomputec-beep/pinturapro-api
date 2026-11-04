@@ -644,6 +644,15 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS lembretes_enviados INTEGER NOT NULL DEFAULT 0`)
     await client.query(`UPDATE obras   SET lembretes_enviados = 1 WHERE lembrete_enviado_em IS NOT NULL AND lembretes_enviados = 0`)
     await client.query(`UPDATE reparos SET lembretes_enviados = 1 WHERE lembrete_enviado_em IS NOT NULL AND lembretes_enviados = 0`)
+    // "Pedido de indicação" (alertaService.pedirIndicacoes): demanda sem match e sem NENHUMA
+    // manifestação 48h+ após criado_em pede, UMA vez, a quem NÃO faz aquele serviço que indique o
+    // app. indicacao_enviada_em = claim por demanda (NULL = ainda não pedido); usuarios.
+    // indicacao_pedida_em = último pedido recebido pelo profissional, em qualquer demanda (gap de
+    // 3 dias entre pedidos). Aditivas, sem DEFAULT nem backfill: demanda antiga ainda sem resposta
+    // entra no primeiro tique dentro da janela 08–20h.
+    await client.query(`ALTER TABLE obras    ADD COLUMN IF NOT EXISTS indicacao_enviada_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE reparos  ADD COLUMN IF NOT EXISTS indicacao_enviada_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS indicacao_pedida_em  TIMESTAMPTZ`)
     // Avisos ao PROFISSIONAL casado (alertaService.avisarMatchFeito / lembrarPrazoChegada):
     // aviso_match_enviado_em = push "Match feito!" logo após o match; lembrete_chegada_enviado_em
     // = lembrete antes do prazo de chegada. Cada um é um claim atômico (UPDATE ... WHERE IS NULL

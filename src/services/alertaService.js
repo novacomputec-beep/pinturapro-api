@@ -15,7 +15,7 @@ const { normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 // em vez do slug cru. Fallback = emoji fixo de antes + slug cru, para categoria fora da lista.
 // Reparo com até 3 categorias: o texto usa a primeira + " +N" (apresentacaoReparoLista) e o
 // casamento usa TODAS (categoriasDoReparo → expandirCategoria).
-const { apresentacaoReparoLista, apresentacaoObra, categoriasDoReparo } = require('../utils/categoriasApp')
+const { apresentacaoReparo, apresentacaoReparoLista, apresentacaoObra, categoriasDoReparo } = require('../utils/categoriasApp')
 // Cidade dobrada dos DOIS lados com a MESMA regra (ver utils/localidade): a do profissional
 // aqui, a da demanda em JS com normalizar(). uf compara em caixa alta, que e como e gravado.
 const SQL_CIDADE_PRESTADOR = sqlNormalizarCidade('u.cidade')
@@ -38,7 +38,7 @@ const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZE
 // do seu grupo (chave grupos_relacionados_ativo) antes do casamento com especialidades, nos DOIS
 // públicos (broadcastPaginado e reivindicarEmailsNovaDemanda). utils/gruposCategorias só importa
 // utils/supabase e utils/categoriasApp — sem ciclo.
-const { publicoDemanda } = require('../utils/gruposCategorias')
+const { publicoDemanda, expandirCategoria } = require('../utils/gruposCategorias')
 // DeviceNotRegistered → desinstalação provável. utils/desinstalacoes só importa utils/supabase.
 const { marcarDesinstalados } = require('../utils/desinstalacoes')
 // Diagnóstico: ticket e recibo de cada push em push_recibos. Fire-and-forget, nunca lança.
@@ -303,6 +303,12 @@ const SQL_ASSINATURA_ATIVA = `a.status = 'ativa' AND (a.proximo_vencimento IS NU
 // Tamanho de página do broadcast — o antigo LIMIT 500 vira o passo do cursor, não o teto.
 const PAGINA_BROADCAST = 500
 
+// "Pedido de indicação" (pedirIndicacoes, abaixo de lembrarDemandasSemResposta): no máx. UM por
+// profissional a cada INDICACAO_GAP_DIAS, somando TODAS as demandas — usuarios.indicacao_pedida_em
+// guarda o último envio e este predicado (público do broadcast) deixa de fora quem ainda está no gap.
+const INDICACAO_GAP_DIAS = 3
+const SQL_SEM_INDICACAO_RECENTE = `(u.indicacao_pedida_em IS NULL OR u.indicacao_pedida_em < NOW() - (${INDICACAO_GAP_DIAS} * INTERVAL '1 day'))`
+
 // Broadcast PAGINADO por chave estável (A5): u.id > cursor ORDER BY u.id LIMIT 500, até
 // esgotar. Antes era LIMIT 500 sem ORDER BY nem continuação: numa cidade com 5.000
 // assinantes, até 90% nunca recebiam a publicação — e, sem ordem, possivelmente sempre os
@@ -352,11 +358,22 @@ const sqlSemManifestacao = (interesse, param) => (interesse
 // quem já se candidatou / mostrou interesse NESTA demanda (sqlSemManifestacao).
 // demanda = { tabela: 'obras' | 'reparos', id }: a demanda anunciada — tira do público a outra
 // conta do seu criador (sqlNaoMesmoCpfDoCriador). Todos os chamadores passam; sem ela não filtra.
-const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null, demanda = null }) => {
+// Só o "pedido de indicação" (pedirIndicacoes) passa os quatro abaixo:
+//   foraDasCategorias (text[]): INVERTE o casamento — público = quem NÃO tem nenhum desses slugs
+//     em especialidades (especialidades NULL conta como "fora"). Exclui `categoria`.
+//   semIndicacaoRecente: só quem não recebeu pedido de indicação nos últimos INDICACAO_GAP_DIAS
+//     (usuarios.indicacao_pedida_em), em QUALQUER demanda.
+//   excluirUsuarioId: nunca o próprio criador da demanda (além da outra conta dele, acima).
+//   aposPagina(resultados): await por página, DEPOIS do envio (carimbo de indicacao_pedida_em).
+const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null, demanda = null,
+                                   foraDasCategorias = null, semIndicacaoRecente = false, excluirUsuarioId = null, aposPagina = null }) => {
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
   // Lista de slugs a casar (categoria + grupo, ou só ela; null no lado obra), resolvida UMA vez
   // por broadcast — a chave de config é lida aqui, não a cada página.
-  const { push: categorias } = await publicoDemanda(categoria)
+  const { push: categorias } = foraDasCategorias ? { push: foraDasCategorias } : await publicoDemanda(categoria)
+  const sqlCategorias = foraDasCategorias
+    ? `NOT COALESCE(u.especialidades && $6::text[], false)`
+    : sqlCasaCategorias('$6')
   let cursor = null
   for (;;) {
     // Filtros opcionais entram no SQL E na lista de parâmetros JUNTOS: o pg recusa parâmetro
@@ -372,6 +389,13 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
     if (demanda) {
       params.push(demanda.id)
       filtrosOpcionais += `\n         AND ${sqlNaoMesmoCpfDoCriador(demanda.tabela, `$${params.length}`)}`
+    }
+    if (excluirUsuarioId) {
+      params.push(excluirUsuarioId)
+      filtrosOpcionais += `\n         AND u.id <> $${params.length}::uuid`
+    }
+    if (semIndicacaoRecente) {
+      filtrosOpcionais += `\n         AND ${SQL_SEM_INDICACAO_RECENTE}`
     }
     const pagina = await pool.query(
       `SELECT u.id, u.push_token
@@ -390,7 +414,7 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
          AND ${SQL_CIDADE_PRESTADOR} = $2
          AND upper(btrim(u.uf)) = $3
          AND ($4::uuid IS NULL OR u.id > $4::uuid)
-         AND ${sqlCasaCategorias('$6')}${filtrosOpcionais}
+         AND ${sqlCategorias}${filtrosOpcionais}
        ORDER BY u.id
        LIMIT $5`,
       params
@@ -401,6 +425,7 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
     // Grava ANTES de somar/seguir: se o registro falhar, o erro sobe e o claim da demanda
     // dá ROLLBACK — melhor reenviar tudo do que ter enviado sem saber para quem.
     if (entrega) await registrarEntregas(entrega.tipo, entrega.demandaId, resultados)
+    if (aposPagina) await aposPagina(resultados)
     const s = contarResultados(resultados)
     total.elegiveis += s.elegiveis; total.invalidos += s.invalidos; total.enviados += s.enviados; total.falhos += s.falhos
     cursor = pagina.rows[pagina.rows.length - 1].id
@@ -1276,6 +1301,115 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
       }
     } catch (err) {
       console.error(`[Lembrete] erro em ${lado.tabela}:`, err.message)
+    }
+  }
+})
+
+// "Pedido de indicação" (aprovado pelo dono, 04/11/2026) — demanda aberta, aprovada, SEM match e
+// com ZERO manifestações (candidaturas / interesse_reparos) INDICACAO_APOS_HORAS (48h) ou mais
+// depois de criado_em recebe UM push (sem e-mail) pedindo que quem NÃO faz aquele serviço indique
+// o app a quem faz. Elegibilidade do profissional = a do aviso de demanda nova (broadcastPaginado:
+// role prestador, assinatura ativa, token, não suspenso, não desinstalado, cidade+uf dobrados),
+// MENOS quem está nos grupos de categoria da demanda (foraDasCategorias: categorias + grupos de
+// expandirCategoria — ou só 'outros', quando é a única), menos o criador (as duas contas) e menos
+// quem já se manifestou nela (por definição ninguém, mas o predicado fica, por segurança).
+// Lado reparo: reparadores fora dos grupos. Lado obra: obras.categoria não tem grupo (residencial/
+// comercial/… não casam com especialidade), e só o tipo 'pintor' tem a aba Obras no app — um
+// reparador que tocasse no push cairia no nada. Então, na obra, o público é todo pintor elegível
+// da cidade (nenhum se manifestou), e o texto pede a indicação do mesmo jeito.
+// LIMITES: uma vez por demanda (claim atômico em indicacao_enviada_em, ANTES do envio e nunca
+// desfeito, como o lembrete) e no máx. um pedido por profissional a cada INDICACAO_GAP_DIAS em
+// qualquer demanda (usuarios.indicacao_pedida_em, carimbado por página logo após o envio, só para
+// quem saiu 'enviado' — SQL_SEM_INDICACAO_RECENTE o lê no público). Só entre LEMBRETE_HORA_INICIO
+// e LEMBRETE_HORA_FIM (São Paulo): fora da janela o claim não acontece e a demanda espera o
+// próximo tique dentro dela (a condição de 48h continua valendo, então ninguém perde a vez).
+// data do push = o mesmo tipo/id do aviso de demanda nova (novo_reparo / nova_obra), que o app já
+// leva ao detalhe da demanda; indicacao: true distingue a origem (como lembrete / oferta_aumentada).
+// Cadência: 5 min (INTERVALO_LEMBRETE em server.js), como o lembrete "ainda aberto".
+const INDICACAO_APOS_HORAS = 48
+const corpoIndicacao = (d) => {
+  const valor = Number(d.valor) > 0 ? ` de ${formatarReaisPush(d.valor)}` : ''
+  const local = String(d.bairro || '').trim() || String(d.cidade || '').trim() || 'sua região'
+  return `Tem um pedido${valor} aberto em ${local}. Indique o ${MARCA} para quem faz esse serviço!`
+}
+// Título com a categoria PRINCIPAL (a primeira, sem " +N"); fallback para categoria fora do mapa.
+const mensagemIndicacaoReparo = (reparo, reparoId) => {
+  const { rotulo } = apresentacaoReparo(categoriasDoReparo(reparo)[0] ?? null, '🔧')
+  return {
+    titulo: `Conhece alguém que faz ${rotulo || 'esse serviço'}? 🔧`,
+    corpo: corpoIndicacao(reparo),
+    data: { tipo: 'novo_reparo', reparo_id: reparoId, indicacao: true },
+  }
+}
+const mensagemIndicacaoObra = (obra, obraId) => {
+  const { rotulo } = apresentacaoObra(obra.categoria, '🎨')
+  return {
+    titulo: `Conhece alguém que faz ${rotulo ? `obra ${rotulo.toLowerCase()}` : 'obras'}? 🔧`,
+    corpo: corpoIndicacao(obra),
+    data: { tipo: 'nova_obra', obra_id: obraId, indicacao: true },
+  }
+}
+const LADOS_INDICACAO = [
+  { tabela: 'reparos', tipoPrestador: 'reparador', comCategoria: true,  colunaValor: 'valor_estimado',
+    interesse: { tabela: 'interesse_reparos', coluna: 'reparo_id' }, mensagem: mensagemIndicacaoReparo },
+  { tabela: 'obras',   tipoPrestador: 'pintor',    comCategoria: false, colunaValor: 'valor',
+    interesse: { tabela: 'candidaturas', coluna: 'obra_id' },        mensagem: mensagemIndicacaoObra },
+]
+// O claim (UPDATE … RETURNING). Exportado para o teste executar o MESMO statement num
+// BEGIN…ROLLBACK; o cron (pedirIndicacoes) é o único chamador real.
+const sqlClaimIndicacao = (lado) => `
+      UPDATE ${lado.tabela} d
+         SET indicacao_enviada_em = NOW()
+       WHERE d.status = 'aberta' AND d.status_aprovacao = 'aprovada'
+         AND d.match_usuario_id IS NULL AND d.expira_em > NOW()
+         AND d.push_novo_enviado_em IS NOT NULL
+         AND d.indicacao_enviada_em IS NULL
+         AND d.criado_em <= NOW() - (${INDICACAO_APOS_HORAS} * INTERVAL '1 hour')
+         AND NOT EXISTS (SELECT 1 FROM ${lado.interesse.tabela} x WHERE x.${lado.interesse.coluna} = d.id)
+         AND ${SQL_JANELA_LEMBRETE}
+   RETURNING d.id, d.titulo, d.cidade, d.uf, d.bairro, d.categoria, ${lado.comCategoria ? 'd.categorias, ' : ''}d.${lado.colunaValor} AS valor, d.criado_por`
+// Lista de slugs que define "está no grupo da demanda" (quem os tem fica FORA do público). Lado
+// obra: null = sem filtro de categoria (ver cabeçalho). db: client do teste, pool no cron.
+const categoriasExcluidasIndicacao = async (lado, d, db = pool) =>
+  (lado.comCategoria ? (await expandirCategoria(categoriasDoReparo(d), db)) || [] : null)
+const carimbarIndicacaoPedida = async (resultados, db = pool) => {
+  const ids = resultados.filter(r => r.resultado === 'enviado').map(r => r.id)
+  if (ids.length === 0) return
+  await db.query(`UPDATE usuarios SET indicacao_pedida_em = NOW() WHERE id = ANY($1::uuid[])`, [ids])
+}
+const pedirIndicacoes = semSobreposicao('pedirIndicacoes', async () => {
+  for (const lado of LADOS_INDICACAO) {
+    try {
+      const claim = await pool.query(sqlClaimIndicacao(lado))
+      if (claim.rows.length === 0) continue
+      console.log(`[Indicacao] ${lado.tabela}: ${claim.rows.length} demanda(s) sem resposta há ${INDICACAO_APOS_HORAS}h+ — pedindo indicação (${claim.rows.map(d => d.id.slice(0, 8)).join(', ')})`)
+      for (const d of claim.rows) {
+        const cidade = normalizar(d.cidade)
+        const uf = String(d.uf || '').trim().toUpperCase()
+        if (!cidade || !uf) {
+          console.log(`[Indicacao] ${lado.tabela} ${d.id} sem cidade/uf — ninguém avisado`)
+          continue
+        }
+        // try/catch POR demanda, como o lembrete: o claim já está gravado; falha fica no log.
+        try {
+          await broadcastPaginado({
+            tipoPrestador: lado.tipoPrestador, cidade, uf,
+            foraDasCategorias: await categoriasExcluidasIndicacao(lado, d),
+            semIndicacaoRecente: true,
+            excluirUsuarioId: d.criado_por,
+            ...lado.mensagem(d, d.id),
+            rotulo: `indicação ${lado.tabela} ${d.id}`,
+            entrega: null,
+            excluirManifestados: { interesse: lado.interesse, demandaId: d.id },
+            demanda: { tabela: lado.tabela, id: d.id },
+            aposPagina: carimbarIndicacaoPedida,
+          })
+        } catch (err) {
+          console.error(`[Indicacao] push ${lado.tabela} ${d.id} falhou:`, err.message)
+        }
+      }
+    } catch (err) {
+      console.error(`[Indicacao] erro em ${lado.tabela}:`, err.message)
     }
   }
 })
@@ -2818,6 +2952,16 @@ module.exports = {
   listarCandidatosLembrete,
   sqlClaimLembrete,
   LADOS_LEMBRETE,
+  // Pedido de indicação (cron + peças exportadas para o teste rodar o mesmo SQL em BEGIN…ROLLBACK).
+  pedirIndicacoes,
+  sqlClaimIndicacao,
+  LADOS_INDICACAO,
+  INDICACAO_APOS_HORAS,
+  INDICACAO_GAP_DIAS,
+  SQL_SEM_INDICACAO_RECENTE,
+  categoriasExcluidasIndicacao,
+  carimbarIndicacaoPedida,
+  broadcastPaginado,
   avisarMatchFeito,
   lembrarPrazoChegada,
   lembrarAgendamento,
