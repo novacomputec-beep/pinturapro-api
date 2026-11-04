@@ -538,46 +538,97 @@ const login = async (req, res) => {
       }
     }
 
-    const assinaturaResult = await pool.query(
-      `SELECT status, tipo, plano, proximo_vencimento, valor_mensal FROM assinaturas
-       WHERE usuario_id = $1
-       ORDER BY CASE status WHEN 'ativa' THEN 1 WHEN 'pendente' THEN 2 ELSE 3 END, criado_em DESC
-       LIMIT 1`,
-      [usuario.id]
-    )
-
-    const token = gerarToken(usuario)
-    registrarPlataforma(usuario.id, req)
-    // Login vindo do APP (não do painel/site no navegador) fecha a desinstalação provável.
-    if (detectarPlataforma(req)) registrarReinstalacao(usuario.id)
-
-    res.json({
-      usuario: {
-        id: usuario.id,
-        nome: usuario.nome,
-        email: usuario.email,
-        telefone: usuario.telefone || null,
-        cidade: usuario.cidade || null,
-        role: usuario.role,
-        foto_url: usuario.foto_url || null,
-        tipo_dono: usuario.tipo_dono || null,
-        tipo_prestador: usuario.tipo_prestador || null,
-        boas_vindas_exibida: usuario.boas_vindas_exibida ?? false,
-        verificacao_status: usuario.verificacao_status || 'nao_solicitada',
-        // O app usa ESTE usuario até a próxima releitura do perfil (boot/revalidarSessao): sem
-        // os campos aqui, "Minhas referências" ficava escondido logo depois do login.
-        ...camposReferencias(usuario.referencias, usuario),
-      },
-      assinatura: assinaturaResult.rows[0] || null,
-      token,
-      // Campo EXTRA, só quando o e-mail tem 2+ contas ativas — com uma conta a resposta é
-      // byte a byte a de antes. O app novo usa para oferecer a troca (novo login com `tipo`).
-      ...(contas.length > 1 ? { contas } : {})
-    })
+    res.json(await montarSessao(usuario, req, contas))
 
   } catch (err) {
     console.error('Erro no login:', err)
     res.status(500).json({ erro: 'Erro ao fazer login' })
+  }
+}
+
+// Colunas que o payload de sessão precisa (login, trocar-conta e a conta vinculada de
+// POST /auth/contas/:tipo leem a MESMA lista, para o `usuario` sair igual nos três).
+const COLUNAS_SESSAO = 'id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version, verificacao_status, referencias, criado_em'
+
+// Payload de sessão de UMA conta — exatamente o que o login sempre devolveu: usuario,
+// assinatura (a melhor linha), token (gerarToken) e, só com 2+ contas ativas no e-mail, a
+// lista `contas`. Efeitos colaterais do login (plataforma, reinstalação) vêm junto, porque a
+// troca de conta é um login sem senha: a conta alvo passa a ser a sessão do aparelho.
+// `contas` = [{ id, tipo, nome }] das contas ATIVAS do e-mail (quem chama já as leu).
+const montarSessao = async (usuario, req, contas = []) => {
+  const assinaturaResult = await pool.query(
+    `SELECT status, tipo, plano, proximo_vencimento, valor_mensal FROM assinaturas
+     WHERE usuario_id = $1
+     ORDER BY CASE status WHEN 'ativa' THEN 1 WHEN 'pendente' THEN 2 ELSE 3 END, criado_em DESC
+     LIMIT 1`,
+    [usuario.id]
+  )
+
+  const token = gerarToken(usuario)
+  registrarPlataforma(usuario.id, req)
+  // Login vindo do APP (não do painel/site no navegador) fecha a desinstalação provável.
+  if (detectarPlataforma(req)) registrarReinstalacao(usuario.id)
+
+  return {
+    usuario: {
+      id: usuario.id,
+      nome: usuario.nome,
+      email: usuario.email,
+      telefone: usuario.telefone || null,
+      cidade: usuario.cidade || null,
+      role: usuario.role,
+      foto_url: usuario.foto_url || null,
+      tipo_dono: usuario.tipo_dono || null,
+      tipo_prestador: usuario.tipo_prestador || null,
+      boas_vindas_exibida: usuario.boas_vindas_exibida ?? false,
+      verificacao_status: usuario.verificacao_status || 'nao_solicitada',
+      // O app usa ESTE usuario até a próxima releitura do perfil (boot/revalidarSessao): sem
+      // os campos aqui, "Minhas referências" ficava escondido logo depois do login.
+      ...camposReferencias(usuario.referencias, usuario),
+    },
+    assinatura: assinaturaResult.rows[0] || null,
+    token,
+    // Campo EXTRA, só quando o e-mail tem 2+ contas ativas — com uma conta a resposta é
+    // byte a byte a de antes. O app novo usa para oferecer a troca (POST /auth/trocar-conta).
+    ...(contas.length > 1 ? { contas } : {})
+  }
+}
+
+// Contas ATIVAS do e-mail (uma por tipo), mais antiga primeiro — a mesma ordem do login.
+// Linhas completas (COLUNAS_SESSAO) para trocarConta montar a sessão da escolhida sem reler.
+const contasDoEmail = async (email) => {
+  const r = await pool.query(
+    `SELECT ${COLUNAS_SESSAO} FROM usuarios WHERE email = $1 AND ativo = true ORDER BY criado_em ASC, id ASC`,
+    [email]
+  )
+  return r.rows
+}
+const resumoContas = (linhas) => linhas.map(u => ({ id: u.id, tipo: tipoDaLinha(u), nome: u.nome }))
+
+// POST /auth/trocar-conta (autenticado, body { tipo }): sessão da conta ATIVA do MESMO e-mail
+// com aquele tipo, com o payload do login. Não pede senha: ela é UMA por e-mail e já foi provada
+// pela sessão atual; trocar de perfil é só escolher outra linha da mesma pessoa. Admin nunca
+// divide e-mail (trigger), então fica fora dos dois lados. Tipo sem conta → 404 com a lista
+// `contas`, como o login com `tipo` errado. Trocar para o próprio tipo só renova o token.
+const trocarConta = async (req, res) => {
+  try {
+    const tipoPedido = tipoDeTipoConta(req.body?.tipo)
+    if (!tipoPedido) {
+      return res.status(400).json({ erro: 'Tipo de conta inválido', codigo: 'tipo_invalido' })
+    }
+    if (req.usuario.role === 'admin') {
+      return res.status(403).json({ erro: 'Sem permissão para esta ação' })
+    }
+    const linhas = (await contasDoEmail(req.usuario.email.toLowerCase().trim())).filter(u => u.role !== 'admin')
+    const alvo = linhas.find(u => tipoDaLinha(u) === tipoPedido)
+    const contas = resumoContas(linhas)
+    if (!alvo) {
+      return res.status(404).json({ erro: 'Não há conta deste tipo para este e-mail.', codigo: 'conta_tipo_inexistente', contas })
+    }
+    res.json(await montarSessao(alvo, req, contas))
+  } catch (err) {
+    console.error('Erro ao trocar conta:', err)
+    res.status(500).json({ erro: 'Erro ao trocar de conta' })
   }
 }
 
@@ -617,7 +668,11 @@ const perfil = async (req, res) => {
       usuario.avaliacoes = { total: a.total, media: parseFloat(a.media), cinco_estrelas: a.cinco_estrelas }
       usuario.selo_bem_avaliado = a.selo_bem_avaliado
     }
-    res.json({ usuario, assinatura: assinaturaResult.rows[0] || null })
+    // Múltiplas contas: TODAS as contas ativas do e-mail ({ id, tipo, nome }), a atual incluída,
+    // para o Perfil oferecer "trocar perfil" (POST /auth/trocar-conta) e "adicionar perfil"
+    // (POST /auth/contas/:tipo) nos tipos que faltam. Sempre presente (1+ itens).
+    const contas = usuario ? resumoContas(await contasDoEmail(usuario.email)) : []
+    res.json({ usuario, assinatura: assinaturaResult.rows[0] || null, contas })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar perfil' })
   }
@@ -904,6 +959,6 @@ const resetarSenhaUsuario = async (req, res) => {
 }
 
 // transporter exportado para o link de assinatura pela web usar o MESMO caminho de e-mail do reset.
-// gerarToken: exportado para POST /auth/contas/:tipo (routes/index.js) devolver a sessão da
-// conta vinculada recém-criada com o MESMO token do login.
-module.exports = { cadastrar, login, perfil, atualizarPerfil, alterarSenha, esqueciSenha, redefinirSenha, resetarSenhaUsuario, transporter, gerarToken }
+// gerarToken / montarSessao / contasDoEmail / resumoContas: exportados para POST /auth/contas/:tipo
+// (routes/index.js) devolver a sessão da conta vinculada recém-criada com o MESMO payload do login.
+module.exports = { cadastrar, login, trocarConta, perfil, atualizarPerfil, alterarSenha, esqueciSenha, redefinirSenha, resetarSenhaUsuario, transporter, gerarToken, montarSessao, contasDoEmail, resumoContas }
