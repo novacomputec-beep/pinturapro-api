@@ -3341,14 +3341,28 @@ const aplicarDigitosPartidos = (lido, anteriores) => {
 }
 
 // Lista para os detalhes: id (o dono precisa dele para responder), textos e carimbos; minha =
-// true só na pergunta do próprio leitor. Nome e id do autor NUNCA saem — o profissional que
-// perguntou continua anônimo para o dono e para os concorrentes até se candidatar. Pergunta e
-// resposta passam pela máscara de leitura (linha gravada antes de um padrão novo do filtro).
-const listarPerguntas = async (tipo, demandaId, leitorId) => {
+// true só na pergunta do próprio leitor. Para o profissional, nome e id do autor NUNCA saem —
+// quem perguntou continua anônimo para os concorrentes. Para o DONO da demanda (dono: true)
+// saem autor_id, autor_nome e autor_candidato (true se esse profissional tem candidatura/
+// interesse VIVO nesta demanda — não recusado, expirado nem cancelado), para ele ligar a
+// pergunta à proposta na hora de escolher. Pergunta e resposta passam pela máscara de leitura
+// (linha gravada antes de um padrão novo do filtro).
+const INTERESSE_POR_TIPO = {
+  obra:   { tabela: 'candidaturas',      chave: 'obra_id' },
+  reparo: { tabela: 'interesse_reparos', chave: 'reparo_id' },
+}
+const sqlInteresseVivo = (a) => `COALESCE(${a}status, 'pendente') NOT IN ('recusado', 'expirado', 'cancelado')`
+const listarPerguntas = async (tipo, demandaId, leitorId, { dono = false } = {}) => {
+  const i = INTERESSE_POR_TIPO[tipo]
+  const colunasDono = dono
+    ? `, p.autor_id, u.nome AS autor_nome,
+         EXISTS (SELECT 1 FROM ${i.tabela} x WHERE x.${i.chave} = p.demanda_id AND x.usuario_id = p.autor_id AND ${sqlInteresseVivo('x.')}) AS autor_candidato`
+    : ''
   const r = await pool.query(
-    `SELECT id, pergunta, resposta, criado_em, respondido_em, (autor_id = $3) AS minha
-       FROM perguntas_demanda WHERE tipo = $1 AND demanda_id = $2
-      ORDER BY criado_em ASC`,
+    `SELECT p.id, p.pergunta, p.resposta, p.criado_em, p.respondido_em, (p.autor_id = $3) AS minha${colunasDono}
+       FROM perguntas_demanda p${dono ? ' JOIN usuarios u ON u.id = p.autor_id' : ''}
+      WHERE p.tipo = $1 AND p.demanda_id = $2
+      ORDER BY p.criado_em ASC`,
     [tipo, demandaId, leitorId]
   )
   return mascararLista(r.rows, ['pergunta', 'resposta'])
@@ -3536,6 +3550,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         // de região (ajuda o dono a julgar deslocamento), não endereço. logradouro, numero
         // e logradouro/numero continuam match-gated. telefone exige ALÉM do match o
         // "Estou a caminho" (obras.a_caminho_em, $3): antes dele sai NULL até para o pintor casado.
+        // pergunta_id/pergunta/resposta: a pergunta única que ESTE candidato fez nesta obra
+        // (perguntas_demanda, uma por autor por demanda), null quando não perguntou.
         `SELECT c.id, c.status, c.valor_proposto, c.valor_contraproposta, c.mensagem,
                 u.nome, u.cidade, u.bairro, u.foto_url, c.usuario_id,
                 u.anos_experiencia, u.especialidades, u.tamanho_equipe, u.embaixador,
@@ -3544,13 +3560,15 @@ router.get('/obras/:id', autenticar, async (req, res) => {
                 CASE WHEN c.usuario_id = $2 AND $3::boolean THEN u.telefone ELSE NULL END as telefone,
                 (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = c.usuario_id) AS avaliacoes_total,
                 (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = c.usuario_id) AS avaliacoes_media,
-                ${sqlSeloBemAvaliado('c.usuario_id')} AS selo_bem_avaliado
+                ${sqlSeloBemAvaliado('c.usuario_id')} AS selo_bem_avaliado,
+                pd.id AS pergunta_id, pd.pergunta, pd.resposta
          FROM candidaturas c JOIN usuarios u ON u.id = c.usuario_id
+         LEFT JOIN perguntas_demanda pd ON pd.tipo = 'obra' AND pd.demanda_id = c.obra_id AND pd.autor_id = c.usuario_id
          WHERE c.obra_id = $1 ORDER BY c.criado_em DESC`,
         [req.params.id, obra.match_usuario_id, !!obra.a_caminho_em]
       )
-      // Mensagem do candidato mascarada na leitura (candidatura antiga, anterior ao filtro).
-      candidatos = mascararLista(candidatosResult.rows, ['mensagem'])
+      // Mensagem/pergunta do candidato mascaradas na leitura (linhas antigas, anteriores ao filtro).
+      candidatos = mascararLista(candidatosResult.rows, ['mensagem', 'pergunta', 'resposta'])
     }
     mascararLista(minhaCandidaturaResult.rows, ['mensagem', 'mensagem_oferta'])
 
@@ -3593,9 +3611,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // pintor do match; null para os demais). Teto por lado em utils/agendamento.
     const sugestoes_restantes = (ehDono || ehPintorDoMatch) ? sugestoesRestantes(obra, ehDono) : null
     // perguntas: a pergunta única de cada profissional ao dono (com resposta, se houver) para
-    // qualquer leitor que passou a guarda acima; minha = true só na do próprio leitor, nunca
-    // nome ou id do autor (listarPerguntas).
-    const perguntas = await listarPerguntas('obra', req.params.id, req.usuario.id)
+    // qualquer leitor que passou a guarda acima; minha = true só na do próprio leitor. Autor
+    // (autor_id, autor_nome, autor_candidato) SÓ para o dono; anônimo para os demais (listarPerguntas).
+    const perguntas = await listarPerguntas('obra', req.params.id, req.usuario.id, { dono: ehDono })
     // profissionais_avisados: SÓ para o dono (null para pintor do match, admin e assinantes) —
     // quantos profissionais distintos receberam o aviso "Nova obra disponível!" por push ou
     // e-mail; lembretes e reenvios não somam (utils/profissionaisAvisados).
@@ -6234,6 +6252,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
         // EXCEÇÃO: bairro sai para todos os interessados, junto de cidade — mesma regra do
         // lado obra. logradouro e numero continuam match-gated; telefone exige ALÉM do match o
         // "Estou a caminho" (reparos.a_caminho_em, $3): antes dele sai NULL até para o casado.
+        // pergunta_id/pergunta/resposta: a pergunta única que ESTE interessado fez neste reparo
+        // (perguntas_demanda, uma por autor por demanda), null quando não perguntou.
         `SELECT ir.id, ir.usuario_id, ir.status, ir.mensagem, ir.criado_em,
                 ir.valor_proposto, ir.valor_contraproposta, ir.rodada,
                 u.nome, u.cidade, u.bairro, u.foto_url, u.anos_experiencia, u.especialidades, u.tamanho_equipe, u.embaixador,
@@ -6242,15 +6262,17 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
                 CASE WHEN ir.usuario_id = $2 AND $3::boolean THEN u.telefone ELSE NULL END as telefone,
                 (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_total,
                 (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = ir.usuario_id) AS avaliacoes_media,
-                ${sqlSeloBemAvaliado('ir.usuario_id')} AS selo_bem_avaliado
+                ${sqlSeloBemAvaliado('ir.usuario_id')} AS selo_bem_avaliado,
+                pd.id AS pergunta_id, pd.pergunta, pd.resposta
          FROM interesse_reparos ir
          JOIN usuarios u ON ir.usuario_id = u.id
+         LEFT JOIN perguntas_demanda pd ON pd.tipo = 'reparo' AND pd.demanda_id = ir.reparo_id AND pd.autor_id = ir.usuario_id
          WHERE ir.reparo_id = $1
          ORDER BY ir.criado_em ASC`,
         [req.params.id, reparo.match_usuario_id, !!reparo.a_caminho_em]
       )
-      // Mensagem do interessado mascarada na leitura (interesse antigo, anterior ao filtro).
-      interessados = mascararLista(result2.rows, ['mensagem'])
+      // Mensagem/pergunta do interessado mascaradas na leitura (linhas antigas, anteriores ao filtro).
+      interessados = mascararLista(result2.rows, ['mensagem', 'pergunta', 'resposta'])
     }
 
     // dono_nome ("Luiz M.") e dono_foto_url (avatar otimizado): SÓ para o prestador do match;
@@ -6292,9 +6314,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // prestador do match; null para os demais). Teto por lado em utils/agendamento.
     const sugestoes_restantes = (ehDono || ehPrestadorDoMatch) ? sugestoesRestantes(reparo, ehDono) : null
     // perguntas: a pergunta única de cada profissional ao dono (com resposta, se houver) para
-    // qualquer leitor que passou a guarda acima; minha = true só na do próprio leitor, nunca
-    // nome ou id do autor (listarPerguntas).
-    const perguntas = await listarPerguntas('reparo', req.params.id, req.usuario.id)
+    // qualquer leitor que passou a guarda acima; minha = true só na do próprio leitor. Autor
+    // (autor_id, autor_nome, autor_candidato) SÓ para o dono; anônimo para os demais (listarPerguntas).
+    const perguntas = await listarPerguntas('reparo', req.params.id, req.usuario.id, { dono: ehDono })
     // profissionais_avisados: SÓ para o dono (null para prestador do match, admin e assinantes) —
     // quantos profissionais distintos receberam o aviso "Novo serviço disponível!" por push ou
     // e-mail; lembretes e reenvios não somam (utils/profissionaisAvisados).
