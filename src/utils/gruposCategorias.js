@@ -19,9 +19,11 @@ const CHAVE_GRUPOS_ATIVO = 'grupos_relacionados_ativo'
 
 const GRUPOS_RELACIONADOS = {
   'Elétrica e tecnologia':        ['eletrica', 'eletronica', 'climatizacao'],
-  'Reparos da casa':              ['alvenaria', 'hidraulica', 'marcenaria', 'montagem_moveis', 'estofamento', 'chaveiro'],
+  'Reparos da casa':              ['alvenaria', 'hidraulica', 'marcenaria', 'montagem_moveis', 'estofamento', 'chaveiro',
+                                   'vidraceiro', 'serralheria'],
   'Limpeza e cuidados da casa':   ['faxina', 'dedetizacao', 'jardineiro'],
-  'Beleza':                       ['cabelo', 'manicure', 'maquiagem', 'barbeiro', 'depilacao', 'massagem', 'podologo'],
+  'Beleza':                       ['cabelo', 'manicure', 'maquiagem', 'barbeiro', 'depilacao', 'massagem', 'podologo',
+                                   'design_sobrancelhas'],
   'Festas e eventos':             ['aluguel_festas', 'decoracao_festas', 'recreacao_infantil', 'dj', 'musico', 'garcom',
                                    'churrasqueiro', 'cozinheiro', 'confeiteiro', 'salgadeiro', 'filmagem_fotografia'],
   'Cuidado':                      ['baba', 'cuidador', 'pet'],

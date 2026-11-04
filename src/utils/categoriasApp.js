@@ -61,6 +61,9 @@ const CATEGORIAS_SERVICO = [
   { slug: 'aluguel_festas',  rotulo: 'Aluguel para festas', emoji: '🎪' },
   { slug: 'decoracao_festas', rotulo: 'Decoração de festas', emoji: '🎈' },
   { slug: 'recreacao_infantil', rotulo: 'Recreação infantil', emoji: '🎠' },
+  { slug: 'design_sobrancelhas', rotulo: 'Design de sobrancelhas', emoji: '👁️' },
+  { slug: 'vidraceiro',      rotulo: 'Vidraceiro',        emoji: '🪟' },
+  { slug: 'serralheria',     rotulo: 'Serralheria',       emoji: '⚒️' },
   { slug: 'outros',          rotulo: 'Outros',            emoji: '➕' },
 ]
 
