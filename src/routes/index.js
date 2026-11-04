@@ -18,7 +18,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, avisarUsuario, encerramentoAutomaticoEm } = require('../services/alertaService')
+const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarCategoriasAdicionadas, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, avisarUsuario, encerramentoAutomaticoEm } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { moderarDemanda, avisarModeracao, sanitizarTexto, mascararDigitosPartidos, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
@@ -4366,6 +4366,65 @@ router.patch('/reparos/dono/:id/ponto-referencia', autenticar, async (req, res) 
   } catch (err) {
     console.error('[reparos/ponto-referencia]', err.message)
     res.status(500).json({ erro: 'Erro ao atualizar ponto de referência' })
+  }
+})
+
+// PATCH /reparos/dono/:id/categorias — o dono troca as categorias (1 a 3 slugs distintos de
+// ESPECIALIDADES_REPARADOR, mesmas regras do POST /reparos) de um reparo ABERTO e SEM match;
+// `categoria` = a primeira, como no create. Fechado/casado → 409; de outro dono → 404.
+// Categoria ADICIONADA a reparo já anunciado (push_novo_enviado_em) e aprovado dispara, em
+// segundo plano, o aviso de demanda nova SÓ para quem entrou no público por causa dela e ainda
+// não foi avisado (alertaService.notificarCategoriasAdicionadas). Remoção não avisa ninguém.
+// Reparo ainda não anunciado: nada a fazer — o aviso original sairá com a lista nova.
+router.patch('/reparos/dono/:id/categorias', autenticar, async (req, res) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ erro: 'Serviço não encontrado' })
+    const { categorias } = req.body || {}
+    if (!Array.isArray(categorias) || categorias.length === 0) {
+      return res.status(400).json({ erro: 'Categoria é obrigatória' })
+    }
+    if (categorias.length > CATEGORIAS_MAX_REPARO) {
+      return res.status(400).json({ erro: `Escolha no máximo ${CATEGORIAS_MAX_REPARO} categorias` })
+    }
+    if (new Set(categorias).size !== categorias.length) {
+      return res.status(400).json({ erro: 'Categorias repetidas' })
+    }
+    for (const c of categorias) {
+      if (typeof c !== 'string' || !ESPECIALIDADES_REPARADOR.includes(c)) {
+        return res.status(400).json({ erro: `Categoria inválida: ${String(c)}` })
+      }
+    }
+    // Lista ANTIGA sai no mesmo UPDATE (subconsulta travada com FOR UPDATE): duas edições
+    // concorrentes não leem a mesma "antes". Linha antiga sem `categorias` usa [categoria].
+    const upd = await pool.query(
+      `UPDATE reparos r
+          SET categorias = $2::text[], categoria = ($2::text[])[1]
+         FROM (SELECT id, COALESCE(categorias, CASE WHEN categoria IS NULL THEN '{}'::text[] ELSE ARRAY[categoria] END) AS antes
+                 FROM reparos WHERE id = $1 AND criado_por = $3 AND status = 'aberta' AND match_usuario_id IS NULL
+                  FOR UPDATE) o
+        WHERE r.id = o.id
+    RETURNING r.id, r.categoria, r.categorias, o.antes, r.status_aprovacao, r.push_novo_enviado_em, r.expira_em`,
+      [req.params.id, categorias, req.usuario.id]
+    )
+    if (upd.rows.length === 0) {
+      const existe = await pool.query(`SELECT 1 FROM reparos WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+      if (existe.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
+      return res.status(409).json({ erro: 'Só dá para alterar as categorias de um serviço aberto e ainda sem profissional escolhido.', codigo: 'reparo_fechado' })
+    }
+    const r = upd.rows[0]
+    const antes = r.antes || []
+    const adicionadas = r.categorias.filter(c => !antes.includes(c))
+    const removidas = antes.filter(c => !r.categorias.includes(c))
+    let aviso = 'nenhum'
+    if (adicionadas.length > 0 && r.status_aprovacao === 'aprovada' && r.push_novo_enviado_em && new Date(r.expira_em) > new Date()) {
+      aviso = 'disparado'
+      notificarCategoriasAdicionadas(r.id, antes).catch(err =>
+        console.error(`[reparos/categorias] aviso de categorias adicionadas falhou | ${r.id}:`, err.message))
+    }
+    res.json({ categoria: r.categoria, categorias: r.categorias, adicionadas, removidas, aviso })
+  } catch (err) {
+    console.error('[reparos/categorias]', err.message)
+    res.status(500).json({ erro: 'Erro ao atualizar categorias' })
   }
 })
 

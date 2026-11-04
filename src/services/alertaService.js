@@ -365,8 +365,14 @@ const sqlSemManifestacao = (interesse, param) => (interesse
 //     (usuarios.indicacao_pedida_em), em QUALQUER demanda.
 //   excluirUsuarioId: nunca o próprio criador da demanda (além da outra conta dele, acima).
 //   aposPagina(resultados): await por página, DEPOIS do envio (carimbo de indicacao_pedida_em).
+// Só o aviso de CATEGORIAS ADICIONADAS (notificarCategoriasAdicionadas) passa estes dois:
+//   excluirCategorias (text[]): tira quem casa com os slugs do público ANTIGO (já estava no alvo
+//     do primeiro aviso), por cima do casamento normal com `categoria` (o público novo).
+//   excluirJaAvisados { tipo, demandaId }: tira quem já tem linha em push_entregas desta demanda
+//     (enviado, falha ou inválido — todos já foram alvo do aviso original ou de uma repescagem).
 const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null, demanda = null,
-                                   foraDasCategorias = null, semIndicacaoRecente = false, excluirUsuarioId = null, aposPagina = null }) => {
+                                   foraDasCategorias = null, semIndicacaoRecente = false, excluirUsuarioId = null, aposPagina = null,
+                                   excluirCategorias = null, excluirJaAvisados = null }) => {
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
   // Lista de slugs a casar (categoria + grupo, ou só ela; null no lado obra), resolvida UMA vez
   // por broadcast — a chave de config é lida aqui, não a cada página.
@@ -396,6 +402,14 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
     }
     if (semIndicacaoRecente) {
       filtrosOpcionais += `\n         AND ${SQL_SEM_INDICACAO_RECENTE}`
+    }
+    if (excluirCategorias) {
+      params.push(excluirCategorias)
+      filtrosOpcionais += `\n         AND NOT COALESCE(u.especialidades && $${params.length}::text[], false)`
+    }
+    if (excluirJaAvisados) {
+      params.push(excluirJaAvisados.tipo, excluirJaAvisados.demandaId)
+      filtrosOpcionais += `\n         AND NOT EXISTS (SELECT 1 FROM push_entregas pe WHERE pe.tipo = $${params.length - 1} AND pe.demanda_id = $${params.length}::uuid AND pe.usuario_id = u.id)`
     }
     const pagina = await pool.query(
       `SELECT u.id, u.push_token
@@ -541,6 +555,59 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     console.error('Erro ao notificar prestadores:', err)
     throw err
   }
+}
+
+// Categorias ADICIONADAS a um reparo já anunciado (PATCH /reparos/dono/:id/categorias): o MESMO
+// aviso de demanda nova (texto de mensagemNovoReparo, push + e-mail, mesmas regras de
+// elegibilidade e a regra do "Outros" de publicoDemanda), só para quem entrou no público POR
+// CAUSA das categorias novas e ainda não foi avisado desta demanda:
+//   push: casa com o público NOVO (categorias + grupos; 'outros' → todos), MENOS quem casa com o
+//         público ANTIGO (excluirCategorias) e MENOS quem já tem linha em push_entregas da
+//         demanda (excluirJaAvisados). Registra em push_entregas (repescagem e edições futuras
+//         passam a enxergá-los como avisados). Antigo com 'outros' = todo mundo já foi alvo →
+//         nenhum push.
+//   e-mail: enviarEmailsNovaDemanda com o tipo 'reparo' de sempre (o UNIQUE barra quem já
+//         recebeu) e excluirCategorias = público antigo do e-mail.
+// Nunca o criador (id e outra conta por CPF). Remoção de categoria não passa por aqui.
+// Só vale para reparo publicado (push_novo_enviado_em NOT NULL), aberto, aprovado, sem match e
+// não expirado — fora disso, ou sem nada adicionado, não faz nada e devolve null. Lança só em
+// falha total do push (como broadcastPaginado); o chamador é fire-and-forget e loga.
+const notificarCategoriasAdicionadas = async (reparoId, categoriasAntes) => {
+  const r = await pool.query(
+    `SELECT id, titulo, cidade, uf, categoria, categorias, criado_por, status, status_aprovacao, match_usuario_id, expira_em, push_novo_enviado_em
+       FROM reparos WHERE id = $1`, [reparoId]
+  )
+  const reparo = r.rows[0]
+  if (!reparo || reparo.status !== 'aberta' || reparo.status_aprovacao !== 'aprovada' || reparo.match_usuario_id
+      || !reparo.push_novo_enviado_em || !(new Date(reparo.expira_em) > new Date())) return null
+  const antes = (Array.isArray(categoriasAntes) ? categoriasAntes : []).filter(Boolean)
+  const depois = categoriasDoReparo(reparo)
+  const adicionadas = depois.filter(c => !antes.includes(c))
+  if (adicionadas.length === 0) return null
+  const cidade = normalizar(reparo.cidade)
+  const uf = String(reparo.uf || '').trim().toUpperCase()
+  if (!cidade || !uf) return null
+
+  // Público antigo por canal. Sem categorias antes (linha legada sem nada): ninguém a excluir
+  // por categoria — só push_entregas / email_alertas separam quem já foi avisado.
+  const publicoAntes = antes.length > 0 ? await publicoDemanda(antes) : { push: [], email: [] }
+  let push = null
+  if (publicoAntes.push === null) {
+    console.log(`[Categorias] reparo ${reparoId}: público antigo já era todo reparador da cidade ('outros') — sem push novo`)
+  } else {
+    push = await broadcastPaginado({
+      tipoPrestador: 'reparador', cidade, uf, categoria: depois,
+      ...mensagemNovoReparo(reparo, reparoId),
+      rotulo: `categorias adicionadas reparo ${reparoId} (+${adicionadas.join(',')})`,
+      entrega: { tipo: 'reparo', demandaId: reparoId },
+      demanda: { tabela: 'reparos', id: reparoId },
+      excluirUsuarioId: reparo.criado_por,
+      excluirCategorias: publicoAntes.push,
+      excluirJaAvisados: { tipo: 'reparo', demandaId: reparoId },
+    })
+  }
+  await enviarEmailsNovaDemanda('reparos', reparoId, { excluirCategorias: publicoAntes.email || [] })
+  return { adicionadas, push }
 }
 
 // Push "oferta aumentada" (POST /obras/:id/aumentar-valor e /reparos/:id/aumentar-valor em
@@ -744,8 +811,11 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
                SELECT 1 FROM email_alertas ea
                 WHERE ea.demanda_id = $5 AND ea.usuario_id = u.id AND ea.tipo LIKE 'lembrete\\_%'
                   AND ea.created_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')))
+         -- Categorias ADICIONADAS ($8, lado.excluirCategorias): só quem NÃO casava com o público
+         -- antigo — o UNIQUE de email_alertas já barra quem recebeu o e-mail original.
+         AND ($8::text[] IS NULL OR NOT COALESCE(u.especialidades && $8::text[], false))
        ORDER BY u.id`,
-      [lado.tipoPrestador, cidade, uf, categorias, demandaId, lado.somenteSemToken === true, /^lembrete_/.test(lado.tipo)]
+      [lado.tipoPrestador, cidade, uf, categorias, demandaId, lado.somenteSemToken === true, /^lembrete_/.test(lado.tipo), lado.excluirCategorias ?? null]
     )
     if (elegiveis.rows.length === 0) return null
 
@@ -2937,6 +3007,7 @@ module.exports = {
   enviarBoasVindas,
   notificarPintoresSobreNovaObra,
   notificarPrestadoresSobreNovoReparo,
+  notificarCategoriasAdicionadas,
   notificarOfertaAumentadaObra,
   notificarOfertaAumentadaReparo,
   notificarDonoSobreAnaliseObra,
