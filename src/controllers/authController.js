@@ -904,4 +904,6 @@ const resetarSenhaUsuario = async (req, res) => {
 }
 
 // transporter exportado para o link de assinatura pela web usar o MESMO caminho de e-mail do reset.
-module.exports = { cadastrar, login, perfil, atualizarPerfil, alterarSenha, esqueciSenha, redefinirSenha, resetarSenhaUsuario, transporter }
+// gerarToken: exportado para POST /auth/contas/:tipo (routes/index.js) devolver a sessão da
+// conta vinculada recém-criada com o MESMO token do login.
+module.exports = { cadastrar, login, perfil, atualizarPerfil, alterarSenha, esqueciSenha, redefinirSenha, resetarSenhaUsuario, transporter, gerarToken }

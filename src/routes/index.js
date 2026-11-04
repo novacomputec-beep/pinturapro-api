@@ -6822,19 +6822,32 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
   }
 })
 
-// Conta vinculada: pintor logado cria o seu perfil de REPARADOR sem redigitar nada. É o
-// "novo tipo da mesma pessoa" do cadastro (authController.cadastrar, múltiplas contas), só
-// que autenticado: quem chama já provou a senha, então o senha_hash é copiado direto (uma
-// senha por e-mail) e nome/CPF/contato/endereço/documentos vêm da própria linha do pintor.
+// Conta vinculada: usuário logado cria OUTRO TIPO da mesma pessoa (:tipo = dono_reparo |
+// dono_obra | pintor | reparador — ou os nomes do cadastro, via tipoDeTipoConta) sem redigitar
+// nada. É o "novo tipo da mesma pessoa" do cadastro (authController.cadastrar, múltiplas
+// contas), só que autenticado: quem chama já provou a senha, então o senha_hash é copiado
+// direto (uma senha por e-mail) e nome/CPF/contato/cidade/endereço/documentos vêm da própria
+// linha de origem, seja ela de dono ou de profissional.
 // Mesmas guardas do cadastro: chave multiplas_contas ligada, mesmos advisory locks (classe 1
-// = e-mail, classe 2 = CPF normalizado), sem conta reparador para o e-mail/CPF, teto de 4.
-// Só as especialidades (lista do reparador, 1 a 5) e o plano vêm do corpo.
-// Pintor já aprovado → a conta nova nasce aprovada e com assinatura ativa pelo MESMO
-// aprovarPrestador de /verificacao/:id/aprovar; pintor pendente → fila normal.
-// Resposta: a conta nova no formato de login.contas[] ({ id, tipo, nome }).
-router.post('/auth/contas/reparador', autenticar, async (req, res) => {
+// = e-mail, classe 2 = CPF normalizado), nenhuma conta do tipo pedido para o e-mail/CPF
+// (tipo_duplicado), CPF não pode estar em outro e-mail, teto de 4.
+// Corpo: tipo PROFISSIONAL exige `especialidades` (lista do lado, 1 a 5) e aceita `plano`;
+// tipo DONO não exige nada (dono nasce com a assinatura gratuita do cadastro).
+// Documentos: origem COM documentos → profissional novo nasce 'pendente' e, se a origem já
+// está aprovada, aprovado na hora pelo MESMO aprovarPrestador de /verificacao/:id/aprovar;
+// origem SEM documentos (dono, ou profissional de verificação adiada) → 'nao_solicitada',
+// como o cadastro sem fotos. Dono novo é sempre 'nao_solicitada' (dono não passa por fila).
+// Resposta: a conta nova no formato de login.contas[] ({ id, tipo, nome }), `aprovada`, o
+// `usuario` como o login devolve e um `token` dela (gerarToken) — o app entra no perfil novo
+// sem pedir senha de novo. A rota antiga /auth/contas/reparador continua casando aqui.
+const PRECO_PRESTADOR = { pintor: { anual: 999.00, mensal: 99.90 }, reparador: { anual: 499.00, mensal: 49.90 } }
+router.post('/auth/contas/:tipo', autenticar, async (req, res) => {
   let client
   try {
+    const tipoNovo = tipoDeTipoConta(req.params.tipo)
+    if (!tipoNovo) {
+      return res.status(400).json({ erro: 'Tipo de conta inválido', codigo: 'tipo_invalido' })
+    }
     if (!await multiplasContasAtivo()) {
       return res.status(403).json({ erro: 'Criação de conta vinculada indisponível', codigo: 'multiplas_contas_desligada' })
     }
@@ -6849,16 +6862,27 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
     if (!origem || !origem.ativo || origem.role === 'admin') {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
-    if (tipoDaLinha(origem) !== 'pintor') {
-      return res.status(403).json({ erro: 'Só uma conta de pintor pode criar o perfil de reparador', codigo: 'origem_nao_pintor' })
+    if (tipoDaLinha(origem) === tipoNovo) {
+      return res.status(409).json({ erro: 'Você já tem uma conta deste tipo com este e-mail.', codigo: 'tipo_duplicado' })
     }
 
-    // Reparador presta serviço: mínimo 1 (ehProfissional) e máximo ESPECIALIDADES_MAX (5),
-    // validados contra a lista do lado 'reparador'.
-    const esp = validarEspecialidades(req.body?.especialidades || [], true, 'reparador')
-    if (esp.erro) return res.status(400).json({ erro: esp.erro })
+    // role / tipo_dono / tipo_prestador do tipo pedido — a MESMA derivação do cadastro
+    // (authController.cadastrar) e o inverso de tipoDaLinha (utils/tipoConta).
+    const ehProfissional = tipoNovo === 'pintor' || tipoNovo === 'reparador'
+    const role = ehProfissional ? 'prestador' : 'dono_obra'
+    const tipo_prestador = ehProfissional ? tipoNovo : null
+    const tipo_dono = ehProfissional ? null : (tipoNovo === 'dono_reparo' ? 'reparo' : 'pintura')
+
+    // Profissional presta serviço: mínimo 1 e máximo ESPECIALIDADES_MAX (5), validados contra a
+    // lista do SEU lado (pintor → obra, reparador → serviços). Dono: lista vazia, nada exigido.
+    let especialidades = []
+    if (ehProfissional) {
+      const esp = validarEspecialidades(req.body?.especialidades || [], true, tipo_prestador)
+      if (esp.erro) return res.status(400).json({ erro: esp.erro })
+      especialidades = esp.valor
+    }
     const planoEscolhido = req.body?.plano === 'anual' ? 'anual' : 'mensal'
-    const valorMensal = planoEscolhido === 'anual' ? 499.00 : 49.90
+    const valorMensal = ehProfissional ? PRECO_PRESTADOR[tipo_prestador][planoEscolhido] : 0
 
     const emailNormalizado = origem.email.toLowerCase().trim()
     const cpfLimpo = origem.cpf_cnpj ? origem.cpf_cnpj.replace(/\D/g, '') : null
@@ -6884,7 +6908,7 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
     if (contasEmail.some(u => u.role === 'admin' || !u.ativo)) {
       return recusar(409, 'Este e-mail já está cadastrado.', 'email_duplicado')
     }
-    if (contasEmail.some(u => u.tipo === 'reparador') || contasCpf.some(u => u.tipo === 'reparador')) {
+    if (contasEmail.some(u => u.tipo === tipoNovo) || contasCpf.some(u => u.tipo === tipoNovo)) {
       return recusar(409, 'Você já tem uma conta deste tipo com este e-mail.', 'tipo_duplicado')
     }
     if (contasCpf.some(u => u.email !== emailNormalizado)) {
@@ -6899,10 +6923,11 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
     const dataFimLancamento = cfgLancamento.rows[0]?.valor || null
     const lancamentoGratis = !!dataFimLancamento && new Date(dataFimLancamento) > new Date()
 
-    // Verificação ADIADA: pintor que ainda não enviou documentos ('nao_solicitada') não tem o
-    // que copiar — a conta nova nasce no mesmo estado do cadastro sem documentos (fora da fila
-    // do painel, assinatura como no cadastro) em vez de 'pendente' sem nada para revisar.
-    const semDocs = origem.verificacao_status === 'nao_solicitada'
+    // Documentos da origem (mesmo teste do cadastro: as três fotos ausentes = verificação
+    // adiada). Sem documentos não há o que copiar para a fila: profissional novo nasce
+    // 'nao_solicitada' como o cadastro sem fotos. Dono nunca entra na fila.
+    const semDocs = !origem.verificacao_doc_frente_url && !origem.verificacao_doc_verso_url && !origem.verificacao_selfie_url
+    const verificacaoStatus = ehProfissional && !semDocs ? 'pendente' : 'nao_solicitada'
 
     const novo = (await client.query(
       `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade, uf,
@@ -6911,21 +6936,30 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
         verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
         verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador, cep, latitude, longitude,
         logradouro, numero, complemento, bairro, foto_url, codigo_indicacao)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'prestador',true,NULL,$11,$12,$13,$14,$15,$27,
-               $16,$17,$18,'reparador',$19,$20,$21,$22,$23,$24,$25,$26, gerar_codigo_indicacao())
-       RETURNING id, nome, role, tipo_prestador, tipo_dono`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$28,true,$29,$11,$12,$13,$14,$15,$27,
+               $16,$17,$18,$30,$19,$20,$21,$22,$23,$24,$25,$26,
+               CASE WHEN $31::boolean THEN gerar_codigo_indicacao() ELSE NULL END)
+       RETURNING id, nome, email, telefone, cidade, role, tipo_prestador, tipo_dono, foto_url,
+                 boas_vindas_exibida, verificacao_status, token_version`,
       [origem.nome, emailNormalizado, origem.telefone, origem.senha_hash, origem.cidade, origem.uf,
-       esp.valor, origem.anos_experiencia || 0, origem.tamanho_equipe || 1, origem.cpf_cnpj,
+       especialidades, origem.anos_experiencia || 0, origem.tamanho_equipe || 1, origem.cpf_cnpj,
        origem.pix_reembolso, JSON.stringify(origem.referencias || []),
        origem.verificacao_doc_frente_url, origem.verificacao_doc_verso_url, origem.verificacao_selfie_url,
        origem.rg, origem.rg_orgao, origem.rg_estado,
        origem.cep, origem.latitude, origem.longitude,
        origem.logradouro, origem.numero, origem.complemento, origem.bairro, origem.foto_url,
-       semDocs ? 'nao_solicitada' : 'pendente']
+       verificacaoStatus, role, tipo_dono, tipo_prestador, ehProfissional]
     )).rows[0]
 
-    // Assinatura igual à do cadastro de reparador; a aprovação (abaixo) é quem ativa.
-    if (lancamentoGratis && semDocs) {
+    // Assinatura igual à do cadastro de cada tipo. Dono: gratuita e ativa. Profissional: a
+    // aprovação (abaixo) é quem ativa, salvo lançamento + verificação adiada.
+    if (!ehProfissional) {
+      await client.query(
+        `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
+         VALUES ($1, 'mensal', 0, 'ativa', 'gratuito')`,
+        [novo.id]
+      )
+    } else if (lancamentoGratis && semDocs) {
       await client.query(
         `INSERT INTO assinaturas (usuario_id, plano, valor_mensal, status, tipo)
          VALUES ($1, $2, $3, 'ativa', 'gratuito')`,
@@ -6947,17 +6981,30 @@ router.post('/auth/contas/reparador', autenticar, async (req, res) => {
     await client.query('COMMIT')
     client.release(); client = null
 
-    // Idoneidade já confirmada na conta de origem: a nova nasce aprovada pelo mesmo caminho
-    // do painel. Fora da transação porque aprovarPrestador usa o pool e envia e-mail/push.
-    const aprovada = origem.verificacao_status === 'aprovado'
+    // Idoneidade já confirmada na conta de origem (profissional aprovado, com documentos): a
+    // nova conta PROFISSIONAL nasce aprovada pelo mesmo caminho do painel. Fora da transação
+    // porque aprovarPrestador usa o pool e envia e-mail/push. Dono não tem aprovação.
+    const aprovada = ehProfissional && !semDocs && origem.verificacao_status === 'aprovado'
     if (aprovada) await aprovarPrestador(novo.id)
 
-    console.log(`[CONTA VINCULADA] pintor ${origem.id} → reparador ${novo.id} aprovada=${aprovada}`)
-    res.status(201).json({ conta: { id: novo.id, tipo: tipoDaLinha(novo), nome: novo.nome }, aprovada })
+    console.log(`[CONTA VINCULADA] ${tipoDaLinha(origem)} ${origem.id} → ${tipoNovo} ${novo.id} aprovada=${aprovada}`)
+    res.status(201).json({
+      conta: { id: novo.id, tipo: tipoDaLinha(novo), nome: novo.nome },
+      aprovada,
+      // Sessão da conta nova, no formato do login: o app grava o token e entra no perfil novo.
+      token: authCtrl.gerarToken(novo),
+      usuario: {
+        id: novo.id, nome: novo.nome, email: novo.email, telefone: novo.telefone || null,
+        cidade: novo.cidade || null, role: novo.role, foto_url: novo.foto_url || null,
+        tipo_dono: novo.tipo_dono || null, tipo_prestador: novo.tipo_prestador || null,
+        boas_vindas_exibida: novo.boas_vindas_exibida ?? false,
+        verificacao_status: aprovada ? 'aprovado' : (novo.verificacao_status || 'nao_solicitada'),
+      },
+    })
   } catch (err) {
     if (client) await client.query('ROLLBACK').catch(() => {})
     console.error('[CONTA VINCULADA] erro:', err.message)
-    res.status(500).json({ erro: 'Erro ao criar conta de reparador' })
+    res.status(500).json({ erro: 'Erro ao criar conta vinculada' })
   } finally {
     if (client) client.release()
   }
