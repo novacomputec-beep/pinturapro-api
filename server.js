@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, entregarLembrete, lembrarRespostaHorario, repetirRespostaHorarioDono, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, pedirIndicacoes, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, entregarLembrete, lembrarRespostaHorario, repetirRespostaHorarioDono, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -847,6 +847,11 @@ const iniciarAgendador = () => {
   // cronômetro — a fatia de W=1h cai em 30 min e não pode esperar 10. Fora do warm-up: a
   // fatia fica devida até acabar, então o próximo tique a pega.
   setInterval(() => { lembrarDemandasSemResposta() }, INTERVALO_LEMBRETE)
+  // "Pedido de indicação": demanda sem match e sem manifestação 48h+ após criado_em pede, UMA vez,
+  // a quem não faz aquele serviço que indique o app (push só, 08–20h SP, 1 por profissional a
+  // cada 3 dias). Mesma cadência do lembrete; fora do warm-up: a condição fica devida até o match
+  // ou a expiração, então o próximo tique a pega.
+  setInterval(() => { pedirIndicacoes() }, INTERVALO_LEMBRETE)
   // Lembretes ao dono (30 min / 2h) da solicitação de encerramento pendente do profissional.
   setInterval(() => { lembrarConfirmacaoEncerramento() }, INTERVALO_LEMBRETE)
   // "Ainda trabalhando?" ao profissional com chegada confirmada e sem pedido de conclusão de
