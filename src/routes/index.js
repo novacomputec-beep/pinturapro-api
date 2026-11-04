@@ -62,6 +62,8 @@ const { normalizarCodigo, recalcularIndicador, LINK_INDICACAO } = require('../ut
 const { GRUPOS_RELACIONADOS, CHAVE_DO_GRUPO, gruposRelacionadosAtivo } = require('../utils/gruposCategorias')
 // Etiquetas da avaliação (fonte única): catálogo público, validação da escrita e selo.
 const { NIVEIS, catalogoEtiquetas, gruposDaDemanda, validarEtiquetas, sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
+// Dicas do ProTudo (utils/dicas): DDL + seed na migração, GET /dicas por lado e CRUD /admin/dicas.
+const { LADOS: LADOS_DICA, SQL_CRIAR_TABELA_DICAS, SELECT_DICA, seedDicas, ladoDoUsuario, listarDicasAgrupadas, validarDica } = require('../utils/dicas')
 const CATEGORIAS_MAX_REPARO = 3
 // Grupo chegada_* zerado NO MESMO UPDATE que cria um match (A1/A2 da auditoria externa): o
 // match novo nasce sem rastro de chegada de uma rodada anterior — uma declaração/confirmação
@@ -1695,6 +1697,12 @@ const migracaoPronta = (async () => {
     if (semCodigoIndicacao.rowCount > 0) console.log(`[migration] usuarios: ${semCodigoIndicacao.rowCount} código(s) de indicação gerado(s)`)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS usuarios_codigo_indicacao_idx ON usuarios (codigo_indicacao) WHERE codigo_indicacao IS NOT NULL`)
     await client.query(`CREATE INDEX IF NOT EXISTS usuarios_indicado_por_idx ON usuarios (indicado_por) WHERE indicado_por IS NOT NULL`)
+    // Dicas do ProTudo (utils/dicas). Tabela NOVA e puramente aditiva: nada existente lê ou
+    // escreve nela. O seed é um upsert por (lado, tema, ordem) que roda a cada boot: textos do
+    // seed sempre refletem o código; `ativo` e linhas extras do admin são preservados.
+    await client.query(SQL_CRIAR_TABELA_DICAS)
+    await client.query(`CREATE INDEX IF NOT EXISTS dicas_lado_ativo_idx ON dicas (lado, tema_ordem, ordem) WHERE ativo`)
+    await seedDicas(client)
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -8161,6 +8169,101 @@ router.post('/sugestoes', autenticar, async (req, res) => {
   } catch (err) {
     console.error('[Sugestoes] Erro:', err.message)
     res.status(500).json({ erro: 'Erro ao registrar sugestão' })
+  }
+})
+
+// DICAS DO PROTUDO — seção "💡 Dicas" do app (utils/dicas).
+
+// GET /dicas — dicas ATIVAS do lado da conta logada, agrupadas por tema na ordem.
+// cliente = dono_reparo/dono_obra (role dono_obra); profissional = reparador/pintor (role
+// prestador). admin/aprovador não têm lado: escolhem com ?lado=cliente|profissional (default
+// cliente), útil para o painel conferir o que cada lado vê. `nova` = novo_ate ainda não passou
+// (data civil em São Paulo); o app guarda localmente quais ids já viu para o badge "N novas".
+router.get('/dicas', autenticar, async (req, res) => {
+  try {
+    let lado = ladoDoUsuario(req.usuario)
+    if (!lado) {
+      lado = LADOS_DICA.includes(req.query.lado) ? req.query.lado : 'cliente'
+    }
+    res.json(await listarDicasAgrupadas(pool, lado))
+  } catch (err) {
+    console.error('[dicas]', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar dicas' })
+  }
+})
+
+// GET /admin/dicas — todas (inclusive inativas), ?lado= opcional, na ordem de exibição.
+router.get('/admin/dicas', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const lado = LADOS_DICA.includes(req.query.lado) ? req.query.lado : null
+    const r = await pool.query(
+      `SELECT ${SELECT_DICA} FROM dicas WHERE $1::text IS NULL OR lado = $1
+        ORDER BY lado, tema_ordem, tema, ordem, criado_em`,
+      [lado]
+    )
+    res.json({ total: r.rows.length, dicas: r.rows })
+  } catch (err) {
+    console.error('[admin/dicas]', err.message)
+    res.status(500).json({ erro: 'Erro ao listar dicas' })
+  }
+})
+
+// POST /admin/dicas — cria. Corpo: { lado, tema, tema_icone?, tema_ordem?, ordem?, texto, acao?, novo_ate?, ativo? }.
+// (lado, tema, ordem) é único → 409 se já existir.
+router.post('/admin/dicas', autenticar, exigirSuperAdmin, async (req, res) => {
+  const { erro, valores: v } = validarDica(req.body)
+  if (erro) return res.status(400).json({ erro })
+  try {
+    const r = await pool.query(
+      `INSERT INTO dicas (lado, tema, tema_icone, tema_ordem, ordem, texto, acao, novo_ate, ativo)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9)
+       RETURNING ${SELECT_DICA}`,
+      [v.lado, v.tema, v.tema_icone ?? null, v.tema_ordem ?? 0, v.ordem ?? 0, v.texto, v.acao ?? null, v.novo_ate ?? null, v.ativo ?? true]
+    )
+    console.log(`[admin/dicas] ${req.usuario.id} criou ${r.rows[0].id} (${v.lado}/${v.tema}/${v.ordem ?? 0})`)
+    res.status(201).json(r.rows[0])
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ erro: 'Já existe uma dica com este lado, tema e ordem', codigo: 'dica_duplicada' })
+    console.error('[admin/dicas] criar:', err.message)
+    res.status(500).json({ erro: 'Erro ao criar dica' })
+  }
+})
+
+// PUT /admin/dicas/:id — altera só o que vier no corpo (mesmos campos do POST).
+router.put('/admin/dicas/:id', autenticar, exigirSuperAdmin, async (req, res) => {
+  if (!UUID_RE.test(req.params.id)) return res.status(404).json({ erro: 'Dica não encontrada' })
+  const { erro, valores: v } = validarDica(req.body, { parcial: true })
+  if (erro) return res.status(400).json({ erro })
+  const chaves = Object.keys(v)
+  if (chaves.length === 0) return res.status(400).json({ erro: 'Nada para alterar' })
+  try {
+    const sets = chaves.map((k, i) => `${k} = $${i + 2}${k === 'novo_ate' ? '::date' : ''}`)
+    const r = await pool.query(
+      `UPDATE dicas SET ${sets.join(', ')} WHERE id = $1 RETURNING ${SELECT_DICA}`,
+      [req.params.id, ...chaves.map(k => v[k])]
+    )
+    if (r.rows.length === 0) return res.status(404).json({ erro: 'Dica não encontrada' })
+    console.log(`[admin/dicas] ${req.usuario.id} alterou ${req.params.id}: ${chaves.join(', ')}`)
+    res.json(r.rows[0])
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ erro: 'Já existe uma dica com este lado, tema e ordem', codigo: 'dica_duplicada' })
+    console.error('[admin/dicas] alterar:', err.message)
+    res.status(500).json({ erro: 'Erro ao alterar dica' })
+  }
+})
+
+// DELETE /admin/dicas/:id — apaga. (Dica do seed volta no próximo boot; para sumir de vez,
+// desative com PUT { ativo: false } ou tire-a do seed.)
+router.delete('/admin/dicas/:id', autenticar, exigirSuperAdmin, async (req, res) => {
+  if (!UUID_RE.test(req.params.id)) return res.status(404).json({ erro: 'Dica não encontrada' })
+  try {
+    const r = await pool.query(`DELETE FROM dicas WHERE id = $1 RETURNING id`, [req.params.id])
+    if (r.rows.length === 0) return res.status(404).json({ erro: 'Dica não encontrada' })
+    console.log(`[admin/dicas] ${req.usuario.id} apagou ${req.params.id}`)
+    res.json({ mensagem: 'Dica apagada', id: req.params.id })
+  } catch (err) {
+    console.error('[admin/dicas] apagar:', err.message)
+    res.status(500).json({ erro: 'Erro ao apagar dica' })
   }
 })
 
