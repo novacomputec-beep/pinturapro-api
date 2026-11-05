@@ -78,7 +78,7 @@ const SEED_DICAS = [
     [3, 'Sem verificação aprovada você vê os pedidos, mas **não propõe nem pergunta**. Tenha à mão documento, selfie, chave PIX e 1 a 2 referências.'],
   ] },
   { lado: 'profissional', tema: 'No serviço', icone: '🛠️', tema_ordem: 3, dicas: [
-    [1, 'Escolhido? **Combine o horário pelo app**: sem horário combinado você não leva falta.'],
+    [1, 'Escolhido? **Combine o horário pelo app logo.** Se o prazo vencer sem você marcar dia e horário, você leva **1 falta**.'],
     [2, '**15 minutos de tolerância.** Precisa de mais? Peça 15, 30 ou 60 min (até 2x) **antes** de estourar. Estourar desfaz o match.'],
     [3, '**3 faltas em 90 dias suspendem a conta.** Cancelar com menos de 12 horas conta como falta.'],
     [4, 'Terminou? **Peça o encerramento.** Sem resposta, fecha sozinho.'],
