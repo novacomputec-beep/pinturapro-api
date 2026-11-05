@@ -1712,6 +1712,13 @@ const migracaoPronta = (async () => {
     if (semCodigoIndicacao.rowCount > 0) console.log(`[migration] usuarios: ${semCodigoIndicacao.rowCount} código(s) de indicação gerado(s)`)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS usuarios_codigo_indicacao_idx ON usuarios (codigo_indicacao) WHERE codigo_indicacao IS NOT NULL`)
     await client.query(`CREATE INDEX IF NOT EXISTS usuarios_indicado_por_idx ON usuarios (indicado_por) WHERE indicado_por IS NOT NULL`)
+    // Login social (POST /auth/social): identificador estável da pessoa em cada provedor. Nulo
+    // para quem só entra por senha; o mesmo sub vai em TODAS as contas do e-mail (a identidade é
+    // da pessoa). Índices parciais: só as linhas vinculadas entram, e o lookup é por igualdade.
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS google_sub TEXT`)
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS apple_sub TEXT`)
+    await client.query(`CREATE INDEX IF NOT EXISTS usuarios_google_sub_idx ON usuarios (google_sub) WHERE google_sub IS NOT NULL`)
+    await client.query(`CREATE INDEX IF NOT EXISTS usuarios_apple_sub_idx ON usuarios (apple_sub) WHERE apple_sub IS NOT NULL`)
     // Dicas do ProTudo (utils/dicas). Tabela NOVA e puramente aditiva: nada existente lê ou
     // escreve nela. O seed é um upsert por (lado, tema, ordem) que roda a cada boot: textos do
     // seed sempre refletem o código; `ativo` e linhas extras do admin são preservados.
@@ -1948,6 +1955,8 @@ router.get('/stats/publico', async (req, res) => {
 // ============================================================
 router.post('/auth/cadastro',        authCtrl.cadastrar)
 router.post('/auth/login',           authCtrl.login)
+// Login com Google/Apple: mesma resposta do login por senha, ou { novo, ticket } para o cadastro.
+router.post('/auth/social',          authCtrl.loginSocial)
 // Troca de perfil sem senha (múltiplas contas): sessão de outra conta ativa do mesmo e-mail.
 router.post('/auth/trocar-conta',    autenticar, authCtrl.trocarConta)
 router.get('/auth/perfil',           autenticar, authCtrl.perfil)

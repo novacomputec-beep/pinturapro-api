@@ -71,7 +71,7 @@ const main = async () => {
       verificacao_selfie_url text, verificacao_status text DEFAULT 'nao_solicitada', rg text, rg_orgao text, rg_estado text,
       tipo_prestador text, cep text, latitude numeric, longitude numeric, logradouro text, numero text, complemento text, bairro text,
       foto_url text, codigo_indicacao text, indicado_por uuid, token_version int NOT NULL DEFAULT 1, boas_vindas_exibida boolean DEFAULT false,
-      aceita_promocoes boolean, aprovado_automaticamente boolean, criado_em timestamptz DEFAULT now());
+      aceita_promocoes boolean, aprovado_automaticamente boolean, google_sub text, apple_sub text, criado_em timestamptz DEFAULT now());
     CREATE UNIQUE INDEX usuarios_cpf_cnpj_tipo_unico_idx ON usuarios ((regexp_replace(cpf_cnpj, '[^0-9]', '', 'g')), ${sqlTipoConta()}) WHERE cpf_cnpj IS NOT NULL AND cpf_cnpj <> '';
     CREATE UNIQUE INDEX usuarios_email_tipo_unico_idx ON usuarios (email, ${sqlTipoConta()});
     CREATE TABLE assinaturas (usuario_id uuid, plano text, valor_mensal numeric, status text, tipo text, proximo_vencimento timestamptz, criado_em timestamptz DEFAULT now());
