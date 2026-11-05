@@ -50,6 +50,37 @@ const tipoDeTipoConta = (tipoConta) => {
   }
 }
 
+// Tipo pedido num CADASTRO/CONTA VINCULADA a partir do corpo inteiro: tipo_conta E os campos
+// que o app manda junto (tipo_dono, tipo_prestador, role). O app de dono de SERVIÇO chegou a
+// mandar tipo_conta 'dono_obra' com tipo_dono 'reparo' — lido só o tipo_conta, virava
+// 'dono_obra' e colidia com a conta de pintura da mesma pessoa (falso cpf_duplicado /
+// tipo_duplicado). Regra: tipo_dono 'reparo' (ou 'servico') manda em qualquer dono;
+// tipo_prestador 'reparador' manda em qualquer profissional; sem tipo_conta, role decide.
+// Desconhecido → null (quem chama decide: cadastro legado 'assinante', rota 400).
+const ladoReparo = (v) => ['reparo', 'reparos', 'servico', 'serviço', 'servicos', 'serviços'].includes(String(v || '').toLowerCase())
+const tipoDoCadastro = ({ tipo_conta, tipo_dono, tipo_prestador, role } = {}) => {
+  const base = tipoDeTipoConta(tipo_conta)
+    || (role === 'dono_obra' ? 'dono_obra' : role === 'prestador' ? 'pintor' : null)
+  if (base === 'dono_obra' || base === 'dono_reparo') {
+    if (ladoReparo(tipo_dono)) return 'dono_reparo'
+    if (tipo_dono === 'pintura') return 'dono_obra'
+    return base
+  }
+  if (base === 'pintor' || base === 'reparador') {
+    if (tipo_prestador === 'reparador') return 'reparador'
+    if (tipo_prestador === 'pintor') return 'pintor'
+    return base
+  }
+  return null
+}
+// Inverso: role / tipo_dono / tipo_prestador que a linha de usuarios recebe para um tipo.
+const colunasDoTipo = (tipo) => ({
+  dono_obra:   { role: 'dono_obra', tipo_dono: 'pintura', tipo_prestador: null },
+  dono_reparo: { role: 'dono_obra', tipo_dono: 'reparo',  tipo_prestador: null },
+  pintor:      { role: 'prestador', tipo_dono: null, tipo_prestador: 'pintor' },
+  reparador:   { role: 'prestador', tipo_dono: null, tipo_prestador: 'reparador' },
+}[tipo] || null)
+
 // Chave global (configuracoes.multiplas_contas, 'true'/'false', default 'false'). Lida a cada
 // uso, sem cache, como as demais chaves — desligada, todo caminho responde como antes das
 // múltiplas contas. `db` = client da transação quando a leitura precisa do mesmo snapshot.
@@ -58,4 +89,4 @@ const multiplasContasAtivo = async (db = pool) => {
   return r.rows[0]?.valor === 'true'
 }
 
-module.exports = { TIPOS_CADASTRO, MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, multiplasContasAtivo }
+module.exports = { TIPOS_CADASTRO, MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, multiplasContasAtivo }

@@ -86,7 +86,7 @@ const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 // /reparos/dono valida; a rota de aprovação não reavalia linha já gravada.
 const { ESPECIALIDADES_REPARADOR, validarEspecialidades } = require('../utils/especialidades')
 const { enviarEmail } = require('../services/emailService')
-const { sqlTipoConta, tipoDeTipoConta, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL } = require('../utils/tipoConta')
+const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL } = require('../utils/tipoConta')
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
@@ -6393,24 +6393,31 @@ router.post('/auth/verificar-disponibilidade', async (req, res) => {
 
   const ts = new Date().toISOString()
   const { email, cpf_cnpj, tipo_conta } = req.body
-  console.log(`[VERIF][${ts}] ▶ inicio | email=${email} cpf_cnpj=${cpf_cnpj}`)
+  // Tipo resolvido do corpo inteiro (tipo_conta + tipo_dono / tipo_prestador / role), como no
+  // cadastro — dono de serviço mandado como tipo_conta 'dono_obra' + tipo_dono 'reparo' é
+  // dono_reparo (utils/tipoConta.tipoDoCadastro).
+  const tipoNovo = tipoDoCadastro({ tipo_conta, tipo_dono: req.body.tipo_dono, tipo_prestador: req.body.tipo_prestador, role: req.body.role })
+  console.log(`[VERIF][${ts}] ▶ inicio | email=${email} cpf_cnpj=${cpf_cnpj} tipo_conta=${tipo_conta} tipo_dono=${req.body.tipo_dono} tipo_prestador=${req.body.tipo_prestador} role=${req.body.role} tipo=${tipoNovo}`)
   try {
-    // Múltiplas contas: SÓ quando o app manda tipo_conta (um dos 4 tipos) E a chave está
-    // ligada. Sem tipo_conta (app antigo) ou com a chave desligada, cai no caminho de sempre,
-    // logo abaixo, intocado. Aqui valem as MESMAS regras do cadastro (authController):
-    // conta do mesmo tipo recusa; conta em OUTRO tipo não recusa, e a resposta avisa com
-    // email_em_outro_tipo / cpf_em_outro_tipo — o app então pede a senha da conta existente.
-    // "Mesma pessoa" (e-mail E CPF casando) só é conferível quando os dois vêm juntos; vindo
-    // um só (formulário em etapas), a palavra final fica com o cadastro.
-    const tipoNovo = tipoDeTipoConta(tipo_conta)
+    // Múltiplas contas: SÓ quando o corpo resolve para um dos 4 tipos E a chave está ligada.
+    // Sem tipo (app antigo) ou com a chave desligada, cai no caminho de sempre, logo abaixo,
+    // intocado. Aqui valem as MESMAS regras do cadastro (authController): conta do MESMO tipo
+    // recusa com tipo_duplicado (pelo e-mail ou pelo CPF); conta em OUTRO tipo não recusa, e a
+    // resposta avisa com email_em_outro_tipo / cpf_em_outro_tipo — o app então pede a senha da
+    // conta existente. cpf_duplicado SÓ quando o CPF está em conta de OUTRO e-mail. "Mesma
+    // pessoa" (e-mail E CPF casando) só é conferível quando os dois vêm juntos; vindo um só
+    // (formulário em etapas), a palavra final fica com o cadastro.
     if (tipoNovo && await multiplasContasAtivo()) {
       const emailNormalizado = email ? email.toLowerCase().trim() : null
       const cpfLimpo = cpf_cnpj ? cpf_cnpj.replace(/\D/g, '') : null
-      const recusarEmail = (codigo = 'email_duplicado') => res.status(409).json({
-        erro: codigo === 'tipo_duplicado' ? 'Você já tem uma conta deste tipo com este e-mail.' : 'Este e-mail já está cadastrado.',
-        codigo,
-      })
-      const recusarCpf = () => res.status(409).json({ erro: 'Este CPF/CNPJ já está cadastrado.', codigo: 'cpf_duplicado' })
+      const recusar = (codigo, erro) => {
+        console.log(`[VERIF][${ts}] ✗ 409 ${codigo} (multiplas contas) | tipo=${tipoNovo}`)
+        return res.status(409).json({ erro, codigo })
+      }
+      const recusarEmail = (codigo = 'email_duplicado') => recusar(codigo,
+        codigo === 'tipo_duplicado' ? 'Você já tem uma conta deste tipo com este e-mail.' : 'Este e-mail já está cadastrado.')
+      const recusarTipoPeloCpf = () => recusar('tipo_duplicado', 'Você já tem uma conta deste tipo com este CPF/CNPJ.')
+      const recusarCpf = () => recusar('cpf_duplicado', 'Este CPF/CNPJ já está cadastrado.')
       const porEmail = emailNormalizado
         ? (await pool.query(
             `SELECT role, ativo, ${sqlTipoConta()} AS tipo,
@@ -6428,8 +6435,10 @@ router.post('/auth/verificar-disponibilidade', async (req, res) => {
         if (cpf_cnpj && !porEmail.every(u => u.cpf_norm === cpfLimpo)) return recusarEmail()
       }
       if (porCpf.length > 0) {
-        if (porCpf.some(u => u.tipo === tipoNovo)) return recusarCpf()
+        // CPF de OUTRO e-mail: é de outra pessoa. Mesmo e-mail (ou e-mail ainda não informado)
+        // no MESMO tipo: tipo_duplicado. Só em outros tipos: disponível (múltiplas contas).
         if (emailNormalizado && porCpf.some(u => u.email !== emailNormalizado)) return recusarCpf()
+        if (porCpf.some(u => u.tipo === tipoNovo)) return recusarTipoPeloCpf()
       }
       console.log(`[VERIF][${ts}] ✓ disponivel (multiplas contas) | tipo=${tipoNovo} email_em_outro_tipo=${porEmail.length > 0} cpf_em_outro_tipo=${porCpf.length > 0}`)
       return res.json({
@@ -6950,7 +6959,10 @@ const PRECO_PRESTADOR = { pintor: { anual: 999.00, mensal: 99.90 }, reparador: {
 router.post('/auth/contas/:tipo', autenticar, async (req, res) => {
   let client
   try {
-    const tipoNovo = tipoDeTipoConta(req.params.tipo)
+    // :tipo + tipo_dono / tipo_prestador / role do corpo resolvem juntos (utils/tipoConta
+    // .tipoDoCadastro): /auth/contas/dono_obra com tipo_dono 'reparo' é dono_reparo.
+    const tipoNovo = tipoDoCadastro({ tipo_conta: req.params.tipo, tipo_dono: req.body?.tipo_dono, tipo_prestador: req.body?.tipo_prestador, role: req.body?.role })
+    console.log(`[CONTA VINCULADA] pedido | usuario=${req.usuario.id} tipo_param=${req.params.tipo} tipo_dono=${req.body?.tipo_dono} tipo_prestador=${req.body?.tipo_prestador} role=${req.body?.role} tipo=${tipoNovo}`)
     if (!tipoNovo) {
       return res.status(400).json({ erro: 'Tipo de conta inválido', codigo: 'tipo_invalido' })
     }
@@ -6975,9 +6987,7 @@ router.post('/auth/contas/:tipo', autenticar, async (req, res) => {
     // role / tipo_dono / tipo_prestador do tipo pedido — a MESMA derivação do cadastro
     // (authController.cadastrar) e o inverso de tipoDaLinha (utils/tipoConta).
     const ehProfissional = tipoNovo === 'pintor' || tipoNovo === 'reparador'
-    const role = ehProfissional ? 'prestador' : 'dono_obra'
-    const tipo_prestador = ehProfissional ? tipoNovo : null
-    const tipo_dono = ehProfissional ? null : (tipoNovo === 'dono_reparo' ? 'reparo' : 'pintura')
+    const { role, tipo_prestador, tipo_dono } = colunasDoTipo(tipoNovo)
 
     // Profissional presta serviço: mínimo 1 e máximo ESPECIALIDADES_MAX (5), validados contra a
     // lista do SEU lado (pintor → obra, reparador → serviços). Dono: lista vazia, nada exigido.
