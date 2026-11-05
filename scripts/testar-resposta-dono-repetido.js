@@ -1,0 +1,150 @@
+#!/usr/bin/env node
+// Testa repetirRespostaHorarioDono (alertaService) com o SQL REAL num Postgres em memória (PGlite):
+// pool trocado por um shim, Expo e Brevo trocados por fakes que só coletam as mensagens,
+// NOW() sombreado por public.now() para andar o relógio (hora de São Paulo).
+// Cadência esperada: 1º ciclo 30 min após chegada_proposta_em; depois pelo tempo RESTANTE até o
+// HORÁRIO PROPOSTO (chegada_pendente_em), reavaliado a cada tique:
+//   > 3 d → 12h · 1–3 d → 6h · 6–24h → 2h · < 6h → 30 min.
+//   npm i -D @electric-sql/pglite && node scripts/testar-resposta-dono-repetido.js
+const path = require('path')
+const Module = require('module')
+const REPO = path.join(__dirname, '..')
+const { PGlite } = require('@electric-sql/pglite') // npm i -D @electric-sql/pglite (não vai para produção)
+
+const pushes = []
+const emails = []
+class FakeExpo {
+  static isExpoPushToken(t) { return typeof t === 'string' && t.startsWith('ExponentPushToken[') }
+  chunkPushNotifications(m) { return [m] }
+  async sendPushNotificationsAsync(chunk) { pushes.push(...chunk); return chunk.map((_, i) => ({ status: 'ok', id: `t${pushes.length}-${i}` })) }
+  chunkPushNotificationReceiptIds(ids) { return [ids] }
+  async getPushNotificationReceiptsAsync() { return {} }
+}
+
+let db
+const shim = {
+  query: (sql, params) => db.query(sql, params),
+  connect: async () => ({ query: (sql, params) => db.query(sql, params), release() {} }),
+  on() {},
+}
+const origLoad = Module._load
+Module._load = function (request) {
+  if (request === 'expo-server-sdk') return { Expo: FakeExpo }
+  if (/(^|[\\/])supabase$/.test(request)) return { pool: shim }
+  if (/pushRecibos$/.test(request)) return { registrarTickets() {}, registrarRecibos() {} }
+  if (/brevoService$/.test(request)) return { enviarEmail: async (m) => { emails.push(m) }, enviarEmailComAnexo: async () => {} }
+  return origLoad.apply(this, arguments)
+}
+
+const U = (n) => `aaaaaaaa-0000-4000-8000-${String(n).padStart(12, '0')}`
+const D = (n) => `dddddddd-0000-4000-8000-${String(n).padStart(12, '0')}`
+// T0 = 05/11/2026 10:00 São Paulo (13:00Z). Relógio em minutos a partir de T0.
+const T0 = Date.parse('2026-11-05T13:00:00Z')
+const emMin = (min) => new RealDate(T0 + min * 60000).toISOString()
+// O relógio do JS (diaSP, chave do e-mail diário) anda junto com o NOW() do banco.
+let relogio = T0
+const RealDate = Date
+global.Date = class extends RealDate {
+  constructor(...a) { super(...(a.length ? a : [relogio])) }
+  static now() { return relogio }
+}
+const fixarAgora = (min) => {
+  relogio = T0 + min * 60000
+  return db.exec(`CREATE OR REPLACE FUNCTION public.now() RETURNS timestamptz LANGUAGE sql STABLE AS $$ SELECT '${emMin(min)}'::timestamptz $$`)
+}
+
+let falhas = 0
+const ok = (c, rot, extra) => { if (!c) falhas++; console.log(`${c ? 'OK  ' : 'FAIL'} ${rot}${extra !== undefined ? ' | ' + JSON.stringify(extra) : ''}`) }
+
+const main = async () => {
+  db = new PGlite()
+  const colsDemanda = `id uuid PRIMARY KEY, titulo text, criado_por uuid, status text, match_usuario_id uuid, match_feito_em timestamptz,
+      expira_em timestamptz, criado_em timestamptz, chegada_prevista_em timestamptz, chegada_pendente_em timestamptz,
+      chegada_proposta_em timestamptz, chegada_proposta_por uuid,
+      lembrete_resposta_ultimo_em timestamptz, lembrete_resposta_ciclo int NOT NULL DEFAULT 0`
+  await db.exec(`
+    CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, push_token text);
+    CREATE TABLE reparos (${colsDemanda});
+    CREATE TABLE obras (${colsDemanda});
+    CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
+    SET search_path = public, pg_catalog;
+  `)
+  await db.query(`INSERT INTO usuarios VALUES ($1, 'Dono Silva', 'dono@x.invalid', 'ExponentPushToken[dono]')`, [U(99)])
+  await db.query(`INSERT INTO usuarios VALUES ($1, 'Carlos Prof', 'prof@x.invalid', 'ExponentPushToken[prof]')`, [U(1)])
+  await fixarAgora(0)
+  // Quatro demandas: o profissional propôs às 09:30 SP (T0 − 30 min) um horário que fica a
+  // "restante" de T0. Prazo da demanda (expira_em) bem depois, para não interferir.
+  const cenarios = [
+    { n: 1, tabela: 'reparos', rotulo: '10 dias', restanteMin: 10 * 1440 },
+    { n: 2, tabela: 'obras',   rotulo: '2 dias',  restanteMin: 2 * 1440 },
+    { n: 3, tabela: 'reparos', rotulo: '12 horas', restanteMin: 12 * 60 },
+    { n: 4, tabela: 'reparos', rotulo: '3 horas',  restanteMin: 3 * 60 },
+  ]
+  for (const c of cenarios) {
+    await db.query(
+      `INSERT INTO ${c.tabela} (id, titulo, criado_por, status, match_usuario_id, match_feito_em, expira_em, criado_em,
+                                chegada_pendente_em, chegada_proposta_em, chegada_proposta_por)
+       VALUES ($1, $2, $3, 'aberta', $4, now() - INTERVAL '2 hours', now() + INTERVAL '30 days', now() - INTERVAL '3 hours',
+               now() + ($5 * INTERVAL '1 minute'), now() - INTERVAL '30 minutes', $4)`,
+      [D(c.n), `Demanda ${c.rotulo}`, U(99), U(1), c.restanteMin])
+  }
+  const A = require(path.join(REPO, 'src/services/alertaService'))
+  const ciclo = async (c) => (await db.query(`SELECT lembrete_resposta_ciclo AS n FROM ${c.tabela} WHERE id = $1`, [D(c.n)])).rows[0].n
+  const ciclos = async () => { const r = {}; for (const c of cenarios) r[c.rotulo] = await ciclo(c); return r }
+  const tique = async (min) => { await fixarAgora(min); await A.repetirRespostaHorarioDono() }
+  const [c10d, c2d, c12h, c3h] = cenarios
+  const pushesDe = (token) => pushes.filter(p => p.to === `ExponentPushToken[${token}]`)
+  const emailsDono = async (c) => (await db.query(`SELECT tipo FROM email_alertas WHERE demanda_id = $1 AND usuario_id = $2 ORDER BY tipo`, [D(c.n), U(99)])).rows.map(r => r.tipo)
+
+  // 1) 29 min após a proposta: nada
+  await tique(-1)
+  ok(Object.values(await ciclos()).every(n => n === 0) && pushes.length === 0, '09:59 (proposta + 29 min): nenhum ciclo', await ciclos())
+  // 2) 30 min após a proposta: 1º ciclo nas quatro, push + e-mail ao dono, nada ao profissional
+  await tique(0)
+  ok(Object.values(await ciclos()).every(n => n === 1), '10:00 (proposta + 30 min): 1º ciclo nas 4 demandas', await ciclos())
+  ok(pushesDe('dono').length === 4 && pushesDe('prof').length === 0, '1º ciclo: 4 pushes ao dono, 0 ao profissional', [pushesDe('dono').length, pushesDe('prof').length])
+  ok(emails.length === 4 && emails.every(e => e.para === 'dono@x.invalid'), '1º ciclo: 1 e-mail por demanda ao dono', emails.length)
+  const p0 = pushesDe('dono').find(p => p.data.reparo_id === D(1))
+  ok(p0.title === '⏳ Responda o horário proposto' && /^Carlos propôs .* para "Demanda 10 dias"\. Confirme ou sugira outro\.$/.test(p0.body), 'título/corpo do push', [p0.title, p0.body])
+  ok(p0.data.tipo === 'chegada_prevista_pendente' && p0.data.reparo_id === D(1), 'data do push abre o detalhe', p0.data)
+  // 3) 29 min depois: nada; 30 min: só a de 3h (< 6h → 30 min); e-mail do dia já enviado
+  await tique(29)
+  ok(JSON.stringify(await ciclos()) === JSON.stringify({ '10 dias': 1, '2 dias': 1, '12 horas': 1, '3 horas': 1 }), '10:29: nenhum ciclo novo', await ciclos())
+  await tique(30)
+  ok(await ciclo(c3h) === 2 && await ciclo(c12h) === 1, '10:30: 3h → 2º ciclo (30 min); 12h ainda no 1º', await ciclos())
+  ok((await emailsDono(c3h)).length === 1 && emails.length === 4, 'dono: 1 e-mail/dia por demanda (2º ciclo só push)', [await emailsDono(c3h), emails.length])
+  // 4) 12h: 2h de intervalo (6–24h restantes)
+  await tique(119); ok(await ciclo(c12h) === 1, '11:59: 12h ainda no 1º ciclo')
+  await tique(120); ok(await ciclo(c12h) === 2, '12:00: 12h → 2º ciclo (2h)')
+  // 5) 3h: o horário proposto chega às 13:00 → para (NOW() < chegada_pendente_em)
+  const antes3h = await ciclo(c3h)
+  await tique(180); ok(await ciclo(c3h) === antes3h, '13:00: 3h → horário proposto chegou, parou', [antes3h, await ciclo(c3h)])
+  // 6) 2 dias: 6h (1–3 dias restantes)
+  await tique(359); ok(await ciclo(c2d) === 1 && await ciclo(c10d) === 1, '15:59: 2d e 10d ainda no 1º ciclo', await ciclos())
+  await tique(360); ok(await ciclo(c2d) === 2 && await ciclo(c10d) === 1, '16:00: 2d → 2º ciclo (6h); 10d não (12h)', await ciclos())
+  // 7) 10 dias: 12h cai às 22:00 = silêncio → fica para 07:00
+  await tique(719); ok(await ciclo(c10d) === 1, '21:59: 10d ainda no 1º ciclo')
+  await tique(720); ok(await ciclo(c10d) === 1, '22:00: 10d devido mas em silêncio → não dispara')
+  await tique(720 + 8 * 60 + 59); ok(await ciclo(c10d) === 1, '06:59: ainda em silêncio')
+  await tique(720 + 9 * 60); ok(await ciclo(c10d) === 2, '07:00 do dia seguinte: 10d → 2º ciclo')
+  ok((await emailsDono(c10d)).length === 2, 'dia novo → novo e-mail ao dono', await emailsDono(c10d))
+  // 8) Recálculo pelo restante: 2d teve o 3º ciclo às 07:00 (restam 27h → 6h → 13:00), mas às 10:00
+  //    restam 24h (faixa 6–24h → 2h): 07:00 + 2h = 09:00 já passou → dispara antes das 13:00.
+  ok(await ciclo(c2d) === 3, '07:00: 2d → 3º ciclo (devido às 22:00, adiado)', await ciclo(c2d))
+  await tique(1440 - 30); ok(await ciclo(c2d) === 3, '09:30: 2d restam 24h30 (faixa 6h) → ainda não', await ciclo(c2d))
+  await tique(1440); ok(await ciclo(c2d) === 4, '10:00: 2d restam 24h (faixa 2h) → 4º ciclo: intervalo recalculado', await ciclo(c2d))
+  // 9) Para: dono aceitou (chegada_pendente_em NULL) na de 10 dias; 3º ciclo seria às 19:00
+  await db.query(`UPDATE reparos SET chegada_pendente_em = NULL, chegada_prevista_em = now() + INTERVAL '9 days' WHERE id = $1`, [D(c10d.n)])
+  await tique(1440 + 9 * 60 + 30); ok(await ciclo(c10d) === 2, '19:30: 10d respondida pelo dono → parou', await ciclo(c10d))
+  // 10) Contraproposta do DONO (proponente troca) na de 2 dias: para (às 19:30 ela já tinha o 5º ciclo)
+  const antes2d = await ciclo(c2d)
+  await db.query(`UPDATE obras SET chegada_proposta_por = $2, chegada_proposta_em = now(), lembrete_resposta_ultimo_em = NULL WHERE id = $1`, [D(c2d.n), U(99)])
+  await tique(1440 + 11 * 60); ok(await ciclo(c2d) === antes2d, '21:00: 2d com contraproposta do dono → parou', [antes2d, await ciclo(c2d)])
+  // 11) Proposta nova do profissional zera o claim: 30 min depois volta a lembrar
+  await db.query(`UPDATE obras SET chegada_proposta_por = $2, chegada_proposta_em = now() - INTERVAL '30 minutes', lembrete_resposta_ultimo_em = NULL WHERE id = $1`, [D(c2d.n), U(1)])
+  await tique(1440 + 11 * 60 + 1); ok(await ciclo(c2d) === antes2d + 1, '21:01: proposta nova do profissional há 30 min → lembra de novo', [antes2d, await ciclo(c2d)])
+
+  console.log(falhas === 0 ? '\nTUDO OK' : `\n${falhas} FALHA(S)`)
+  process.exit(falhas ? 1 : 0)
+}
+main().catch(e => { console.error('ERRO', e); process.exit(1) })

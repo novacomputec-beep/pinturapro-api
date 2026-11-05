@@ -1912,7 +1912,6 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
 //   1º ciclo 1h depois do match_feito_em; dos seguintes, contados de lembrete_agendar_ultimo_em,
 //   o intervalo vem do tempo RESTANTE até o prazo de chegada (SQL_PRAZO_CHEGADA − NOW()),
 //   reavaliado a cada tique: > 3 dias → 12h · 1–3 dias → 6h · 6–24h → 2h · < 6h → 30 min.
-//   (sqlIntervaloRepetirAgendar, pela janela W, segue só no repetirRespostaHorarioDono.)
 // Silêncio 22:00–07:00 (America/Sao_Paulo): o ciclo devido nesse intervalo fica para o 1º tique
 // das 07:00. Do 2º ciclo DESTE match em diante (já havia lembrete_agendar_ultimo_em) avisa
 // também o DONO, no máx. uma vez por dia (SP) — lembrete_agendar_dono_em. Claim atômico
@@ -1920,22 +1919,16 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
 // restarts nunca repetem um ciclo. lembrete_agendar_ciclo (nunca zera) numera o ciclo no log.
 // ultimo_em e dono_em são zerados em SQL_ZERAR_AGENDA.
 // Guarda de autor: dono e profissional na mesma conta não recebem aviso sobre si mesmos.
-// Cadência do "responda o horário" repetido ao dono, pela janela W da demanda (o "agendar"
-// repetido usa SQL_PROXIMO_AGENDAR, pelo tempo restante).
-const sqlIntervaloRepetirAgendar = (lado) => {
-  const w = sqlJanelaHoras(LADOS_LEMBRETE.find(l => l.tabela === lado.tabela))
-  return `(CASE WHEN ${w} < 4   THEN INTERVAL '30 minutes'
-                WHEN ${w} < 24  THEN INTERVAL '2 hours'
-                WHEN ${w} < 168 THEN INTERVAL '6 hours'
-                ELSE INTERVAL '12 hours' END)`
-}
 const SQL_HORA_SP = `EXTRACT(HOUR FROM (NOW() AT TIME ZONE '${TZ_AGENDA}'))`
 const SQL_FORA_SILENCIO = `${SQL_HORA_SP} >= 7 AND ${SQL_HORA_SP} < 22`
-// Intervalo do "agendar" repetido pelo tempo que RESTA até o prazo de chegada, avaliado agora.
-const SQL_INTERVALO_RESTANTE_AGENDAR = `(CASE WHEN ${SQL_PRAZO_CHEGADA} - NOW() > INTERVAL '3 days'   THEN INTERVAL '12 hours'
-                WHEN ${SQL_PRAZO_CHEGADA} - NOW() > INTERVAL '24 hours' THEN INTERVAL '6 hours'
-                WHEN ${SQL_PRAZO_CHEGADA} - NOW() > INTERVAL '6 hours'  THEN INTERVAL '2 hours'
+// Intervalo dos lembretes repetidos pelo tempo que RESTA até o instante de referência `ate`
+// (expressão SQL), avaliado agora: > 3 dias → 12h · 1–3 dias → 6h · 6–24h → 2h · < 6h → 30 min.
+// Agendar (profissional): até o prazo de chegada; responder horário (dono): até o horário proposto.
+const sqlIntervaloRestante = (ate) => `(CASE WHEN ${ate} - NOW() > INTERVAL '3 days'   THEN INTERVAL '12 hours'
+                WHEN ${ate} - NOW() > INTERVAL '24 hours' THEN INTERVAL '6 hours'
+                WHEN ${ate} - NOW() > INTERVAL '6 hours'  THEN INTERVAL '2 hours'
                 ELSE INTERVAL '30 minutes' END)`
+const SQL_INTERVALO_RESTANTE_AGENDAR = sqlIntervaloRestante(SQL_PRAZO_CHEGADA)
 // Instante em que o próximo ciclo fica devido: 1h após o match no 1º; depois, último + intervalo.
 const SQL_PROXIMO_AGENDAR = `(CASE WHEN d.lembrete_agendar_ultimo_em IS NULL THEN d.match_feito_em + INTERVAL '1 hour'
                 ELSE d.lembrete_agendar_ultimo_em + ${SQL_INTERVALO_RESTANTE_AGENDAR} END)`
@@ -2060,14 +2053,18 @@ const lembrarRespostaHorario = semSobreposicao('lembrarRespostaHorario', async (
 })
 
 // "Responda o horário proposto" REPETIDO ao DONO — proposta/contraproposta do PROFISSIONAL
-// pendente (chegada_pendente_em, proposta por match_usuario_id). Cadência pela janela W
-// (sqlIntervaloRepetirAgendar: 30 min / 2h / 6h / 12h), contada do
-// último ciclo ou, no 1º, de chegada_proposta_em; silêncio 22–07 SP (SQL_FORA_SILENCIO) adia
-// para as 07:00. Push a cada ciclo + no máx. 1 e-mail/dia (entregarLembrete); guarda de autor
+// pendente (chegada_pendente_em, proposta por match_usuario_id). Cadência (dono, 05/11/2026):
+// 1º ciclo 30 min depois de chegada_proposta_em; os seguintes, contados de
+// lembrete_resposta_ultimo_em, pelo tempo RESTANTE até o HORÁRIO PROPOSTO (chegada_pendente_em),
+// reavaliado a cada tique (sqlIntervaloRestante: 12h / 6h / 2h / 30 min); silêncio 22–07 SP
+// (SQL_FORA_SILENCIO) adia para as 07:00. Push a cada ciclo + no máx. 1 e-mail/dia (entregarLembrete); guarda de autor
 // (ator = profissional). lembrete_resposta_ciclo (nunca zera) numera o ciclo no log.
 // Para no mesmo tique em que o dono responde (aceite/recusa zeram chegada_pendente_em; a
 // contraproposta dele troca o proponente), quando o horário proposto passa, a demanda sai de
 // 'aberta' ou o match cai. Claim atômico em lembrete_resposta_ultimo_em, zerado a cada proposta.
+const SQL_INTERVALO_RESTANTE_RESPOSTA = sqlIntervaloRestante('d.chegada_pendente_em')
+const SQL_PROXIMO_RESPOSTA_DONO = `(CASE WHEN d.lembrete_resposta_ultimo_em IS NULL THEN d.chegada_proposta_em + INTERVAL '30 minutes'
+                ELSE d.lembrete_resposta_ultimo_em + ${SQL_INTERVALO_RESTANTE_RESPOSTA} END)`
 const sqlClaimRepetirRespostaDono = (lado) => `
       UPDATE ${lado.tabela} d SET lembrete_resposta_ultimo_em = NOW(),
              lembrete_resposta_ciclo = d.lembrete_resposta_ciclo + 1
@@ -2077,10 +2074,11 @@ const sqlClaimRepetirRespostaDono = (lado) => `
          AND ${SQL_QUEM_PROPOS} = d.match_usuario_id
          AND u.id = d.criado_por AND p.id = d.match_usuario_id
          AND NOW() < d.chegada_pendente_em
-         AND NOW() >= COALESCE(d.lembrete_resposta_ultimo_em, d.chegada_proposta_em) + ${sqlIntervaloRepetirAgendar(lado)}
+         AND NOW() >= ${SQL_PROXIMO_RESPOSTA_DONO}
          AND ${SQL_FORA_SILENCIO}
    RETURNING d.id, d.titulo, d.chegada_pendente_em, d.criado_por, d.match_usuario_id,
              d.lembrete_resposta_ciclo AS ciclo, true AS para_dono,
+             ${SQL_INTERVALO_RESTANTE_RESPOSTA}::text AS proximo_intervalo,
              u.push_token, u.email, u.nome, p.nome AS nome_proponente`
 const repetirRespostaHorarioDono = semSobreposicao('repetirRespostaHorarioDono', async () => {
   for (const lado of Object.values(LADOS_MATCH)) {
@@ -2094,7 +2092,7 @@ const repetirRespostaHorarioDono = semSobreposicao('repetirRespostaHorarioDono',
           data: { tipo: 'chegada_prevista_pendente', [lado.chave]: d.id },
           rotulo: `resposta horário repetido ${lado.tabela} ${d.id} #${d.ciclo}`,
         })
-        console.log(`[RespostaHorarioDono] ${lado.tabela} ${d.id} #${d.ciclo} → dono via ${via}`)
+        console.log(`[RespostaHorarioDono] ${lado.tabela} ${d.id} #${d.ciclo} → dono via ${via}; próximo em ${d.proximo_intervalo}`)
       }
     } catch (err) {
       console.error(`[RespostaHorarioDono] erro em ${lado.tabela}:`, err.message)
