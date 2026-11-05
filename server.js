@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, pedirIndicacoes, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, entregarLembrete, lembrarRespostaHorario, repetirRespostaHorarioDono, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, pedirIndicacoes, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, entregarLembrete, lembrarRespostaHorario, repetirRespostaHorarioDono, lembrarPerguntasSemResposta, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -820,6 +820,10 @@ const iniciarAgendador = () => {
   // após a proposta e depois pelo tempo restante até o horário proposto (12h/6h/2h/30 min),
   // silêncio 22–07 (SP), até ele responder ou o horário passar.
   setInterval(() => { repetirRespostaHorarioDono() }, INTERVALO_CRONOMETRO)
+  // Ao DONO de demanda aberta sem match com pergunta(s) sem resposta: "N perguntas aguardam sua
+  // resposta" (push + e-mail) 30 min após a pergunta mais antiga e depois pelo tempo restante
+  // até expira_em (12h/6h/2h/30 min), silêncio 22–07 (SP); pergunta nova reinicia a contagem.
+  setInterval(() => { lembrarPerguntasSemResposta() }, INTERVALO_CRONOMETRO)
   setInterval(() => { vigiarComparecimento() }, INTERVALO_CRONOMETRO)
   // Dono com interessados pendentes e sem escolha: lembrete diário, avisos 24h/2h e vencimento
   // (services/escolhaPendenteService). Cadência dos cronômetros: o aviso de vencimento sai no
