@@ -1908,9 +1908,11 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
 // "Agende seu atendimento" REPETIDO — complementa (não substitui) as antecedências fixas acima:
 // enquanto o match vive sem horário (o mesmo SQL_BASE_AGENDAR: nada proposto, aceito, declarado,
 // confirmado nem "a caminho"; demanda 'aberta'; prazo à frente), repete o aviso ao PROFISSIONAL
-// por push a cada ciclo + no máx. 1 e-mail/dia (entregarLembrete). Cadência pela janela W (sqlJanelaHoras):
-//   W < 4h → 30 min · W < 24h → 2h · W < 7 dias → 6h · W ≥ 7 dias → 12h
-// contada do último ciclo (lembrete_agendar_ultimo_em) ou, no 1º, do match_feito_em.
+// por push a cada ciclo + no máx. 1 e-mail/dia (entregarLembrete). Cadência (dono, 05/11/2026):
+//   1º ciclo 1h depois do match_feito_em; dos seguintes, contados de lembrete_agendar_ultimo_em,
+//   o intervalo vem do tempo RESTANTE até o prazo de chegada (SQL_PRAZO_CHEGADA − NOW()),
+//   reavaliado a cada tique: > 3 dias → 12h · 1–3 dias → 6h · 6–24h → 2h · < 6h → 30 min.
+//   (sqlIntervaloRepetirAgendar, pela janela W, segue só no repetirRespostaHorarioDono.)
 // Silêncio 22:00–07:00 (America/Sao_Paulo): o ciclo devido nesse intervalo fica para o 1º tique
 // das 07:00. Do 2º ciclo DESTE match em diante (já havia lembrete_agendar_ultimo_em) avisa
 // também o DONO, no máx. uma vez por dia (SP) — lembrete_agendar_dono_em. Claim atômico
@@ -1918,7 +1920,8 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
 // restarts nunca repetem um ciclo. lembrete_agendar_ciclo (nunca zera) numera o ciclo no log.
 // ultimo_em e dono_em são zerados em SQL_ZERAR_AGENDA.
 // Guarda de autor: dono e profissional na mesma conta não recebem aviso sobre si mesmos.
-// Cadência dos lembretes repetidos (agendar e resposta de horário), pela janela W da demanda.
+// Cadência do "responda o horário" repetido ao dono, pela janela W da demanda (o "agendar"
+// repetido usa SQL_PROXIMO_AGENDAR, pelo tempo restante).
 const sqlIntervaloRepetirAgendar = (lado) => {
   const w = sqlJanelaHoras(LADOS_LEMBRETE.find(l => l.tabela === lado.tabela))
   return `(CASE WHEN ${w} < 4   THEN INTERVAL '30 minutes'
@@ -1928,6 +1931,14 @@ const sqlIntervaloRepetirAgendar = (lado) => {
 }
 const SQL_HORA_SP = `EXTRACT(HOUR FROM (NOW() AT TIME ZONE '${TZ_AGENDA}'))`
 const SQL_FORA_SILENCIO = `${SQL_HORA_SP} >= 7 AND ${SQL_HORA_SP} < 22`
+// Intervalo do "agendar" repetido pelo tempo que RESTA até o prazo de chegada, avaliado agora.
+const SQL_INTERVALO_RESTANTE_AGENDAR = `(CASE WHEN ${SQL_PRAZO_CHEGADA} - NOW() > INTERVAL '3 days'   THEN INTERVAL '12 hours'
+                WHEN ${SQL_PRAZO_CHEGADA} - NOW() > INTERVAL '24 hours' THEN INTERVAL '6 hours'
+                WHEN ${SQL_PRAZO_CHEGADA} - NOW() > INTERVAL '6 hours'  THEN INTERVAL '2 hours'
+                ELSE INTERVAL '30 minutes' END)`
+// Instante em que o próximo ciclo fica devido: 1h após o match no 1º; depois, último + intervalo.
+const SQL_PROXIMO_AGENDAR = `(CASE WHEN d.lembrete_agendar_ultimo_em IS NULL THEN d.match_feito_em + INTERVAL '1 hour'
+                ELSE d.lembrete_agendar_ultimo_em + ${SQL_INTERVALO_RESTANTE_AGENDAR} END)`
 const sqlClaimRepetirAgendar = (lado) => `
       UPDATE ${lado.tabela} d SET lembrete_agendar_ultimo_em = NOW(),
              lembrete_agendar_ciclo = d.lembrete_agendar_ciclo + 1,
@@ -1939,9 +1950,10 @@ const sqlClaimRepetirAgendar = (lado) => `
         FROM usuarios p, usuarios o
        WHERE p.id = d.match_usuario_id AND o.id = d.criado_por
          AND ${SQL_BASE_AGENDAR} AND ${SQL_PRAZO_CHEGADA} > NOW()
-         AND NOW() >= COALESCE(d.lembrete_agendar_ultimo_em, d.match_feito_em) + ${sqlIntervaloRepetirAgendar(lado)}
+         AND NOW() >= ${SQL_PROXIMO_AGENDAR}
          AND ${SQL_FORA_SILENCIO}
    RETURNING d.id, d.titulo, d.match_usuario_id, d.criado_por, d.lembrete_agendar_ciclo AS ciclo,
+             ${SQL_INTERVALO_RESTANTE_AGENDAR}::text AS proximo_intervalo,
              (d.lembrete_agendar_dono_em = NOW()) AS avisar_dono, ${sqlReparoCurto(lado)} AS curto,
              p.push_token, p.email, p.nome,
              o.push_token AS dono_push_token, o.email AS dono_email, o.nome AS dono_nome`
@@ -1971,7 +1983,7 @@ const repetirLembreteAgendar = semSobreposicao('repetirLembreteAgendar', async (
             rotulo: `agendar repetido dono ${lado.tabela} ${d.id} #${d.ciclo}`,
           })
         }
-        console.log(`[AgendarRepetido] ${lado.tabela} ${d.id} #${d.ciclo} → profissional via ${via}; dono via ${viaDono}`)
+        console.log(`[AgendarRepetido] ${lado.tabela} ${d.id} #${d.ciclo} → profissional via ${via}; dono via ${viaDono}; próximo em ${d.proximo_intervalo}`)
       }
     } catch (err) {
       console.error(`[AgendarRepetido] erro em ${lado.tabela}:`, err.message)
@@ -2048,8 +2060,8 @@ const lembrarRespostaHorario = semSobreposicao('lembrarRespostaHorario', async (
 })
 
 // "Responda o horário proposto" REPETIDO ao DONO — proposta/contraproposta do PROFISSIONAL
-// pendente (chegada_pendente_em, proposta por match_usuario_id). Mesma cadência do agendar
-// repetido (sqlIntervaloRepetirAgendar: 30 min / 2h / 6h / 12h pela janela W), contada do
+// pendente (chegada_pendente_em, proposta por match_usuario_id). Cadência pela janela W
+// (sqlIntervaloRepetirAgendar: 30 min / 2h / 6h / 12h), contada do
 // último ciclo ou, no 1º, de chegada_proposta_em; silêncio 22–07 SP (SQL_FORA_SILENCIO) adia
 // para as 07:00. Push a cada ciclo + no máx. 1 e-mail/dia (entregarLembrete); guarda de autor
 // (ator = profissional). lembrete_resposta_ciclo (nunca zera) numera o ciclo no log.

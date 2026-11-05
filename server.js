@@ -809,8 +809,9 @@ const iniciarAgendador = () => {
   // antecedências fixas antes do prazo de chegada (faixa da demanda). Mesma cadência; fora do
   // warm-up porque a antecedência corrente fica devida até a seguinte — o próximo tique a pega.
   setInterval(() => { lembrarAgendarAtendimento() }, INTERVALO_CRONOMETRO)
-  // O mesmo aviso REPETIDO (push + e-mail) enquanto ninguém propõe horário, com cadência pela
-  // janela da demanda, silêncio 22–07 (SP) e aviso ao dono a partir do 2º ciclo (1x/dia).
+  // O mesmo aviso REPETIDO (push + e-mail) enquanto ninguém propõe horário: 1h após o match e
+  // depois pelo tempo restante até o prazo (12h/6h/2h/30 min), silêncio 22–07 (SP) e aviso ao
+  // dono a partir do 2º ciclo (1x/dia).
   setInterval(() => { repetirLembreteAgendar() }, INTERVALO_CRONOMETRO)
   // "Responda o horário proposto": à parte que deve responder uma proposta de horário pendente,
   // 1h depois da proposta e 1h antes do horário. Mesma cadência; fora do warm-up (janela de 60 min).
