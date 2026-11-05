@@ -2100,6 +2100,56 @@ const repetirRespostaHorarioDono = semSobreposicao('repetirRespostaHorarioDono',
   }
 })
 
+// "N perguntas aguardam sua resposta" — ao DONO de demanda aberta, aprovada, sem match e no
+// prazo (expira_em) com pergunta(s) sem resposta (perguntas_demanda.respondido_em IS NULL).
+// UM aviso agrupado por demanda: "N perguntas aguardam sua resposta" ("1 pergunta aguarda…"),
+// corpo com o título; data { tipo: 'nova_pergunta', obra_id | reparo_id } — o tipo que o app já
+// roteia ao detalhe do dono, nas perguntas (sem pergunta_id: é o grupo). Cadência (dono,
+// 05/11/2026): 1º ciclo 30 min depois da pergunta sem resposta mais ANTIGA; os seguintes,
+// contados de lembrete_perguntas_ultimo_em, pelo tempo RESTANTE até expira_em
+// (sqlIntervaloRestante: 12h / 6h / 2h / 30 min), reavaliado a cada tique; pergunta NOVA depois
+// do último ciclo reinicia: próximo 30 min depois dela. Silêncio 22–07 SP adia para as 07:00.
+// Push a cada ciclo + no máx. 1 e-mail/dia por demanda (entregarLembrete). Para no mesmo tique
+// em que todas são respondidas, a demanda casa, vence ou sai de 'aberta' (cancelada/encerrada).
+// Perguntas do próprio dono (a API já as nega) não contam. Claim atômico (UPDATE ... RETURNING).
+const TIPO_PERGUNTA = { obras: 'obra', reparos: 'reparo' }
+const sqlClaimPerguntasSemResposta = (lado) => `
+      UPDATE ${lado.tabela} d SET lembrete_perguntas_ultimo_em = NOW(),
+             lembrete_perguntas_ciclo = d.lembrete_perguntas_ciclo + 1
+        FROM usuarios u,
+             (SELECT p.demanda_id, count(*)::int AS n, min(p.criado_em) AS primeira, max(p.criado_em) AS ultima
+                FROM perguntas_demanda p JOIN ${lado.tabela} x ON x.id = p.demanda_id
+               WHERE p.tipo = '${TIPO_PERGUNTA[lado.tabela]}' AND p.respondido_em IS NULL AND p.autor_id <> x.criado_por
+               GROUP BY p.demanda_id) q
+       WHERE u.id = d.criado_por AND q.demanda_id = d.id
+         AND d.status = 'aberta' AND d.status_aprovacao = 'aprovada'
+         AND d.match_usuario_id IS NULL AND d.expira_em > NOW()
+         AND NOW() >= (CASE WHEN d.lembrete_perguntas_ultimo_em IS NULL THEN q.primeira + INTERVAL '30 minutes'
+                            WHEN q.ultima > d.lembrete_perguntas_ultimo_em THEN q.ultima + INTERVAL '30 minutes'
+                            ELSE d.lembrete_perguntas_ultimo_em + ${sqlIntervaloRestante('d.expira_em')} END)
+         AND ${SQL_FORA_SILENCIO}
+   RETURNING d.id, d.titulo, d.criado_por, q.n, d.lembrete_perguntas_ciclo AS ciclo,
+             ${sqlIntervaloRestante('d.expira_em')}::text AS proximo_intervalo, u.push_token, u.email, u.nome`
+const tituloPerguntasSemResposta = (n) => (n === 1 ? '❓ 1 pergunta aguarda sua resposta' : `❓ ${n} perguntas aguardam sua resposta`)
+const lembrarPerguntasSemResposta = semSobreposicao('lembrarPerguntasSemResposta', async () => {
+  for (const lado of Object.values(LADOS_MATCH)) {
+    try {
+      const claim = await pool.query(sqlClaimPerguntasSemResposta(lado))
+      for (const d of claim.rows) {
+        const via = await entregarLembrete({
+          usuario_id: d.criado_por, push_token: d.push_token, email: d.email, nome: d.nome,
+          titulo: tituloPerguntasSemResposta(d.n), corpo: `${d.titulo}: responda para atrair propostas`,
+          data: { tipo: 'nova_pergunta', [lado.chave]: d.id },
+          rotulo: `perguntas sem resposta ${lado.tabela} ${d.id} #${d.ciclo}`,
+        })
+        console.log(`[PerguntasSemResposta] ${lado.tabela} ${d.id} #${d.ciclo} (${d.n}) → dono via ${via}; próximo em ${d.proximo_intervalo}`)
+      }
+    } catch (err) {
+      console.error(`[PerguntasSemResposta] erro em ${lado.tabela}:`, err.message)
+    }
+  }
+})
+
 const vigiarComparecimento = semSobreposicao('vigiarComparecimento', async () => {
   for (const lado of Object.values(LADOS_MATCH)) {
     try {
@@ -3053,6 +3103,7 @@ module.exports = {
   repetirLembreteAgendar,
   sqlClaimRepetirAgendar,
   repetirRespostaHorarioDono,
+  lembrarPerguntasSemResposta,
   sqlClaimRepetirRespostaDono,
   sqlClaimAgendar,
   OFFSETS_AGENDAR,

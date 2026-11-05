@@ -487,6 +487,12 @@ const migracaoPronta = (async () => {
       // ciclo (chave aviso:resposta_horario#n), que nunca zera pelo mesmo motivo acima.
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_resposta_ultimo_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_resposta_ciclo INTEGER NOT NULL DEFAULT 0`)
+      // "N perguntas aguardam sua resposta" ao dono (alertaService.lembrarPerguntasSemResposta):
+      // claim do último ciclo (a cadência conta dele; pergunta nova depois dele reinicia a
+      // contagem) e o nº do ciclo, só para o log. Nunca zeradas: o predicado é o estado das
+      // perguntas (respondido_em) e da demanda.
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_perguntas_ultimo_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_perguntas_ciclo INTEGER NOT NULL DEFAULT 0`)
       // Negociação de horário: quando a proposta PENDENTE foi feita (toda escrita de proposta
       // grava NOW()) e as duas marcas do "Responda o horário proposto"
       // (alertaService.lembrarRespostaHorario: 1h depois da proposta / 1h antes do horário),
