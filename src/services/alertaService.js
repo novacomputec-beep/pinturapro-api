@@ -2518,13 +2518,27 @@ const isentoPorRecusa = (demanda) => isentoDeFalta(demanda)
 // atendimento (cancelamentoMatchService) conta falta para quem cancelou — dono ou profissional.
 const registrarFalta = (tabela, demanda) =>
   (demanda.match_usuario_id ? registrarFaltaUsuario(tabela, demanda.id, demanda.match_usuario_id) : Promise.resolve())
-const registrarFaltaUsuario = async (tabela, demandaId, usuarioId) => {
+// Duas peças exportadas à parte: inserirFalta (só o INSERT, aceita o client de uma transação —
+// desfazerEscolhaService grava a falta JUNTO com o un-match) e avaliarSuspensaoPorFaltas
+// (contagem + suspensão, pelo pool, DEPOIS do commit — dentro da transação a contagem não
+// enxergaria a linha nova). motivo (opcional) sai na ficha do admin (GET /admin/suspensos).
+const inserirFalta = (db, tabela, demandaId, usuarioId, motivo = null) =>
+  db.query(
+    `INSERT INTO faltas_profissional (usuario_id, tabela, demanda_id, motivo) VALUES ($1, $2, $3, $4)`,
+    [usuarioId, tabela, demandaId, motivo]
+  )
+const registrarFaltaUsuario = async (tabela, demandaId, usuarioId, motivo = null) => {
   if (!usuarioId) return
   try {
-    await pool.query(
-      `INSERT INTO faltas_profissional (usuario_id, tabela, demanda_id) VALUES ($1, $2, $3)`,
-      [usuarioId, tabela, demandaId]
-    )
+    await inserirFalta(pool, tabela, demandaId, usuarioId, motivo)
+    await avaliarSuspensaoPorFaltas(usuarioId)
+  } catch (err) {
+    console.error(`[Faltas] Erro ao registrar falta em ${tabela}:`, err.message)
+  }
+}
+const avaliarSuspensaoPorFaltas = async (usuarioId) => {
+  if (!usuarioId) return
+  try {
     // perdoada_em IS NULL: falta perdoada por um admin continua no histórico mas não conta.
     const c = await pool.query(
       `SELECT COUNT(*)::int AS n FROM faltas_profissional
@@ -2558,7 +2572,7 @@ const registrarFaltaUsuario = async (tabela, demandaId, usuarioId) => {
       data: { tipo: 'conta_suspensa' }, rotulo: `conta suspensa (faltas) ${usuarioId}`,
     })
   } catch (err) {
-    console.error(`[Faltas] Erro ao registrar falta em ${tabela}:`, err.message)
+    console.error(`[Faltas] Erro ao avaliar suspensão de ${usuarioId}:`, err.message)
   }
 }
 
@@ -3098,6 +3112,8 @@ module.exports = {
   semSobreposicao,
   // Cancelamento de match (cancelamentoMatchService): falta por usuário e reanúncio da demanda.
   registrarFaltaUsuario,
+  inserirFalta,
+  avaliarSuspensaoPorFaltas,
   reanunciarDemanda,
   enviarPushNotificacao,
   OPCOES_PUSH,

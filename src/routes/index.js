@@ -1244,6 +1244,9 @@ const migracaoPronta = (async () => {
     // liberou alguém falharia por violação de FK e derrubaria a transação inteira de exclusão
     // (mesmo risco documentado no DELETE /usuarios/:id). A falta sobrevive com o autor anônimo.
     await client.query(`ALTER TABLE faltas_profissional ADD COLUMN IF NOT EXISTS perdoada_por UUID REFERENCES usuarios(id) ON DELETE SET NULL`)
+    // Motivo legível da falta (NULL = não comparecimento, o caso de sempre). Hoje só
+    // "não marcou horário" (services/desfazerEscolhaService); sai na ficha de GET /admin/suspensos.
+    await client.query(`ALTER TABLE faltas_profissional ADD COLUMN IF NOT EXISTS motivo TEXT`)
     // Suspensão por acúmulo de faltas. suspenso_em É a flag: NULL = ativo, preenchido =
     // suspenso (mesma convenção de encerrado_em/chegada_confirmada_em — nada de booleano
     // paralelo que possa divergir do timestamp). suspenso_motivo guarda o porquê legível.
@@ -1668,6 +1671,11 @@ const migracaoPronta = (async () => {
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelado_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS cancelado_acordo BOOLEAN NOT NULL DEFAULT false`)
       await client.query(`CREATE INDEX IF NOT EXISTS ${tabela}_cancelado_por_idx ON ${tabela} (cancelado_por, cancelado_em DESC) WHERE cancelado_por IS NOT NULL`)
+      // status_antes_match: o status que a proposta tinha quando o MATCH de outro profissional a
+      // rebaixou a 'recusado' (utils/rejeitarConcorrentes). "Desfazer escolha" (services/
+      // desfazerEscolhaService) devolve essas propostas a esse status — e só essas: recusa
+      // explícita do dono antes do match não tem marcador e fica recusada.
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS status_antes_match TEXT`)
     }
     // Indicações (utils/indicacoes): código único de 6 caracteres por profissional, quem o
     // indicou, e os dois agregados por indicador (meses de bônus com teto, embaixador).
@@ -8828,7 +8836,7 @@ router.get('/admin/suspensos', autenticar, exigirAdmin, async (req, res) => {
               COALESCE((
                 SELECT json_agg(x ORDER BY x.criado_em DESC)
                   FROM (
-                    SELECT f.id, f.tabela, f.demanda_id, f.criado_em,
+                    SELECT f.id, f.tabela, f.demanda_id, f.criado_em, f.motivo,
                            f.perdoada_em, f.perdoada_por, up.nome AS perdoada_por_nome
                       FROM faltas_profissional f
                       LEFT JOIN usuarios up ON up.id = f.perdoada_por

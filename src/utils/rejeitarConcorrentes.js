@@ -35,8 +35,10 @@ const rejeitarConcorrentes = async (tipoDemanda, demandaId, vencedorUsuarioId) =
 
   // tabela/coluna saem do CONFIG acima (whitelist fechada), nunca do request —
   // a interpolação no SQL é segura pelo mesmo motivo do POST /avaliacoes.
+  // status_antes_match guarda o status rebaixado: "desfazer escolha" (services/
+  // desfazerEscolhaService) devolve estas propostas a ele quando o dono desfaz o match.
   const rejeitados = await pool.query(
-    `UPDATE ${cfg.tabela} SET status = 'recusado'
+    `UPDATE ${cfg.tabela} SET status = 'recusado', status_antes_match = status
      WHERE ${cfg.coluna} = $1 AND usuario_id != $2 AND status NOT IN ('recusado', 'expirado', 'cancelado')
      RETURNING usuario_id`,
     [demandaId, vencedorUsuarioId]
