@@ -2425,9 +2425,11 @@ const ROTULOS_MATCH_DESFEITO = {
   reparos: { chave: 'reparo_id', profissional: 'prestador', artigo: 'O serviço', volta: 'O serviço voltou' },
 }
 
-const notificarMatchDesfeito = async (tabela, demanda) => {
+// somenteDono: o profissional que NUNCA marcou horário recebe, em vez deste, o aviso próprio da
+// falta "não marcou horário" (registrarFaltaSemHorario) — um push por fato, não dois.
+const notificarMatchDesfeito = async (tabela, demanda, { somenteDono = false } = {}) => {
   const { chave, profissional, artigo, volta } = ROTULOS_MATCH_DESFEITO[tabela]
-  const alvos = [demanda.criado_por, demanda.match_usuario_id].filter(Boolean)
+  const alvos = [demanda.criado_por, somenteDono ? null : demanda.match_usuario_id].filter(Boolean)
   if (alvos.length === 0) return
   // Push + e-mail sempre (política de 29/10/2026); resultado no log. match_feito_em em data
   // distingue um match expirado de outro no dedupe do e-mail.
@@ -2576,6 +2578,51 @@ const avaliarSuspensaoPorFaltas = async (usuarioId) => {
   }
 }
 
+// Falta "não marcou horário": o match morreu (cronômetro ou "desfazer escolha") sem o
+// profissional ter proposto dia e horário NENHUMA vez. Única por (usuário, tabela, demanda):
+// a segunda tentativa não insere (NOT EXISTS) e devolve false — idempotente.
+const MOTIVO_FALTA_SEM_HORARIO = 'não marcou horário'
+const inserirFaltaUnica = async (db, tabela, demandaId, usuarioId, motivo) => {
+  const r = await db.query(
+    `INSERT INTO faltas_profissional (usuario_id, tabela, demanda_id, motivo)
+     SELECT $1, $2, $3, $4
+      WHERE NOT EXISTS (SELECT 1 FROM faltas_profissional WHERE usuario_id = $1 AND tabela = $2 AND demanda_id = $3)
+     RETURNING id`,
+    [usuarioId, tabela, demandaId, motivo]
+  )
+  return r.rows.length > 0
+}
+// O profissional do match NUNCA propôs horário: nenhum horário valendo (chegada_prevista_em),
+// nenhuma janela dele recusada (chegada_recusada_em), nenhuma pendência DELE
+// (chegada_pendente_em só conta se COALESCE(chegada_proposta_por, match_usuario_id) é ele — a
+// proposta do DONO sem resposta não é dele) e nenhum "Estou a caminho". Pendência dele sem
+// resposta do dono NÃO cai aqui (segue isenta, isentoDeFalta). Lida na linha ANTES do un-match.
+const nuncaPropos = (d) =>
+  !d.chegada_prevista_em && !d.chegada_recusada_em && !d.a_caminho_em
+  && (!d.chegada_pendente_em || (d.chegada_proposta_por || d.match_usuario_id) !== d.match_usuario_id)
+// Falta única + suspensão + aviso crítico (push + e-mail) ao profissional. Nunca lança.
+const registrarFaltaSemHorario = async (tabela, demanda) => {
+  const usuarioId = demanda.match_usuario_id
+  if (!usuarioId) return false
+  try {
+    const nova = await inserirFaltaUnica(pool, tabela, demanda.id, usuarioId, MOTIVO_FALTA_SEM_HORARIO)
+    if (!nova) { console.log(`[Faltas] ${tabela} ${demanda.id}: falta "${MOTIVO_FALTA_SEM_HORARIO}" já registrada para ${usuarioId}`); return false }
+    await avaliarSuspensaoPorFaltas(usuarioId)
+    const { chave } = ROTULOS_MATCH_DESFEITO[tabela]
+    const via = await avisarUsuario(usuarioId, {
+      titulo: 'Você recebeu 1 falta',
+      corpo: `O prazo de "${demanda.titulo}" venceu sem você marcar dia e horário. Com ${FALTAS_PARA_SUSPENDER} faltas em 90 dias, a conta é suspensa.`,
+      data: { tipo: 'match_expirado', [chave]: demanda.id, falta: MOTIVO_FALTA_SEM_HORARIO, match_feito_em: demanda.match_feito_em || null },
+      rotulo: `falta sem horário ${tabela} ${demanda.id}`,
+    })
+    console.log(`[Faltas] ${tabela} ${demanda.id}: falta "${MOTIVO_FALTA_SEM_HORARIO}" para ${usuarioId} — aviso via ${via}`)
+    return true
+  } catch (err) {
+    console.error(`[Faltas] Erro na falta sem horário em ${tabela} ${demanda.id}:`, err.message)
+    return false
+  }
+}
+
 // Cronômetro de matches de reparos.
 // O prazo do cronômetro inicia em match_feito_em e vai até COALESCE(chegada_prevista_em,
 // expira_em): quando o prestador promete uma janela de chegada, é ELA que passa a valer como
@@ -2654,7 +2701,7 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
     // chegada_proposta_por: de quem era a pendência (só a do profissional isenta).
     const candidatos = await pool.query(`
       SELECT id, titulo, criado_por, match_usuario_id, match_feito_em,
-             chegada_recusada_em, chegada_pendente_em, chegada_prevista_em, chegada_proposta_por
+             chegada_recusada_em, chegada_pendente_em, chegada_prevista_em, chegada_proposta_por, a_caminho_em
         FROM reparos WHERE ${PRED_EXPIRADOS_REPAROS}
     `)
 
@@ -2726,15 +2773,21 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
       // try/catch POR LINHA: notificarMatchDesfeito faz query de token e pode estourar. Sem o
       // guard, uma linha ruim jogava para o catch da função e as SEGUINTES ficavam sem aviso e
       // sem falta, com o un-match já commitado para todas. registrarFalta já se protege sozinha.
+      // Três desfechos para o profissional (ver nuncaPropos / isentoDeFalta):
+      //   nunca propôs horário → falta única "não marcou horário" + aviso próprio (o genérico
+      //   "Prazo expirado" vai só ao dono); propôs e o dono não respondeu/recusou → isento;
+      //   horário valendo e não chegou → falta de não comparecimento, como sempre.
       const atualizados = new Set(expirados.rows.map(r => r.id))
       for (const c of candidatos.rows) {
         if (!atualizados.has(c.id)) continue
+        const semHorario = nuncaPropos(c)
         try {
-          await notificarMatchDesfeito('reparos', c)
+          await notificarMatchDesfeito('reparos', c, { somenteDono: semHorario })
         } catch (err) {
           console.error(`[CronômetroReparos] falha ao notificar match desfeito ${c.id}:`, err.message)
         }
-        if (!isentoPorRecusa(c)) await registrarFalta('reparos', c)
+        if (semHorario) await registrarFaltaSemHorario('reparos', c)
+        else if (!isentoPorRecusa(c)) await registrarFalta('reparos', c)
       }
     }
 
@@ -2800,7 +2853,7 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
     // Mesma isenção do cron de reparos (ver isentoPorRecusa).
     const candidatos = await pool.query(`
       SELECT id, titulo, criado_por, match_usuario_id, match_feito_em,
-             chegada_recusada_em, chegada_pendente_em, chegada_prevista_em, chegada_proposta_por
+             chegada_recusada_em, chegada_pendente_em, chegada_prevista_em, chegada_proposta_por, a_caminho_em
         FROM obras WHERE ${PRED_EXPIRADOS_OBRAS}
     `)
 
@@ -2864,15 +2917,18 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
       expiradosCount = expirados.rows.length
 
       // try/catch por linha pelo mesmo motivo do cron de reparos.
+      // Mesmos três desfechos do cron de reparos (nuncaPropos / isentoDeFalta).
       const atualizados = new Set(expirados.rows.map(o => o.id))
       for (const c of candidatos.rows) {
         if (!atualizados.has(c.id)) continue
+        const semHorario = nuncaPropos(c)
         try {
-          await notificarMatchDesfeito('obras', c)
+          await notificarMatchDesfeito('obras', c, { somenteDono: semHorario })
         } catch (err) {
           console.error(`[CronômetroObras] falha ao notificar match desfeito ${c.id}:`, err.message)
         }
-        if (!isentoPorRecusa(c)) await registrarFalta('obras', c)
+        if (semHorario) await registrarFaltaSemHorario('obras', c)
+        else if (!isentoPorRecusa(c)) await registrarFalta('obras', c)
       }
     }
 
@@ -3113,7 +3169,11 @@ module.exports = {
   // Cancelamento de match (cancelamentoMatchService): falta por usuário e reanúncio da demanda.
   registrarFaltaUsuario,
   inserirFalta,
+  inserirFaltaUnica,
   avaliarSuspensaoPorFaltas,
+  registrarFaltaSemHorario,
+  nuncaPropos,
+  MOTIVO_FALTA_SEM_HORARIO,
   reanunciarDemanda,
   enviarPushNotificacao,
   OPCOES_PUSH,

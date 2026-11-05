@@ -28,14 +28,14 @@
 const { pool } = require('../utils/supabase')
 const { formatarDataHoraSP } = require('../utils/agendamento')
 const { SQL_LIMPAR_MATCH } = require('./cancelamentoMatchService')
-const { entregarPushEEmail, inserirFalta, avaliarSuspensaoPorFaltas } = require('./alertaService')
+const { entregarPushEEmail, inserirFaltaUnica, avaliarSuspensaoPorFaltas, MOTIVO_FALTA_SEM_HORARIO } = require('./alertaService')
 
 const ESPERA_FRACAO = 0.10
 const ESPERA_MIN = '1 hour'
 const ESPERA_MAX = '48 hours'
 const PISO_PRAZO_RESTANTE = '1 hour'
 const MOTIVO_ESCOLHA_DESFEITA = 'escolha_desfeita'
-const MOTIVO_FALTA = 'não marcou horário'
+const MOTIVO_FALTA = MOTIVO_FALTA_SEM_HORARIO // 'não marcou horário' — o mesmo do cronômetro
 const STATUS_VALENDO = ['pendente', 'contraproposta_dono']
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -141,7 +141,7 @@ const handler = (tabela) => {
           WHERE ${lado.proposta.coluna} = $1 AND usuario_id <> $2 AND status = ANY($3::text[])`,
         [d.id, profissionalId, STATUS_VALENDO]
       )).rows.map(x => x.usuario_id)
-      await inserirFalta(client, lado.tabela, d.id, profissionalId, MOTIVO_FALTA)
+      await inserirFaltaUnica(client, lado.tabela, d.id, profissionalId, MOTIVO_FALTA) // única por (profissional, demanda)
       await client.query('COMMIT')
     } catch (err) {
       if (client) { try { await client.query('ROLLBACK') } catch {} }
