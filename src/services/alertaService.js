@@ -1581,16 +1581,42 @@ const entregarPushOuEmail = async ({ usuario_id, ator_id, push_token, email, nom
 //   e-mail por demanda × destinatário × dia de São Paulo: a chave vira 'lembrete#AAAAMMDD',
 //   comum a TODOS os lembretes — o 1º do dia leva o e-mail, os demais saem só por push. Sem
 //   usuario_id ou id de demanda não há como contar o dia: lembrete sai só por push;
+//   DONO SEM PUSH ATIVO (dono, 05/11/2026) nos lembretes repetidos do lado do dono (perguntas
+//   sem resposta, responda o horário, escolha pendente diário — `emailCadaCiclo: true`, que o
+//   chamador liga com semPushAtivo): sem push_token ou com desinstalado_em, o e-mail sai a CADA
+//   ciclo, até LEMBRETE_EMAIL_SEM_PUSH_TETO_DIA por demanda × dono × dia SP — chaves
+//   'lembrete#AAAAMMDD#k' (k = 1..teto; a chave diária simples, se já saiu, conta no teto).
+//   Dono com push ativo segue no 1 e-mail/dia. Como toda chave 'aviso:%', esses e-mails ficam
+//   na reserva dos avisos críticos (fora do teto dos e-mails de demanda nova);
 //   boas-vindas e avisos/promoções do painel → só push (fora daqui).
 // Nunca lança. Devolve as vias que saíram ('push+e-mail', 'push', 'e-mail', 'push+e-mail já
-// enviado', …), 'sem contato' ou 'falha'.
+// enviado', 'e-mail teto do dia', …), 'sem contato' ou 'falha'.
 const UUID_RE_AVISO = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const hash8 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 8)
 const FMT_DIA_SP = new Intl.DateTimeFormat('en-CA', { timeZone: TZ_AGENDA, year: 'numeric', month: '2-digit', day: '2-digit' })
 const diaSP = (agora = new Date()) => FMT_DIA_SP.format(agora).replace(/-/g, '')
+const LEMBRETE_EMAIL_SEM_PUSH_TETO_DIA = 6
+// Push ATIVO = tem token e não está marcado como desinstalado (utils/desinstalacoes). `u` traz
+// push_token e desinstalado_em (a linha de usuarios ou o RETURNING do claim).
+const semPushAtivo = (u) => !u?.push_token || !!u?.desinstalado_em
+// Claim do e-mail por ciclo (dono sem push ativo): a k-ésima chave do dia, só enquanto k ≤ teto.
+// Um statement (contagem + INSERT): o claim do ciclo na linha da demanda já é atômico, então
+// dois tiques nunca chegam aqui juntos para a mesma demanda × dono.
+const reivindicarEmailLembreteCiclo = async (demandaId, usuarioId, dia) => {
+  const r = await pool.query(
+    `INSERT INTO email_alertas (tipo, demanda_id, usuario_id)
+     SELECT 'aviso:lembrete#' || $3 || '#' || (c.n + 1), $1, $2
+       FROM (SELECT count(*)::int AS n FROM email_alertas
+              WHERE demanda_id = $1 AND usuario_id = $2 AND tipo LIKE 'aviso:lembrete#' || $3 || '%') c
+      WHERE c.n < $4
+     ON CONFLICT (tipo, demanda_id, usuario_id) DO NOTHING RETURNING tipo`,
+    [demandaId, usuarioId, dia, LEMBRETE_EMAIL_SEM_PUSH_TETO_DIA]
+  )
+  return r.rows.length > 0
+}
 // corpoEmail (opcional): texto do e-mail quando precisa diferir do push (ex.: o caminho no app,
 // que no push é o próprio toque). Sem ele, o e-mail repete o corpo do push.
-const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, corpoEmail, data, rotulo, lembrete = false }) => {
+const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, corpoEmail, data, rotulo, lembrete = false, emailCadaCiclo = false }) => {
   if (ehOProprioAutor({ usuario_id, ator_id, rotulo })) return 'autor'
   const vias = []
   try {
@@ -1609,7 +1635,9 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
       : (/^[a-z_]+$/.test(evento) ? `${evento}#${hash8(`${titulo}\n${corpo}\n${JSON.stringify(data)}`)}` : null)
     const temChave = !!(usuario_id && UUID_RE_AVISO.test(demandaId) && chave)
     if (lembrete && !temChave) return vias.length ? vias.join('+') : 'sem contato'
-    if (temChave) {
+    if (lembrete && emailCadaCiclo) {
+      if (!(await reivindicarEmailLembreteCiclo(demandaId, usuario_id, diaSP()))) { vias.push('e-mail teto do dia'); return vias.join('+') }
+    } else if (temChave) {
       const claim = await pool.query(
         `INSERT INTO email_alertas (tipo, demanda_id, usuario_id) VALUES ($1, $2, $3)
          ON CONFLICT (tipo, demanda_id, usuario_id) DO NOTHING RETURNING usuario_id`,
@@ -2079,7 +2107,7 @@ const sqlClaimRepetirRespostaDono = (lado) => `
    RETURNING d.id, d.titulo, d.chegada_pendente_em, d.criado_por, d.match_usuario_id,
              d.lembrete_resposta_ciclo AS ciclo, true AS para_dono,
              ${SQL_INTERVALO_RESTANTE_RESPOSTA}::text AS proximo_intervalo,
-             u.push_token, u.email, u.nome, p.nome AS nome_proponente`
+             u.push_token, u.desinstalado_em, u.email, u.nome, p.nome AS nome_proponente`
 const repetirRespostaHorarioDono = semSobreposicao('repetirRespostaHorarioDono', async () => {
   for (const lado of Object.values(LADOS_MATCH)) {
     try {
@@ -2087,7 +2115,7 @@ const repetirRespostaHorarioDono = semSobreposicao('repetirRespostaHorarioDono',
       for (const d of claim.rows) {
         const via = await entregarLembrete({
           usuario_id: d.criado_por, ator_id: d.match_usuario_id,
-          push_token: d.push_token, email: d.email, nome: d.nome,
+          push_token: d.push_token, email: d.email, nome: d.nome, emailCadaCiclo: semPushAtivo(d),
           titulo: TITULO_RESPOSTA_HORARIO, corpo: corpoRespostaHorario(d),
           data: { tipo: 'chegada_prevista_pendente', [lado.chave]: d.id },
           rotulo: `resposta horário repetido ${lado.tabela} ${d.id} #${d.ciclo}`,
@@ -2129,7 +2157,7 @@ const sqlClaimPerguntasSemResposta = (lado) => `
                             ELSE d.lembrete_perguntas_ultimo_em + ${sqlIntervaloRestante('d.expira_em')} END)
          AND ${SQL_FORA_SILENCIO}
    RETURNING d.id, d.titulo, d.criado_por, q.n, d.lembrete_perguntas_ciclo AS ciclo,
-             ${sqlIntervaloRestante('d.expira_em')}::text AS proximo_intervalo, u.push_token, u.email, u.nome`
+             ${sqlIntervaloRestante('d.expira_em')}::text AS proximo_intervalo, u.push_token, u.desinstalado_em, u.email, u.nome`
 const tituloPerguntasSemResposta = (n) => (n === 1 ? '❓ 1 pergunta aguarda sua resposta' : `❓ ${n} perguntas aguardam sua resposta`)
 const lembrarPerguntasSemResposta = semSobreposicao('lembrarPerguntasSemResposta', async () => {
   for (const lado of Object.values(LADOS_MATCH)) {
@@ -2137,7 +2165,7 @@ const lembrarPerguntasSemResposta = semSobreposicao('lembrarPerguntasSemResposta
       const claim = await pool.query(sqlClaimPerguntasSemResposta(lado))
       for (const d of claim.rows) {
         const via = await entregarLembrete({
-          usuario_id: d.criado_por, push_token: d.push_token, email: d.email, nome: d.nome,
+          usuario_id: d.criado_por, push_token: d.push_token, email: d.email, nome: d.nome, emailCadaCiclo: semPushAtivo(d),
           titulo: tituloPerguntasSemResposta(d.n), corpo: `${d.titulo}: responda para atrair propostas`,
           data: { tipo: 'nova_pergunta', [lado.chave]: d.id },
           rotulo: `perguntas sem resposta ${lado.tabela} ${d.id} #${d.ciclo}`,
@@ -3098,6 +3126,8 @@ module.exports = {
   lembrarAgendamento,
   lembrarAgendarAtendimento,
   entregarLembrete,
+  semPushAtivo,
+  LEMBRETE_EMAIL_SEM_PUSH_TETO_DIA,
   avisarUsuario,
   diaSP,
   repetirLembreteAgendar,
