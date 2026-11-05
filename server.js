@@ -816,8 +816,9 @@ const iniciarAgendador = () => {
   // "Responda o horário proposto": à parte que deve responder uma proposta de horário pendente,
   // 1h depois da proposta e 1h antes do horário. Mesma cadência; fora do warm-up (janela de 60 min).
   setInterval(() => { lembrarRespostaHorario() }, INTERVALO_CRONOMETRO)
-  // Ao DONO, proposta do profissional pendente: o mesmo aviso REPETIDO (push + e-mail) com a
-  // cadência do agendar repetido, silêncio 22–07 (SP), até ele responder ou o horário passar.
+  // Ao DONO, proposta do profissional pendente: o mesmo aviso REPETIDO (push + e-mail) 30 min
+  // após a proposta e depois pelo tempo restante até o horário proposto (12h/6h/2h/30 min),
+  // silêncio 22–07 (SP), até ele responder ou o horário passar.
   setInterval(() => { repetirRespostaHorarioDono() }, INTERVALO_CRONOMETRO)
   setInterval(() => { vigiarComparecimento() }, INTERVALO_CRONOMETRO)
   // Dono com interessados pendentes e sem escolha: lembrete diário, avisos 24h/2h e vencimento
