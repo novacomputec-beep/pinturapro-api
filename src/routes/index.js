@@ -30,6 +30,7 @@ const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaCon
 // Cancelamento justo de match pelas partes (antecedência, acordo mútuo, falta no tardio) —
 // substitui o uso de POST /:id/expirar-match por dono/profissional.
 const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQL_LIMPAR_MATCH } = require('../services/cancelamentoMatchService')
+const { handler: desfazerEscolhaHandler, sqlDesfazerLiberadoEm } = require('../services/desfazerEscolhaService')
 // Tolerância de chegada (15 min) e pedido de atraso (15/30/60 min, 2 por match, auto-aceite em
 // 10 min). Os endpoints antigos pedir-tempo/perguntar-tempo/informar-tempo/responder-tempo caem
 // na mesma lógica (handlersLegados). GET /:id expõe camposAtraso.
@@ -3487,6 +3488,10 @@ for (const tabela of ['obras', 'reparos']) {
   router.post(`/${tabela}/:id/cancelar-match`, autenticar, h.cancelar)
   router.post(`/${tabela}/:id/cancelamento-acordo`, autenticar, h.pedirAcordo)
   router.post(`/${tabela}/:id/cancelamento-acordo/responder`, autenticar, h.responderAcordo)
+  // "Desfazer escolha" (services/desfazerEscolhaService): SÓ o dono, antes de qualquer horário
+  // proposto/combinado e de "Estou a caminho", depois da espera (10% do prazo desde o match,
+  // 1h–48h). 409 AGUARDE com liberado_em antes da hora; GET /:id expõe desfazer_liberado_em.
+  router.post(`/${tabela}/dono/:id/desfazer-match`, autenticar, desfazerEscolhaHandler(tabela))
   // Pedido de atraso (services/atrasoChegadaService): profissional pede 15/30/60 min depois do
   // "Estou a caminho"; dono aceita/recusa (sem resposta em 10 min, aceito pelo cron).
   const a = atrasoHandlers(tabela)
@@ -3504,6 +3509,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT o.*,
+        -- desfazer_liberado_em: a partir de quando o dono pode desfazer a escolha (services/
+        -- desfazerEscolhaService); NULL sem match, com horário em negociação ou já a caminho.
+        ${sqlDesfazerLiberadoEm('o.')} AS desfazer_liberado_em,
         -- "Expirada" não é status no banco: é uma obra NÃO encerrada cujo expira_em já
         -- passou. Calculado no SQL (relógio do servidor) para a tela de detalhe gatear o
         -- botão de estender sem comparar com o relógio do aparelho. Mesma expressão do
@@ -3626,11 +3634,14 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     const profissionais_avisados = ehDono ? await contarProfissionaisAvisados('obras', req.params.id, obra.criado_por) : null
     // pedido_cancelamento: pedido de acordo vigente (quem, motivo, expira_em) — só dono e pintor do match.
     const pedido_cancelamento = pedidoCancelamento(obra, req.usuario.id)
+    // desfazer_liberado_em: SÓ para o dono (null para os demais); sai no nível de cima, não na obra.
+    const desfazer_liberado_em = ehDono ? (obra.desfazer_liberado_em || null) : null
+    delete obra.desfazer_liberado_em
     // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
     // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
     // encerramento_automatico_em: quando o cron fecha sozinho a solicitação pendente do pintor
     // (solicitado_em + 2 dias — alertaService.encerramentoAutomaticoEm); null sem solicitação.
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -6214,7 +6225,10 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // relógio do aparelho.
     const result = await pool.query(
       `SELECT *, (status <> 'encerrada' AND (CASE WHEN match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada()} ELSE expira_em END) <= NOW()) AS expirada,
-              ${sqlTotalExtensaoReparo()} AS total_extensao_horas
+              ${sqlTotalExtensaoReparo()} AS total_extensao_horas,
+              -- desfazer_liberado_em: a partir de quando o dono pode desfazer a escolha
+              -- (services/desfazerEscolhaService); NULL quando não se aplica.
+              ${sqlDesfazerLiberadoEm()} AS desfazer_liberado_em
          FROM reparos WHERE id = $1`,
       [req.params.id]
     )
@@ -6327,6 +6341,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // quantos profissionais distintos receberam o aviso "Novo serviço disponível!" por push ou
     // e-mail; lembretes e reenvios não somam (utils/profissionaisAvisados).
     const profissionais_avisados = ehDono ? await contarProfissionaisAvisados('reparos', req.params.id, reparo.criado_por) : null
+    // desfazer_liberado_em: SÓ para o dono (null para os demais); sai no nível de cima, não no reparo.
+    const desfazer_liberado_em = ehDono ? (reparo.desfazer_liberado_em || null) : null
+    delete reparo.desfazer_liberado_em
     res.json({
       reparo,
       midias: midias.rows,
@@ -6334,6 +6351,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       interessados,
       // Pedido de acordo de cancelamento vigente (quem, motivo, expira_em) — só dono e prestador do match.
       pedido_cancelamento: pedidoCancelamento(reparo, req.usuario.id),
+      // A partir de quando o dono pode desfazer a escolha (POST /reparos/dono/:id/desfazer-match).
+      desfazer_liberado_em,
       // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
       // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
       ...camposAtraso(reparo),

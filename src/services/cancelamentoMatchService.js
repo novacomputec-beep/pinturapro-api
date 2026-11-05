@@ -162,11 +162,13 @@ const avisar = async (usuarioId, { titulo, corpo, data, rotulo }, { ambos = true
 }
 
 // Cancelamentos do usuário (como quem cancelou) em 90 dias, nos dois lados; no 3º, aviso.
+// "Desfazer escolha" (desfazerEscolhaService, cancelado_motivo 'escolha_desfeita') é saída
+// sancionada antes de qualquer horário e NÃO conta.
 const avisarCancelamentosFrequentes = async (usuarioId) => {
   try {
     const r = await pool.query(
-      `SELECT (SELECT COUNT(*) FROM candidaturas WHERE cancelado_por = $1 AND cancelado_em > NOW() - ($2::int * INTERVAL '1 day'))
-            + (SELECT COUNT(*) FROM interesse_reparos WHERE cancelado_por = $1 AND cancelado_em > NOW() - ($2::int * INTERVAL '1 day')) AS n`,
+      `SELECT (SELECT COUNT(*) FROM candidaturas WHERE cancelado_por = $1 AND cancelado_em > NOW() - ($2::int * INTERVAL '1 day') AND cancelado_motivo IS DISTINCT FROM 'escolha_desfeita')
+            + (SELECT COUNT(*) FROM interesse_reparos WHERE cancelado_por = $1 AND cancelado_em > NOW() - ($2::int * INTERVAL '1 day') AND cancelado_motivo IS DISTINCT FROM 'escolha_desfeita') AS n`,
       [usuarioId, JANELA_CANCELAMENTOS_DIAS]
     )
     const n = Number(r.rows[0]?.n || 0)
