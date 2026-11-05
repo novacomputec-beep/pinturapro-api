@@ -5,7 +5,7 @@ const { invalidarCacheAssinatura } = require('../middlewares/auth')
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { MARCA } = require('../utils/marca')
 const { validarEspecialidades } = require('../utils/especialidades')
-const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, multiplasContasAtivo } = require('../utils/tipoConta')
+const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, multiplasContasAtivo } = require('../utils/tipoConta')
 const { registrarPlataforma, detectarPlataforma } = require('../utils/plataforma')
 const { registrarReinstalacao } = require('../utils/desinstalacoes')
 const { municipioExiste } = require('../utils/geoBusca')
@@ -55,10 +55,15 @@ const cadastrar = async (req, res) => {
             rg, rg_orgao, rg_estado, cep, latitude, longitude,
             logradouro, numero, complemento, bairro, codigo_indicacao } = req.body
 
+    // TIPO da conta resolvido do corpo INTEIRO (utils/tipoConta.tipoDoCadastro): tipo_conta e
+    // também tipo_dono / tipo_prestador / role que o app manda junto — dono de serviço enviado
+    // como tipo_conta 'dono_obra' + tipo_dono 'reparo' é dono_reparo. Sem tipo reconhecido,
+    // segue o legado: role 'assinante', sem tipo_dono/tipo_prestador.
+    const tipoResolvido = tipoDoCadastro({ tipo_conta, tipo_dono: req.body.tipo_dono, tipo_prestador: req.body.tipo_prestador, role: req.body.role })
     // PRESENÇA, nunca o valor: email e cpf_cnpj saíam em claro para o stdout e ficavam
     // retidos no log da Railway. Mesmo estilo booleano já usado no log de campos obrigatórios
     // logo abaixo — o diagnóstico ("veio email?", "veio documento?") é preservado.
-    console.log(`[CADASTRO][${ts}] ▶ inicio | tipo_conta=${tipo_conta} tem_email=${!!email} tem_cpf_cnpj=${!!cpf_cnpj} plano=${plano} tem_doc_frente=${!!verificacao_doc_frente_url} tem_doc_verso=${!!verificacao_doc_verso_url} tem_selfie=${!!verificacao_selfie_url}`)
+    console.log(`[CADASTRO][${ts}] ▶ inicio | tipo_conta=${tipo_conta} tipo_dono=${req.body.tipo_dono} tipo_prestador=${req.body.tipo_prestador} role=${req.body.role} tipo=${tipoResolvido} tem_email=${!!email} tem_cpf_cnpj=${!!cpf_cnpj} plano=${plano} tem_doc_frente=${!!verificacao_doc_frente_url} tem_doc_verso=${!!verificacao_doc_verso_url} tem_selfie=${!!verificacao_selfie_url}`)
 
     if (!nome || !email || !senha) {
       console.log(`[CADASTRO][${ts}] ✗ 400 campos obrigatorios ausentes | nome=${!!nome} email=${!!email} senha=${!!senha}`)
@@ -88,22 +93,13 @@ const cadastrar = async (req, res) => {
     let senha_hash = await bcrypt.hash(senha, 10)
     console.log(`[CADASTRO][${ts}] ✓ senha hash gerada`)
 
-    let role = 'assinante'
-    if (tipo_conta === 'dono_obra') role = 'dono_obra'
-    else if (tipo_conta === 'prestador' || tipo_conta === 'pintor' || tipo_conta === 'construtor') role = 'prestador'
-
-    // Define tipo_dono para distinguir donos de pintura vs reparo
-    let tipo_dono = null
-    if (tipo_conta === 'dono_obra') tipo_dono = 'pintura'
-    else if (tipo_conta === 'dono_reparo') { role = 'dono_obra'; tipo_dono = 'reparo' }
-
-    // Define tipo_prestador para distinguir pintores/construtores de reparadores.
-    // Derivado ANTES da validação de especialidades porque é ele que escolhe a lista
-    // (obra × reparador). tipo_conta ausente segue como sempre: role 'assinante',
-    // tipo_prestador null — nenhum default inventado aqui.
-    let tipo_prestador = null
-    if (tipo_conta === 'pintor' || tipo_conta === 'construtor') tipo_prestador = 'pintor'
-    else if (tipo_conta === 'prestador') tipo_prestador = 'reparador'
+    // role / tipo_dono / tipo_prestador são o inverso do tipo resolvido (colunasDoTipo):
+    // dono_obra → role dono_obra + tipo_dono 'pintura'; dono_reparo → dono_obra + 'reparo';
+    // pintor/construtor → prestador + 'pintor'; prestador/reparador → prestador + 'reparador'.
+    // Derivados ANTES da validação de especialidades porque tipo_prestador escolhe a lista
+    // (obra × reparador). Tipo não reconhecido segue como sempre: role 'assinante',
+    // tipo_dono/tipo_prestador null — nenhum default inventado aqui.
+    const { role, tipo_dono, tipo_prestador } = colunasDoTipo(tipoResolvido) || { role: 'assinante', tipo_dono: null, tipo_prestador: null }
 
     // Validação do vocabulário FECHADO de especialidades (utils/especialidades). Roda aqui,
     // depois de role E tipo_prestador estarem resolvidos: o mínimo de 1 só vale para
@@ -215,7 +211,7 @@ const cadastrar = async (req, res) => {
       // da MESMA pessoa — e-mail E CPF têm que casar, os dois, com as contas que já existem.
       // Mesmo e-mail com outro CPF (ou sem CPF de um dos lados) e mesmo CPF com outro e-mail
       // seguem recusados com os 409 de sempre.
-      const tipoNovo = tipoDeTipoConta(tipo_conta)
+      const tipoNovo = tipoResolvido
       if (existente.rows.length > 0) {
         const mesmaPessoa = !!cpfLimpo && existente.rows.every(u => u.cpf_norm === cpfLimpo)
         // Conta admin nunca divide e-mail (o trigger também barra); conta desativada não
