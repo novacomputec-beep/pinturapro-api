@@ -13,6 +13,9 @@ const { normalizarCodigo, recalcularIndicador } = require('../utils/indicacoes')
 const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias, camposReferencias } = require('../utils/referencias')
 // Resumo de avaliações + selo "bem avaliado" no perfil do profissional (utils/etiquetasAvaliacao).
 const { sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
+// Login social (Google/Apple): verificação dos tokens e ticket de cadastro (services/loginSocialService).
+const social = require('../services/loginSocialService')
+const cfgSocial = require('../config/loginSocial')
 const nodemailer = require('nodemailer')
 const crypto = require('crypto')
 
@@ -48,12 +51,28 @@ const cadastrar = async (req, res) => {
   const ts = new Date().toISOString()
   let client
   try {
-    const { nome, email, telefone, senha, cidade, uf,
+    const { nome, telefone, senha, cidade, uf,
             especialidades, anos_experiencia, tamanho_equipe,
             cpf_cnpj, tipo_conta, plano, pix_reembolso, referencias,
             verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
             rg, rg_orgao, rg_estado, cep, latitude, longitude,
-            logradouro, numero, complemento, bairro, codigo_indicacao } = req.body
+            logradouro, numero, complemento, bairro, codigo_indicacao, ticket } = req.body
+    let { email } = req.body
+
+    // Cadastro via login social: `ticket` (JWT de 15 min devolvido por POST /auth/social quando o
+    // e-mail não tinha conta) entra NO LUGAR da senha. O e-mail é o do ticket — o do corpo é
+    // ignorado — e a linha nasce com google_sub/apple_sub preenchido. A senha gravada é um
+    // hash de um segredo aleatório (ninguém entra por senha até "esqueci minha senha").
+    let identidadeSocial = null
+    if (ticket) {
+      try {
+        identidadeSocial = social.lerTicket(ticket)
+      } catch (err) {
+        console.log(`[CADASTRO][${ts}] ✗ 401 ticket social | ${err.message}`)
+        return res.status(401).json({ erro: err.message, codigo: err.codigo || 'ticket_invalido' })
+      }
+      email = identidadeSocial.email
+    }
 
     // TIPO da conta resolvido do corpo INTEIRO (utils/tipoConta.tipoDoCadastro): tipo_conta e
     // também tipo_dono / tipo_prestador / role que o app manda junto — dono de serviço enviado
@@ -63,9 +82,9 @@ const cadastrar = async (req, res) => {
     // PRESENÇA, nunca o valor: email e cpf_cnpj saíam em claro para o stdout e ficavam
     // retidos no log da Railway. Mesmo estilo booleano já usado no log de campos obrigatórios
     // logo abaixo — o diagnóstico ("veio email?", "veio documento?") é preservado.
-    console.log(`[CADASTRO][${ts}] ▶ inicio | tipo_conta=${tipo_conta} tipo_dono=${req.body.tipo_dono} tipo_prestador=${req.body.tipo_prestador} role=${req.body.role} tipo=${tipoResolvido} tem_email=${!!email} tem_cpf_cnpj=${!!cpf_cnpj} plano=${plano} tem_doc_frente=${!!verificacao_doc_frente_url} tem_doc_verso=${!!verificacao_doc_verso_url} tem_selfie=${!!verificacao_selfie_url}`)
+    console.log(`[CADASTRO][${ts}] ▶ inicio | tipo_conta=${tipo_conta} tipo_dono=${req.body.tipo_dono} tipo_prestador=${req.body.tipo_prestador} role=${req.body.role} tipo=${tipoResolvido} tem_email=${!!email} tem_cpf_cnpj=${!!cpf_cnpj} social=${identidadeSocial ? identidadeSocial.provedor : 'nao'} plano=${plano} tem_doc_frente=${!!verificacao_doc_frente_url} tem_doc_verso=${!!verificacao_doc_verso_url} tem_selfie=${!!verificacao_selfie_url}`)
 
-    if (!nome || !email || !senha) {
+    if (!nome || !email || (!senha && !identidadeSocial)) {
       console.log(`[CADASTRO][${ts}] ✗ 400 campos obrigatorios ausentes | nome=${!!nome} email=${!!email} senha=${!!senha}`)
       return res.status(400).json({ erro: 'Nome, e-mail e senha são obrigatórios' })
     }
@@ -73,7 +92,7 @@ const cadastrar = async (req, res) => {
       console.log(`[CADASTRO][${ts}] ✗ 400 nome parece e-mail`)
       return res.status(400).json({ erro: ERRO_NOME_PARECE_EMAIL })
     }
-    if (senha.length < 8) {
+    if (!identidadeSocial && senha.length < 8) {
       console.log(`[CADASTRO][${ts}] ✗ 400 senha curta | len=${senha.length}`)
       return res.status(400).json({ erro: 'A senha deve ter pelo menos 8 caracteres' })
     }
@@ -90,7 +109,10 @@ const cadastrar = async (req, res) => {
     console.log(`[CADASTRO][${ts}] ▶ gerando hash de senha`)
     // `let`: com múltiplas contas, o novo tipo de um e-mail existente REUSA o hash da conta
     // que já existe (uma senha por e-mail) — a troca acontece dentro da transação, abaixo.
-    let senha_hash = await bcrypt.hash(senha, 10)
+    // Via ticket social não há senha: o hash é de 32 bytes aleatórios descartados (a coluna é
+    // preenchida, o login por senha continua funcionando para as outras contas e esta só
+    // ganha senha por "esqueci minha senha").
+    let senha_hash = await bcrypt.hash(identidadeSocial ? crypto.randomBytes(32).toString('hex') : senha, 10)
     console.log(`[CADASTRO][${ts}] ✓ senha hash gerada`)
 
     // role / tipo_dono / tipo_prestador são o inverso do tipo resolvido (colunasDoTipo):
@@ -238,25 +260,28 @@ const cadastrar = async (req, res) => {
       // nova REUSA aquele hash (o hash gerado acima é descartado). Isto é uma conferência de
       // senha exposta num endpoint público, então conta no MESMO contador por identidade do
       // login — sem isso o cadastro viraria um login sem teto de tentativas.
-      const tentativa = await registrarTentativa('login', emailNormalizado)
-      if (tentativa.excedeu) {
-        await client.query('ROLLBACK')
-        return res.status(429).json({
-          erro: `Muitas tentativas. Tente novamente em ${Math.ceil(tentativa.segundosRestantes / 60)} minuto(s), ou redefina sua senha.`,
-          codigo: 'MUITAS_TENTATIVAS',
-          retry_apos_segundos: tentativa.segundosRestantes,
-        })
+      // Com ticket social a posse do e-mail já foi provada pelo provedor: não há senha a conferir.
+      if (!identidadeSocial) {
+        const tentativa = await registrarTentativa('login', emailNormalizado)
+        if (tentativa.excedeu) {
+          await client.query('ROLLBACK')
+          return res.status(429).json({
+            erro: `Muitas tentativas. Tente novamente em ${Math.ceil(tentativa.segundosRestantes / 60)} minuto(s), ou redefina sua senha.`,
+            codigo: 'MUITAS_TENTATIVAS',
+            retry_apos_segundos: tentativa.segundosRestantes,
+          })
+        }
+        const senhaConfere = await bcrypt.compare(senha, existente.rows[0].senha_hash)
+        if (!senhaConfere) {
+          await client.query('ROLLBACK')
+          console.log(`[CADASTRO][${ts}] ✗ 401 senha nao confere com a conta existente`)
+          return res.status(401).json({
+            erro: 'Este e-mail já tem uma conta. Informe a mesma senha dela para criar este novo perfil.',
+            codigo: 'senha_conta_existente',
+          })
+        }
+        await limparTentativas('login', emailNormalizado)
       }
-      const senhaConfere = await bcrypt.compare(senha, existente.rows[0].senha_hash)
-      if (!senhaConfere) {
-        await client.query('ROLLBACK')
-        console.log(`[CADASTRO][${ts}] ✗ 401 senha nao confere com a conta existente`)
-        return res.status(401).json({
-          erro: 'Este e-mail já tem uma conta. Informe a mesma senha dela para criar este novo perfil.',
-          codigo: 'senha_conta_existente',
-        })
-      }
-      await limparTentativas('login', emailNormalizado)
       senha_hash = existente.rows[0].senha_hash
       console.log(`[CADASTRO][${ts}] ✓ novo tipo para pessoa existente | tipo=${tipoNovo} contas_existentes=${existente.rows.length}`)
     }
@@ -286,9 +311,9 @@ const cadastrar = async (req, res) => {
         tipo_dono, pix_reembolso, referencias,
         verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
         verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador, cep, latitude, longitude,
-        logradouro, numero, complemento, bairro, indicado_por, codigo_indicacao)
+        logradouro, numero, complemento, bairro, indicado_por, codigo_indicacao, google_sub, apple_sub)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,
-               $30, CASE WHEN $31::boolean THEN gerar_codigo_indicacao() ELSE NULL END)
+               $30, CASE WHEN $31::boolean THEN gerar_codigo_indicacao() ELSE NULL END, $32, $33)
        RETURNING id, nome, email, telefone, cidade, role, tipo_dono, tipo_prestador, foto_url`,
       [nome.trim(), emailNormalizado, telefone, senha_hash, cidade, uf || null,
        espCadastro.valor, anos_experiencia || 0,
@@ -304,7 +329,9 @@ const cadastrar = async (req, res) => {
        tipo_prestador,
        cep || null, latitude ?? null, longitude ?? null,
        logradouro || null, numero || null, complemento || null, bairro || null,
-       indicadoPor, role === 'prestador']
+       indicadoPor, role === 'prestador',
+       identidadeSocial?.provedor === 'google' ? identidadeSocial.sub : null,
+       identidadeSocial?.provedor === 'apple' ? identidadeSocial.sub : null]
     )
 
     const usuario = result.rows[0]
@@ -518,26 +545,126 @@ const login = async (req, res) => {
     // eventual contador de 2FA seria um controle à parte.
     await limparTentativas('login', emailNormalizado)
 
-    if (usuario.role === 'admin') {
-      const tfaResult = await pool.query(
-        `SELECT dois_fa_ativo, dois_fa_secret FROM usuarios WHERE id = $1`,
-        [usuario.id]
-      )
-      const tfa = tfaResult.rows[0]
-      if (tfa?.dois_fa_ativo && tfa?.dois_fa_secret) {
-        const tempToken = jwt.sign(
-          { id: usuario.id, role: usuario.role, tipo: '2fa_pendente' },
-          process.env.JWT_SECRET,
-          { expiresIn: '5m' }
-        )
-        return res.status(200).json({ requer_2fa: true, temp_token: tempToken })
-      }
-    }
-
-    res.json(await montarSessao(usuario, req, contas))
+    await responderSessao(usuario, req, res, contas)
 
   } catch (err) {
     console.error('Erro no login:', err)
+    res.status(500).json({ erro: 'Erro ao fazer login' })
+  }
+}
+
+// Último passo do login (senha ou social), depois de a identidade estar provada: admin com 2FA
+// ligado recebe { requer_2fa, temp_token } (POST /admin/2fa/login-verificar fecha a sessão);
+// todo o resto recebe o payload de sessão de montarSessao. Os dois logins passam por aqui para
+// a resposta ser byte a byte a mesma.
+const responderSessao = async (usuario, req, res, contas) => {
+  if (usuario.role === 'admin') {
+    const tfaResult = await pool.query(
+      `SELECT dois_fa_ativo, dois_fa_secret FROM usuarios WHERE id = $1`,
+      [usuario.id]
+    )
+    const tfa = tfaResult.rows[0]
+    if (tfa?.dois_fa_ativo && tfa?.dois_fa_secret) {
+      const tempToken = jwt.sign(
+        { id: usuario.id, role: usuario.role, tipo: '2fa_pendente' },
+        process.env.JWT_SECRET,
+        { expiresIn: '5m' }
+      )
+      return res.status(200).json({ requer_2fa: true, temp_token: tempToken })
+    }
+  }
+  res.json(await montarSessao(usuario, req, contas))
+}
+
+// POST /auth/social { provedor: 'google'|'apple', id_token, nome?, tipo? }
+// 1. Verifica o token no provedor (services/loginSocialService): Google exige email_verified;
+//    Apple é o identity token RS256 contra as chaves públicas da Apple (iss/aud/exp).
+// 2. Procura contas PRIMEIRO pelo sub do provedor (google_sub/apple_sub); só depois pelo
+//    e-mail verificado — e um e-mail de relay privado da Apple nunca vincula por e-mail.
+// 3. Com contas: grava o sub nelas e responde EXATAMENTE como o login por senha (mesma escolha
+//    por `tipo` com múltiplas contas, mesma lista `contas`, mesma regra de 2FA do admin).
+// 4. Sem contas: { novo: true, nome, email, ticket } — o ticket (15 min) entra no lugar da
+//    senha em POST /auth/cadastro, que grava o sub na conta nova.
+// Sem contador de tentativas: não há senha a adivinhar; o teto por IP está em server.js.
+const loginSocial = async (req, res) => {
+  const ts = new Date().toISOString()
+  try {
+    const { provedor, id_token, nome, tipo } = req.body || {}
+    if (!cfgSocial.PROVEDORES.includes(provedor)) {
+      return res.status(400).json({ erro: "provedor deve ser 'google' ou 'apple'", codigo: 'provedor_invalido' })
+    }
+    if (!id_token || typeof id_token !== 'string') {
+      return res.status(400).json({ erro: 'id_token é obrigatório', codigo: 'id_token_obrigatorio' })
+    }
+
+    let identidade
+    try {
+      identidade = await social.verificar(provedor, id_token)
+    } catch (err) {
+      if (err instanceof social.ErroLoginSocial) {
+        console.log(`[LOGIN SOCIAL][${ts}] ✗ 401 ${provedor} | ${err.codigo}: ${err.message}`)
+        return res.status(401).json({ erro: 'Não foi possível validar o login com ' + (provedor === 'google' ? 'Google' : 'Apple') + '.', codigo: err.codigo })
+      }
+      throw err
+    }
+
+    const coluna = social.colunaSub(provedor)
+    const relay = social.ehEmailRelayApple(identidade.email)
+    // E-mail "âncora" das contas: o das linhas já vinculadas ao sub (prioridade — o e-mail da
+    // conta pode ter mudado no app) ou, sem vínculo, o e-mail verificado pelo provedor.
+    const porSub = await pool.query(
+      `SELECT email FROM usuarios WHERE ${coluna} = $1 ORDER BY criado_em ASC, id ASC LIMIT 1`,
+      [identidade.sub]
+    )
+    const emailConta = porSub.rows[0]?.email
+      || (identidade.email && identidade.email_verificado && !relay ? identidade.email : null)
+    console.log(`[LOGIN SOCIAL][${ts}] ▶ ${provedor} | por_sub=${porSub.rows.length > 0} tem_email=${!!identidade.email} relay=${relay}`)
+
+    const linhas = emailConta
+      ? (await pool.query(
+          `SELECT ${COLUNAS_SESSAO} FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC`,
+          [emailConta]
+        )).rows
+      : []
+
+    if (linhas.length === 0) {
+      if (!identidade.email) {
+        console.log(`[LOGIN SOCIAL][${ts}] ✗ 400 ${provedor} sem e-mail e sem conta vinculada`)
+        return res.status(400).json({ erro: 'O provedor não informou um e-mail. Cadastre-se com e-mail e senha.', codigo: 'email_ausente' })
+      }
+      const nomeNovo = (typeof nome === 'string' && nome.trim() && !nomePareceEmail(nome)) ? nome.trim() : (identidade.nome || null)
+      console.log(`[LOGIN SOCIAL][${ts}] · ${provedor} sem conta → ticket de cadastro`)
+      return res.json({
+        novo: true,
+        nome: nomeNovo,
+        email: identidade.email,
+        ticket: social.gerarTicket({ provedor, sub: identidade.sub, email: identidade.email, nome: nomeNovo }),
+      })
+    }
+
+    // Vincula o sub a TODAS as contas do e-mail (a identidade é da pessoa, não de um perfil) —
+    // só grava onde ainda não está, então um login repetido não escreve nada.
+    await pool.query(
+      `UPDATE usuarios SET ${coluna} = $1 WHERE email = $2 AND ${coluna} IS DISTINCT FROM $1`,
+      [identidade.sub, emailConta]
+    )
+
+    // Daqui em diante, a MESMA regra do login por senha (sem o bcrypt): só conta ativa; com 2+
+    // ativas entra a do `tipo` pedido ou a mais antiga; tipo sem conta → 404 com `contas`.
+    const ativas = linhas.filter(u => u.ativo)
+    if (ativas.length === 0) {
+      return res.status(403).json({ erro: 'Conta desativada' })
+    }
+    const tipoPedido = ativas.length > 1 ? tipoDeTipoConta(tipo) : null
+    const escolhida = tipoPedido ? ativas.find(u => tipoDaLinha(u) === tipoPedido) : ativas[0]
+    const contas = ativas.map(u => ({ id: u.id, tipo: tipoDaLinha(u), nome: u.nome }))
+    if (!escolhida) {
+      return res.status(404).json({ erro: 'Não há conta deste tipo para este e-mail.', codigo: 'conta_tipo_inexistente', contas })
+    }
+    console.log(`[LOGIN SOCIAL][${ts}] ✓ ${provedor} | usuario_id=${escolhida.id} contas=${contas.length}`)
+    await responderSessao(escolhida, req, res, contas)
+  } catch (err) {
+    console.error(`[LOGIN SOCIAL][${ts}] erro:`, err)
     res.status(500).json({ erro: 'Erro ao fazer login' })
   }
 }
@@ -957,4 +1084,4 @@ const resetarSenhaUsuario = async (req, res) => {
 // transporter exportado para o link de assinatura pela web usar o MESMO caminho de e-mail do reset.
 // gerarToken / montarSessao / contasDoEmail / resumoContas: exportados para POST /auth/contas/:tipo
 // (routes/index.js) devolver a sessão da conta vinculada recém-criada com o MESMO payload do login.
-module.exports = { cadastrar, login, trocarConta, perfil, atualizarPerfil, alterarSenha, esqueciSenha, redefinirSenha, resetarSenhaUsuario, transporter, gerarToken, montarSessao, contasDoEmail, resumoContas }
+module.exports = { cadastrar, login, loginSocial, trocarConta, perfil, atualizarPerfil, alterarSenha, esqueciSenha, redefinirSenha, resetarSenhaUsuario, transporter, gerarToken, montarSessao, contasDoEmail, resumoContas }

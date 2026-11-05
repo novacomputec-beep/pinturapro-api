@@ -189,6 +189,13 @@ app.use('/api/auth/login',    rateLimit({
   skipSuccessfulRequests: true,
   message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
 }))
+// Login social: sem senha a adivinhar, mas cada chamada custa uma verificação de token (e, na
+// primeira, uma leitura das chaves da Apple). Mesmo teto do login por senha.
+app.use('/api/auth/social',   rateLimit({
+  windowMs: 15 * 60 * 1000, max: 30,
+  skipSuccessfulRequests: true,
+  message: { erro: 'Muitas requisições. Tente novamente em alguns minutos.' }
+}))
 // 60/h (era 20/h, antes 5/h): usuários de celular saem por CGNAT do carrier — muitos aparelhos
 // reais compartilham o mesmo IP público, então 5/h bloqueava gente legítima. O limite
 // também era consumido pelos próprios retries que os timeouts de cadastro provocavam.
