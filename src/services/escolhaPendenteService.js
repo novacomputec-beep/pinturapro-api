@@ -1,6 +1,6 @@
 const { pool } = require('../utils/supabase')
 const { TZ_AGENDA } = require('../utils/agendamento')
-const { entregarPushEEmail, entregarLembrete, semSobreposicao } = require('./alertaService')
+const { entregarPushEEmail, entregarLembrete, semSobreposicao, semPushAtivo } = require('./alertaService')
 
 // Demanda ABERTA, sem profissional escolhido e com interessados PENDENTES (interesse_reparos /
 // candidaturas com status 'pendente' — o profissional espera o dono; 'contraproposta_dono' é o
@@ -12,7 +12,8 @@ const { entregarPushEEmail, entregarLembrete, semSobreposicao } = require('./ale
 //       pendente mais antigo tem ao menos LEMBRETE_CARENCIA_HORAS (o push "Novo interesse" já
 //       avisou na hora) e só fora das últimas 24h antes de expira_em (ali valem os avisos 2).
 //       Push a cada dia + no máx. 1 e-mail/dia (entregarLembrete → claim 'lembrete#AAAAMMDD'
-//       em email_alertas).
+//       em email_alertas); dono SEM push ativo (semPushAtivo): e-mail a cada ciclo, dentro do
+//       teto diário por demanda dos lembretes do dono (emailCadaCiclo, alertaService).
 //   (2) dois avisos ao dono antes de expira_em, PROPORCIONAIS à vida da demanda
 //       L = expira_em − âncora (criado_em; obra: publicado_em): o primeiro quando falta
 //       ≤ min(24h, 25% de L) (escolha_aviso_24h_em) e o final quando falta ≤ min(2h, 10% de L)
@@ -65,7 +66,7 @@ const sqlForaSilencioEm = (instante) => {
   return `${h} >= 7 AND ${h} < 22`
 }
 const RETORNO = (lado) => `d.id, d.titulo, d.criado_por, d.expira_em, ${sqlPendentes(lado)} AS pendentes,
-             u.push_token, u.email, u.nome`
+             u.push_token, u.desinstalado_em, u.email, u.nome`
 
 const profissionais = (n) => (n === 1 ? '1 profissional aguarda' : `${n} profissionais aguardam`)
 const dataDono = (lado, tipo, d) => ({ tipo, [lado.chave]: d.id, expira_em: new Date(d.expira_em).toISOString() })
@@ -88,7 +89,7 @@ const lembrarDiario = async (lado) => {
  RETURNING ${RETORNO(lado)}`)
   for (const d of claim.rows) {
     const via = await entregarLembrete({
-      usuario_id: d.criado_por, push_token: d.push_token, email: d.email, nome: d.nome,
+      usuario_id: d.criado_por, push_token: d.push_token, email: d.email, nome: d.nome, emailCadaCiclo: semPushAtivo(d),
       titulo: `👥 ${profissionais(d.pendentes)} sua escolha`,
       corpo: `Pedido "${d.titulo}": veja as propostas e escolha um profissional no app.`,
       data: { tipo: lado.tipoDiario, [lado.chave]: d.id, lembrete: true },

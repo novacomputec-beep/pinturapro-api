@@ -62,7 +62,7 @@ const main = async () => {
       expira_em timestamptz, criado_em timestamptz,
       lembrete_perguntas_ultimo_em timestamptz, lembrete_perguntas_ciclo int NOT NULL DEFAULT 0`
   await db.exec(`
-    CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, push_token text);
+    CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, push_token text, desinstalado_em timestamptz);
     CREATE TABLE reparos (${colsDemanda});
     CREATE TABLE obras (${colsDemanda});
     CREATE TABLE perguntas_demanda (id uuid PRIMARY KEY, tipo text, demanda_id uuid, autor_id uuid, pergunta text, resposta text,
