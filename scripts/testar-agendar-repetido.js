@@ -78,12 +78,14 @@ const main = async () => {
     { n: 3, tabela: 'reparos', rotulo: '12 horas', restanteMin: 12 * 60 },
     { n: 4, tabela: 'reparos', rotulo: '3 horas',  restanteMin: 3 * 60 },
   ]
+  // A de 3h leva um título comprido: o push ao dono deve encurtá-lo, o e-mail leva inteiro.
+  const TITULO_LONGO = 'Pintura completa do apartamento com três quartos, sala, cozinha, dois banheiros e área de serviço, incluindo massa corrida, lixamento, selador, duas demãos de tinta acrílica fosca e retoques nos rodapés e batentes das portas'
   for (const c of cenarios) {
     const extra = c.tabela === 'reparos' ? `, $5, NULL` : `, $5, now() - INTERVAL '2 hours'`
     await db.query(
       `INSERT INTO ${c.tabela} (id, titulo, criado_por, status, match_usuario_id, match_feito_em, expira_em, criado_em, ${c.tabela === 'reparos' ? 'prazo_atendimento_horas, prazo_modo' : 'horas_para_expirar, publicado_em'})
        VALUES ($1, $2, $3, 'aberta', $4, now() - INTERVAL '1 hour', now() + ($5 * INTERVAL '1 minute'), now() - INTERVAL '2 hours'${extra})`,
-      [D(c.n), `Demanda ${c.rotulo}`, U(99), U(1), c.restanteMin])
+      [D(c.n), c.n === 4 ? TITULO_LONGO : `Demanda ${c.rotulo}`, U(99), U(1), c.restanteMin])
   }
   const A = require(path.join(REPO, 'src/services/alertaService'))
   const ciclo = async (c) => (await db.query(`SELECT lembrete_agendar_ciclo AS n FROM ${c.tabela} WHERE id = $1`, [D(c.n)])).rows[0].n
@@ -91,6 +93,7 @@ const main = async () => {
   const tique = async (min) => { await fixarAgora(min); await A.repetirLembreteAgendar() }
   const [c10d, c2d, c12h, c3h] = cenarios
   const pushesDe = (token) => pushes.filter(p => p.to === `ExponentPushToken[${token}]`)
+  const corpoLinha = (t) => `O profissional ainda não propôs dia e horário para "${t}". Já enviamos um lembrete a ele. Assim que ele propuser, você recebe um aviso para confirmar.`
   const emailsProf = async (c) => (await db.query(`SELECT tipo FROM email_alertas WHERE demanda_id = $1 AND usuario_id = $2 ORDER BY tipo`, [D(c.n), U(1)])).rows.map(r => r.tipo)
 
   // 1) 59 min após o match: nada
@@ -107,8 +110,16 @@ const main = async () => {
   ok(JSON.stringify(await ciclos()) === JSON.stringify({ '10 dias': 1, '2 dias': 1, '12 horas': 1, '3 horas': 1 }), '10:29: nenhum ciclo novo', await ciclos())
   await tique(30)
   ok(await ciclo(c3h) === 2 && await ciclo(c12h) === 1, '10:30: 3h → 2º ciclo (30 min); 12h ainda no 1º', await ciclos())
-  ok(pushesDe('dono').length === 1 && pushesDe('dono')[0].title === '⏳ Horário ainda não proposto', '2º ciclo: dono avisado', pushesDe('dono')[0]?.title)
+  ok(pushesDe('dono').length === 1 && pushesDe('dono')[0].title === '⏳ Aguardando o horário do profissional', '2º ciclo: dono avisado', pushesDe('dono')[0]?.title)
   ok((await emailsProf(c3h)).length === 1 && emails.length === 5, 'profissional: 1 e-mail/dia por demanda (2º ciclo só push); dono recebeu o dele', [await emailsProf(c3h), emails.length])
+  const pushDono = pushesDe('dono')[0]
+  const emailDono = emails.find(e => e.para === 'dono@x.invalid')
+  const CORPO_RE = /^O profissional ainda não propôs dia e horário para "(.+)"\. Já enviamos um lembrete a ele\. Assim que ele propuser, você recebe um aviso para confirmar\.$/
+  ok(CORPO_RE.test(pushDono.body) && pushDono.body.length <= 240 && CORPO_RE.exec(pushDono.body)[1].endsWith('…') && TITULO_LONGO.startsWith(CORPO_RE.exec(pushDono.body)[1].slice(0, -1)),
+    'push ao dono: texto novo, ≤ 240 caracteres, título encurtado com reticências', [pushDono.body.length, pushDono.body])
+  ok(!/sugerir|sugira|propor|proponha/.test(pushDono.body), 'push ao dono não pede para ele sugerir horário')
+  ok(emailDono && emailDono.assunto === '⏳ Aguardando o horário do profissional' && emailDono.texto.includes(corpoLinha(TITULO_LONGO)),
+    'e-mail ao dono: assunto novo e título da demanda INTEIRO', emailDono?.texto)
   // 4) 12h: 2h de intervalo (6–24h restantes)
   await tique(119); ok(await ciclo(c12h) === 1, '11:59: 12h ainda no 1º ciclo')
   await tique(120); ok(await ciclo(c12h) === 2, '12:00: 12h → 2º ciclo (2h)')

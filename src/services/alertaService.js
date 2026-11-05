@@ -1978,8 +1978,20 @@ const sqlClaimRepetirAgendar = (lado) => `
              (d.lembrete_agendar_dono_em = NOW()) AS avisar_dono, ${sqlReparoCurto(lado)} AS curto,
              p.push_token, p.email, p.nome,
              o.push_token AS dono_push_token, o.email AS dono_email, o.nome AS dono_nome`
-const TITULO_AGENDAR_DONO = '⏳ Horário ainda não proposto'
-const corpoAgendarDono = (d) => `O profissional ainda não propôs horário para "${d.titulo}". Você pode sugerir um no app.`
+// Aviso ao dono (do 2º ciclo em diante). O dono NUNCA propõe o primeiro horário — o profissional
+// propõe e o dono confirma ou contrapropõe —, então o texto só o avisa que estamos lembrando o
+// profissional. E-mail leva o título da demanda inteiro; o push encurta o título (reticências)
+// apenas se o corpo passar de PUSH_CORPO_MAX.
+const PUSH_CORPO_MAX = 240
+const TITULO_AGENDAR_DONO = '⏳ Aguardando o horário do profissional'
+const corpoAgendarDono = (titulo) => `O profissional ainda não propôs dia e horário para "${titulo}". Já enviamos um lembrete a ele. Assim que ele propuser, você recebe um aviso para confirmar.`
+const corpoAgendarDonoPush = (d) => {
+  const titulo = String(d.titulo || '')
+  const cheio = corpoAgendarDono(titulo)
+  if (cheio.length <= PUSH_CORPO_MAX) return cheio
+  const sobra = PUSH_CORPO_MAX - (cheio.length - titulo.length) - 1 // 1 = a reticência
+  return corpoAgendarDono(`${titulo.slice(0, Math.max(sobra, 10)).trimEnd()}…`)
+}
 const repetirLembreteAgendar = semSobreposicao('repetirLembreteAgendar', async () => {
   for (const lado of Object.values(LADOS_MATCH)) {
     try {
@@ -1999,7 +2011,7 @@ const repetirLembreteAgendar = semSobreposicao('repetirLembreteAgendar', async (
           viaDono = await entregarLembrete({
             usuario_id: d.criado_por, ator_id: d.match_usuario_id,
             push_token: d.dono_push_token, email: d.dono_email, nome: d.dono_nome,
-            titulo: TITULO_AGENDAR_DONO, corpo: corpoAgendarDono(d),
+            titulo: TITULO_AGENDAR_DONO, corpo: corpoAgendarDonoPush(d), corpoEmail: corpoAgendarDono(d.titulo),
             data: { tipo: 'chegada_prevista', [lado.chave]: d.id },
             rotulo: `agendar repetido dono ${lado.tabela} ${d.id} #${d.ciclo}`,
           })
