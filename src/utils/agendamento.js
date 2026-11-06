@@ -65,8 +65,11 @@ const sqlDataHora = (param, paramTemFuso) =>
 // profissional seguinte. Também cai no 'remarcar' do comparecimento, que usa esta lista.
 // lembrete_agendar_offsets (alertaService.lembrarAgendarAtendimento): antecedências já
 // avisadas do "Agende seu atendimento" — estado DESTE match, então o profissional seguinte
-// (ou o mesmo, após 'remarcar') começa com a lista vazia.
+// (ou o mesmo, após 'remarcar') começa com a lista vazia. lembrete_agendar_enviados (contagem
+// dos "Agende" deste match, exposta em GET /:id) e desfazer_aviso_em (claim do aviso "você já
+// pode escolher outro", desfazerEscolhaService) são estado DESTE match pelo mesmo motivo.
 const SQL_ZERAR_AGENDA = `chegada_proposta_por = NULL, chegada_pendente_rodada = 0,
+              lembrete_agendar_enviados = 0, desfazer_aviso_em = NULL,
               lembrete_agenda_vespera_em = NULL, lembrete_agenda_2h_em = NULL, lembrete_agenda_hora_em = NULL,
               lembrete_agenda_dono_vespera_em = NULL, lembrete_agenda_dono_2h_em = NULL,
               vigia_comparecimento_em = NULL, comparecimento_resposta = NULL, comparecimento_respondido_em = NULL,

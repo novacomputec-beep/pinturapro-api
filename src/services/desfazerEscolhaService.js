@@ -1,11 +1,16 @@
 // "Desfazer escolha" (obras e reparos): o DONO desfaz o match com o profissional escolhido
 // enquanto nada aconteceu — nenhum horário proposto nem combinado (chegada_pendente_em e
 // chegada_prevista_em nulos), sem "Estou a caminho" nem chegada (a_caminho_em,
-// chegada_declarada_em, chegada_confirmada_em nulos), demanda 'aberta' — e só depois de uma
-// ESPERA contada do match: 10% do que faltava do match até o prazo (a MESMA referência de
-// repetirLembreteAgendar: COALESCE(chegada_prevista_em, expira_em)), no mínimo 1h e no máximo
-// 48h. Antes disso a rota responde 409 AGUARDE com liberado_em; o mesmo instante sai em GET
-// /:tabela/:id como desfazer_liberado_em (só para o dono; null quando não se aplica).
+// chegada_declarada_em, chegada_confirmada_em nulos), demanda 'aberta' — e só quando o que
+// RESTA do prazo é ≤ 25% do que havia do match até o prazo (LIBERA_FRACAO_RESTANTE): libera em
+// match_feito_em + 75% de (expira_em − match_feito_em). Regra do dono (06/11/2026), no lugar da
+// espera de 10% (1h–48h). Como nenhum horário pode ter sido proposto, o prazo é expira_em.
+// Antes disso a rota responde 409 AGUARDE com liberado_em; o mesmo instante sai em GET
+// /:tabela/:id como desfazer_liberado_em (só para o dono; null quando não se aplica), junto de
+// lembretes_agendar_enviados e proximo_lembrete_agendar_em (alertaService.sqlProximoLembreteAgendar).
+// Quando libera, avisarDesfazerLiberado (cron de 1 min) manda ao dono push + e-mail "Falta pouco
+// e <Nome> ainda não marcou o horário…" UMA vez por match (claim desfazer_aviso_em, zerado em
+// SQL_ZERAR_AGENDA), só enquanto o prazo não venceu e as condições acima seguem valendo.
 //
 // UMA transação com a linha da demanda travada (SELECT … FOR UPDATE): toda guarda é lida na
 // linha travada, então uma proposta de horário do profissional que chegue no meio faz o pedido
@@ -28,11 +33,10 @@
 const { pool } = require('../utils/supabase')
 const { formatarDataHoraSP } = require('../utils/agendamento')
 const { SQL_LIMPAR_MATCH } = require('./cancelamentoMatchService')
-const { entregarPushEEmail, inserirFaltaUnica, avaliarSuspensaoPorFaltas, MOTIVO_FALTA_SEM_HORARIO } = require('./alertaService')
+const { entregarPushEEmail, inserirFaltaUnica, avaliarSuspensaoPorFaltas, MOTIVO_FALTA_SEM_HORARIO, semSobreposicao } = require('./alertaService')
 
-const ESPERA_FRACAO = 0.10
-const ESPERA_MIN = '1 hour'
-const ESPERA_MAX = '48 hours'
+// Fração do intervalo match→prazo que ainda pode restar quando o desfazer libera.
+const LIBERA_FRACAO_RESTANTE = 0.25
 const PISO_PRAZO_RESTANTE = '1 hour'
 const MOTIVO_ESCOLHA_DESFEITA = 'escolha_desfeita'
 const MOTIVO_FALTA = MOTIVO_FALTA_SEM_HORARIO // 'não marcou horário' — o mesmo do cronômetro
@@ -44,9 +48,10 @@ const LADOS = {
   reparos: { tabela: 'reparos', tipo: 'reparo', chave: 'reparo_id', proposta: { tabela: 'interesse_reparos', coluna: 'reparo_id' }, artigo: 'O serviço', naoEncontrada: 'Serviço não encontrado', tipoPushProfissional: 'interesse_recusado',   tipoPushInteressado: 'novo_reparo',  tipoPushDono: 'novo_interesse' },
 }
 
-// p = prefixo da tabela ('' ou 'o.'). Espera = 10% de (prazo − match), entre 1h e 48h.
+// p = prefixo da tabela ('' ou 'o.'). Espera = 75% de (expira_em − match): libera quando resta
+// ≤ 25%. Prazo já vencido no match (expira_em ≤ match_feito_em): espera ≤ 0, libera na hora.
 const sqlEspera = (p = '') =>
-  `LEAST(INTERVAL '${ESPERA_MAX}', GREATEST(INTERVAL '${ESPERA_MIN}', (COALESCE(${p}chegada_prevista_em, ${p}expira_em) - ${p}match_feito_em) * ${ESPERA_FRACAO}))`
+  `((${p}expira_em - ${p}match_feito_em) * ${1 - LIBERA_FRACAO_RESTANTE})`
 // Condições em que desfazer se aplica (fora a espera): sem isso, NULL.
 const sqlPodeDesfazer = (p = '') =>
   `(${p}status = 'aberta' AND ${p}match_usuario_id IS NOT NULL AND ${p}match_feito_em IS NOT NULL
@@ -190,4 +195,37 @@ const handler = (tabela) => {
   }
 }
 
-module.exports = { ESPERA_FRACAO, ESPERA_MIN, ESPERA_MAX, MOTIVO_ESCOLHA_DESFEITA, MOTIVO_FALTA, sqlEspera, sqlDesfazerLiberadoEm, handler }
+// Cron (1 min): quando o desfazer LIBERA (NOW() ≥ liberado_em) e o prazo ainda não venceu, avisa o
+// dono UMA vez por match — claim desfazer_aviso_em no mesmo UPDATE (réplicas/restarts não
+// repetem; SQL_ZERAR_AGENDA zera em match novo/un-match). Evento crítico: push + e-mail sempre
+// (entregarPushEEmail). Sem silêncio noturno, como os lembretes de agenda do dono. Toque: tipo
+// 'chegada_prevista' (o app abre o detalhe da demanda nos dois lados).
+const TITULO_LIBERADO = '🔓 Você já pode escolher outro profissional'
+const corpoLiberado = (d) => `Falta pouco e ${primeiroNome(d.profissional_nome)} ainda não marcou o horário de "${d.titulo}". Você já pode escolher outro profissional.`
+const primeiroNome = (nome) => String(nome || '').trim().split(/\s+/)[0] || 'O profissional'
+const avisarDesfazerLiberado = semSobreposicao('avisarDesfazerLiberado', async () => {
+  for (const lado of Object.values(LADOS)) {
+    try {
+      const claim = await pool.query(
+        `UPDATE ${lado.tabela} d SET desfazer_aviso_em = NOW()
+           FROM usuarios u, usuarios p
+          WHERE u.id = d.criado_por AND p.id = d.match_usuario_id
+            AND ${sqlPodeDesfazer('d.')} AND d.desfazer_aviso_em IS NULL
+            AND NOW() >= d.match_feito_em + ${sqlEspera('d.')} AND d.expira_em > NOW()
+      RETURNING d.id, d.titulo, d.criado_por, u.push_token, u.email, u.nome, p.nome AS profissional_nome`
+      )
+      for (const d of claim.rows) {
+        const via = await avisar({ usuario_id: d.criado_por, push_token: d.push_token, email: d.email, nome: d.nome }, {
+          titulo: TITULO_LIBERADO, corpo: corpoLiberado(d),
+          data: { tipo: 'chegada_prevista', [lado.chave]: d.id, desfazer_liberado: true },
+          rotulo: `desfazer liberado ${lado.tipo} ${d.id}`,
+        })
+        console.log(`[DesfazerEscolha] ${lado.tipo} ${d.id}: desfazer liberado → dono ${d.criado_por} via ${via}`)
+      }
+    } catch (err) {
+      console.error(`[DesfazerEscolha] aviso de liberação ${lado.tabela}:`, err.message)
+    }
+  }
+})
+
+module.exports = { LIBERA_FRACAO_RESTANTE, MOTIVO_ESCOLHA_DESFEITA, MOTIVO_FALTA, sqlEspera, sqlDesfazerLiberadoEm, handler, avisarDesfazerLiberado, TITULO_LIBERADO, corpoLiberado }

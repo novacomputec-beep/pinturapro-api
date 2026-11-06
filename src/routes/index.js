@@ -18,7 +18,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarCategoriasAdicionadas, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, avisarUsuario, encerramentoAutomaticoEm } = require('../services/alertaService')
+const { sqlProximoLembreteAgendar, enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarCategoriasAdicionadas, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, avisarUsuario, encerramentoAutomaticoEm } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { moderarDemanda, avisarModeracao, sanitizarTexto, mascararDigitosPartidos, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
@@ -37,6 +37,7 @@ const { handler: desfazerEscolhaHandler, sqlDesfazerLiberadoEm } = require('../s
 const { handlers: atrasoHandlers, handlersLegados: atrasoHandlersLegados, camposAtraso } = require('../services/atrasoChegadaService')
 const { sqlLimiteChegada } = require('../utils/agendamento')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
+const { listarItensCanal } = require('../utils/itensCanal')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 const { PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao, normalizarVersao, normalizarTestadores, SQL_VERSAO_INT, versoesPublicas, invalidarCacheVersoes, gravarConfig, lerConfigVersao, candidatosPromocao,
         chaveObrigatorias, OBRIGATORIAS_PADRAO, normalizarListaVersoes, lerListaVersoes, aplicarMinimaObrigatoria, contarUsuariosPorMinima } = require('../utils/versaoApp')
@@ -487,6 +488,12 @@ const migracaoPronta = (async () => {
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agendar_ultimo_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agendar_ciclo INTEGER NOT NULL DEFAULT 0`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agendar_dono_em TIMESTAMPTZ`)
+      // Nº de "Agende seu atendimento" (fixos + repetidos) já enviados ao profissional DESTE match
+      // — exposto ao dono em GET /:id como lembretes_agendar_enviados; zerado em SQL_ZERAR_AGENDA.
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agendar_enviados INTEGER NOT NULL DEFAULT 0`)
+      // Claim do aviso ao dono "você já pode escolher outro profissional" quando o desfazer libera
+      // (services/desfazerEscolhaService.avisarDesfazerLiberado); zerado em SQL_ZERAR_AGENDA.
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS desfazer_aviso_em TIMESTAMPTZ`)
       // "Responda o horário proposto" REPETIDO ao dono (alertaService.repetirRespostaHorarioDono):
       // claim do último ciclo — zerado a cada proposta nova e em SQL_ZERAR_AGENDA — e o nº do
       // ciclo (chave aviso:resposta_horario#n), que nunca zera pelo mesmo motivo acima.
@@ -1969,12 +1976,19 @@ router.post('/auth/alterar-senha',   autenticar, authCtrl.alterarSenha)
 router.post('/auth/esqueci-senha',   authCtrl.esqueciSenha)
 router.post('/auth/redefinir-senha', authCtrl.redefinirSenha)
 
+// Foto de perfil é da PESSOA, não da conta (decisão do dono, 06/11/2026): quem tem mais de uma
+// conta no mesmo e-mail (dono + profissional) troca a foto numa e ela vale em todas. O UPDATE
+// alcança a própria linha e toda linha de MESMO e-mail (dobra lower/btrim, a mesma do login);
+// conta sem e-mail (NULL) só atualiza a si mesma. Devolve quantas contas receberam a foto.
+const SQL_FOTO_DA_PESSOA = `UPDATE usuarios SET foto_url = $1
+   WHERE id = $2 OR lower(btrim(email)) = (SELECT lower(btrim(email)) FROM usuarios WHERE id = $2)
+   RETURNING id`
 router.post('/auth/foto-perfil', autenticar, upload.single('arquivo'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
     const resultado = await uploadArquivo(req.file)
-    await pool.query('UPDATE usuarios SET foto_url = $1 WHERE id = $2', [resultado.secure_url, req.usuario.id])
-    res.json({ foto_url: resultado.secure_url })
+    const r = await pool.query(SQL_FOTO_DA_PESSOA, [resultado.secure_url, req.usuario.id])
+    res.json({ foto_url: resultado.secure_url, contas_atualizadas: r.rowCount })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao enviar foto' })
   }
@@ -1984,8 +1998,8 @@ router.patch('/auth/foto-perfil', autenticar, async (req, res) => {
   try {
     const { foto_url } = req.body
     if (!foto_url) return res.status(400).json({ erro: 'URL da foto é obrigatória' })
-    await pool.query('UPDATE usuarios SET foto_url = $1 WHERE id = $2', [foto_url, req.usuario.id])
-    res.json({ foto_url })
+    const r = await pool.query(SQL_FOTO_DA_PESSOA, [foto_url, req.usuario.id])
+    res.json({ foto_url, contas_atualizadas: r.rowCount })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar foto de perfil' })
   }
@@ -3510,8 +3524,8 @@ for (const tabela of ['obras', 'reparos']) {
   router.post(`/${tabela}/:id/cancelamento-acordo`, autenticar, h.pedirAcordo)
   router.post(`/${tabela}/:id/cancelamento-acordo/responder`, autenticar, h.responderAcordo)
   // "Desfazer escolha" (services/desfazerEscolhaService): SÓ o dono, antes de qualquer horário
-  // proposto/combinado e de "Estou a caminho", depois da espera (10% do prazo desde o match,
-  // 1h–48h). 409 AGUARDE com liberado_em antes da hora; GET /:id expõe desfazer_liberado_em.
+  // proposto/combinado e de "Estou a caminho", quando resta ≤ 25% do intervalo match→prazo.
+  // 409 AGUARDE com liberado_em antes da hora; GET /:id expõe desfazer_liberado_em.
   router.post(`/${tabela}/dono/:id/desfazer-match`, autenticar, desfazerEscolhaHandler(tabela))
   // Pedido de atraso (services/atrasoChegadaService): profissional pede 15/30/60 min depois do
   // "Estou a caminho"; dono aceita/recusa (sem resposta em 10 min, aceito pelo cron).
@@ -3533,6 +3547,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         -- desfazer_liberado_em: a partir de quando o dono pode desfazer a escolha (services/
         -- desfazerEscolhaService); NULL sem match, com horário em negociação ou já a caminho.
         ${sqlDesfazerLiberadoEm('o.')} AS desfazer_liberado_em,
+        -- Lembretes "Agende seu atendimento" deste match: quantos já saíram ao profissional e
+        -- quando sai o próximo (alertaService.sqlProximoLembreteAgendar); só para o dono.
+        ${sqlProximoLembreteAgendar('obras', 'o.')} AS proximo_lembrete_agendar_em,
         -- "Expirada" não é status no banco: é uma obra NÃO encerrada cujo expira_em já
         -- passou. Calculado no SQL (relógio do servidor) para a tela de detalhe gatear o
         -- botão de estender sem comparar com o relógio do aparelho. Mesma expressão do
@@ -3658,11 +3675,15 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // desfazer_liberado_em: SÓ para o dono (null para os demais); sai no nível de cima, não na obra.
     const desfazer_liberado_em = ehDono ? (obra.desfazer_liberado_em || null) : null
     delete obra.desfazer_liberado_em
+    // Lembretes "Agende seu atendimento" deste match (quantos saíram ao pintor e o próximo): SÓ dono.
+    const lembretes_agendar_enviados = ehDono ? Number(obra.lembrete_agendar_enviados || 0) : null
+    const proximo_lembrete_agendar_em = ehDono ? (obra.proximo_lembrete_agendar_em || null) : null
+    delete obra.proximo_lembrete_agendar_em
     // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
     // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
     // encerramento_automatico_em: quando o cron fecha sozinho a solicitação pendente do pintor
     // (solicitado_em + 2 dias — alertaService.encerramentoAutomaticoEm); null sem solicitação.
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -6250,7 +6271,10 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
               ${sqlTotalExtensaoReparo()} AS total_extensao_horas,
               -- desfazer_liberado_em: a partir de quando o dono pode desfazer a escolha
               -- (services/desfazerEscolhaService); NULL quando não se aplica.
-              ${sqlDesfazerLiberadoEm()} AS desfazer_liberado_em
+              ${sqlDesfazerLiberadoEm()} AS desfazer_liberado_em,
+              -- Lembretes "Agende seu atendimento" deste match: quando sai o próximo ao
+              -- profissional (alertaService.sqlProximoLembreteAgendar); só para o dono.
+              ${sqlProximoLembreteAgendar('reparos', 'reparos.')} AS proximo_lembrete_agendar_em
          FROM reparos WHERE id = $1`,
       [req.params.id]
     )
@@ -6366,6 +6390,10 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // desfazer_liberado_em: SÓ para o dono (null para os demais); sai no nível de cima, não no reparo.
     const desfazer_liberado_em = ehDono ? (reparo.desfazer_liberado_em || null) : null
     delete reparo.desfazer_liberado_em
+    // Lembretes "Agende seu atendimento" deste match (quantos saíram ao prestador e o próximo): SÓ dono.
+    const lembretes_agendar_enviados = ehDono ? Number(reparo.lembrete_agendar_enviados || 0) : null
+    const proximo_lembrete_agendar_em = ehDono ? (reparo.proximo_lembrete_agendar_em || null) : null
+    delete reparo.proximo_lembrete_agendar_em
     res.json({
       reparo,
       midias: midias.rows,
@@ -6375,6 +6403,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       pedido_cancelamento: pedidoCancelamento(reparo, req.usuario.id),
       // A partir de quando o dono pode desfazer a escolha (POST /reparos/dono/:id/desfazer-match).
       desfazer_liberado_em,
+      // Lembretes "Agende seu atendimento" já enviados ao prestador deste match e o próximo devido.
+      lembretes_agendar_enviados,
+      proximo_lembrete_agendar_em,
       // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
       // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
       ...camposAtraso(reparo),
@@ -9997,40 +10028,14 @@ router.get('/admin/canal/resumo', autenticar, exigirAdmin, async (req, res) => {
   try {
     const cidadeBruta = typeof req.query.cidade === 'string' ? req.query.cidade.trim() : ''
     if (!cidadeBruta) return res.status(400).json({ erro: 'cidade é obrigatória' })
-    const cidade = normalizar(cidadeBruta)
     const ufBruta = typeof req.query.uf === 'string' ? req.query.uf.trim().toUpperCase() : ''
     const uf = ufBruta || null
     const ligado = (v) => v !== '0' && v !== 'false'
     const comServicos = ligado(req.query.servicos)
     const comObras = ligado(req.query.obras)
-
-    const itens = []
-    if (comServicos) {
-      const r = await pool.query(
-        `SELECT 'reparo' AS tipo, r.titulo, r.categoria, r.categorias, r.bairro, r.valor_estimado AS valor, r.criado_em, r.codigo_publico
-           FROM reparos r
-          WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()
-            AND ${sqlNormalizarCidade('r.cidade')} = $1
-            AND ($2::text IS NULL OR upper(btrim(r.uf)) = $2)
-          ORDER BY r.criado_em DESC
-          LIMIT 200`,
-        [cidade, uf]
-      )
-      itens.push(...r.rows)
-    }
-    if (comObras) {
-      const o = await pool.query(
-        `SELECT 'obra' AS tipo, o.titulo, o.categoria, o.bairro, o.valor, o.criado_em, o.codigo_publico
-           FROM obras o
-          WHERE o.status = 'aberta' AND o.status_aprovacao = 'aprovada' AND o.expira_em > NOW()
-            AND ${sqlNormalizarCidade('o.cidade')} = $1
-            AND ($2::text IS NULL OR upper(btrim(o.uf)) = $2)
-          ORDER BY o.criado_em DESC
-          LIMIT 200`,
-        [cidade, uf]
-      )
-      itens.push(...o.rows)
-    }
+    // A consulta vive em utils/itensCanal (dobra a cidade lá): o resumo das 18:00 ao admin
+    // (resumoDiaAdminService) conta os MESMOS pedidos que esta prévia mostra.
+    const itens = await listarItensCanal({ cidade: cidadeBruta, uf, comServicos, comObras })
     res.json(montarResumoCanal({ cidade: cidadeBruta, itens }))
   } catch (err) {
     console.error('[admin/canal/resumo]', err.message)
