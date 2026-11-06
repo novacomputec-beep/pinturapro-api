@@ -57,6 +57,8 @@ const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
 // fragmentos SQL compartilhados com os crons (alertaService) e o formatador dos pushes.
 const { JANELA_AGENDADO, SUGESTOES_MAX_POR_LADO, ERRO_LIMITE_SUGESTOES, colunaSugestoes, sugestoesRestantes, RESPOSTAS_COMPARECIMENTO, PRAZO_MINIMO_REMARCAR, RE_DATA_HORA, temFuso, sqlDataHora, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, formatarDataHoraSP } = require('../utils/agendamento')
 const { nomeCurto, fotoOtimizada } = require('../utils/donoResumo')
+// Desistências (profissional cancelou depois de escolhido) e interessados ativos — só ao dono em GET /:id.
+const { listarDesistencias, contarInteressadosAtivos } = require('../utils/desistencias')
 // Indicações: recálculo do indicador após cada aprovação, código/link em GET /indicacoes/minhas.
 const { normalizarCodigo, recalcularIndicador, LINK_INDICACAO } = require('../utils/indicacoes')
 // Grupos de categorias relacionadas (mapa público em GET /config/grupos-categorias) e o teto de
@@ -3681,11 +3683,15 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     const lembretes_agendar_enviados = ehDono ? Number(obra.lembrete_agendar_enviados || 0) : null
     const proximo_lembrete_agendar_em = ehDono ? (obra.proximo_lembrete_agendar_em || null) : null
     delete obra.proximo_lembrete_agendar_em
+    // desistencias (pintores que cancelaram depois de escolhidos, mais recente primeiro) e
+    // interessados_ativos (ainda na disputa): SÓ dono (utils/desistencias); null para os demais.
+    const desistencias = ehDono ? await listarDesistencias('obras', req.params.id) : null
+    const interessados_ativos = ehDono ? await contarInteressadosAtivos('obras', req.params.id) : null
     // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
     // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
     // encerramento_automatico_em: quando o cron fecha sozinho a solicitação pendente do pintor
     // (solicitado_em + 2 dias — alertaService.encerramentoAutomaticoEm); null sem solicitação.
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
+    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, desistencias, interessados_ativos, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -6443,11 +6449,17 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     const lembretes_agendar_enviados = ehDono ? Number(reparo.lembrete_agendar_enviados || 0) : null
     const proximo_lembrete_agendar_em = ehDono ? (reparo.proximo_lembrete_agendar_em || null) : null
     delete reparo.proximo_lembrete_agendar_em
+    // desistencias (prestadores que cancelaram depois de escolhidos, mais recente primeiro) e
+    // interessados_ativos (ainda na disputa): SÓ dono (utils/desistencias); null para os demais.
+    const desistencias = ehDono ? await listarDesistencias('reparos', req.params.id) : null
+    const interessados_ativos = ehDono ? await contarInteressadosAtivos('reparos', req.params.id) : null
     res.json({
       reparo,
       midias: midias.rows,
       meu_interesse: interesse.rows[0] || null,
       interessados,
+      desistencias,
+      interessados_ativos,
       // Pedido de acordo de cancelamento vigente (quem, motivo, expira_em) — só dono e prestador do match.
       pedido_cancelamento: pedidoCancelamento(reparo, req.usuario.id),
       // A partir de quando o dono pode desfazer a escolha (POST /reparos/dono/:id/desfazer-match).
