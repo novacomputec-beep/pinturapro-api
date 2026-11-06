@@ -55,7 +55,7 @@ const main = async () => {
     [D(3), U(2), 'pendente', null, null, null, null, false],
     [D(3), U(4), 'expirado', null, null, null, null, false],
   ])
-  const { listarDesistencias, contarInteressadosAtivos, ROTULO_DESISTENCIA } = require(path.join(REPO, 'src/utils/desistencias'))
+  const { listarDesistencias, contarInteressadosAtivos, desistenciaRecentePorDemanda, anexarDesistenciaRecente, ROTULO_DESISTENCIA } = require(path.join(REPO, 'src/utils/desistencias'))
 
   let l = await listarDesistencias('reparos', D(1))
   ok(l.length === 1 && l[0].usuario_id === U(1), 'reparo 1: só o cancelamento feito pelo próprio profissional (desfazer do dono, cancelamento do dono e recusado ficam fora)', l.map(x => x.nome))
@@ -79,6 +79,20 @@ const main = async () => {
   let erro = null
   try { await listarDesistencias('usuarios', D(1)) } catch (e) { erro = e.message }
   ok(/tabela inválida/.test(erro || ''), 'tabela inválida lança')
+
+  // desistencia_recente para as listas /minhas: uma consulta para N demandas, a mais recente de cada
+  const mapa = await desistenciaRecentePorDemanda('reparos', [D(1), D(2), D(4), D(1)])
+  ok(Object.keys(mapa).sort().join() === [D(1), D(2)].sort().join(), 'mapa só das demandas com desistência (ids repetidos/sem desistência ignorados)', Object.keys(mapa))
+  ok(mapa[D(2)].nome === 'Hudson' && mapa[D(2)].motivo_texto === 'Não consegue no horário' && mapa[D(2)].acordo === true, 'reparo 2: a MAIS RECENTE (Hudson 15:40, não Beto 15:30)', mapa[D(2)])
+  ok(JSON.stringify(Object.keys(mapa[D(1)])) === JSON.stringify(['id', 'nome', 'foto_url', 'cancelado_em', 'motivo_texto', 'acordo']), 'formato resumido: id, nome, foto_url, cancelado_em, motivo_texto, acordo', Object.keys(mapa[D(1)]))
+  ok(JSON.stringify(await desistenciaRecentePorDemanda('obras', [])) === '{}', 'lista vazia → {} sem consulta')
+  const linhas = [{ id: D(1), match_usuario_id: null }, { id: D(2), match_usuario_id: U(2) }, { id: D(4), match_usuario_id: null }]
+  await anexarDesistenciaRecente('reparos', linhas)
+  ok(linhas[0].desistencia_recente?.nome === 'Hudson' && linhas[1].desistencia_recente === null && linhas[2].desistencia_recente === null,
+     'anexar: item só na demanda SEM match com desistência; com match ou sem desistência → null', linhas.map(l => l.desistencia_recente && l.desistencia_recente.nome))
+  const obrasLinhas = [{ id: D(3), match_usuario_id: null }]
+  await anexarDesistenciaRecente('obras', obrasLinhas)
+  ok(obrasLinhas[0].desistencia_recente?.nome === 'Hudson' && obrasLinhas[0].desistencia_recente.motivo_texto === 'Outro motivo', 'obras: idem, a mais recente (Hudson 11:00)', obrasLinhas[0].desistencia_recente)
 
   console.log(falhas === 0 ? '\nTUDO OK' : `\n${falhas} FALHA(S)`)
   process.exit(falhas ? 1 : 0)
