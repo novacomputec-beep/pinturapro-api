@@ -1767,6 +1767,8 @@ const lembrarPrazoChegada = semSobreposicao('lembrarPrazoChegada', async () => {
 //                          match/un-match e no aceite de um horário novo. Janela de disparo de
 //                          60 min: horário aceito depois do instante do lembrete não recebe um
 //                          lembrete atrasado. Push ou, sem token, e-mail (entregarAoProfissional).
+//                          Ao DONO, os dois primeiros (véspera e 2h antes) — LEMBRETES_AGENDA_DONO,
+//                          claims lembrete_agenda_dono_*_em, mesma regra e entrega.
 //   vigiarComparecimento → ao DONO, 1h depois do horário sem chegada declarada/confirmada:
 //                          "o profissional veio?" (claim vigia_comparecimento_em). A resposta
 //                          entra por POST /:id/confirmar-comparecimento; o cron de cronômetro
@@ -1790,6 +1792,26 @@ const LEMBRETES_AGENDA = [
     titulo: () => '🚗 Hora de sair: toque em Estou a caminho',
     corpo: (d) => `Horário combinado em "${d.titulo}": ${formatarDataHoraSP(d.chegada_prevista_em)}.` },
 ]
+// Os MESMOS dois primeiros instantes (véspera 18:00 SP e 2h antes) ao DONO — sem o "hora de
+// sair", que é ato do profissional. Mesmo predicado (SQL_BASE_AGENDA: match vivo, horário
+// agendado valendo, chegada não declarada/confirmada), mesma janela de 60 min (slot que já passou
+// não sai), claims próprios (lembrete_agenda_dono_*_em) zerados com os do profissional em
+// SQL_ZERAR_AGENDA (match novo, un-match, remarcar) e no aceite de um horário novo — horário
+// cancelado ou remarcado nunca recebe o lembrete do horário antigo. Entrega por entregarLembrete:
+// push a cada lembrete + no máx. 1 e-mail/dia por demanda × dono (a mesma dedupe de todo lembrete).
+// `d.profissional` = primeiro nome do profissional casado (o dono sabe quem vai).
+const HORA_SP = (d) => formatarDataHoraSP(d.chegada_prevista_em).split(' às ')[1]
+const LEMBRETES_AGENDA_DONO = [
+  { coluna: 'lembrete_agenda_dono_vespera_em',
+    dispara: LEMBRETES_AGENDA[0].dispara,
+    titulo: (d) => `📅 Amanhã às ${HORA_SP(d)}: ${d.profissional} vai aí`,
+    corpo: (d) => `Amanhã às ${HORA_SP(d)}: ${d.profissional} vai aí para "${d.titulo}". Esteja no local.` },
+  { coluna: 'lembrete_agenda_dono_2h_em',
+    dispara: LEMBRETES_AGENDA[1].dispara,
+    titulo: (d) => `⏰ Em 2h, às ${HORA_SP(d)}: ${d.profissional} chega`,
+    corpo: (d) => `Daqui a 2 horas, às ${HORA_SP(d)}, ${d.profissional} chega para "${d.titulo}". Esteja no local.` },
+]
+const primeiroNomeProfissional = (nome) => String(nome || '').trim().split(/\s+/)[0] || 'O profissional'
 const lembrarAgendamento = semSobreposicao('lembrarAgendamento', async () => {
   for (const lado of Object.values(LADOS_MATCH)) {
     for (const l of LEMBRETES_AGENDA) {
@@ -1812,6 +1834,36 @@ const lembrarAgendamento = semSobreposicao('lembrarAgendamento', async () => {
             console.log(`[Agenda] ${l.coluna} ${lado.tabela} ${d.id} → profissional ${d.match_usuario_id} via ${via}`)
           } catch (err) {
             // Claim já gravado: sem repescagem (um lembrete por slot).
+            console.error(`[Agenda] ${l.coluna} ${lado.tabela} ${d.id} falhou:`, err.message)
+          }
+        }
+      } catch (err) {
+        console.error(`[Agenda] erro em ${lado.tabela} ${l.coluna}:`, err.message)
+      }
+    }
+    for (const l of LEMBRETES_AGENDA_DONO) {
+      try {
+        // u = dono (destinatário); p = profissional casado (só o nome entra no texto).
+        const claim = await pool.query(
+          `UPDATE ${lado.tabela} d SET ${l.coluna} = NOW()
+             FROM usuarios u, usuarios p
+            WHERE u.id = d.criado_por AND p.id = d.match_usuario_id AND ${SQL_BASE_AGENDA}
+              AND d.${l.coluna} IS NULL
+              AND NOW() >= ${l.dispara}
+              AND NOW() < ${l.dispara} + INTERVAL '${LEMBRETE_AGENDA_JANELA}'
+        RETURNING d.id, d.titulo, d.criado_por, d.chegada_prevista_em, u.push_token, u.email, u.nome, p.nome AS profissional_nome`
+        )
+        for (const d of claim.rows) {
+          try {
+            d.profissional = primeiroNomeProfissional(d.profissional_nome)
+            const via = await entregarLembrete({
+              usuario_id: d.criado_por, push_token: d.push_token, email: d.email, nome: d.nome,
+              titulo: l.titulo(d), corpo: l.corpo(d),
+              data: { tipo: 'chegada_prevista', [lado.chave]: d.id },
+              rotulo: `agenda ${l.coluna} ${lado.tabela} ${d.id}`,
+            })
+            console.log(`[Agenda] ${l.coluna} ${lado.tabela} ${d.id} → dono ${d.criado_por} via ${via}`)
+          } catch (err) {
             console.error(`[Agenda] ${l.coluna} ${lado.tabela} ${d.id} falhou:`, err.message)
           }
         }
@@ -3211,7 +3263,7 @@ module.exports = {
   broadcastPaginado,
   avisarMatchFeito,
   lembrarPrazoChegada,
-  lembrarAgendamento,
+  lembrarAgendamento, LEMBRETES_AGENDA_DONO,
   lembrarAgendarAtendimento,
   entregarLembrete,
   semPushAtivo,

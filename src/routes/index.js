@@ -463,6 +463,10 @@ const migracaoPronta = (async () => {
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agenda_vespera_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agenda_2h_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agenda_hora_em TIMESTAMPTZ`)
+      // Claims dos lembretes do horário aceito ao DONO (véspera e 2h antes — alertaService
+      // LEMBRETES_AGENDA_DONO); zerados com os do profissional (SQL_ZERAR_AGENDA e aceite novo).
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agenda_dono_vespera_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agenda_dono_2h_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS vigia_comparecimento_em TIMESTAMPTZ`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS comparecimento_resposta TEXT`)
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS comparecimento_respondido_em TIMESTAMPTZ`)
@@ -6032,6 +6036,7 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
            chegada_proposta_por = NULL,
            chegada_proposta_em = NULL,
            lembrete_agenda_vespera_em = NULL, lembrete_agenda_2h_em = NULL, lembrete_agenda_hora_em = NULL,
+           lembrete_agenda_dono_vespera_em = NULL, lembrete_agenda_dono_2h_em = NULL,
            vigia_comparecimento_em = NULL, comparecimento_resposta = NULL, comparecimento_respondido_em = NULL
          ${guard}
          RETURNING chegada_janela, chegada_prevista_em, expira_em, chegada_pendente_rodada, ${colSugestoes}`,
