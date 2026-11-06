@@ -64,6 +64,9 @@ const CATEGORIAS_SERVICO = [
   { slug: 'design_sobrancelhas', rotulo: 'Design de sobrancelhas', emoji: '👁️' },
   { slug: 'vidraceiro',      rotulo: 'Vidraceiro',        emoji: '🪟' },
   { slug: 'serralheria',     rotulo: 'Serralheria',       emoji: '⚒️' },
+  { slug: 'informatica',     rotulo: 'Informática',       emoji: '🖥️' },
+  { slug: 'gesseiro',        rotulo: 'Gesseiro',          emoji: '🪜' },
+  { slug: 'placas_fachadas', rotulo: 'Placas e fachadas', emoji: '🪧' },
   { slug: 'outros',          rotulo: 'Outros',            emoji: '➕' },
 ]
 

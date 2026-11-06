@@ -1,5 +1,5 @@
 // Vocabulário FECHADO das especialidades do profissional — DUAS listas, uma por lado:
-//   - REPARADOR (tipo_prestador = 'reparador'): as 54 categorias de SERVIÇO doméstico;
+//   - REPARADOR (tipo_prestador = 'reparador'): as 57 categorias de SERVIÇO doméstico;
 //   - OBRA (tipo_prestador = 'pintor', que cobre pintor E construtor): os 4 papéis de obra.
 // Mesmo estilo de slug nas duas: minúsculas, sem acento, '_' como separador (aula_particular).
 //
@@ -26,6 +26,7 @@ const ESPECIALIDADES_REPARADOR = [
   'dj', 'panfletagem', 'social_midia',
   'aluguel_festas', 'decoracao_festas', 'recreacao_infantil',
   'design_sobrancelhas', 'vidraceiro', 'serralheria',
+  'informatica', 'gesseiro', 'placas_fachadas',
   'outros',
 ]
 
