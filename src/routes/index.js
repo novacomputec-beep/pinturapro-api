@@ -10067,7 +10067,7 @@ router.get('/admin/crescimento-nichos', autenticar, exigirAdmin, async (req, res
 
 // GET /admin/canal/resumo?cidade=Patos de Minas&uf=MG&servicos=1&obras=1 — texto pronto
 // para o canal de WhatsApp com os pedidos ABERTOS (status 'aberta', aprovados, não
-// expirados) da cidade: { texto, total }. Montagem em utils/canalResumo (mais recentes
+// expirados, SEM profissional escolhido) da cidade: { texto, total }. Montagem em utils/canalResumo (mais recentes
 // primeiro, no máximo 15; total = quantos existem antes do corte).
 // cidade é obrigatória e dobrada com a regra de utils/localidade; uf é opcional e compara em
 // caixa alta, como o broadcast. servicos/obras: '0' desliga o lado; ausente = ligado.

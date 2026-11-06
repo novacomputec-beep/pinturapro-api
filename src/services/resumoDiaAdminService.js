@@ -1,7 +1,8 @@
 // Resumo do dia para o ADMIN (decisão do dono, 06/11/2026): todo dia às 18:00 (America/Sao_Paulo)
 // o admin recebe push + e-mail "Resumo do dia pronto (N pedidos)" com o link da aba Canal do
 // WhatsApp do painel (PAINEL_URL#canal), onde o texto do canal é copiado. N = pedidos ABERTOS
-// (serviços + obras, aprovados, não vencidos) da cidade do canal (conviteCanalService.CIDADE_CANAL)
+// (serviços + obras, aprovados, não vencidos, sem profissional escolhido) da cidade do canal
+// (conviteCanalService.CIDADE_CANAL)
 // — a MESMA consulta de GET /admin/canal/resumo (utils/itensCanal, única porta das duas).
 //
 // Agendamento: cron de 1 min (server.js) + claim em configuracoes ('resumo_dia_admin_em' = data SP

@@ -52,7 +52,7 @@ const ok = (c, rot, extra) => { if (!c) falhas++; console.log(`${c ? 'OK  ' : 'F
 const main = async () => {
   db = new PGlite()
   const colsDemanda = `id uuid PRIMARY KEY DEFAULT gen_random_uuid(), titulo text, categoria text, bairro text, cidade text, uf text, status text DEFAULT 'aberta',
-      status_aprovacao text DEFAULT 'aprovada', expira_em timestamptz, criado_em timestamptz DEFAULT now(), codigo_publico text`
+      status_aprovacao text DEFAULT 'aprovada', expira_em timestamptz, criado_em timestamptz DEFAULT now(), codigo_publico text, match_usuario_id uuid`
   await db.exec(`
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz DEFAULT now());
     CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, push_token text, role text);
@@ -66,15 +66,19 @@ const main = async () => {
     ($1, 'Admin', 'admin@teste.invalid', 'ExponentPushToken[admin1]', 'admin'),
     ($2, 'Admin app', 'ADMIN@teste.invalid', NULL, 'dono_obra'),
     ($3, 'Outro', 'outro@x.invalid', 'ExponentPushToken[outro]', 'prestador')`, [U(1), U(2), U(3)])
-  // Patos de Minas: 2 serviços + 1 obra abertos; 1 serviço vencido; 1 obra em outra cidade; 1 serviço pendente de aprovação.
-  await db.query(`INSERT INTO reparos (titulo, categoria, categorias, bairro, cidade, uf, valor_estimado, expira_em, status_aprovacao, codigo_publico) VALUES
-    ('Torneira', 'hidraulica', '{hidraulica}', 'Centro', 'Patos de Minas', 'MG', 100, now() + INTERVAL '2 days', 'aprovada', 'r1'),
-    ('Tomada', 'eletrica', '{eletrica}', 'Lagoa', 'PATOS DE MINAS ', 'mg', 80, now() + INTERVAL '1 day', 'aprovada', 'r2'),
-    ('Vencido', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() - INTERVAL '1 hour', 'aprovada', 'r3'),
-    ('Pendente', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() + INTERVAL '1 day', 'pendente', 'r4')`)
-  await db.query(`INSERT INTO obras (titulo, categoria, bairro, cidade, uf, valor, expira_em, codigo_publico) VALUES
-    ('Casa', 'residencial', 'Centro', 'Patos de Minas', 'MG', 5000, now() + INTERVAL '10 days', 'o1'),
-    ('Galpão BH', 'galpao', 'Centro', 'Belo Horizonte', 'MG', 9000, now() + INTERVAL '10 days', 'o2')`)
+  // Patos de Minas: 2 serviços + 1 obra abertos SEM profissional; fora: 1 serviço vencido, 1 obra em outra
+  // cidade, 1 serviço pendente de aprovação, 1 serviço e 1 obra com profissional escolhido, 1 cancelado.
+  await db.query(`INSERT INTO reparos (titulo, categoria, categorias, bairro, cidade, uf, valor_estimado, expira_em, status_aprovacao, codigo_publico, match_usuario_id, status) VALUES
+    ('Torneira', 'hidraulica', '{hidraulica}', 'Centro', 'Patos de Minas', 'MG', 100, now() + INTERVAL '2 days', 'aprovada', 'r1', NULL, 'aberta'),
+    ('Tomada', 'eletrica', '{eletrica}', 'Lagoa', 'PATOS DE MINAS ', 'mg', 80, now() + INTERVAL '1 day', 'aprovada', 'r2', NULL, 'aberta'),
+    ('Vencido', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() - INTERVAL '1 hour', 'aprovada', 'r3', NULL, 'aberta'),
+    ('Pendente', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() + INTERVAL '1 day', 'pendente', 'r4', NULL, 'aberta'),
+    ('Com match', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() + INTERVAL '1 day', 'aprovada', 'r5', $1, 'aberta'),
+    ('Cancelado', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() + INTERVAL '1 day', 'aprovada', 'r6', NULL, 'cancelada')`, [U(3)])
+  await db.query(`INSERT INTO obras (titulo, categoria, bairro, cidade, uf, valor, expira_em, codigo_publico, match_usuario_id) VALUES
+    ('Casa', 'residencial', 'Centro', 'Patos de Minas', 'MG', 5000, now() + INTERVAL '10 days', 'o1', NULL),
+    ('Galpão BH', 'galpao', 'Centro', 'Belo Horizonte', 'MG', 9000, now() + INTERVAL '10 days', 'o2', NULL),
+    ('Casa com pintor', 'residencial', 'Centro', 'Patos de Minas', 'MG', 7000, now() + INTERVAL '10 days', 'o3', $1)`, [U(3)])
 
   const S = require(path.join(REPO, 'src/services/resumoDiaAdminService'))
   const { ADMIN_EMAIL, PAINEL_URL } = require(path.join(REPO, 'src/config/admin'))
@@ -83,7 +87,7 @@ const main = async () => {
 
   ok(ADMIN_EMAIL === 'admin@teste.invalid' && S.LINK_CANAL === `${PAINEL_URL}/#canal`, 'ADMIN_EMAIL dobrado (lower/trim) e link = painel/#canal', { ADMIN_EMAIL, link: S.LINK_CANAL })
   const itens = await listarItensCanal({ cidade: 'patos de minas', uf: 'MG' })
-  ok(itens.length === 3 && itens.map(i => i.codigo_publico).sort().join() === 'o1,r1,r2', 'itens do canal: 2 serviços + 1 obra abertos da cidade (vencido, pendente e outra cidade fora)', itens.map(i => i.codigo_publico))
+  ok(itens.length === 3 && itens.map(i => i.codigo_publico).sort().join() === 'o1,r1,r2', 'itens do canal: 2 serviços + 1 obra abertos SEM profissional (vencido, pendente, cancelado, com match e outra cidade fora)', itens.map(i => i.codigo_publico))
 
   // 17:59 SP: nada
   let r = await S.enviarResumoDiaAdmin()
