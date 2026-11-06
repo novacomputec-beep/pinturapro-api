@@ -1946,7 +1946,8 @@ const SQL_BASE_AGENDAR = `d.status = 'aberta' AND d.match_usuario_id IS NOT NULL
         AND d.chegada_declarada_em IS NULL AND d.chegada_confirmada_em IS NULL
         AND d.a_caminho_em IS NULL`
 const sqlClaimAgendar = (lado, conjunto, offsets) => `
-      UPDATE ${lado.tabela} d SET lembrete_agendar_offsets = array_append(d.lembrete_agendar_offsets, s.off)
+      UPDATE ${lado.tabela} d SET lembrete_agendar_offsets = array_append(d.lembrete_agendar_offsets, s.off),
+             lembrete_agendar_enviados = d.lembrete_agendar_enviados + 1
         FROM (SELECT d.id, ${SQL_PRAZO_CHEGADA} AS prazo, ${sqlOffsetDevido(offsets)} AS off, ${sqlReparoCurto(lado)} AS curto
                 FROM ${lado.tabela} d
                WHERE ${SQL_BASE_AGENDAR} AND ${SQL_PRAZO_CHEGADA} > NOW()
@@ -2015,6 +2016,7 @@ const SQL_PROXIMO_AGENDAR = `(CASE WHEN d.lembrete_agendar_ultimo_em IS NULL THE
 const sqlClaimRepetirAgendar = (lado) => `
       UPDATE ${lado.tabela} d SET lembrete_agendar_ultimo_em = NOW(),
              lembrete_agendar_ciclo = d.lembrete_agendar_ciclo + 1,
+             lembrete_agendar_enviados = d.lembrete_agendar_enviados + 1,
              lembrete_agendar_dono_em = CASE
                WHEN d.lembrete_agendar_ultimo_em IS NOT NULL
                 AND (d.lembrete_agendar_dono_em IS NULL
@@ -2043,6 +2045,34 @@ const corpoAgendarDonoPush = (d) => {
   if (cheio.length <= PUSH_CORPO_MAX) return cheio
   const sobra = PUSH_CORPO_MAX - (cheio.length - titulo.length) - 1 // 1 = a reticência
   return corpoAgendarDono(`${titulo.slice(0, Math.max(sobra, 10)).trimEnd()}…`)
+}
+// Próximo "Agende seu atendimento" devido ao profissional DESTE match — sai em GET /:id (só para o
+// dono) como proximo_lembrete_agendar_em, ao lado de lembretes_agendar_enviados (coluna somada
+// pelos dois claims acima e zerada em SQL_ZERAR_AGENDA). É o MENOR entre o próximo ciclo repetido
+// (SQL_PROXIMO_AGENDAR, nunca no passado, adiado às 07:00 SP se cair no silêncio 22–07) e a
+// próxima antecedência fixa ainda não avisada (OFFSETS_AGENDAR, mesmas condições do claim). NULL
+// quando nenhum lembrete está devido (sem match, horário proposto/combinado, a caminho, prazo
+// vencido). Subconsulta sobre a própria linha com o alias `d` dos claims, para reusar o SQL
+// deles; `p` é o prefixo da tabela na consulta de fora ('o.' / 'reparos.').
+const sqlAdiarSilencio = (inst) => {
+  const h = `EXTRACT(HOUR FROM ((${inst}) AT TIME ZONE '${TZ_AGENDA}'))`
+  const dia = `((${inst}) AT TIME ZONE '${TZ_AGENDA}')::date`
+  return `(CASE WHEN ${h} >= 22 THEN (${dia} + 1 + TIME '07:00') AT TIME ZONE '${TZ_AGENDA}'
+                WHEN ${h} < 7  THEN (${dia} + TIME '07:00') AT TIME ZONE '${TZ_AGENDA}'
+                ELSE (${inst}) END)`
+}
+const sqlProximoOffsetAgendar = (lado) => `(SELECT MIN(${SQL_PRAZO_CHEGADA} - o.off * INTERVAL '1 minute')
+          FROM unnest(CASE ${sqlConjuntoAgendar(lado)} ${Object.entries(OFFSETS_AGENDAR).map(([c, o]) => `WHEN '${c}' THEN ARRAY[${o.join(',')}]`).join(' ')} END) AS o(off)
+         WHERE NOT (d.lembrete_agendar_offsets @> ARRAY[o.off])
+           AND d.match_feito_em <= ${SQL_PRAZO_CHEGADA} - o.off * INTERVAL '1 minute'
+           AND ${SQL_PRAZO_CHEGADA} - o.off * INTERVAL '1 minute' > NOW())`
+const sqlProximoLembreteAgendar = (tabela, p) => {
+  const lado = LADOS_MATCH[tabela]
+  if (!lado || !p) throw new Error(`sqlProximoLembreteAgendar: tabela "${tabela}" / prefixo "${p}"`)
+  return `(SELECT CASE WHEN ${SQL_BASE_AGENDAR} AND ${SQL_PRAZO_CHEGADA} > NOW()
+                  THEN LEAST(${sqlAdiarSilencio(`GREATEST(${SQL_PROXIMO_AGENDAR}, NOW())`)}, ${sqlProximoOffsetAgendar(lado)})
+                  ELSE NULL END
+             FROM ${lado.tabela} d WHERE d.id = ${p}id)`
 }
 const repetirLembreteAgendar = semSobreposicao('repetirLembreteAgendar', async () => {
   for (const lado of Object.values(LADOS_MATCH)) {
@@ -3272,6 +3302,7 @@ module.exports = {
   diaSP,
   repetirLembreteAgendar,
   sqlClaimRepetirAgendar,
+  sqlProximoLembreteAgendar,
   repetirRespostaHorarioDono,
   lembrarPerguntasSemResposta,
   sqlClaimRepetirRespostaDono,

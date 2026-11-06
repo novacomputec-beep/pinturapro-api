@@ -60,7 +60,8 @@ const main = async () => {
   const colsDemanda = `id uuid PRIMARY KEY, titulo text, criado_por uuid, status text, match_usuario_id uuid, match_feito_em timestamptz,
       expira_em timestamptz, criado_em timestamptz, chegada_prevista_em timestamptz, chegada_pendente_em timestamptz,
       chegada_declarada_em timestamptz, chegada_confirmada_em timestamptz, a_caminho_em timestamptz,
-      lembrete_agendar_ultimo_em timestamptz, lembrete_agendar_ciclo int NOT NULL DEFAULT 0, lembrete_agendar_dono_em timestamptz`
+      lembrete_agendar_ultimo_em timestamptz, lembrete_agendar_ciclo int NOT NULL DEFAULT 0, lembrete_agendar_dono_em timestamptz,
+      lembrete_agendar_enviados int NOT NULL DEFAULT 0`
   await db.exec(`
     CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, push_token text);
     CREATE TABLE reparos (${colsDemanda}, prazo_atendimento_horas numeric, prazo_modo text);

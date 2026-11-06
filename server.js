@@ -32,6 +32,11 @@ const { limparLinksAssinaturaAntigos } = require('./src/controllers/assinaturaLi
 // Poda de 30 dias do diagnóstico de push (push_recibos) — mesmo agendamento diário.
 const { purgarPushRecibosAntigos } = require('./src/utils/pushRecibos')
 const { verificarEscolhaPendente } = require('./src/services/escolhaPendenteService')
+// "Você já pode escolher outro profissional": ao dono quando o desfazer escolha libera (≤ 25% do
+// intervalo match→prazo restando, sem horário proposto). Cadência dos cronômetros.
+const { avisarDesfazerLiberado } = require('./src/services/desfazerEscolhaService')
+// Resumo do dia ao admin às 18:00 SP (push + e-mail com o link da aba Canal do WhatsApp).
+const { enviarResumoDiaAdmin } = require('./src/services/resumoDiaAdminService')
 // Mesmo caminho de e-mail do reset/link de assinatura (SMTP/nodemailer do authController).
 const { transporter } = require('./src/controllers/authController')
 const { MARCA } = require('./src/utils/marca')
@@ -836,6 +841,11 @@ const iniciarAgendador = () => {
   // (services/escolhaPendenteService). Cadência dos cronômetros: o aviso de vencimento sai no
   // minuto do expira_em.
   setInterval(() => { verificarEscolhaPendente() }, INTERVALO_CRONOMETRO)
+  // Dono com profissional escolhido que não marcou horário: aviso único quando o desfazer libera
+  // (services/desfazerEscolhaService). Fica devido até o prazo, então o 1º tique de 1 min o pega.
+  setInterval(() => { avisarDesfazerLiberado() }, INTERVALO_CRONOMETRO)
+  // Admin: "Resumo do dia pronto (N pedidos)" às 18:00 SP, 1x/dia (claim em configuracoes).
+  setInterval(() => { enviarResumoDiaAdmin() }, INTERVALO_CRONOMETRO)
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
   // Poda das tentativas de auth: a tabela acumula linhas de e-mails inexistentes, que é o
   // preço de contar TODOS (o que fecha o oráculo de existência de conta).
