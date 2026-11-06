@@ -58,7 +58,7 @@ const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
 const { JANELA_AGENDADO, SUGESTOES_MAX_POR_LADO, ERRO_LIMITE_SUGESTOES, colunaSugestoes, sugestoesRestantes, RESPOSTAS_COMPARECIMENTO, PRAZO_MINIMO_REMARCAR, RE_DATA_HORA, temFuso, sqlDataHora, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, formatarDataHoraSP } = require('../utils/agendamento')
 const { nomeCurto, fotoOtimizada } = require('../utils/donoResumo')
 // Desistências (profissional cancelou depois de escolhido) e interessados ativos — só ao dono em GET /:id.
-const { listarDesistencias, contarInteressadosAtivos } = require('../utils/desistencias')
+const { listarDesistencias, contarInteressadosAtivos, anexarDesistenciaRecente } = require('../utils/desistencias')
 // Indicações: recálculo do indicador após cada aprovação, código/link em GET /indicacoes/minhas.
 const { normalizarCodigo, recalcularIndicador, LINK_INDICACAO } = require('../utils/indicacoes')
 // Grupos de categorias relacionadas (mapa público em GET /config/grupos-categorias) e o teto de
@@ -2537,6 +2537,9 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
        LIMIT $2 OFFSET $3`,
       [req.usuario.id, limit, offset]
     )
+    // desistencia_recente: o último pintor que cancelou depois de escolhido ({ id, nome, foto_url,
+    // cancelado_em, motivo_texto, acordo }) nas obras SEM match; null nas demais (utils/desistencias).
+    await anexarDesistenciaRecente('obras', result.rows)
     const agora = new Date()
     const eArquivada = o => o.status === 'encerrada' || (o.expira_em && new Date(o.expira_em) < agora)
     const obras     = result.rows.filter(o => !eArquivada(o))
@@ -4293,6 +4296,9 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
        LIMIT $2 OFFSET $3`,
       [req.usuario.id, limit, offset]
     )
+    // desistencia_recente: o último prestador que cancelou depois de escolhido ({ id, nome, foto_url,
+    // cancelado_em, motivo_texto, acordo }) nos reparos SEM match; null nos demais (utils/desistencias).
+    await anexarDesistenciaRecente('reparos', result.rows)
     const agora = new Date()
     const eArquivado = r => r.status === 'encerrada' || (r.expira_em && new Date(r.expira_em) < agora)
     const reparos   = result.rows.filter(r => !eArquivado(r))
