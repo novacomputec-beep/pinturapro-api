@@ -68,6 +68,7 @@ const sqlDataHora = (param, paramTemFuso) =>
 // (ou o mesmo, após 'remarcar') começa com a lista vazia.
 const SQL_ZERAR_AGENDA = `chegada_proposta_por = NULL, chegada_pendente_rodada = 0,
               lembrete_agenda_vespera_em = NULL, lembrete_agenda_2h_em = NULL, lembrete_agenda_hora_em = NULL,
+              lembrete_agenda_dono_vespera_em = NULL, lembrete_agenda_dono_2h_em = NULL,
               vigia_comparecimento_em = NULL, comparecimento_resposta = NULL, comparecimento_respondido_em = NULL,
               a_caminho_em = NULL, lembrete_agendar_offsets = '{}',
               lembrete_agendar_ultimo_em = NULL, lembrete_agendar_dono_em = NULL,
