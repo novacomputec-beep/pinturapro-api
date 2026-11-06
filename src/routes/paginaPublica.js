@@ -12,7 +12,9 @@
 // mais fino de local exibido. Título é texto do dono: escapado antes de ir ao HTML.
 //
 // Estados: ABERTA (status aberta + aprovada + sem match + não expirada) → card completo, faixa
-// "ninguém respondeu ainda" só quando há ZERO interesses; ENCERRADA (qualquer outro estado) e
+// "ninguém respondeu ainda" só quando há ZERO interesses; COM PROFISSIONAL (status aberta +
+// aprovada + match_usuario_id preenchido) → "Este pedido já tem um profissional escolhido."
+// SEM os detalhes (só chip + título + cidade, card apagado); ENCERRADA (qualquer outro estado) e
 // CÓDIGO DESCONHECIDO → variante apagada (card cinza, título riscado, só a cidade, botão "Ver
 // pedidos abertos no app"). Código desconhecido responde 404 com a mesma página.
 //
@@ -74,6 +76,8 @@ const buscarDemanda = async (codigo, db = pool) => {
               d.${lado.janelaCol} AS janela_horas, d.prazo_modo, d.expira_em,
               (d.status = 'aberta' AND d.status_aprovacao = 'aprovada'
                AND d.match_usuario_id IS NULL AND d.expira_em > NOW()) AS aberta,
+              (d.status = 'aberta' AND d.status_aprovacao = 'aprovada'
+               AND d.match_usuario_id IS NOT NULL) AS com_profissional,
               ${lado.interesses}::int AS interesses
          FROM ${lado.tabela} d WHERE d.codigo_publico = $1`,
       [codigo]
@@ -239,6 +243,28 @@ const renderEncerrada = ({ lado, demanda, base, url, ua }) => {
   })
 }
 
+// Pedido com profissional ESCOLHIDO (match vivo): quem abre o link do canal fica sabendo que já
+// foi, sem valor, prazo nem contagem de interesses — o card apagado só repete chip, título e
+// cidade. Botão como na encerrada ("veja os pedidos abertos").
+const TEXTO_COM_PROFISSIONAL = 'Este pedido já tem um profissional escolhido.'
+const renderComProfissional = ({ lado, demanda, base, url, ua }) => {
+  const cidade = demanda?.cidade || ''
+  return paginaHtml({
+    base,
+    og: { titulo: 'Pedido com profissional escolhido', descricao: cidade ? `Veja os pedidos abertos em ${cidade} no app ${MARCA}` : `Veja os pedidos abertos no app ${MARCA}`, url },
+    kicker: cidade ? `Pedido em andamento · ${cidade}` : 'Pedido em andamento',
+    kickerOff: true,
+    heading: TEXTO_COM_PROFISSIONAL,
+    card: `
+    <div class="card off">
+      <span class="chip">${escapar(chipCategoria(lado, demanda))}</span>
+      <div class="titulo">${escapar(demanda.titulo)}</div>
+      ${cidade ? `<div class="linha">📍 ${escapar(cidade)}</div>` : ''}
+    </div>`,
+    botao: botaoEApoio({ ua, aba: null }),
+  })
+}
+
 router.get('/logo.png', (req, res) => {
   res.set('Cache-Control', 'public, max-age=86400')
   res.type('png').send(LOGO_PNG)
@@ -255,7 +281,8 @@ router.get('/:codigo', async (req, res) => {
     const achado = RE_CODIGO.test(codigo) ? await buscarDemanda(codigo) : null
     if (!achado) return res.status(404).send(renderEncerrada({ base, url, ua }))
     const { lado, demanda } = achado
-    return res.send(demanda.aberta ? renderAberta({ lado, demanda, base, url, ua }) : renderEncerrada({ lado, demanda, base, url, ua }))
+    const render = demanda.aberta ? renderAberta : (demanda.com_profissional ? renderComProfissional : renderEncerrada)
+    return res.send(render({ lado, demanda, base, url, ua }))
   } catch (err) {
     console.error(`[PaginaPublica] erro em /p/${codigo}:`, err.message)
     return res.status(500).send(renderEncerrada({ base, url, ua }))
@@ -267,4 +294,4 @@ module.exports = router
 // usa a MESMA regra, para os dois caminhos aceitarem e recusarem os mesmos códigos.
 module.exports.RE_CODIGO = RE_CODIGO
 // Só para teste/dry-run (render sem servidor): não são API pública do módulo.
-module.exports._interno = { buscarDemanda, renderAberta, renderEncerrada, linkAbrirApp, botaoEApoio, RE_CODIGO, APP_TEM_SCHEME }
+module.exports._interno = { buscarDemanda, renderAberta, renderEncerrada, renderComProfissional, TEXTO_COM_PROFISSIONAL, linkAbrirApp, botaoEApoio, RE_CODIGO, APP_TEM_SCHEME }
