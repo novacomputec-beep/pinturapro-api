@@ -93,6 +93,8 @@ const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
 const { sqlNaoDemandaPropria, sqlNaoMesmoCpf, ERRO_DEMANDA_PROPRIA, ehDemandaPropria } = require('../utils/demandaPropria')
+// Demanda ABERTA sob trava (FOR UPDATE) nas rotas do profissional: 409 PEDIDO_INDISPONIVEL fora de 'aberta'.
+const { travarDemandaAberta } = require('../utils/demandaAberta')
 // profissionais_avisados (GET /obras/:id e /reparos/:id, só para o dono): quantos profissionais
 // distintos receberam o aviso de demanda nova por push ou e-mail (utils/profissionaisAvisados).
 const { contarProfissionaisAvisados } = require('../utils/profissionaisAvisados')
@@ -3698,36 +3700,45 @@ router.get('/obras/:id', autenticar, async (req, res) => {
 
 // POST /obras/:id/candidatura — pintor se candidata a uma obra
 router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, exigirVerificado, async (req, res) => {
+  let client
   try {
     const { mensagem, valor_proposto } = req.body
     if (await ehDemandaPropria('obras', req.params.id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
-    const existente = await pool.query(
+    // Contato na mensagem vira "[contato removido]" antes de gravar (+ linha em tentativas_contato).
+    const { valores: limpos, registrar: registrarContato } = limparCamposEscrita({ mensagem }, { usuario_id: req.usuario.id, tipo: 'candidatura', demanda_id: req.params.id })
+    // UMA transação com a obra travada (utils/demandaAberta): obra fora de 'aberta' (excluída
+    // pelo dono segundos antes, encerrada…) → 409 PEDIDO_INDISPONIVEL, nada gravado, dono não
+    // avisado. A duplicidade é lida sob a mesma trava.
+    client = await pool.connect()
+    await client.query('BEGIN')
+    const { demanda, recusa } = await travarDemandaAberta(client, 'obras', req.params.id)
+    if (recusa) { await client.query('ROLLBACK'); return res.status(recusa.status).json(recusa.corpo) }
+    const existente = await client.query(
       `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
       [req.params.id, req.usuario.id]
     )
-    if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já se candidatou nesta obra' })
-    // Contato na mensagem vira "[contato removido]" antes de gravar (+ linha em tentativas_contato).
-    const { valores: limpos, registrar: registrarContato } = limparCamposEscrita({ mensagem }, { usuario_id: req.usuario.id, tipo: 'candidatura', demanda_id: req.params.id })
-    const result = await pool.query(
+    if (existente.rows.length > 0) { await client.query('ROLLBACK'); return res.status(409).json({ erro: 'Você já se candidatou nesta obra' }) }
+    const result = await client.query(
       `INSERT INTO candidaturas (obra_id, usuario_id, mensagem, valor_proposto, status) VALUES ($1, $2, $3, $4, 'pendente') RETURNING *`,
       [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
     )
+    await client.query('COMMIT')
     registrarContato() // só depois de a candidatura entrar: envio recusado não é tentativa
-    const donoInfo = await pool.query(`SELECT criado_por, titulo FROM obras WHERE id = $1`, [req.params.id])
     // Push + e-mail sempre (política de 29/10/2026); candidatura_id distingue os candidatos no dedupe.
-    if (donoInfo.rows[0]) {
-      avisarUsuario(donoInfo.rows[0].criado_por, {
-        ator_id: req.usuario.id,
-        titulo: '🎨 Novo candidato!',
-        corpo: `Um pintor se candidatou na obra "${donoInfo.rows[0].titulo}"`,
-        data: { tipo: 'nova_candidatura', obra_id: req.params.id, candidatura_id: result.rows[0].id },
-        rotulo: `nova candidatura obras ${req.params.id}`,
-      })
-    }
+    avisarUsuario(demanda.criado_por, {
+      ator_id: req.usuario.id,
+      titulo: '🎨 Novo candidato!',
+      corpo: `Um pintor se candidatou na obra "${demanda.titulo}"`,
+      data: { tipo: 'nova_candidatura', obra_id: req.params.id, candidatura_id: result.rows[0].id },
+      rotulo: `nova candidatura obras ${req.params.id}`,
+    })
     res.status(201).json(result.rows[0])
   } catch (err) {
+    if (client) { try { await client.query('ROLLBACK') } catch {} }
     console.error('Erro ao candidatar:', err)
     res.status(500).json({ erro: 'Erro ao registrar candidatura' })
+  } finally {
+    if (client) client.release()
   }
 })
 
@@ -3849,14 +3860,24 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
 
 // POST /obras/:id/candidatura/:candidaturaId/pintor-responder — pintor responde a contraproposta
 router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar, exigirPintor, async (req, res) => {
+  let client
+  // Encerra a transação (ROLLBACK para recusas, COMMIT para efeitos) e responde.
+  const sair = async (fim, status, corpo) => { await client.query(fim); return res.status(status).json(corpo) }
   try {
     const { action, valor } = req.body
     const { id: obra_id, candidaturaId } = req.params
-    const candidatura = await pool.query(
-      `SELECT * FROM candidaturas WHERE id = $1 AND obra_id = $2 AND usuario_id = $3`,
+    // UMA transação com a obra travada (utils/demandaAberta): obra fora de 'aberta' → 409
+    // PEDIDO_INDISPONIVEL em qualquer ação, nada gravado, dono não avisado. A candidatura é lida
+    // e alterada sob a mesma trava; os avisos saem depois do COMMIT.
+    client = await pool.connect()
+    await client.query('BEGIN')
+    const { demanda: obra, recusa } = await travarDemandaAberta(client, 'obras', obra_id)
+    if (recusa) return sair('ROLLBACK', recusa.status, recusa.corpo)
+    const candidatura = await client.query(
+      `SELECT * FROM candidaturas WHERE id = $1 AND obra_id = $2 AND usuario_id = $3 FOR UPDATE`,
       [candidaturaId, obra_id, req.usuario.id]
     )
-    if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
+    if (candidatura.rows.length === 0) return sair('ROLLBACK', 404, { erro: 'Candidatura não encontrada' })
     if (candidatura.rows[0].status !== 'contraproposta_dono') {
       // Idempotência de retry: já aceita → sucesso em vez de 400, espelhando o guard de
       // .../prestador-responder (que este endpoint não tinha). O contrato é rechamado: se
@@ -3864,19 +3885,19 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
       // anterior falhou, o claim foi liberado e esta é a retentativa.
       if (action === 'aceitar' && candidatura.rows[0].status === 'aceito') {
         enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
-        return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
+        return sair('ROLLBACK', 200, { mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
       }
-      return res.status(400).json({ erro: 'Não há contraproposta pendente' })
+      return sair('ROLLBACK', 400, { erro: 'Não há contraproposta pendente' })
     }
-    const obra = await pool.query(`SELECT titulo, criado_por FROM obras WHERE id = $1`, [obra_id])
     if (action === 'contraproposta') {
-      if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
+      if (!valor) return sair('ROLLBACK', 400, { erro: 'Informe o valor da contraproposta' })
       // Volta para 'pendente' com o novo valor para reentrar no fluxo de resposta do dono
-      await pool.query(`UPDATE candidaturas SET status = 'pendente', valor_proposto = $2, valor_contraproposta = NULL WHERE id = $1`, [candidaturaId, valor])
-      avisarUsuario(obra.rows[0].criado_por, {
+      await client.query(`UPDATE candidaturas SET status = 'pendente', valor_proposto = $2, valor_contraproposta = NULL WHERE id = $1`, [candidaturaId, valor])
+      await client.query('COMMIT')
+      avisarUsuario(obra.criado_por, {
         ator_id: req.usuario.id,
         titulo: '💬 Nova contraproposta do profissional!',
-        corpo: `O pintor propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${obra.rows[0].titulo}". Veja no app!`,
+        corpo: `O pintor propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${obra.titulo}". Veja no app!`,
         data: { tipo: 'contra_oferta', obra_id, candidatura_id: candidaturaId }, rotulo: `contraproposta pintor obras ${obra_id}`,
       })
       return res.json({ mensagem: 'Contraproposta enviada!' })
@@ -3888,19 +3909,20 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
       // Lê do banco, não de req.usuario: o cache de 5 min de autenticar não pode liberar um
       // aceite, que é irreversível (casa e dispara contrato).
       const suspensao = await estaSuspenso(req.usuario.id)
-      if (suspensao) return res.status(403).json(corpoContaSuspensa(suspensao))
-      await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
+      if (suspensao) return sair('ROLLBACK', 403, corpoContaSuspensa(suspensao))
+      await client.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
       // O aceite já casa o profissional com a obra (ver POST .../responder).
-      await pool.query(
+      await client.query(
         `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW(), ${SQL_LIMPAR_CHEGADA}
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [req.usuario.id, obra_id]
       )
+      await client.query('COMMIT')
       // Match ao dono: push + e-mail sempre (política de 29/10/2026).
-      avisarUsuario(obra.rows[0].criado_por, {
+      avisarUsuario(obra.criado_por, {
         ator_id: req.usuario.id,
         titulo: '🎉 Deu match!',
-        corpo: `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
+        corpo: `Parabéns! Você fechou negócio em "${obra.titulo}"! Toque para ver os detalhes.`,
         data: { tipo: 'candidatura_aceita', obra_id }, rotulo: `match dono obras ${obra_id}`,
       })
       avisarMatchFeito('obras', obra_id, req.usuario.id)
@@ -3910,19 +3932,23 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
       return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
     }
     if (action === 'recusar') {
-      await pool.query(`UPDATE candidaturas SET status = 'recusado' WHERE id = $1`, [candidaturaId])
-      avisarUsuario(obra.rows[0].criado_por, {
+      await client.query(`UPDATE candidaturas SET status = 'recusado' WHERE id = $1`, [candidaturaId])
+      await client.query('COMMIT')
+      avisarUsuario(obra.criado_por, {
         ator_id: req.usuario.id,
         titulo: '❌ Proposta recusada',
-        corpo: `O pintor recusou sua contraproposta para "${obra.rows[0].titulo}".`,
+        corpo: `O pintor recusou sua contraproposta para "${obra.titulo}".`,
         data: { tipo: 'candidatura_recusada', obra_id, candidatura_id: candidaturaId }, rotulo: `contraproposta recusada obras ${obra_id}`,
       })
       return res.json({ mensagem: 'Proposta recusada.' })
     }
-    res.status(400).json({ erro: 'Ação inválida' })
+    return sair('ROLLBACK', 400, { erro: 'Ação inválida' })
   } catch (err) {
+    if (client) { try { await client.query('ROLLBACK') } catch {} }
     console.error('Erro ao responder contraproposta:', err)
     res.status(500).json({ erro: 'Erro ao responder' })
+  } finally {
+    if (client) client.release()
   }
 })
 
@@ -5018,33 +5044,43 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
 })
 
 router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, exigirVerificado, async (req, res) => {
+  let client
   try {
     const { mensagem, valor_proposto } = req.body
     if (await ehDemandaPropria('reparos', req.params.id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
-    const existente = await pool.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
-    if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse neste serviço' })
     // Contato na mensagem vira "[contato removido]" antes de gravar (+ linha em tentativas_contato).
     const { valores: limpos, registrar: registrarContato } = limparCamposEscrita({ mensagem }, { usuario_id: req.usuario.id, tipo: 'interesse', demanda_id: req.params.id })
-    const result = await pool.query(
+    // UMA transação com o reparo travado (utils/demandaAberta): reparo fora de 'aberta' (excluído
+    // pelo dono segundos antes, encerrado…) → 409 PEDIDO_INDISPONIVEL, nada gravado, dono não
+    // avisado. A duplicidade é lida sob a mesma trava.
+    client = await pool.connect()
+    await client.query('BEGIN')
+    const { demanda, recusa } = await travarDemandaAberta(client, 'reparos', req.params.id)
+    if (recusa) { await client.query('ROLLBACK'); return res.status(recusa.status).json(recusa.corpo) }
+    const existente = await client.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
+    if (existente.rows.length > 0) { await client.query('ROLLBACK'); return res.status(409).json({ erro: 'Você já demonstrou interesse neste serviço' }) }
+    const result = await client.query(
       `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem, valor_proposto, rodada) VALUES ($1, $2, $3, $4, 1) RETURNING *`,
       [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
     )
+    await client.query('COMMIT')
     registrarContato() // só depois de o interesse entrar: envio recusado não é tentativa
     // Avisa o dono: push + e-mail sempre (política de 29/10/2026); interesse_id distingue os
     // interessados no dedupe.
-    const donoInfo = await pool.query(`SELECT criado_por, titulo FROM reparos WHERE id = $1`, [req.params.id])
-    if (donoInfo.rows[0]) {
-      avisarUsuario(donoInfo.rows[0].criado_por, {
-        ator_id: req.usuario.id,
-        titulo: '🔧 Novo interesse!',
-        corpo: `Um prestador demonstrou interesse no serviço "${donoInfo.rows[0].titulo}"`,
-        data: { tipo: 'novo_interesse', reparo_id: req.params.id, interesse_id: result.rows[0].id },
-        rotulo: `novo interesse reparos ${req.params.id}`,
-      })
-    }
+    avisarUsuario(demanda.criado_por, {
+      ator_id: req.usuario.id,
+      titulo: '🔧 Novo interesse!',
+      corpo: `Um prestador demonstrou interesse no serviço "${demanda.titulo}"`,
+      data: { tipo: 'novo_interesse', reparo_id: req.params.id, interesse_id: result.rows[0].id },
+      rotulo: `novo interesse reparos ${req.params.id}`,
+    })
     res.status(201).json(result.rows[0])
   } catch (err) {
+    if (client) { try { await client.query('ROLLBACK') } catch {} }
+    console.error('Erro ao registrar interesse:', err.message)
     res.status(500).json({ erro: 'Erro ao registrar interesse' })
+  } finally {
+    if (client) client.release()
   }
 })
 
@@ -5309,36 +5345,44 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
 
 // Prestador responde a uma contraproposta do dono
 router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autenticar, exigirReparador, async (req, res) => {
+  let client
+  // Encerra a transação (ROLLBACK para recusas, COMMIT para efeitos) e responde.
+  const sair = async (fim, status, corpo) => { await client.query(fim); return res.status(status).json(corpo) }
   try {
     const { action, valor } = req.body
     const { id: reparo_id, interesse_id } = req.params
-
-    const interesse = await pool.query(
-      `SELECT * FROM interesse_reparos WHERE id = $1 AND reparo_id = $2 AND usuario_id = $3`,
+    // UMA transação com o reparo travado (utils/demandaAberta): reparo fora de 'aberta' → 409
+    // PEDIDO_INDISPONIVEL em qualquer ação, nada gravado, dono não avisado. O interesse é lido
+    // e alterado sob a mesma trava; os avisos saem depois do COMMIT.
+    client = await pool.connect()
+    await client.query('BEGIN')
+    const { demanda: reparo, recusa } = await travarDemandaAberta(client, 'reparos', reparo_id)
+    if (recusa) return sair('ROLLBACK', recusa.status, recusa.corpo)
+    const interesse = await client.query(
+      `SELECT * FROM interesse_reparos WHERE id = $1 AND reparo_id = $2 AND usuario_id = $3 FOR UPDATE`,
       [interesse_id, reparo_id, req.usuario.id]
     )
-    if (interesse.rows.length === 0) return res.status(404).json({ erro: 'Interesse não encontrado' })
+    if (interesse.rows.length === 0) return sair('ROLLBACK', 404, { erro: 'Interesse não encontrado' })
     if (interesse.rows[0].status !== 'contraproposta_dono') {
       // Idempotency for accept retries: if already accepted, return success silently.
       // O contrato é rechamado: se já foi enviado, o claim em enviarContratoReparo sai cedo
       // sem e-mail; se o envio anterior falhou, o claim foi liberado e esta é a retentativa.
       if (action === 'aceitar' && interesse.rows[0].status === 'aceito') {
         enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
-        return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
+        return sair('ROLLBACK', 200, { mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
       }
-      return res.status(400).json({ erro: 'Não há contraproposta pendente' })
+      return sair('ROLLBACK', 400, { erro: 'Não há contraproposta pendente' })
     }
 
-    const reparo = await pool.query(`SELECT titulo, criado_por FROM reparos WHERE id = $1`, [reparo_id])
-
     if (action === 'contraproposta') {
-      if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
+      if (!valor) return sair('ROLLBACK', 400, { erro: 'Informe o valor da contraproposta' })
       // Volta para 'pendente' com o novo valor para reentrar no fluxo de resposta do dono
-      await pool.query(`UPDATE interesse_reparos SET status = 'pendente', valor_proposto = $2, valor_contraproposta = NULL WHERE id = $1`, [interesse_id, valor])
-      avisarUsuario(reparo.rows[0].criado_por, {
+      await client.query(`UPDATE interesse_reparos SET status = 'pendente', valor_proposto = $2, valor_contraproposta = NULL WHERE id = $1`, [interesse_id, valor])
+      await client.query('COMMIT')
+      avisarUsuario(reparo.criado_por, {
         ator_id: req.usuario.id,
         titulo: '💬 Nova contraproposta do profissional!',
-        corpo: `O prestador propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${reparo.rows[0].titulo}". Veja no app!`,
+        corpo: `O prestador propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${reparo.titulo}". Veja no app!`,
         data: { tipo: 'contra_oferta', reparo_id, interesse_id }, rotulo: `contraproposta prestador reparos ${reparo_id}`,
       })
       return res.json({ mensagem: 'Contraproposta enviada!' })
@@ -5348,19 +5392,20 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
       // Mesma trava do pintor-responder de obra: só 'aceitar' é barrado; 'recusar' e
       // 'contraproposta' continuam liberados para o suspenso encerrar a negociação.
       const suspensao = await estaSuspenso(req.usuario.id)
-      if (suspensao) return res.status(403).json(corpoContaSuspensa(suspensao))
-      await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
+      if (suspensao) return sair('ROLLBACK', 403, corpoContaSuspensa(suspensao))
+      await client.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
       // O aceite já casa o prestador com o reparo (ver POST .../responder).
-      await pool.query(
+      await client.query(
         `UPDATE reparos SET match_usuario_id = $1, match_feito_em = NOW(), ${SQL_LIMPAR_CHEGADA}
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [req.usuario.id, reparo_id]
       )
+      await client.query('COMMIT')
       // Match ao dono: push + e-mail sempre (política de 29/10/2026).
-      avisarUsuario(reparo.rows[0].criado_por, {
+      avisarUsuario(reparo.criado_por, {
         ator_id: req.usuario.id,
         titulo: '🎉 Deu match!',
-        corpo: `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
+        corpo: `Parabéns! Você fechou negócio em "${reparo.titulo}"! Toque para ver os detalhes.`,
         data: { tipo: 'interesse_aceito', reparo_id }, rotulo: `match dono reparos ${reparo_id}`,
       })
       avisarMatchFeito('reparos', reparo_id, req.usuario.id)
@@ -5372,20 +5417,24 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
     }
 
     if (action === 'recusar') {
-      await pool.query(`UPDATE interesse_reparos SET status = 'recusado' WHERE id = $1`, [interesse_id])
-      avisarUsuario(reparo.rows[0].criado_por, {
+      await client.query(`UPDATE interesse_reparos SET status = 'recusado' WHERE id = $1`, [interesse_id])
+      await client.query('COMMIT')
+      avisarUsuario(reparo.criado_por, {
         ator_id: req.usuario.id,
         titulo: '❌ Proposta recusada',
-        corpo: `O prestador recusou sua contraproposta para "${reparo.rows[0].titulo}".`,
+        corpo: `O prestador recusou sua contraproposta para "${reparo.titulo}".`,
         data: { tipo: 'interesse_recusado', reparo_id, interesse_id }, rotulo: `contraproposta recusada reparos ${reparo_id}`,
       })
       return res.json({ mensagem: 'Proposta recusada.' })
     }
 
-    res.status(400).json({ erro: 'Ação inválida' })
+    return sair('ROLLBACK', 400, { erro: 'Ação inválida' })
   } catch (err) {
+    if (client) { try { await client.query('ROLLBACK') } catch {} }
     console.error('Erro ao responder contraproposta:', err)
     res.status(500).json({ erro: 'Erro ao responder' })
+  } finally {
+    if (client) client.release()
   }
 })
 
