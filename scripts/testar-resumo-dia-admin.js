@@ -58,6 +58,8 @@ const main = async () => {
     CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, push_token text, role text);
     CREATE TABLE reparos (${colsDemanda}, categorias text[], valor_estimado numeric);
     CREATE TABLE obras (${colsDemanda}, valor numeric);
+    CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, status text DEFAULT 'pendente', criado_em timestamptz DEFAULT now());
+    CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, status text DEFAULT 'pendente', criado_em timestamptz DEFAULT now());
     SET search_path = public, pg_catalog;
   `)
   await fixarAgora('2026-11-06T20:59:00Z')
@@ -67,18 +69,29 @@ const main = async () => {
     ($2, 'Admin app', 'ADMIN@teste.invalid', NULL, 'dono_obra'),
     ($3, 'Outro', 'outro@x.invalid', 'ExponentPushToken[outro]', 'prestador')`, [U(1), U(2), U(3)])
   // Patos de Minas: 2 serviços + 1 obra abertos SEM profissional; fora: 1 serviço vencido, 1 obra em outra
-  // cidade, 1 serviço pendente de aprovação, 1 serviço e 1 obra com profissional escolhido, 1 cancelado.
+  // cidade, 1 serviço pendente de aprovação, 1 serviço e 1 obra com profissional escolhido (match), 1 cancelado,
+  // 1 obra e 1 serviço com proposta 'aceito' mas match_usuario_id NULL (utils/profissionalEscolhido).
   await db.query(`INSERT INTO reparos (titulo, categoria, categorias, bairro, cidade, uf, valor_estimado, expira_em, status_aprovacao, codigo_publico, match_usuario_id, status) VALUES
     ('Torneira', 'hidraulica', '{hidraulica}', 'Centro', 'Patos de Minas', 'MG', 100, now() + INTERVAL '2 days', 'aprovada', 'r1', NULL, 'aberta'),
     ('Tomada', 'eletrica', '{eletrica}', 'Lagoa', 'PATOS DE MINAS ', 'mg', 80, now() + INTERVAL '1 day', 'aprovada', 'r2', NULL, 'aberta'),
     ('Vencido', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() - INTERVAL '1 hour', 'aprovada', 'r3', NULL, 'aberta'),
     ('Pendente', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() + INTERVAL '1 day', 'pendente', 'r4', NULL, 'aberta'),
     ('Com match', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() + INTERVAL '1 day', 'aprovada', 'r5', $1, 'aberta'),
-    ('Cancelado', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() + INTERVAL '1 day', 'aprovada', 'r6', NULL, 'cancelada')`, [U(3)])
+    ('Cancelado', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() + INTERVAL '1 day', 'aprovada', 'r6', NULL, 'cancelada'),
+    ('Interesse aceito', 'eletrica', '{eletrica}', 'Lagoa', 'Patos de Minas', 'MG', 80, now() + INTERVAL '1 day', 'aprovada', 'r7', NULL, 'aberta')`, [U(3)])
   await db.query(`INSERT INTO obras (titulo, categoria, bairro, cidade, uf, valor, expira_em, codigo_publico, match_usuario_id) VALUES
     ('Casa', 'residencial', 'Centro', 'Patos de Minas', 'MG', 5000, now() + INTERVAL '10 days', 'o1', NULL),
     ('Galpão BH', 'galpao', 'Centro', 'Belo Horizonte', 'MG', 9000, now() + INTERVAL '10 days', 'o2', NULL),
-    ('Casa com pintor', 'residencial', 'Centro', 'Patos de Minas', 'MG', 7000, now() + INTERVAL '10 days', 'o3', $1)`, [U(3)])
+    ('Casa com pintor', 'residencial', 'Centro', 'Patos de Minas', 'MG', 7000, now() + INTERVAL '10 days', 'o3', $1),
+    ('Pintura', 'residencial', 'Copacabana', 'Patos de Minas', 'MG', 3000, now() + INTERVAL '10 days', 'o4', NULL)`, [U(3)])
+  // o4 e r7: proposta 'aceito' sem match (o caso real da obra 'Pintura'); o1 só com candidatura pendente/recusada.
+  await db.query(`INSERT INTO candidaturas (obra_id, usuario_id, status)
+    SELECT id, $1::uuid, 'aceito' FROM obras WHERE codigo_publico = 'o4'
+    UNION ALL SELECT id, $1::uuid, 'pendente' FROM obras WHERE codigo_publico = 'o1'
+    UNION ALL SELECT id, $2::uuid, 'recusado' FROM obras WHERE codigo_publico = 'o1'`, [U(3), U(2)])
+  await db.query(`INSERT INTO interesse_reparos (reparo_id, usuario_id, status)
+    SELECT id, $1::uuid, 'aceito' FROM reparos WHERE codigo_publico = 'r7'
+    UNION ALL SELECT id, $1::uuid, 'pendente' FROM reparos WHERE codigo_publico = 'r1'`, [U(3)])
 
   const S = require(path.join(REPO, 'src/services/resumoDiaAdminService'))
   const { ADMIN_EMAIL, PAINEL_URL } = require(path.join(REPO, 'src/config/admin'))
@@ -87,7 +100,7 @@ const main = async () => {
 
   ok(ADMIN_EMAIL === 'admin@teste.invalid' && S.LINK_CANAL === `${PAINEL_URL}/#canal`, 'ADMIN_EMAIL dobrado (lower/trim) e link = painel/#canal', { ADMIN_EMAIL, link: S.LINK_CANAL })
   const itens = await listarItensCanal({ cidade: 'patos de minas', uf: 'MG' })
-  ok(itens.length === 3 && itens.map(i => i.codigo_publico).sort().join() === 'o1,r1,r2', 'itens do canal: 2 serviços + 1 obra abertos SEM profissional (vencido, pendente, cancelado, com match e outra cidade fora)', itens.map(i => i.codigo_publico))
+  ok(itens.length === 3 && itens.map(i => i.codigo_publico).sort().join() === 'o1,r1,r2', 'itens do canal: 2 serviços + 1 obra abertos SEM profissional (vencido, pendente, cancelado, com match, com proposta aceita sem match e outra cidade fora)', itens.map(i => i.codigo_publico))
 
   // 17:59 SP: nada
   let r = await S.enviarResumoDiaAdmin()

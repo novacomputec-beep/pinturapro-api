@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Testa a página pública GET /p/:codigo (routes/paginaPublica) nos três estados — ABERTA (detalhes),
-// COM PROFISSIONAL ("Este pedido já tem um profissional escolhido.", sem detalhes) e ENCERRADA —
+// COM PROFISSIONAL ("Este pedido já tem um profissional escolhido.", sem detalhes; por match OU por
+// proposta 'aceito' sem match — utils/profissionalEscolhido) e ENCERRADA —
 // com o SQL REAL num Postgres em memória (PGlite), chamando o handler da rota.
 //   npm i -D @electric-sql/pglite && node scripts/testar-pagina-publica.js
 const path = require('path')
@@ -38,8 +39,8 @@ const main = async () => {
   await db.exec(`
     CREATE TABLE reparos (${cols}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
     CREATE TABLE obras (${cols}, valor numeric, horas_para_expirar numeric);
-    CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid);
-    CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid);
+    CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, status text DEFAULT 'pendente');
+    CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, status text DEFAULT 'pendente');
   `)
   await db.query(`INSERT INTO reparos (titulo, categoria, categorias, cidade, uf, bairro, valor_estimado, prazo_atendimento_horas, expira_em, codigo_publico, match_usuario_id, status) VALUES
     ('Trocar torneira <b>', 'hidraulica', '{hidraulica}', 'Patos de Minas', 'MG', 'Centro', 150, 24, now() + INTERVAL '20 hours', 'ABERT', NULL, 'aberta'),
@@ -47,7 +48,11 @@ const main = async () => {
     ('Pintar muro', 'alvenaria', '{alvenaria}', 'Patos de Minas', 'MG', 'Lagoa', 300, 24, now() - INTERVAL '2 hours', 'VENCD', NULL, 'aberta'),
     ('Cancelado', 'eletrica', '{eletrica}', 'Patos de Minas', 'MG', 'Lagoa', 90, 24, now() + INTERVAL '20 hours', 'CANCD', $1, 'cancelada')`, [U(1)])
   await db.query(`INSERT INTO obras (titulo, categoria, cidade, uf, bairro, valor, horas_para_expirar, expira_em, codigo_publico, match_usuario_id) VALUES
-    ('Casa nova', 'residencial', 'Patos de Minas', 'MG', 'Centro', 8000, 720, now() + INTERVAL '10 days', 'XBRAM', $1)`, [U(1)])
+    ('Casa nova', 'residencial', 'Patos de Minas', 'MG', 'Centro', 8000, 720, now() + INTERVAL '10 days', 'XBRAM', $1),
+    ('Pintura', 'residencial', 'Patos de Minas', 'MG', 'Copacabana', 3000, 720, now() + INTERVAL '10 days', 'ACEPT', NULL)`, [U(1)])
+  // ACEPT: candidatura 'aceito' com match_usuario_id NULL (caso real) — tem profissional, não é aberta.
+  await db.query(`INSERT INTO candidaturas (obra_id, usuario_id, status) SELECT id, $1::uuid, 'aceito' FROM obras WHERE codigo_publico = 'ACEPT'`, [U(1)])
+  await db.query(`INSERT INTO candidaturas (obra_id, usuario_id, status) SELECT id, $1::uuid, 'recusado' FROM obras WHERE codigo_publico = 'XBRAM'`, [U(1)])
 
   // ABERTA: detalhes
   let r = await abrir('ABERT')
@@ -63,6 +68,8 @@ const main = async () => {
   ok(/og:title" content="Pedido com profissional escolhido"/.test(r.html) && /veja os pedidos abertos/.test(r.html), 'com profissional: OG e botão "veja os pedidos abertos"')
   r = await abrir('XBRAM')
   ok(r.status === 200 && r.html.includes(TEXTO_COM_PROFISSIONAL) && /Casa nova/.test(r.html) && !/R\$ 8/.test(r.html), 'obra com pintor escolhido: mesmo estado, sem valor')
+  r = await abrir('ACEPT')
+  ok(r.status === 200 && r.html.includes(TEXTO_COM_PROFISSIONAL) && /Pintura/.test(r.html) && !/R\$ 3/.test(r.html) && !/Tem cliente esperando/.test(r.html), 'obra com candidatura aceita e match_usuario_id NULL: "já tem um profissional escolhido"')
 
   // ENCERRADA / VENCIDA / CANCELADA / DESCONHECIDO
   r = await abrir('VENCD')
