@@ -4,14 +4,16 @@
 // que a prévia mostra. Mora em utils/ (e não no serviço) porque routes/index.js a importa e o
 // serviço depende do alertaService — que alguns testes de rota substituem por um dublê parcial.
 //
-// Critério: status 'aberta', aprovados, não vencidos e SEM profissional escolhido
-// (match_usuario_id IS NULL — pedido já casado não é mais oferta para o canal; decisão do dono,
-// 06/11/2026); cidade dobrada (utils/localidade, mesma regra do broadcast), uf opcional em caixa
-// alta; cada lado pode ser desligado. Só o que o canal
+// Critério: status 'aberta', aprovados, não vencidos e SEM profissional escolhido — nem match
+// (match_usuario_id) nem proposta 'aceito' (utils/profissionalEscolhido: uma obra com
+// candidatura aceita e match_usuario_id NULL já tem alguém e não é oferta para o canal; decisão
+// do dono, 06/11/2026); cidade dobrada (utils/localidade, mesma regra do broadcast), uf opcional
+// em caixa alta; cada lado pode ser desligado. Só o que o canal
 // mostra sai daqui (título, categoria, bairro, valor, data, código público): nome do dono,
 // telefone, endereço, referência e descrição nunca.
 const { pool } = require('./supabase')
 const { normalizar, sqlNormalizarCidade } = require('./localidade')
+const { sqlSemProfissionalEscolhido } = require('./profissionalEscolhido')
 
 const listarItensCanal = async ({ cidade, uf = null, comServicos = true, comObras = true, db = pool }) => {
   const cidadeNorm = normalizar(cidade)
@@ -22,7 +24,7 @@ const listarItensCanal = async ({ cidade, uf = null, comServicos = true, comObra
       `SELECT 'reparo' AS tipo, r.titulo, r.categoria, r.categorias, r.bairro, r.valor_estimado AS valor, r.criado_em, r.codigo_publico
          FROM reparos r
         WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()
-          AND r.match_usuario_id IS NULL
+          AND ${sqlSemProfissionalEscolhido('reparos', 'r')}
           AND ${sqlNormalizarCidade('r.cidade')} = $1
           AND ($2::text IS NULL OR upper(btrim(r.uf)) = $2)
         ORDER BY r.criado_em DESC
@@ -36,7 +38,7 @@ const listarItensCanal = async ({ cidade, uf = null, comServicos = true, comObra
       `SELECT 'obra' AS tipo, o.titulo, o.categoria, o.bairro, o.valor, o.criado_em, o.codigo_publico
          FROM obras o
         WHERE o.status = 'aberta' AND o.status_aprovacao = 'aprovada' AND o.expira_em > NOW()
-          AND o.match_usuario_id IS NULL
+          AND ${sqlSemProfissionalEscolhido('obras', 'o')}
           AND ${sqlNormalizarCidade('o.cidade')} = $1
           AND ($2::text IS NULL OR upper(btrim(o.uf)) = $2)
         ORDER BY o.criado_em DESC

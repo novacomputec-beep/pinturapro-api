@@ -11,9 +11,10 @@
 // O SELECT lista as colunas uma a uma de propósito; não há `SELECT *`, e `bairro` é o nível
 // mais fino de local exibido. Título é texto do dono: escapado antes de ir ao HTML.
 //
-// Estados: ABERTA (status aberta + aprovada + sem match + não expirada) → card completo, faixa
-// "ninguém respondeu ainda" só quando há ZERO interesses; COM PROFISSIONAL (status aberta +
-// aprovada + match_usuario_id preenchido) → "Este pedido já tem um profissional escolhido."
+// Estados: ABERTA (status aberta + aprovada + sem profissional escolhido + não expirada) → card
+// completo, faixa "ninguém respondeu ainda" só quando há ZERO interesses; COM PROFISSIONAL
+// (status aberta + aprovada + match_usuario_id preenchido OU proposta 'aceito' —
+// utils/profissionalEscolhido) → "Este pedido já tem um profissional escolhido."
 // SEM os detalhes (só chip + título + cidade, card apagado); ENCERRADA (qualquer outro estado) e
 // CÓDIGO DESCONHECIDO → variante apagada (card cinza, título riscado, só a cidade, botão "Ver
 // pedidos abertos no app"). Código desconhecido responde 404 com a mesma página.
@@ -28,6 +29,7 @@ const { pool } = require('../utils/supabase')
 const { MARCA } = require('../utils/marca')
 const { apresentacaoReparo, apresentacaoReparoLista, apresentacaoObra } = require('../utils/categoriasApp')
 const { PRAZO_MODO_HOJE } = require('../utils/faixasPrazo')
+const { sqlTemProfissionalEscolhido, sqlSemProfissionalEscolhido } = require('../utils/profissionalEscolhido')
 
 const router = express.Router()
 
@@ -75,9 +77,9 @@ const buscarDemanda = async (codigo, db = pool) => {
       `SELECT d.titulo, d.categoria, ${lado.tabela === 'reparos' ? 'd.categorias, ' : ''}d.cidade, d.uf, d.bairro, d.${lado.colunaValor} AS valor,
               d.${lado.janelaCol} AS janela_horas, d.prazo_modo, d.expira_em,
               (d.status = 'aberta' AND d.status_aprovacao = 'aprovada'
-               AND d.match_usuario_id IS NULL AND d.expira_em > NOW()) AS aberta,
+               AND ${sqlSemProfissionalEscolhido(lado.tabela, 'd')} AND d.expira_em > NOW()) AS aberta,
               (d.status = 'aberta' AND d.status_aprovacao = 'aprovada'
-               AND d.match_usuario_id IS NOT NULL) AS com_profissional,
+               AND ${sqlTemProfissionalEscolhido(lado.tabela, 'd')}) AS com_profissional,
               ${lado.interesses}::int AS interesses
          FROM ${lado.tabela} d WHERE d.codigo_publico = $1`,
       [codigo]

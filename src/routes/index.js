@@ -38,6 +38,7 @@ const { handlers: atrasoHandlers, handlersLegados: atrasoHandlersLegados, campos
 const { sqlLimiteChegada } = require('../utils/agendamento')
 const { listarPendentesConviteCanal, enviarConvitesPendentes, mascararEmail } = require('../services/conviteCanalService')
 const { listarItensCanal } = require('../utils/itensCanal')
+const { sqlEscolhidoNome, sqlEscolhidoEm } = require('../utils/profissionalEscolhido')
 const { sqlTotalExtensaoObra, sqlTotalExtensaoReparo } = require('../utils/totalExtensao')
 const { PLATAFORMAS, VERSAO_ZERO, MIN_USUARIOS_PADRAO, CHAVE_MIN_USUARIOS, CHAVE_TESTADORES, chaveVersao, normalizarVersao, normalizarTestadores, SQL_VERSAO_INT, versoesPublicas, invalidarCacheVersoes, gravarConfig, lerConfigVersao, candidatosPromocao,
         chaveObrigatorias, OBRIGATORIAS_PADRAO, normalizarListaVersoes, lerListaVersoes, aplicarMinimaObrigatoria, contarUsuariosPorMinima } = require('../utils/versaoApp')
@@ -2889,6 +2890,8 @@ router.get('/obras', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigi
 // prazo_modo, expira_em). 'abertas' usa a mesma definição de GET /reparos/admin
 // (inclui obra com match). "Expirada" não é um status no banco: é uma obra ainda
 // 'aberta' cujo expira_em já passou — por isso o filtro 'canceladas' inclui esse caso.
+// escolhido_nome/escolhido_em: profissional escolhido (match OU candidatura 'aceito' —
+// utils/profissionalEscolhido), NULL quando não há. Mesma definição de GET /reparos/admin.
 router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
   try {
     const filtro = req.query.filtro || 'finalizadas'
@@ -2908,7 +2911,9 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
              o.criado_em, o.horas_para_expirar, o.prazo_modo,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              (o.status = 'aberta' AND (CASE WHEN o.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('o.')} ELSE o.expira_em END) <= NOW()) AS expirada,
-             (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) AS total_candidaturas
+             (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) AS total_candidaturas,
+             ${sqlEscolhidoNome('obras', 'o')} AS escolhido_nome,
+             ${sqlEscolhidoEm('obras', 'o')} AS escolhido_em
       FROM obras o
       LEFT JOIN usuarios u ON u.id = o.criado_por
       WHERE ${where}
@@ -4798,12 +4803,16 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
     }
     // Dono (nome/email/telefone), criado_em e prazo (prazo_atendimento_horas + expira_em) só
     // aqui, no endpoint admin: o feed público GET /reparos não expõe contato do dono ao app.
+    // escolhido_nome/escolhido_em: profissional escolhido (match OU interesse 'aceito' —
+    // utils/profissionalEscolhido), NULL quando não há. Mesma definição de GET /obras/admin.
     const result = await pool.query(`
       SELECT r.id, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.cidade, r.uf, r.bairro,
              r.expira_em, r.status, r.criado_em, r.prazo_atendimento_horas,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              (r.status = 'aberta' AND (CASE WHEN r.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('r.')} ELSE r.expira_em END) <= NOW()) AS expirada,
-             (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) AS total_interessados
+             (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) AS total_interessados,
+             ${sqlEscolhidoNome('reparos', 'r')} AS escolhido_nome,
+             ${sqlEscolhidoEm('reparos', 'r')} AS escolhido_em
       FROM reparos r
       LEFT JOIN usuarios u ON u.id = r.criado_por
       WHERE ${where}
