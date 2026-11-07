@@ -1,4 +1,6 @@
 const { pool } = require('./supabase')
+// sqlCpfNormalizado: a MESMA normalização do índice único de cadastro. demandaPropria só importa supabase — sem ciclo.
+const { sqlCpfNormalizado } = require('./demandaPropria')
 
 // TIPO da conta — a unidade de unicidade das múltiplas contas: o mesmo e-mail (e o mesmo
 // CPF/CNPJ) pode existir em até 4 contas, UMA por tipo. Não há coluna "tipo": ele é derivado
@@ -89,4 +91,46 @@ const multiplasContasAtivo = async (db = pool) => {
   return r.rows[0]?.valor === 'true'
 }
 
-module.exports = { TIPOS_CADASTRO, MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, multiplasContasAtivo }
+// ─── Contas da MESMA PESSOA (lado contratante unificado, Fase 1 — decisão do dono, 07/11/2026) ──
+// Um dono_reparo cria e gerencia obras sem trocar de conta: toda checagem de posse de demanda
+// (obras E reparos) aceita criado_por em QUALQUER conta da pessoa. A identidade é o CPF/CNPJ
+// NORMALIZADO (só dígitos, a mesma expressão do índice único de cadastro e de
+// utils/demandaPropria) — NUNCA o e-mail: um e-mail reaproveitado por outra pessoa (cadastro
+// feito por terceiro, família) não pode abrir os pedidos dela. Conta sem CPF casa só consigo
+// mesma (NULL = NULL é NULL). Só contas CONTRATANTES entram como irmãs (role 'dono_obra', qualquer
+// tipo_dono — decisão do dono, 07/11/2026): o perfil profissional da mesma pessoa (pintor/
+// reparador) NÃO ganha posse das demandas dela, mesmo nas rotas sem role gate (encerrar, avaliar,
+// cancelar) — nos DOIS sentidos: a conta logada só ganha irmãs se ela mesma for contratante, e só
+// irmãs contratantes. A própria conta entra sempre, seja qual for o role. Inclui contas inativas.
+//
+// `param` é o placeholder do id da conta logada ('$1', '$2'…); o resultado é um CONJUNTO de ids
+// para `criado_por IN (...)`. Sem dependência de linha de fora, o planner avalia uma vez por
+// consulta (InitPlan) e a igualdade de CPF usa o índice de expressão do cadastro.
+const sqlContasDaPessoa = (param = '$1') => `
+      SELECT eu.id FROM usuarios eu WHERE eu.id = ${param}::uuid
+      UNION
+      SELECT irma.id FROM usuarios irma
+        JOIN usuarios eu ON eu.id = ${param}::uuid
+       WHERE eu.role = 'dono_obra' AND irma.role = 'dono_obra'
+         AND ${sqlCpfNormalizado('irma.cpf_cnpj')} = ${sqlCpfNormalizado('eu.cpf_cnpj')}`
+
+// Predicado de posse para o WHERE: `${coluna} IN (contas da pessoa de ${param})`.
+const sqlDonoDaPessoa = (coluna, param = '$1') => `${coluna} IN (${sqlContasDaPessoa(param)})`
+
+// ids das contas da pessoa (a própria sempre incluída, mesmo sem CPF).
+const contasDaPessoa = async (usuarioId, db = pool) => {
+  if (!usuarioId) return []
+  const r = await db.query(sqlContasDaPessoa('$1'), [usuarioId])
+  return r.rows.map(x => x.id)
+}
+
+// true quando `criadoPor` é uma conta da mesma pessoa de `usuarioId`. Ids iguais não vão ao
+// banco (o caso comum); diferentes consultam o conjunto. Qualquer lado vazio → false.
+const ehMesmaPessoa = async (criadoPor, usuarioId, db = pool) => {
+  if (!criadoPor || !usuarioId) return false
+  if (String(criadoPor) === String(usuarioId)) return true
+  const r = await db.query(`SELECT 1 WHERE $2::uuid IN (${sqlContasDaPessoa('$1')})`, [usuarioId, criadoPor])
+  return r.rows.length > 0
+}
+
+module.exports = { TIPOS_CADASTRO, MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, multiplasContasAtivo, sqlContasDaPessoa, sqlDonoDaPessoa, contasDaPessoa, ehMesmaPessoa }

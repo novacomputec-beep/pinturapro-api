@@ -5,7 +5,7 @@ const { invalidarCacheAssinatura } = require('../middlewares/auth')
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { MARCA } = require('../utils/marca')
 const { validarEspecialidades } = require('../utils/especialidades')
-const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, multiplasContasAtivo } = require('../utils/tipoConta')
+const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, multiplasContasAtivo, sqlDonoDaPessoa } = require('../utils/tipoConta')
 const { registrarPlataforma, detectarPlataforma } = require('../utils/plataforma')
 const { registrarReinstalacao } = require('../utils/desinstalacoes')
 const { municipioExiste } = require('../utils/geoBusca')
@@ -755,6 +755,28 @@ const trocarConta = async (req, res) => {
   }
 }
 
+// GET /auth/contas (autenticado): { contas: [{ id, tipo, nome }], tem_obras }. `contas` é a MESMA
+// lista do login/trocar-conta (contas ativas do e-mail, sem admin). `tem_obras` é por PESSOA
+// (mesmo CPF, qualquer conta — utils/tipoConta.sqlDonoDaPessoa): com o lado contratante unificado
+// um dono_reparo vê e gerencia as obras da sua conta de pintura, então o app só esconde a aba
+// Mensagens (chat de obra) de quem nunca abriu obra em conta nenhuma. Conta qualquer status de
+// obra: uma cancelada ainda pode ter conversa.
+const listarContas = async (req, res) => {
+  try {
+    const linhas = req.usuario.role === 'admin'
+      ? []
+      : (await contasDoEmail(String(req.usuario.email || '').toLowerCase().trim())).filter(u => u.role !== 'admin')
+    const obras = await pool.query(
+      `SELECT EXISTS (SELECT 1 FROM obras WHERE ${sqlDonoDaPessoa('criado_por', '$1')}) AS tem`,
+      [req.usuario.id]
+    )
+    res.json({ contas: resumoContas(linhas), tem_obras: obras.rows[0]?.tem === true })
+  } catch (err) {
+    console.error('Erro ao listar contas:', err)
+    res.status(500).json({ erro: 'Erro ao listar contas' })
+  }
+}
+
 const perfil = async (req, res) => {
   try {
     const result = await pool.query(
@@ -1084,4 +1106,4 @@ const resetarSenhaUsuario = async (req, res) => {
 // transporter exportado para o link de assinatura pela web usar o MESMO caminho de e-mail do reset.
 // gerarToken / montarSessao / contasDoEmail / resumoContas: exportados para POST /auth/contas/:tipo
 // (routes/index.js) devolver a sessão da conta vinculada recém-criada com o MESMO payload do login.
-module.exports = { cadastrar, login, loginSocial, trocarConta, perfil, atualizarPerfil, alterarSenha, esqueciSenha, redefinirSenha, resetarSenhaUsuario, transporter, gerarToken, montarSessao, contasDoEmail, resumoContas }
+module.exports = { cadastrar, login, loginSocial, trocarConta, listarContas, perfil, atualizarPerfil, alterarSenha, esqueciSenha, redefinirSenha, resetarSenhaUsuario, transporter, gerarToken, montarSessao, contasDoEmail, resumoContas }

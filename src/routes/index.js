@@ -91,7 +91,9 @@ const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 // /reparos/dono valida; a rota de aprovação não reavalia linha já gravada.
 const { ESPECIALIDADES_REPARADOR, validarEspecialidades } = require('../utils/especialidades')
 const { enviarEmail } = require('../services/emailService')
-const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL } = require('../utils/tipoConta')
+// sqlDonoDaPessoa / ehMesmaPessoa: posse de demanda por PESSOA (mesmo CPF), não por conta — um
+// dono_reparo gerencia as obras da sua conta de pintura e vice-versa (Fase 1 do lado contratante).
+const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL, sqlDonoDaPessoa, ehMesmaPessoa } = require('../utils/tipoConta')
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
@@ -1886,13 +1888,13 @@ const limiteDemandasAtingido = async (tabela, donoId, clientRequestId) => {
   }
   const c = await pool.query(
     `SELECT
-       (SELECT COUNT(*) FROM obras   WHERE criado_por = $1 AND status = 'encerrada')
-       + (SELECT COUNT(*) FROM reparos WHERE criado_por = $1 AND status = 'encerrada') AS encerradas,
-       (SELECT COUNT(*) FROM obras WHERE criado_por = $1
+       (SELECT COUNT(*) FROM obras   WHERE ${sqlDonoDaPessoa('criado_por', '$1')} AND status = 'encerrada')
+       + (SELECT COUNT(*) FROM reparos WHERE ${sqlDonoDaPessoa('criado_por', '$1')} AND status = 'encerrada') AS encerradas,
+       (SELECT COUNT(*) FROM obras WHERE ${sqlDonoDaPessoa('criado_por', '$1')}
           AND expira_em > NOW()
           AND (status = 'rascunho'
                OR (status = 'aberta' AND status_aprovacao = 'aprovada')))
-       + (SELECT COUNT(*) FROM reparos WHERE criado_por = $1
+       + (SELECT COUNT(*) FROM reparos WHERE ${sqlDonoDaPessoa('criado_por', '$1')}
             AND status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()) AS live`,
     [donoId]
   )
@@ -1975,6 +1977,9 @@ router.post('/auth/login',           authCtrl.login)
 router.post('/auth/social',          authCtrl.loginSocial)
 // Troca de perfil sem senha (múltiplas contas): sessão de outra conta ativa do mesmo e-mail.
 router.post('/auth/trocar-conta',    autenticar, authCtrl.trocarConta)
+// GET /auth/contas: contas do e-mail (como o login) + tem_obras — a PESSOA (mesmo CPF, qualquer
+// conta) tem alguma obra; o app esconde a aba Mensagens de quem nunca abriu obra.
+router.get('/auth/contas',           autenticar, authCtrl.listarContas)
 router.get('/auth/perfil',           autenticar, authCtrl.perfil)
 router.put('/auth/perfil',           autenticar, authCtrl.atualizarPerfil)
 router.post('/auth/alterar-senha',   autenticar, authCtrl.alterarSenha)
@@ -2534,7 +2539,7 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
            FROM candidaturas c
           WHERE c.obra_id = o.id AND c.usuario_id = o.match_usuario_id
           LIMIT 1) as valor_acordado
-       FROM obras o WHERE o.criado_por = $1 AND o.status != 'cancelada' ORDER BY o.criado_em DESC
+       FROM obras o WHERE ${sqlDonoDaPessoa('o.criado_por', '$1')} AND o.status != 'cancelada' ORDER BY o.criado_em DESC
        LIMIT $2 OFFSET $3`,
       [req.usuario.id, limit, offset]
     )
@@ -2616,13 +2621,13 @@ router.get('/obras/meus-contratos-dono', autenticar, async (req, res) => {
               ${sqlValorAcordadoObra('c', 'o')} AS valor_acordado,
               EXISTS (
                 SELECT 1 FROM avaliacoes a
-                WHERE a.contrato_tipo = 'obra' AND a.contrato_id = o.id AND a.avaliador_id = $1
+                WHERE a.contrato_tipo = 'obra' AND a.contrato_id = o.id AND ${sqlDonoDaPessoa('a.avaliador_id', '$1')}
               ) AS ja_avaliei,
               COUNT(*) OVER()::int AS _total
        FROM obras o
        LEFT JOIN usuarios u ON o.match_usuario_id = u.id
        LEFT JOIN candidaturas c ON c.obra_id = o.id AND c.usuario_id = o.match_usuario_id
-       WHERE o.criado_por = $1 AND o.status = 'encerrada'
+       WHERE ${sqlDonoDaPessoa('o.criado_por', '$1')} AND o.status = 'encerrada'
        ORDER BY o.match_feito_em DESC NULLS LAST, o.id DESC
        LIMIT 200`,
       [req.usuario.id]
@@ -2938,7 +2943,7 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
     const obra = await pool.query(
       `SELECT o.id, o.match_usuario_id,
               EXISTS (SELECT 1 FROM candidaturas c WHERE c.obra_id = o.id AND c.usuario_id = o.match_usuario_id AND c.status = 'aceito') AS match_real
-         FROM obras o WHERE o.id = $1 AND o.criado_por = $2`,
+         FROM obras o WHERE o.id = $1 AND ${sqlDonoDaPessoa('o.criado_por', '$2')}`,
       [req.params.id, req.usuario.id]
     )
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
@@ -3000,7 +3005,7 @@ router.patch('/obras/dono/:id/ponto-referencia', autenticar, async (req, res) =>
     // SELECT antes, sem janela entre checar e escrever. rowCount 0 = não é dele OU não existe,
     // e os dois viram 404 — 403 confirmaria que a obra existe para quem não é o dono.
     const upd = await pool.query(
-      `UPDATE obras SET ponto_referencia = $2 WHERE id = $1 AND criado_por = $3
+      `UPDATE obras SET ponto_referencia = $2 WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$3')}
        RETURNING ponto_referencia`,
       [req.params.id, valor, req.usuario.id]
     )
@@ -3062,7 +3067,7 @@ router.post('/obras/:id/midias-prontas', autenticar, async (req, res) => {
     if (enviado) {
       return res.json({ mensagem: 'Profissionais avisados', enviado: true })
     }
-    const atual = await pool.query(`SELECT push_novo_enviado_em, status, status_aprovacao FROM obras WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+    const atual = await pool.query(`SELECT push_novo_enviado_em, status, status_aprovacao FROM obras WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$2')}`, [req.params.id, req.usuario.id])
     if (atual.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
     const a = atual.rows[0]
     // Ainda não publicada (fila de aprovação): quem avisa é a aprovação, com o mesmo claim.
@@ -3079,7 +3084,7 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
     const obra = await pool.query(
       `SELECT id, criado_por, status, match_usuario_id, expira_em, criado_em, publicado_em, horas_para_expirar,
               prazo_modo, prazo_timezone
-       FROM obras WHERE id = $1 AND criado_por = $2`,
+       FROM obras WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$2')}`,
       [req.params.id, req.usuario.id]
     )
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
@@ -3151,7 +3156,7 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
          escolha_aviso_24h_em = NULL, escolha_aviso_2h_em = NULL, escolha_expirou_em = NULL,
          ultima_extensao_em = NOW(), ultima_extensao_horas = $5::numeric
        FROM (SELECT id, escolha_expirou_em IS NOT NULL AS expirou_antes FROM obras WHERE id = $2) a
-       WHERE obras.id = a.id AND obras.id = $2 AND criado_por = $3
+       WHERE obras.id = a.id AND obras.id = $2 AND ${sqlDonoDaPessoa('criado_por', '$3')}
          AND NOT COALESCE(
                ultima_extensao_em > NOW() - ($4::numeric * INTERVAL '1 minute')
                AND ultima_extensao_horas = $5::numeric, FALSE)
@@ -3166,7 +3171,7 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
     // inicial e o UPDATE (delete concorrente) — aí sim é 404.
     if (upd.rowCount === 0) {
       const atual = await pool.query(
-        `SELECT expira_em FROM obras WHERE id = $1 AND criado_por = $2`,
+        `SELECT expira_em FROM obras WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$2')}`,
         [req.params.id, req.usuario.id]
       )
       if (atual.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
@@ -3241,7 +3246,7 @@ const avaliarAumentoValor = async (lado, id, donoId, valorNovo = null) => {
             NOW() > ${lado.ancora}
               + (COALESCE(d.${lado.janelaCol}, 720) * INTERVAL '1 hour') * ($3::int - 1) / $3::int AS janela_quase_fim
        FROM ${lado.tabela} d
-      WHERE d.id = $1 AND d.criado_por = $2`,
+      WHERE d.id = $1 AND ${sqlDonoDaPessoa('d.criado_por', '$2')}`,
     [id, donoId, FRACAO_JANELA_AUMENTO]
   )
   if (atual.rows.length === 0) {
@@ -3297,7 +3302,7 @@ const aumentarValorDemanda = (lado) => async (req, res) => {
 
     const upd = await pool.query(
       `UPDATE ${lado.tabela} d SET ${lado.colunaValor} = $1, valor_aumentado_em = NOW()
-        WHERE d.id = $2 AND d.criado_por = $3
+        WHERE d.id = $2 AND ${sqlDonoDaPessoa('d.criado_por', '$3')}
           AND d.status = 'aberta' AND d.status_aprovacao = 'aprovada' AND d.expira_em > NOW()
           AND d.valor_aumentado_em IS NULL
           AND d.match_usuario_id IS NULL
@@ -3379,7 +3384,7 @@ const textosAnterioresAutor = async (lado, demandaId, autorId, papel) => {
       : `SELECT mensagem AS texto, criado_em AS quando
            FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`)
     : `SELECT concat_ws(E'\\n', titulo, descricao) AS texto, criado_em AS quando
-         FROM ${lado.tabela} WHERE id = $1 AND criado_por = $2
+         FROM ${lado.tabela} WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$2')}
        UNION ALL
        SELECT resposta AS texto, respondido_em AS quando
          FROM perguntas_demanda WHERE tipo = '${lado.tipo}' AND demanda_id = $1 AND resposta IS NOT NULL`
@@ -3444,7 +3449,7 @@ const criarHandlerPergunta = (tabela) => async (req, res) => {
     )
     if (d.rows.length === 0) return res.status(404).json({ erro: lado.erro404 })
     const demanda = d.rows[0]
-    if (demanda.criado_por === req.usuario.id) return res.status(403).json({ erro: 'Você não pode perguntar no seu próprio pedido' })
+    if (await ehMesmaPessoa(demanda.criado_por, req.usuario.id)) return res.status(403).json({ erro: 'Você não pode perguntar no seu próprio pedido' })
     if (!demanda.aberta) return res.status(409).json({ erro: 'Este pedido não está mais aberto a perguntas' })
     const lido = aplicarDigitosPartidos(lidoBruto, await textosAnterioresAutor(lado, req.params.id, req.usuario.id, 'profissional'))
     const ins = await pool.query(
@@ -3485,7 +3490,7 @@ const criarHandlerResposta = (tabela) => async (req, res) => {
     const d = await pool.query(`SELECT titulo, criado_por FROM ${lado.tabela} WHERE id = $1`, [req.params.id])
     if (d.rows.length === 0) return res.status(404).json({ erro: lado.erro404 })
     const demanda = d.rows[0]
-    if (demanda.criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono do pedido pode responder' })
+    if (!(await ehMesmaPessoa(demanda.criado_por, req.usuario.id))) return res.status(403).json({ erro: 'Apenas o dono do pedido pode responder' })
     const existe = await pool.query(
       `SELECT 1 FROM perguntas_demanda WHERE id = $1 AND tipo = $2 AND demanda_id = $3`,
       [req.params.pid, lado.tipo, req.params.id]
@@ -3578,7 +3583,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
     // Máscara de leitura: título/descrição de obra gravada antes do filtro de contato.
     const obra = mascararLinha(result.rows[0], ['titulo', 'descricao'])
-    const ehDono = obra.criado_por === req.usuario.id
+    const ehDono = await ehMesmaPessoa(obra.criado_por, req.usuario.id)
     const ehPintorDoMatch = obra.match_usuario_id === req.usuario.id
 
     if (!ehDono && !ehPintorDoMatch && req.usuario.role !== 'admin') {
@@ -3658,7 +3663,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // localiza o imóvel ("portão azul ao lado da padaria") — mascarar só o endereço
     // deixaria a dica de localização vazando para qualquer assinante.
     // Coordenadas permanecem para o cálculo de distância no cliente.
-    if (obra.criado_por !== req.usuario.id && obra.match_usuario_id !== req.usuario.id && !meuAceite && req.usuario.role !== 'admin') {
+    if (!ehDono && obra.match_usuario_id !== req.usuario.id && !meuAceite && req.usuario.role !== 'admin') {
       delete obra.endereco_obra
       delete obra.ponto_referencia
     }
@@ -3683,7 +3688,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // e-mail; lembretes e reenvios não somam (utils/profissionaisAvisados).
     const profissionais_avisados = ehDono ? await contarProfissionaisAvisados('obras', req.params.id, obra.criado_por) : null
     // pedido_cancelamento: pedido de acordo vigente (quem, motivo, expira_em) — só dono e pintor do match.
-    const pedido_cancelamento = pedidoCancelamento(obra, req.usuario.id)
+    const pedido_cancelamento = pedidoCancelamento(obra, req.usuario.id, ehDono)
     // desfazer_liberado_em: SÓ para o dono (null para os demais); sai no nível de cima, não na obra.
     const desfazer_liberado_em = ehDono ? (obra.desfazer_liberado_em || null) : null
     delete obra.desfazer_liberado_em
@@ -3763,7 +3768,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
     const { id: obra_id, candidaturaId } = req.params
     const obra = await pool.query(`SELECT criado_por, titulo, status, match_usuario_id FROM obras WHERE id = $1`, [obra_id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
-    if (obra.rows[0].criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
+    if (!(await ehMesmaPessoa(obra.rows[0].criado_por, req.usuario.id))) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
     // Guarda de estado da DEMANDA (D8): aceitar/contrapropor só numa obra viva e ainda não
     // casada. Sem isto, uma obra 'encerrada' podia ser reaberta e o valor reescrito pós-fechamento.
     const obraAbertaParaNegociar = obra.rows[0].status === 'aberta' && !obra.rows[0].match_usuario_id
@@ -4058,7 +4063,7 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
     const o = obra.rows[0]
-    const ehDono = o.criado_por === req.usuario.id
+    const ehDono = await ehMesmaPessoa(o.criado_por, req.usuario.id)
     const ehPintor = o.match_usuario_id === req.usuario.id
     const ehAdmin = req.usuario.role === 'admin'
     if (!ehDono && !ehPintor && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar esta obra' })
@@ -4150,7 +4155,7 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1`, [req.params.id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
     const o = obra.rows[0]
-    const ehDono = o.criado_por === req.usuario.id
+    const ehDono = await ehMesmaPessoa(o.criado_por, req.usuario.id)
     const ehPintor = o.match_usuario_id === req.usuario.id
     const ehAdmin = req.usuario.role === 'admin'
     if (!ehDono && !ehPintor && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão' })
@@ -4297,7 +4302,7 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
            FROM interesse_reparos ir
           WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
           LIMIT 1) as valor_acordado
-       FROM reparos r WHERE r.criado_por = $1 AND r.status != 'cancelada' ORDER BY r.criado_em DESC
+       FROM reparos r WHERE ${sqlDonoDaPessoa('r.criado_por', '$1')} AND r.status != 'cancelada' ORDER BY r.criado_em DESC
        LIMIT $2 OFFSET $3`,
       [req.usuario.id, limit, offset]
     )
@@ -4443,7 +4448,7 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
     const reparo = await pool.query(
       `SELECT r.id, r.match_usuario_id,
               EXISTS (SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id AND ir.status = 'aceito') AS match_real
-         FROM reparos r WHERE r.id = $1 AND r.criado_por = $2`,
+         FROM reparos r WHERE r.id = $1 AND ${sqlDonoDaPessoa('r.criado_por', '$2')}`,
       [req.params.id, req.usuario.id]
     )
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
@@ -4485,7 +4490,7 @@ router.patch('/reparos/dono/:id/ponto-referencia', autenticar, async (req, res) 
     if (erro) return res.status(400).json({ erro })
 
     const upd = await pool.query(
-      `UPDATE reparos SET ponto_referencia = $2 WHERE id = $1 AND criado_por = $3
+      `UPDATE reparos SET ponto_referencia = $2 WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$3')}
        RETURNING ponto_referencia`,
       [req.params.id, valor, req.usuario.id]
     )
@@ -4528,14 +4533,14 @@ router.patch('/reparos/dono/:id/categorias', autenticar, async (req, res) => {
       `UPDATE reparos r
           SET categorias = $2::text[], categoria = ($2::text[])[1]
          FROM (SELECT id, COALESCE(categorias, CASE WHEN categoria IS NULL THEN '{}'::text[] ELSE ARRAY[categoria] END) AS antes
-                 FROM reparos WHERE id = $1 AND criado_por = $3 AND status = 'aberta' AND match_usuario_id IS NULL
+                 FROM reparos WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$3')} AND status = 'aberta' AND match_usuario_id IS NULL
                   FOR UPDATE) o
         WHERE r.id = o.id
     RETURNING r.id, r.categoria, r.categorias, o.antes, r.status_aprovacao, r.push_novo_enviado_em, r.expira_em`,
       [req.params.id, categorias, req.usuario.id]
     )
     if (upd.rows.length === 0) {
-      const existe = await pool.query(`SELECT 1 FROM reparos WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+      const existe = await pool.query(`SELECT 1 FROM reparos WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$2')}`, [req.params.id, req.usuario.id])
       if (existe.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
       return res.status(409).json({ erro: 'Só dá para alterar as categorias de um serviço aberto e ainda sem profissional escolhido.', codigo: 'reparo_fechado' })
     }
@@ -4580,7 +4585,7 @@ router.post('/reparos/:id/midias-prontas', autenticar, async (req, res) => {
     if (enviado) {
       return res.json({ mensagem: 'Profissionais avisados', enviado: true })
     }
-    const atual = await pool.query(`SELECT push_novo_enviado_em, status, status_aprovacao FROM reparos WHERE id = $1 AND criado_por = $2`, [req.params.id, req.usuario.id])
+    const atual = await pool.query(`SELECT push_novo_enviado_em, status, status_aprovacao FROM reparos WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$2')}`, [req.params.id, req.usuario.id])
     if (atual.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     const a = atual.rows[0]
     if (!a.push_novo_enviado_em) return res.json({ mensagem: 'Aguardando aprovação — os profissionais serão avisados na publicação', enviado: false, push_novo_enviado_em: null })
@@ -4596,7 +4601,7 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
     const reparo = await pool.query(
       `SELECT id, criado_por, status, match_usuario_id, expira_em, criado_em, prazo_atendimento_horas,
               prazo_modo, prazo_timezone
-       FROM reparos WHERE id = $1 AND criado_por = $2`,
+       FROM reparos WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$2')}`,
       [req.params.id, req.usuario.id]
     )
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
@@ -4651,7 +4656,7 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
          escolha_aviso_24h_em = NULL, escolha_aviso_2h_em = NULL, escolha_expirou_em = NULL,
          ultima_extensao_em = NOW(), ultima_extensao_horas = $5::numeric
        FROM (SELECT id, escolha_expirou_em IS NOT NULL AS expirou_antes FROM reparos WHERE id = $2) a
-       WHERE reparos.id = a.id AND reparos.id = $2 AND criado_por = $3
+       WHERE reparos.id = a.id AND reparos.id = $2 AND ${sqlDonoDaPessoa('criado_por', '$3')}
          AND NOT COALESCE(
                ultima_extensao_em > NOW() - ($4::numeric * INTERVAL '1 minute')
                AND ultima_extensao_horas = $5::numeric, FALSE)
@@ -4666,7 +4671,7 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
     // inicial e o UPDATE (delete concorrente) — aí sim é 404.
     if (upd.rowCount === 0) {
       const atual = await pool.query(
-        `SELECT expira_em FROM reparos WHERE id = $1 AND criado_por = $2`,
+        `SELECT expira_em FROM reparos WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$2')}`,
         [req.params.id, req.usuario.id]
       )
       if (atual.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
@@ -4933,13 +4938,13 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
               ${sqlValorAcordadoReparo('ir', 'r')} AS valor_acordado,
               EXISTS (
                 SELECT 1 FROM avaliacoes a
-                WHERE a.contrato_tipo = 'reparo' AND a.contrato_id = r.id AND a.avaliador_id = $1
+                WHERE a.contrato_tipo = 'reparo' AND a.contrato_id = r.id AND ${sqlDonoDaPessoa('a.avaliador_id', '$1')}
               ) AS ja_avaliei,
               COUNT(*) OVER()::int AS _total
        FROM reparos r
        LEFT JOIN usuarios u ON r.match_usuario_id = u.id
        LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
-       WHERE r.criado_por = $1 AND r.status = 'encerrada'
+       WHERE ${sqlDonoDaPessoa('r.criado_por', '$1')} AND r.status = 'encerrada'
        ORDER BY r.match_feito_em DESC NULLS LAST, r.id DESC
        LIMIT 200`,
       [req.usuario.id]
@@ -5250,7 +5255,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
 
     const reparo = await pool.query(`SELECT criado_por, titulo, status, match_usuario_id FROM reparos WHERE id = $1`, [reparo_id])
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
-    if (reparo.rows[0].criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
+    if (!(await ehMesmaPessoa(reparo.rows[0].criado_por, req.usuario.id))) return res.status(403).json({ erro: 'Apenas o dono pode responder' })
     // Guarda de estado da DEMANDA (D8): espelha a obra — aceitar/contrapropor só num serviço
     // vivo e ainda não casado, para não reabrir um encerrado nem reescrever valor pós-fechamento.
     const reparoAbertoParaNegociar = reparo.rows[0].status === 'aberta' && !reparo.rows[0].match_usuario_id
@@ -5465,7 +5470,7 @@ router.post('/reparos/:id/encerrar', autenticar, async (req, res) => {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     const r = reparo.rows[0]
-    const ehDono      = r.criado_por === req.usuario.id
+    const ehDono      = await ehMesmaPessoa(r.criado_por, req.usuario.id)
     const ehPrestador = r.match_usuario_id === req.usuario.id
     const ehAdmin     = req.usuario.role === 'admin'
     if (!ehDono && !ehPrestador && !ehAdmin) return res.status(403).json({ erro: 'Sem permissão para encerrar este serviço' })
@@ -5548,7 +5553,7 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1`, [req.params.id])
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     const r = reparo.rows[0]
-    const ehDono      = r.criado_por === req.usuario.id
+    const ehDono      = await ehMesmaPessoa(r.criado_por, req.usuario.id)
     const ehPrestador = r.match_usuario_id === req.usuario.id
     const ehAdmin     = req.usuario.role === 'admin'
     if (!ehDono && !ehPrestador && !ehAdmin) {
@@ -5935,7 +5940,7 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
     )
     if (alvo.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
     const d = alvo.rows[0]
-    const ehDono         = d.criado_por === req.usuario.id
+    const ehDono         = await ehMesmaPessoa(d.criado_por, req.usuario.id)
     const ehProfissional = !!d.match_usuario_id && d.match_usuario_id === req.usuario.id
     if (!ehDono && !ehProfissional) {
       return res.status(403).json({ erro: 'Apenas o dono ou o profissional do match podem declarar a chegada' })
@@ -5973,7 +5978,7 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
        WHERE id = $1
          AND status = 'aberta'
          AND match_usuario_id IS NOT NULL
-         AND (criado_por = $2::uuid OR match_usuario_id = $2::uuid)
+         AND (${sqlDonoDaPessoa('criado_por', '$2')} OR match_usuario_id = $2::uuid)
        RETURNING chegada_declarada_por, chegada_declarada_em, chegada_confirmada_em`,
       [req.params.id, req.usuario.id, ehDono]
     )
@@ -5983,7 +5988,7 @@ const criarHandlerChegada = (tabela) => async (req, res) => {
       )
       if (vivo.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
       const v = vivo.rows[0]
-      if (v.criado_por !== req.usuario.id && v.match_usuario_id !== req.usuario.id) {
+      if (!(await ehMesmaPessoa(v.criado_por, req.usuario.id)) && v.match_usuario_id !== req.usuario.id) {
         return res.status(403).json({ erro: 'Apenas o dono ou o profissional do match podem declarar a chegada' })
       }
       return res.status(409).json({
@@ -6075,7 +6080,7 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
     )
     if (alvo.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
     const d = alvo.rows[0]
-    const ehDono = d.criado_por === req.usuario.id
+    const ehDono = await ehMesmaPessoa(d.criado_por, req.usuario.id)
     const ehProfissional = !!d.match_usuario_id && d.match_usuario_id === req.usuario.id
     // Contador de sugestões de QUEM responde (dono ou profissional); fixo em string de coluna.
     const colSugestoes = colunaSugestoes(ehDono)
@@ -6241,7 +6246,7 @@ const criarHandlerConfirmarComparecimento = (tabela) => async (req, res) => {
     )
     if (alvo.rows.length === 0) return res.status(404).json({ erro: 'Demanda não encontrada' })
     const d = alvo.rows[0]
-    if (d.criado_por !== req.usuario.id) {
+    if (!(await ehMesmaPessoa(d.criado_por, req.usuario.id))) {
       return res.status(403).json({ erro: 'Apenas o dono pode confirmar o comparecimento' })
     }
     let motivo = null
@@ -6254,7 +6259,7 @@ const criarHandlerConfirmarComparecimento = (tabela) => async (req, res) => {
 
     // Mesmas condições repetidas no WHERE (linha VIVA): corrida com o cron ou com um 2º toque
     // vira rowCount 0 → 409, nunca uma gravação sobre estado que já mudou.
-    const guard = `WHERE id = $1 AND criado_por = $2::uuid AND status = 'aberta' AND match_usuario_id IS NOT NULL
+    const guard = `WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$2')} AND status = 'aberta' AND match_usuario_id IS NOT NULL
              AND chegada_janela = '${JANELA_AGENDADO}' AND chegada_prevista_em IS NOT NULL AND chegada_prevista_em <= NOW()
              AND chegada_confirmada_em IS NULL AND comparecimento_resposta IS NULL`
     let upd
@@ -6352,7 +6357,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
 
     // Máscara de leitura: título/descrição de reparo gravado antes do filtro de contato.
     const reparo = mascararLinha(result.rows[0], ['titulo', 'descricao'])
-    const ehDono           = reparo.criado_por === req.usuario.id
+    const ehDono           = await ehMesmaPessoa(reparo.criado_por, req.usuario.id)
     const ehPrestadorDoMatch = reparo.match_usuario_id === req.usuario.id
 
     // Dono sempre pode ver seu próprio reparo
@@ -6432,7 +6437,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // interesse aceito ou admin (Finding 3.1). ponto_referencia sai junto pelo mesmo motivo
     // do lado obra: é dica de localização, não descrição do serviço.
     // Coordenadas permanecem para o cálculo de distância no cliente.
-    if (reparo.criado_por !== req.usuario.id && reparo.match_usuario_id !== req.usuario.id && !meuAceite && req.usuario.role !== 'admin') {
+    if (!ehDono && reparo.match_usuario_id !== req.usuario.id && !meuAceite && req.usuario.role !== 'admin') {
       delete reparo.endereco_reparo
       delete reparo.ponto_referencia
     }
@@ -6476,7 +6481,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       desistencias,
       interessados_ativos,
       // Pedido de acordo de cancelamento vigente (quem, motivo, expira_em) — só dono e prestador do match.
-      pedido_cancelamento: pedidoCancelamento(reparo, req.usuario.id),
+      pedido_cancelamento: pedidoCancelamento(reparo, req.usuario.id, ehDono),
       // A partir de quando o dono pode desfazer a escolha (POST /reparos/dono/:id/desfazer-match).
       desfazer_liberado_em,
       // Lembretes "Agende seu atendimento" já enviados ao prestador deste match e o próximo devido.
@@ -6512,7 +6517,7 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
     const { reparo_id, ordem } = req.body
     if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
     const reparoOwner = await pool.query(`SELECT criado_por FROM reparos WHERE id = $1`, [reparo_id])
-    if (reparoOwner.rows.length === 0 || reparoOwner.rows[0].criado_por !== req.usuario.id) {
+    if (reparoOwner.rows.length === 0 || !(await ehMesmaPessoa(reparoOwner.rows[0].criado_por, req.usuario.id))) {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
     const resultado = await uploadArquivo(req.file)
@@ -6680,7 +6685,7 @@ router.post('/upload/reparo-url', autenticar, async (req, res) => {
     const { reparo_id, url, tipo = 'video', ordem = 1 } = req.body
     if (!reparo_id || !url) return res.status(400).json({ erro: 'reparo_id e url são obrigatórios' })
     const reparoOwner = await pool.query(`SELECT criado_por FROM reparos WHERE id = $1`, [reparo_id])
-    if (reparoOwner.rows.length === 0 || reparoOwner.rows[0].criado_por !== req.usuario.id) {
+    if (reparoOwner.rows.length === 0 || !(await ehMesmaPessoa(reparoOwner.rows[0].criado_por, req.usuario.id))) {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
     // Idempotente por slot (reparo_id, ordem): um retry após resposta perdida
@@ -6710,7 +6715,7 @@ router.post('/upload/obra-url', autenticar, async (req, res) => {
     const { obra_id, url, tipo = 'video', ordem = 1 } = req.body
     if (!obra_id || !url) return res.status(400).json({ erro: 'obra_id e url são obrigatórios' })
     const obraOwner = await pool.query(`SELECT criado_por FROM obras WHERE id = $1`, [obra_id])
-    if (obraOwner.rows.length === 0 || obraOwner.rows[0].criado_por !== req.usuario.id) {
+    if (obraOwner.rows.length === 0 || !(await ehMesmaPessoa(obraOwner.rows[0].criado_por, req.usuario.id))) {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
     // Idempotente por slot (obra_id, ordem): retry após resposta perdida substitui em vez de duplicar.
@@ -8064,7 +8069,9 @@ router.post('/avaliacoes', autenticar, async (req, res) => {
     // Ordem das branches preserva a precedência do dono caso uid seja os dois lados.
     const uid = req.usuario.id
     let avaliado_id
-    if (uid === c.criado_por) {
+    // Dono por PESSOA (ehMesmaPessoa): a conta irmã do criador avalia como dono. avaliador_id
+    // grava a conta que agiu; ja_avaliei nas listas também lê por pessoa.
+    if (await ehMesmaPessoa(c.criado_por, uid)) {
       avaliado_id = c.match_usuario_id       // dono avalia prestador
     } else if (uid === c.match_usuario_id) {
       return res.status(403).json({ erro: 'Apenas o dono do contrato pode avaliar' })
@@ -8144,7 +8151,7 @@ router.post('/avaliacoes/dispensar', autenticar, async (req, res) => {
     // "não quero" e mesmo assim continua elegível.
     const upd = await pool.query(
       `UPDATE ${tabela} SET aval_dispensada_em = NOW()
-        WHERE id = $1 AND criado_por = $2 AND aval_dispensada_em IS NULL
+        WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$2')} AND aval_dispensada_em IS NULL
        RETURNING id`,
       [contrato_id, req.usuario.id]
     )
@@ -8156,7 +8163,7 @@ router.post('/avaliacoes/dispensar', autenticar, async (req, res) => {
     // chamada. Uma leitura só, e apenas neste caminho frio.
     const c = await pool.query(`SELECT criado_por, aval_dispensada_em FROM ${tabela} WHERE id = $1`, [contrato_id])
     if (c.rows.length === 0) return res.status(404).json({ erro: 'Contrato não encontrado' })
-    if (c.rows[0].criado_por !== req.usuario.id) {
+    if (!(await ehMesmaPessoa(c.rows[0].criado_por, req.usuario.id))) {
       return res.status(403).json({ erro: 'Apenas o dono do contrato pode dispensar a avaliação' })
     }
     // Já dispensado antes: idempotente, 200 — repetir a recusa não é erro.
@@ -8298,7 +8305,7 @@ router.post('/denuncias', autenticar, async (req, res) => {
     // Inverso da avaliação: só o prestador do match denuncia, e o denunciado é o dono.
     const uid = req.usuario.id
     if (uid !== c.match_usuario_id) {
-      if (uid === c.criado_por) {
+      if (await ehMesmaPessoa(c.criado_por, uid)) {
         return res.status(403).json({ erro: 'Apenas o profissional do contrato pode denunciar' })
       }
       return res.status(403).json({ erro: 'Você não participou deste contrato' })

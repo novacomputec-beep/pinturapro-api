@@ -31,6 +31,9 @@ const { enviarEmail: enviarEmailBrevo } = require('./brevoService')
 // (reivindicarEmailsNovaDemanda). Sem CPF de um dos lados o predicado não filtra. Só leitura:
 // push_entregas nunca é reescrita por causa disto. utils/demandaPropria só importa utils/supabase.
 const { sqlNaoMesmoCpf, sqlNaoMesmoCpfDoCriador } = require('../utils/demandaPropria')
+// Contas da mesma pessoa (mesmo CPF): posse do dono por pessoa e entrega "uma vez por pessoa".
+// utils/tipoConta só importa supabase e demandaPropria — sem ciclo.
+const { sqlContasDaPessoa, sqlDonoDaPessoa } = require('../utils/tipoConta')
 // Agendamento livre de chegada (módulo inerte): zeragem das colunas no un-match, isenção de
 // falta (JS + SQL), espera pela resposta à vigia e os lembretes/vigia abaixo de lembrarPrazoChegada.
 const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, isentoDeFalta, SQL_ESPERA_COMPARECIMENTO, formatarDataHoraSP, sqlLimiteChegada } = require('../utils/agendamento')
@@ -1092,7 +1095,7 @@ const dispararPushNovoComClaim = async (tabela, id, notificar, { criadoPor = nul
     const lock = await client.query(
       `SELECT id FROM ${tabela}
         WHERE id = $1 AND push_novo_enviado_em IS NULL
-          AND ($2::uuid IS NULL OR criado_por = $2::uuid)
+          AND ($2::uuid IS NULL OR ${sqlDonoDaPessoa('criado_por', '$2')})
           AND (NOT $3::boolean OR (status = 'aberta' AND status_aprovacao = 'aprovada'))
         FOR UPDATE SKIP LOCKED`,
       [id, criadoPor, exigirPublicada]
@@ -1655,12 +1658,39 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
 }
 // Lembretes repetidos: push sempre, e-mail no máx. 1x por demanda × destinatário × dia (SP).
 const entregarLembrete = (args) => entregarPushEEmail({ ...args, lembrete: true })
-// Evento crítico a um usuário pelo id (lê push_token/e-mail/nome). Nunca lança.
+// Contato de ENTREGA de um usuário ({ usuario_id, push_token, email, nome }), ou null.
+// DONO (role dono_obra): a pessoa pode ter duas contas contratantes (dono_obra + dono_reparo,
+// mesmo CPF — utils/tipoConta) e o aviso vai UMA vez à pessoa, nunca uma por conta: token da
+// própria conta quando há, senão o de uma irmã contratante (quem trocou de perfil leva o
+// token junto e a conta antiga fica vazia); e-mail idem. usuario_id continua o da conta
+// pedida (claim de email_alertas, logs). PROFISSIONAL: a própria linha, como sempre.
+const contatoDaPessoa = async (usuarioId, db = pool) => {
+  if (!usuarioId) return null
+  const r = await db.query(
+    `SELECT u.id, u.role, u.push_token, u.email, u.nome
+       FROM usuarios u
+      WHERE u.id = $1::uuid
+         OR (u.role = 'dono_obra' AND u.id IN (${sqlContasDaPessoa('$1')})
+             AND (SELECT eu.role FROM usuarios eu WHERE eu.id = $1::uuid) = 'dono_obra')
+      ORDER BY (u.id = $1::uuid) DESC, (u.push_token IS NOT NULL) DESC`,
+    [usuarioId]
+  )
+  const propria = r.rows[0]
+  if (!propria) return null
+  const irmas = r.rows.slice(1)
+  return {
+    usuario_id: usuarioId,
+    push_token: propria.push_token || irmas.find(x => x.push_token)?.push_token || null,
+    email: propria.email || irmas.find(x => x.email)?.email || null,
+    nome: propria.nome,
+  }
+}
+// Evento crítico a um usuário pelo id (lê push_token/e-mail/nome; dono = uma vez por pessoa). Nunca lança.
 const avisarUsuario = async (usuarioId, args) => {
   try {
-    const u = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [usuarioId])
-    if (!u.rows[0]) return 'sem contato'
-    return await entregarPushEEmail({ usuario_id: usuarioId, ...u.rows[0], ...args })
+    const u = await contatoDaPessoa(usuarioId)
+    if (!u) return 'sem contato'
+    return await entregarPushEEmail({ ...u, ...args })
   } catch (err) {
     console.error(`[Entrega] ${args?.rotulo}:`, err.message)
     return 'falha'
@@ -3299,6 +3329,7 @@ module.exports = {
   semPushAtivo,
   LEMBRETE_EMAIL_SEM_PUSH_TETO_DIA,
   avisarUsuario,
+  contatoDaPessoa,
   diaSP,
   repetirLembreteAgendar,
   sqlClaimRepetirAgendar,

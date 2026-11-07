@@ -33,7 +33,8 @@
 const { pool } = require('../utils/supabase')
 const { formatarDataHoraSP } = require('../utils/agendamento')
 const { SQL_LIMPAR_MATCH } = require('./cancelamentoMatchService')
-const { entregarPushEEmail, inserirFaltaUnica, avaliarSuspensaoPorFaltas, MOTIVO_FALTA_SEM_HORARIO, semSobreposicao } = require('./alertaService')
+const { entregarPushEEmail, inserirFaltaUnica, avaliarSuspensaoPorFaltas, MOTIVO_FALTA_SEM_HORARIO, semSobreposicao, contatoDaPessoa } = require('./alertaService')
+const { ehMesmaPessoa } = require('../utils/tipoConta')
 
 // Fração do intervalo match→prazo que ainda pode restar quando o desfazer libera.
 const LIBERA_FRACAO_RESTANTE = 0.25
@@ -71,8 +72,9 @@ const avisar = async (u, aviso) => {
 }
 
 // Guardas sobre a linha (já travada). Devolve null para seguir ou { status, corpo }.
-const recusa = (lado, d, usuarioId) => {
-  if (d.criado_por !== usuarioId) return { status: 403, corpo: { erro: 'Só o cliente pode desfazer a escolha' } }
+// ehDono: posse por PESSOA, resolvida pelo handler (utils/tipoConta.ehMesmaPessoa) na transação.
+const recusa = (lado, d, ehDono) => {
+  if (!ehDono) return { status: 403, corpo: { erro: 'Só o cliente pode desfazer a escolha' } }
   if (d.status !== 'aberta') return { status: 409, corpo: { erro: `${lado.artigo} não está mais em andamento`, codigo: 'DEMANDA_FECHADA' } }
   if (!d.match_usuario_id || !d.match_feito_em) return { status: 409, corpo: { erro: 'Não há profissional escolhido para desfazer', codigo: 'SEM_MATCH' } }
   if (d.a_caminho_em || d.chegada_declarada_em || d.chegada_confirmada_em) {
@@ -109,7 +111,7 @@ const handler = (tabela) => {
       )
       d = r.rows[0]
       if (!d) { await client.query('ROLLBACK'); return res.status(404).json({ erro: lado.naoEncontrada }) }
-      const neg = recusa(lado, d, req.usuario.id)
+      const neg = recusa(lado, d, await ehMesmaPessoa(d.criado_por, req.usuario.id, client))
       if (neg) { await client.query('ROLLBACK'); return res.status(neg.status).json(neg.corpo) }
       profissionalId = d.match_usuario_id
 
@@ -182,7 +184,8 @@ const handler = (tabela) => {
           rotulo: `escolha desfeita ${lado.tipo} ${d.id} interessado`,
         })
       }
-      const [dono] = await contatos([d.criado_por])
+      // Dono UMA vez por pessoa (alertaService.contatoDaPessoa): token/e-mail da conta irmã se a dele está vazio.
+      const dono = await contatoDaPessoa(d.criado_por)
       if (dono) {
         await avisar(dono, {
           titulo: 'Pedido reaberto',

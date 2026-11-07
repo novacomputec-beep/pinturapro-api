@@ -33,7 +33,8 @@
 const { pool } = require('../utils/supabase')
 const { SQL_ZERAR_AGENDA, TOLERANCIA_CHEGADA_MIN, sqlPrazoChegada, sqlLimiteChegada, formatarHoraSP, isentoDeFalta } = require('../utils/agendamento')
 // Avisos de atraso são críticos pós-match: push E e-mail, com dedupe em email_alertas.
-const { entregarPushEEmail } = require('./alertaService')
+const { entregarPushEEmail, contatoDaPessoa } = require('./alertaService')
+const { ehMesmaPessoa } = require('../utils/tipoConta')
 
 const MINUTOS_PERMITIDOS = [15, 30, 60]
 const MAX_PEDIDOS_POR_MATCH = 2
@@ -120,11 +121,8 @@ const carregar = async (lado, id, db, lock = false) => {
   const r = await db.query(`SELECT ${COLUNAS} FROM ${lado.tabela} WHERE id = $1${lock ? ' FOR UPDATE' : ''}`, [id])
   return r.rows[0] || null
 }
-const contato = async (usuarioId, db = pool) => {
-  if (!usuarioId) return null
-  const r = await db.query(`SELECT id AS usuario_id, push_token, email, nome FROM usuarios WHERE id = $1`, [usuarioId])
-  return r.rows[0] || null
-}
+// Dono recebe UMA vez por pessoa (alertaService.contatoDaPessoa); profissional é a própria linha.
+const contato = (usuarioId, db = pool) => contatoDaPessoa(usuarioId, db)
 const primeiroNome = (nome) => (String(nome || '').trim().split(/\s+/)[0] || 'O profissional')
 const entregar = (destino, campos) => {
   if (!destino) return Promise.resolve('sem contato')
@@ -262,7 +260,7 @@ const responder = async ({ tabela, id, usuarioId, aceitar }) => {
   const feito = await transacao(async (client) => {
     const d = await carregar(lado, id, client, true)
     if (!d) return erro(404, lado.naoEncontrada)
-    if (d.criado_por !== usuarioId) return erro(403, 'Apenas o dono pode responder.')
+    if (!(await ehMesmaPessoa(d.criado_por, usuarioId, client))) return erro(403, 'Apenas o dono pode responder.')
     if (d.pedido_atraso_status !== STATUS_PENDENTE || !d.match_usuario_id || d.status !== 'aberta') {
       return erro(409, 'Não há pedido de mais tempo aguardando resposta.', 'SEM_PEDIDO')
     }
@@ -420,7 +418,7 @@ const handlersLegados = (tabela) => {
       try {
         const d = await carregar(lado, req.params.id, pool)
         if (!d) return res.status(404).json({ erro: lado.naoEncontrada })
-        if (d.criado_por !== req.usuario.id) return res.status(403).json({ erro: 'Apenas o dono pode responder o pedido' })
+        if (!(await ehMesmaPessoa(d.criado_por, req.usuario.id))) return res.status(403).json({ erro: 'Apenas o dono pode responder o pedido' })
         if (d.pedido_atraso_status === STATUS_PENDENTE && d.match_usuario_id) {
           const prof = await contato(d.match_usuario_id)
           entregar(prof, {

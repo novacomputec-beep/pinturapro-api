@@ -1,5 +1,6 @@
 const { upload, uploadParaCloudinary } = require('../services/uploadService')
 const { pool } = require('../utils/supabase')
+const { ehMesmaPessoa } = require('../utils/tipoConta')
 
 const uploadMidia = async (req, res) => {
   try {
@@ -18,7 +19,7 @@ const uploadMidia = async (req, res) => {
     if (obraExiste.rows.length === 0) {
       return res.status(404).json({ erro: 'Obra não encontrada' })
     }
-    if (obraExiste.rows[0].criado_por !== req.usuario.id && req.usuario.role !== 'admin') {
+    if (!(await ehMesmaPessoa(obraExiste.rows[0].criado_por, req.usuario.id)) && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
 
