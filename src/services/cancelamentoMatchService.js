@@ -29,7 +29,8 @@
 // pendente sai em GET /:id como pedido_cancelamento (pedidoCancelamento).
 const { pool } = require('../utils/supabase')
 const { SQL_ZERAR_AGENDA, formatarDataHoraSP } = require('../utils/agendamento')
-const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunciarDemanda } = require('./alertaService')
+const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunciarDemanda, contatoDaPessoa } = require('./alertaService')
+const { ehMesmaPessoa } = require('../utils/tipoConta')
 
 const MOTIVOS = ['imprevisto', 'nao_preciso', 'nao_consigo_horario', 'outro']
 const ROTULO_MOTIVO = {
@@ -100,14 +101,20 @@ const classificar = (d) => {
   }
 }
 
-const papelDe = (d, usuarioId) => (d.criado_por === usuarioId ? 'dono' : d.match_usuario_id === usuarioId ? 'profissional' : null)
+// Papel por PESSOA: dono é qualquer conta da pessoa do criador (utils/tipoConta.ehMesmaPessoa —
+// mesmo CPF); profissional continua sendo exatamente a conta do match.
+const papelDe = async (d, usuarioId) => (await ehMesmaPessoa(d.criado_por, usuarioId) ? 'dono' : d.match_usuario_id === usuarioId ? 'profissional' : null)
+// "Fui eu que pedi o cancelamento": para o dono vale qualquer conta da pessoa (o pedido pode ter
+// saído da conta irmã); para o profissional, só a própria conta.
+const pediuEuMesmo = (d, papel, usuarioId) =>
+  (papel === 'dono' ? !!d.cancelamento_pedido_por && d.cancelamento_pedido_por !== d.match_usuario_id : d.cancelamento_pedido_por === usuarioId)
 const quemFala = (papel, lado) => (papel === 'dono' ? 'O cliente' : `O ${lado.profissional}`)
 
 // Guardas comuns às três rotas. Devolve { d, papel } ou { status, corpo } para responder.
 const guardar = async (lado, req) => {
   const d = await carregar(lado, req.params.id)
   if (!d) return { status: 404, corpo: { erro: lado.naoEncontrada } }
-  const papel = papelDe(d, req.usuario.id)
+  const papel = await papelDe(d, req.usuario.id)
   if (!papel) return { status: 403, corpo: { erro: 'Só o cliente ou o profissional do atendimento podem cancelar' } }
   if (d.status !== 'aberta') return { status: 409, corpo: { erro: `${lado.artigo} não está mais em andamento`, codigo: 'DEMANDA_FECHADA' } }
   if (!d.match_usuario_id) return { status: 409, corpo: { erro: 'Não há atendimento combinado para cancelar', codigo: 'SEM_MATCH' } }
@@ -128,13 +135,16 @@ const lerMotivo = (body) => {
 const textoMotivo = (motivo, detalhe) => `${ROTULO_MOTIVO[motivo] || motivo}${detalhe ? ` — ${detalhe}` : ''}`
 
 // pedido_cancelamento de GET /:id: só para dono e profissional do match; null sem pedido vigente.
-const pedidoCancelamento = (linha, leitorId) => {
+const pedidoCancelamento = (linha, leitorId, ehDono = !!linha && linha.criado_por === leitorId) => {
   if (!linha || !linha.cancelamento_pedido_em || !linha.cancelamento_pedido_expira_em) return null
   if (new Date(linha.cancelamento_pedido_expira_em) <= new Date()) return null
-  if (linha.criado_por !== leitorId && linha.match_usuario_id !== leitorId) return null
+  // ehDono vem do chamador (GET /:id já resolveu a posse por pessoa); sem ele, conta exata.
+  if (!ehDono && linha.match_usuario_id !== leitorId) return null
+  // O pedido do dono pode ter saído de uma conta irmã: "dono" é tudo que não é o profissional.
+  const por = linha.cancelamento_pedido_por === linha.match_usuario_id ? 'profissional' : 'dono'
   return {
-    por: linha.cancelamento_pedido_por === linha.criado_por ? 'dono' : 'profissional',
-    meu: linha.cancelamento_pedido_por === leitorId,
+    por,
+    meu: pediuEuMesmo(linha, ehDono ? 'dono' : 'profissional', leitorId),
     motivo: linha.cancelamento_pedido_motivo,
     detalhe: linha.cancelamento_pedido_detalhe,
     criado_em: linha.cancelamento_pedido_em,
@@ -143,10 +153,9 @@ const pedidoCancelamento = (linha, leitorId) => {
 }
 
 // ---------- efeitos ----------
-const contato = async (usuarioId, db = pool) => {
-  const r = await db.query(`SELECT id AS usuario_id, push_token, email, nome FROM usuarios WHERE id = $1`, [usuarioId])
-  return r.rows[0] || null
-}
+// Dono recebe UMA vez por pessoa (token/e-mail da conta irmã quando a dele está vazio) —
+// alertaService.contatoDaPessoa; profissional é a própria linha, como antes.
+const contato = (usuarioId, db = pool) => contatoDaPessoa(usuarioId, db)
 // ambos (padrão): push E e-mail (entregarPushEEmail, dedupe em email_alertas) — cancelamento,
 // pedido de cancelamento, recusa e expiração do acordo são avisos críticos pós-match.
 // ambos: false → push ou, sem ele, e-mail (entregarPushOuEmail): só o aviso de cancelamentos
@@ -193,7 +202,7 @@ const avisarCancelamentosFrequentes = async (usuarioId) => {
 // no aceite de acordo, ao pedinte ("aceitaram seu pedido"), nunca a quem acabou de aceitar —
 // antes o aceitante recebia "O cliente/profissional cancelou…" e o pedinte não recebia nada.
 const executar = async ({ lado, d, canceladoPor, atorId = canceladoPor, motivo, detalhe, acordo, tardio, manterAberta }) => {
-  const papel = papelDe(d, canceladoPor)
+  const papel = await papelDe(d, canceladoPor)
   const profissionalId = d.match_usuario_id
   const encerrar = papel === 'dono' && (motivo === 'nao_preciso' || manterAberta === false)
   const client = await pool.connect()
@@ -237,7 +246,7 @@ const executar = async ({ lado, d, canceladoPor, atorId = canceladoPor, motivo, 
   if (String(outroId) === String(atorId)) {
     // Aceite de acordo: o "outro" do cancelamento é quem acabou de aceitar. Quem precisa saber é
     // o PEDINTE (canceladoPor): o pedido dele foi aceito e o atendimento acabou.
-    const papelAceitante = papelDe(d, atorId)
+    const papelAceitante = await papelDe(d, atorId)
     avisar(canceladoPor, {
       titulo: '✅ Cancelamento aceito',
       corpo: `${quemFala(papelAceitante, lado)} aceitou cancelar "${d.titulo}" de comum acordo. Sem penalidade para ninguém.`,
@@ -293,7 +302,7 @@ const handlers = (tabela) => {
       const lido = lerMotivo(req.body)
       if (lido.erro) return res.status(400).json({ erro: lido.erro })
       if (d.pedido_vigente) {
-        return res.status(409).json({ erro: d.cancelamento_pedido_por === req.usuario.id ? 'Você já pediu o cancelamento. Aguarde a resposta.' : 'A outra parte já pediu o cancelamento: responda ao pedido.', codigo: 'PEDIDO_PENDENTE', pedido_cancelamento: pedidoCancelamento(d, req.usuario.id) })
+        return res.status(409).json({ erro: pediuEuMesmo(d, papel, req.usuario.id) ? 'Você já pediu o cancelamento. Aguarde a resposta.' : 'A outra parte já pediu o cancelamento: responda ao pedido.', codigo: 'PEDIDO_PENDENTE', pedido_cancelamento: pedidoCancelamento(d, req.usuario.id) })
       }
       const upd = await pool.query(
         `UPDATE ${lado.tabela}
@@ -328,9 +337,9 @@ const handlers = (tabela) => {
       const { d, papel } = g
       if (typeof req.body?.aceitar !== 'boolean') return res.status(400).json({ erro: 'aceitar deve ser true ou false' })
       if (!d.pedido_vigente) return res.status(409).json({ erro: 'Não há pedido de cancelamento pendente', codigo: 'SEM_PEDIDO' })
-      if (d.cancelamento_pedido_por === req.usuario.id) return res.status(403).json({ erro: 'Quem pediu o cancelamento não responde ao próprio pedido' })
+      if (pediuEuMesmo(d, papel, req.usuario.id)) return res.status(403).json({ erro: 'Quem pediu o cancelamento não responde ao próprio pedido' })
       const pedidoPor = d.cancelamento_pedido_por
-      const papelPedinte = papelDe(d, pedidoPor) || 'profissional'
+      const papelPedinte = (await papelDe(d, pedidoPor)) || 'profissional'
       if (req.body.aceitar) {
         const r = await executar({ lado, d, canceladoPor: pedidoPor, atorId: req.usuario.id, motivo: d.cancelamento_pedido_motivo, detalhe: d.cancelamento_pedido_detalhe, acordo: true, tardio: false, manterAberta: true })
         if (!r.ok) return res.status(409).json({ erro: 'O atendimento mudou. Atualize a tela.', codigo: 'ESTADO_MUDOU' })

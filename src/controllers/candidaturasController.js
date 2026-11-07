@@ -1,4 +1,6 @@
 const { pool } = require('../utils/supabase')
+// Posse da obra por PESSOA (mesmo CPF, qualquer conta contratante) — utils/tipoConta.
+const { ehMesmaPessoa } = require('../utils/tipoConta')
 const { enviarContratoObra } = require('./contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 const { enviarPushNotificacao, avisarMatchFeito, avisarUsuario } = require('../services/alertaService')
@@ -66,7 +68,7 @@ const porObra = async (req, res) => {
     if (obraExiste.rows.length === 0) {
       return res.status(404).json({ erro: 'Obra não encontrada' })
     }
-    if (obraExiste.rows[0].criado_por !== req.usuario.id && req.usuario.role !== 'admin') {
+    if (!(await ehMesmaPessoa(obraExiste.rows[0].criado_por, req.usuario.id)) && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
 
@@ -142,7 +144,7 @@ const aprovar = async (req, res) => {
     )
     if (
       obraCheck.rows.length === 0 ||
-      (obraCheck.rows[0].criado_por !== req.usuario.id && req.usuario.role !== 'admin')
+      (!(await ehMesmaPessoa(obraCheck.rows[0].criado_por, req.usuario.id)) && req.usuario.role !== 'admin')
     ) {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
@@ -262,7 +264,7 @@ const recusar = async (req, res) => {
     )
     if (
       obraCheck.rows.length === 0 ||
-      (obraCheck.rows[0].criado_por !== req.usuario.id && req.usuario.role !== 'admin')
+      (!(await ehMesmaPessoa(obraCheck.rows[0].criado_por, req.usuario.id)) && req.usuario.role !== 'admin')
     ) {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }

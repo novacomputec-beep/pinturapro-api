@@ -1,4 +1,5 @@
 const { pool } = require('../utils/supabase')
+const { ehMesmaPessoa } = require('../utils/tipoConta')
 const { enviarEmail } = require('../services/emailService')
 
 // POST /mensagens — pintor envia dúvida sobre uma obra
@@ -23,7 +24,7 @@ const enviar = async (req, res) => {
     // candidatou nela. Antes bastava a obra existir — qualquer assinante podia inserir
     // mensagem em qualquer obra_id. Vale QUALQUER status de candidatura (inclusive recusada):
     // quem participou da disputa continua podendo perguntar sobre o desfecho.
-    if (obra.criado_por !== req.usuario.id) {
+    if (!(await ehMesmaPessoa(obra.criado_por, req.usuario.id))) {
       const candidatura = await pool.query(
         `SELECT 1 FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2 LIMIT 1`,
         [obra_id, req.usuario.id]

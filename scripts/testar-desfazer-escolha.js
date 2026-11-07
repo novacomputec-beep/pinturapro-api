@@ -88,7 +88,7 @@ const main = async () => {
   const colsProposta = (fk) => `id uuid PRIMARY KEY DEFAULT gen_random_uuid(), ${fk} uuid, usuario_id uuid, status text, status_antes_match text, cancelado_por uuid, cancelado_motivo text,
       cancelado_detalhe text, cancelado_em timestamptz, cancelado_acordo boolean DEFAULT false`
   await db.exec(`
-    CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, push_token text, suspenso_em timestamptz, suspenso_motivo text, desinstalado_em timestamptz);
+    CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, push_token text, suspenso_em timestamptz, suspenso_motivo text, desinstalado_em timestamptz, role text, cpf_cnpj text);
     CREATE TABLE reparos (${colsDemanda});
     CREATE TABLE obras (${colsDemanda});
     CREATE TABLE interesse_reparos (${colsProposta('reparo_id')});
