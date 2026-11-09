@@ -50,8 +50,9 @@ const main = async () => {
     // ---- validação de especialidades (cadastro/perfil do reparador) e do lado obra
     const v = E.validarEspecialidades([slug, slug, 'faxina'], true, 'reparador')
     ok(!v.erro && JSON.stringify(v.valor) === JSON.stringify([slug, 'faxina']), `${slug}: válida para reparador (duplicata colapsada)`, v)
-    const vo = E.validarEspecialidades([slug], true, 'pintor')
-    ok(/inválida/.test(vo.erro || ''), `${slug}: inválida para o lado obra`, vo.erro)
+    // Fase 2b: a conta pintor também pode declarar serviços (capacidade simétrica); tipo NULL não muda.
+    const vo = E.validarEspecialidades([slug, 'pintor'], true, 'pintor')
+    ok(!vo.erro && vo.valor.length === 2, `${slug}: válida também para a conta pintor (Fase 2b)`, vo)
 
     // ---- grupos dos avisos
     ok(G.GRUPOS_RELACIONADOS[n.grupo].includes(slug) && G.CHAVE_DO_SLUG[slug] === n.chave, `${slug}: no grupo "${n.grupo}" (chave ${n.chave})`)

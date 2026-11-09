@@ -125,8 +125,12 @@ const main = async () => {
   ok(!v.erro && v.valor.length === 2, 'reparador: duplicata de slug de obra colapsa', v)
   v = esp.validarEspecialidades(['residencial'], true, 'reparador')
   ok(/inválida/.test(v.erro || ''), 'reparador: categoria de OBRA (residencial) não é especialidade', v)
+  // Fase 2b (simétrico): a conta pintor passou a aceitar também os serviços — ver
+  // scripts/testar-profissional-mesma-pessoa.js. O que não é especialidade segue recusado.
   v = esp.validarEspecialidades(['pintor', 'eletrica'], true, 'pintor')
-  ok(/inválida/.test(v.erro || ''), 'pintor: continua SÓ com as 4 de obra (serviço recusado)', v)
+  ok(!v.erro && v.valor.length === 2, 'pintor: obra + serviço aceitos (Fase 2b)', v)
+  v = esp.validarEspecialidades(['pintor', 'residencial'], true, 'pintor')
+  ok(/inválida/.test(v.erro || ''), 'pintor: categoria de OBRA (residencial) não é especialidade', v)
   v = esp.validarEspecialidades(OBRA4, true, 'pintor')
   ok(!v.erro && v.valor.length === 4, 'pintor: as 4 de obra continuam válidas', v)
   v = esp.validarEspecialidades(['pintor'], true, null)
@@ -313,8 +317,8 @@ const main = async () => {
   r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPerf, body: { nome: 'RPERF Novo Nome' } })
   ok(r.status === 200 && r.body.pode_obras === false && r.body.especialidades.length === 1, 'PUT /auth/perfil sem especialidades não mexe na lista', r.body)
   const reqPintor = (await db.query(`SELECT id, nome, email, role, ativo, tipo_prestador, especialidades FROM usuarios WHERE id = $1`, [P.id])).rows[0]
-  r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPintor, body: { especialidades: ['pintor', 'eletrica'] } })
-  ok(r.status === 400, 'PUT /auth/perfil de PINTOR com slug de serviço → 400 (lista do pintor não mudou)', r.body)
+  r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPintor, body: { especialidades: ['pintor', 'residencial'] } })
+  ok(r.status === 400, 'PUT /auth/perfil de PINTOR com slug que não é especialidade → 400', r.body)
 
   // Rota inteira: reparador com obra SE CANDIDATA e o dono é avisado com o texto novo.
   pushes.length = 0

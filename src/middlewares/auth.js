@@ -2,6 +2,9 @@ const jwt = require('jsonwebtoken')
 const { pool } = require('../utils/supabase')
 // Só importa utils/supabase — sem ciclo com este middleware.
 const { registrarVersaoVista } = require('../utils/versaoApp')
+// utils/demandaPropria só importa utils/supabase — sem ciclo. sqlCpfNormalizado: a MESMA
+// normalização do índice único de cadastro (identidade da pessoa = CPF, nunca e-mail).
+const { sqlCpfNormalizado } = require('../utils/demandaPropria')
 
 // Cache simples em memória
 const cacheUsuarios = new Map()
@@ -71,6 +74,114 @@ const assinaturaAtivaCacheada = async (usuarioId) => {
   return ativa
 }
 
+// Linha de sessão de UM usuário, pelo cache de 30s. Além das colunas da própria linha:
+//   especialidades — os gates de capacidade (exigirPodeObras / exigirPodeServicos, routes/index.js)
+//     decidem por tipo OU especialidade (utils/capacidadeObras);
+//   contas_irmas   — ids das OUTRAS contas PROFISSIONAIS da mesma pessoa (role 'prestador' nos dois
+//     lados, mesmo CPF normalizado, nunca e-mail — a regra de utils/tipoConta
+//     .sqlContasProfissionaisDaPessoa). '{}' para dono/admin e para quem tem uma conta só, que é
+//     quase todo mundo: nenhum caminho abaixo consulta nada a mais nesse caso;
+//   suspenso_em / suspenso_motivo — por PESSOA (Fase 2b): os da própria conta ou, sem eles, os de
+//     uma conta irmã suspensa. A suspensão segue gravada na conta que a mereceu; aqui a outra conta
+//     profissional da mesma pessoa deixa de ser porta dos fundos (exigirNaoSuspenso lê isto).
+const sqlMesmoProfissional = (outro) => `${outro}.id <> u.id AND u.role = 'prestador' AND ${outro}.role = 'prestador'
+             AND ${sqlCpfNormalizado(`${outro}.cpf_cnpj`)} = ${sqlCpfNormalizado('u.cpf_cnpj')}`
+const SQL_USUARIO_SESSAO = `
+  SELECT u.id, u.nome, u.email, u.role, u.ativo, u.tipo_prestador, u.especialidades, u.token_version,
+         COALESCE(u.suspenso_em, sp.suspenso_em) AS suspenso_em,
+         CASE WHEN u.suspenso_em IS NOT NULL THEN u.suspenso_motivo ELSE sp.suspenso_motivo END AS suspenso_motivo,
+         ARRAY(SELECT irma.id FROM usuarios irma WHERE ${sqlMesmoProfissional('irma')} ORDER BY irma.id) AS contas_irmas
+    FROM usuarios u
+    LEFT JOIN LATERAL (
+      SELECT s.suspenso_em, s.suspenso_motivo FROM usuarios s
+       WHERE ${sqlMesmoProfissional('s')} AND s.suspenso_em IS NOT NULL
+       ORDER BY s.suspenso_em LIMIT 1) sp ON true
+   WHERE u.id = $1`
+const carregarUsuario = async (id) => {
+  let usuario = getCacheUsuario(id)
+  if (!usuario) {
+    const result = await pool.query(SQL_USUARIO_SESSAO, [id])
+    if (result.rows.length === 0) return null
+    usuario = result.rows[0]
+    setCacheUsuario(id, usuario)
+  }
+  return usuario
+}
+
+// ─── Conta VINCULADA à demanda (lado profissional unificado, Fase 2b — 09/11/2026) ──────────────
+// A pessoa com conta de pintor E de reparador (mesmo CPF) é UM profissional: numa demanda ela age
+// por UMA conta só — a primeira que se envolveu (proposta ou match). Se a conta LOGADA não tem
+// vínculo com a demanda da rota e a conta IRMÃ tem, o handler roda COMO a irmã: req.usuario passa
+// a ser a linha dela e req.contaLogada guarda a conta do token.
+//
+// Por que trocar a identidade aqui, num lugar só, em vez de afrouxar cada checagem de posse: todo
+// o código de obra/reparo compara match_usuario_id e usuario_id com req.usuario.id e GRAVA esse id
+// (chegada_declarada_por, encerramento_solicitado_por, faltas, lista negra). Aceitar "qualquer
+// conta da pessoa" em cada comparação deixaria linhas em que quem declarou a chegada não é o
+// profissional do match — e os crons e o app leem essas colunas por igualdade. Trocando a conta,
+// todas as invariantes continuam valendo e as checagens de "profissional escolhido" aceitam
+// qualquer conta profissional da pessoa sem mudar uma linha.
+//
+// Quem decide (nesta ordem): (1) a proposta NOMEADA na rota (:candidaturaId / :interesse_id) —
+// age a conta dona dela; (2) o match — age a conta casada; (3) a conta logada, se tem proposta;
+// (4) a irmã que tem proposta. Sem vínculo de ninguém, segue a conta logada (é ela que cria a
+// proposta nova). Consequência: a 2ª conta que tenta se candidatar cai no "já se candidatou" da
+// irmã — uma proposta por PESSOA por demanda (a rota troca a mensagem; ver req.contaLogada lá).
+//
+// Só rotas de UMA demanda (/obras/:id… e /reparos/:id…), só role 'prestador' com conta irmã.
+// Os gates de CONTA (assinatura, verificação de identidade) continuam julgando a conta LOGADA
+// (contaDoToken); capacidade e suspensão são por pessoa. Exportada para as rotas que recebem a
+// demanda no CORPO (avaliações) chamarem com (req, tabela, demandaId).
+const LADOS_VINCULO = [
+  { prefixo: '/obras/:id',   tabela: 'obras',   proposta: 'candidaturas',      fk: 'obra_id',   paramProposta: 'candidaturaId' },
+  { prefixo: '/reparos/:id', tabela: 'reparos', proposta: 'interesse_reparos', fk: 'reparo_id', paramProposta: 'interesse_id' },
+]
+const RE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const ladoDaRota = (req) => {
+  const caminho = req.route?.path
+  if (typeof caminho !== 'string') return null
+  return LADOS_VINCULO.find(l => caminho === l.prefixo || caminho.startsWith(`${l.prefixo}/`)) || null
+}
+const contaVinculada = async (usuario, lado, demandaId, propostaId) => {
+  const contas = [usuario.id, ...(usuario.contas_irmas || [])]
+  if (propostaId && RE_UUID.test(String(propostaId))) {
+    const p = await pool.query(
+      `SELECT usuario_id FROM ${lado.proposta} WHERE id = $1 AND ${lado.fk} = $2 AND usuario_id = ANY($3::uuid[])`,
+      [propostaId, demandaId, contas]
+    )
+    if (p.rows[0]) return p.rows[0].usuario_id
+  }
+  const r = await pool.query(
+    `SELECT d.match_usuario_id,
+            ARRAY(SELECT p.usuario_id FROM ${lado.proposta} p
+                   WHERE p.${lado.fk} = d.id AND p.usuario_id = ANY($2::uuid[])
+                   ORDER BY p.criado_em, p.usuario_id) AS com_proposta
+       FROM ${lado.tabela} d WHERE d.id = $1`,
+    [demandaId, contas]
+  )
+  const d = r.rows[0]
+  if (!d) return usuario.id
+  if (d.match_usuario_id && contas.includes(d.match_usuario_id)) return d.match_usuario_id
+  if (d.com_proposta.includes(usuario.id)) return usuario.id
+  return d.com_proposta[0] || usuario.id
+}
+const assumirContaVinculada = async (req, tabela = null, demandaId = null) => {
+  const usuario = req.usuario
+  if (!usuario || usuario.role !== 'prestador' || !(usuario.contas_irmas?.length > 0)) return
+  const lado = tabela ? LADOS_VINCULO.find(l => l.tabela === tabela) : ladoDaRota(req)
+  const id = tabela ? demandaId : req.params?.id
+  if (!lado || !RE_UUID.test(String(id || ''))) return
+  const alvoId = await contaVinculada(usuario, lado, id, tabela ? null : req.params?.[lado.paramProposta])
+  if (!alvoId || alvoId === usuario.id) return
+  const alvo = await carregarUsuario(alvoId)
+  if (!alvo) return
+  req.contaLogada = usuario
+  req.usuario = alvo
+}
+// A conta do TOKEN — a que os gates de conta (assinatura, verificação) julgam, mesmo quando o
+// handler vai agir como a conta irmã vinculada à demanda.
+const contaDoToken = (req) => req.contaLogada || req.usuario
+
 const autenticar = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization
@@ -84,20 +195,10 @@ const autenticar = async (req, res, next) => {
       return res.status(401).json({ erro: 'Autenticação incompleta — código 2FA necessário' })
     }
 
-    // Tenta cache primeiro
-    let usuario = getCacheUsuario(decoded.id)
+    // Tenta cache primeiro (carregarUsuario)
+    const usuario = await carregarUsuario(decoded.id)
     if (!usuario) {
-      // especialidades: o gate de obras (exigirPodeObras, routes/index.js) decide pela
-      // capacidade — tipo 'pintor' OU reparador com especialidade de obra (utils/capacidadeObras).
-      const result = await pool.query(
-        'SELECT id, nome, email, role, ativo, tipo_prestador, especialidades, suspenso_em, suspenso_motivo, token_version FROM usuarios WHERE id = $1',
-        [decoded.id]
-      )
-      if (result.rows.length === 0) {
-        return res.status(401).json({ erro: 'Usuário não encontrado' })
-      }
-      usuario = result.rows[0]
-      setCacheUsuario(decoded.id, usuario)
+      return res.status(401).json({ erro: 'Usuário não encontrado' })
     }
 
     if (!usuario.ativo) {
@@ -114,6 +215,8 @@ const autenticar = async (req, res, next) => {
     }
 
     req.usuario = usuario
+    // Mesma pessoa, outra conta profissional com proposta/match NESTA demanda: age como ela.
+    await assumirContaVinculada(req)
     // Versão/plataforma do app que fez a chamada (headers X-App-Version / X-App-Platform):
     // registro fire-and-forget com dedupe em memória (utils/versaoApp) — síncrono, sem await,
     // nunca falha a requisição. Sem os headers (painel web, cliente antigo) é no-op.
@@ -130,7 +233,8 @@ const exigirAssinaturaAtiva = async (req, res, next) => {
     return next()
   }
   try {
-    const assinaturaAtiva = await assinaturaAtivaCacheada(req.usuario.id)
+    // Conta do TOKEN (contaDoToken): a assinatura é da conta que está logada.
+    const assinaturaAtiva = await assinaturaAtivaCacheada(contaDoToken(req).id)
 
     if (!assinaturaAtiva) {
       return res.status(403).json({
@@ -149,7 +253,9 @@ const exigirAssinaturaAtiva = async (req, res, next) => {
 // andamento — match, chegada, encerramento, avaliação, denúncia, perfil, login — segue aberto,
 // porque suspender alguém no meio de um serviço puniria o dono junto.
 // admin/aprovador nunca são barrados (moderação não pode se autotrancar).
-// suspenso_em vem de req.usuario, populado por autenticar — atenção ao cache de 5 min de lá.
+// suspenso_em vem de req.usuario, populado por autenticar — atenção ao cache de 30s de lá.
+// É por PESSOA (Fase 2b): carregarUsuario já devolve a suspensão da conta OU da conta irmã
+// profissional (mesmo CPF), então a outra conta da mesma pessoa também fica barrada aqui.
 // Corpo do 403 de conta suspensa, exportado para os pontos que checam a suspensão FORA do
 // middleware (aceites, onde a decisão depende da action) não reescreverem o texto por conta
 // própria e acabarem divergindo dele.
@@ -178,7 +284,8 @@ const exigirNaoSuspenso = (req, res, next) => {
 const exigirVerificado = async (req, res, next) => {
   if (req.usuario.role === 'admin' || req.usuario.role === 'aprovador') return next()
   try {
-    const r = await pool.query(`SELECT verificacao_status FROM usuarios WHERE id = $1`, [req.usuario.id])
+    // Conta do TOKEN (contaDoToken): a verificação de identidade é da conta que está logada.
+    const r = await pool.query(`SELECT verificacao_status FROM usuarios WHERE id = $1`, [contaDoToken(req).id])
     const status = r.rows[0]?.verificacao_status || 'nao_solicitada'
     if (status === 'aprovado') return next()
     return res.status(403).json({
@@ -207,4 +314,5 @@ const exigirSuperAdmin = (req, res, next) => {
   next()
 }
 
-module.exports = { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirVerificado, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada }
+module.exports = { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirVerificado, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada,
+  assumirContaVinculada, contaDoToken, carregarUsuario }

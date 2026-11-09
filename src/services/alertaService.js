@@ -33,7 +33,10 @@ const { enviarEmail: enviarEmailBrevo } = require('./brevoService')
 const { sqlNaoMesmoCpf, sqlNaoMesmoCpfDoCriador } = require('../utils/demandaPropria')
 // Contas da mesma pessoa (mesmo CPF): posse do dono por pessoa e entrega "uma vez por pessoa".
 // utils/tipoConta só importa supabase e demandaPropria — sem ciclo.
-const { sqlContasDaPessoa, sqlDonoDaPessoa } = require('../utils/tipoConta')
+// sqlProfissionalDaPessoa / sqlPessoaNaoSuspensa: o espelho para quem TRABALHA (Fase 2b) — contas
+// 'prestador' do mesmo CPF são UM profissional (um aviso, uma contagem de faltas, uma suspensão).
+const { sqlContasDaPessoa, sqlDonoDaPessoa, sqlProfissionalDaPessoa, sqlPessoaNaoSuspensa, contasProfissionaisDaPessoa } = require('../utils/tipoConta')
+const { sqlCpfNormalizado } = require('../utils/demandaPropria')
 // Agendamento livre de chegada (módulo inerte): zeragem das colunas no un-match, isenção de
 // falta (JS + SQL), espera pela resposta à vigia e os lembretes/vigia abaixo de lembrarPrazoChegada.
 const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, isentoDeFalta, SQL_ESPERA_COMPARECIMENTO, formatarDataHoraSP, sqlLimiteChegada } = require('../utils/agendamento')
@@ -64,16 +67,31 @@ const sqlCasaCategorias = (param) =>
 //   'obras'   → quem PODE TRABALHAR EM OBRAS (utils/capacidadeObras.sqlPodeObras): conta 'pintor'
 //               OU conta 'reparador' com ao menos uma especialidade de obra (Fase 2a, 09/11/2026).
 //               É a MESMA regra do gate exigirPodeObras — quem recebe o push consegue abrir a obra.
-//   'reparos' → tipo_prestador = 'reparador' ESTRITO (D87), o mesmo predicado de exigirReparador.
+//   'reparos' → quem PODE TRABALHAR EM SERVIÇOS (sqlPodeServicos): conta 'reparador' OU conta
+//               'pintor' com ao menos uma especialidade de serviço (Fase 2b, 09/11/2026) — a MESMA
+//               regra do gate exigirPodeServicos. O casamento categoria × especialidades
+//               (sqlCasaCategorias) continua por cima: o pintor recebe o serviço das SUAS
+//               especialidades, como qualquer reparador.
 //   qualquer outro valor → ninguém (falha fechado).
 // Prestador com tipo_prestador NULL (legado) não entra em nenhum dos dois, como sempre.
 // O lado obra continua SEM filtro de especialidade por demanda (obras.categoria é residencial/
 // comercial/…, não um ofício): qualquer especialidade de obra recebe toda obra da cidade.
-const { sqlPodeObras } = require('../utils/capacidadeObras')
+const { sqlPodeObras, sqlPodeServicos } = require('../utils/capacidadeObras')
 const sqlPublicoProfissional = (param) => `u.role = 'prestador' AND (CASE ${param}::text
            WHEN 'obras'   THEN ${sqlPodeObras('u')}
-           WHEN 'reparos' THEN u.tipo_prestador = 'reparador'
+           WHEN 'reparos' THEN ${sqlPodeServicos('u')}
            ELSE false END)`
+
+// UM AVISO POR PESSOA (Fase 2b): com as capacidades cruzadas, a conta de pintor e a de reparador
+// da mesma pessoa (mesmo CPF) podem cair no MESMO público. As duas consultas de público escolhem
+// UMA linha por pessoa com DISTINCT ON (SQL_PESSOA_DO_PUBLICO) entre as contas ELEGÍVEIS — então
+// quem só tem token (ou e-mail) numa das contas recebe por ela. Com as duas elegíveis vale a conta
+// do tipo nativo do lado (pintor na obra, reparador no serviço) e, no empate, a de menor id: a
+// escolha é estável entre páginas e entre repetições do mesmo aviso. Conta sem CPF é a própria
+// pessoa (chave = id). Todo mundo aqui é 'prestador', então CPF igual = mesmo profissional.
+const SQL_PESSOA_DO_PUBLICO = `COALESCE(${sqlCpfNormalizado('u.cpf_cnpj')}, u.id::text)`
+const sqlOrdemDaPessoa = (param) => `${SQL_PESSOA_DO_PUBLICO},
+                (u.tipo_prestador = CASE ${param}::text WHEN 'obras' THEN 'pintor' ELSE 'reparador' END) DESC, u.id`
 
 const expo = new Expo()
 
@@ -328,7 +346,10 @@ const PAGINA_BROADCAST = 500
 // profissional a cada INDICACAO_GAP_DIAS, somando TODAS as demandas — usuarios.indicacao_pedida_em
 // guarda o último envio e este predicado (público do broadcast) deixa de fora quem ainda está no gap.
 const INDICACAO_GAP_DIAS = 3
-const SQL_SEM_INDICACAO_RECENTE = `(u.indicacao_pedida_em IS NULL OR u.indicacao_pedida_em < NOW() - (${INDICACAO_GAP_DIAS} * INTERVAL '1 day'))`
+// Por PESSOA (Fase 2b): o carimbo de qualquer conta profissional do mesmo CPF segura as demais.
+const SQL_SEM_INDICACAO_RECENTE = `NOT EXISTS (SELECT 1 FROM usuarios ind
+           WHERE ${sqlProfissionalDaPessoa('ind.id', 'u.id')}
+             AND ind.indicacao_pedida_em >= NOW() - (${INDICACAO_GAP_DIAS} * INTERVAL '1 day'))`
 
 // Broadcast PAGINADO por chave estável (A5): u.id > cursor ORDER BY u.id LIMIT 500, até
 // esgotar. Antes era LIMIT 500 sem ORDER BY nem continuação: numa cidade com 5.000
@@ -365,12 +386,13 @@ const registrarEntregas = async (tipo, demandaId, resultados) => {
 }
 
 // Quem JÁ se manifestou numa demanda (candidaturas / interesse_reparos, qualquer status — o app
-// não deixa a mesma pessoa manifestar duas vezes) fica FORA dos lembretes dela, no push e no
+// não deixa a mesma pessoa manifestar duas vezes; "pessoa" = qualquer conta profissional do
+// mesmo CPF, Fase 2b) fica FORA dos lembretes dela, no push e no
 // e-mail. `interesse` = { tabela, coluna } do lado (LADOS_LEMBRETE); `param` é o placeholder do
 // id da demanda; `u` é o alias do prestador nas duas consultas de público. Sem `interesse`
 // (demanda nova) devolve '' — ninguém pode ter se manifestado antes do primeiro aviso.
 const sqlSemManifestacao = (interesse, param) => (interesse
-  ? `AND NOT EXISTS (SELECT 1 FROM ${interesse.tabela} x WHERE x.${interesse.coluna} = ${param}::uuid AND x.usuario_id = u.id)`
+  ? `AND NOT EXISTS (SELECT 1 FROM ${interesse.tabela} x WHERE x.${interesse.coluna} = ${param}::uuid AND ${sqlProfissionalDaPessoa('x.usuario_id', 'u.id')})`
   : '')
 
 // entrega = { tipo: 'obra' | 'reparo', demandaId }: identifica a demanda em push_entregas.
@@ -430,10 +452,14 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
     }
     if (excluirJaAvisados) {
       params.push(excluirJaAvisados.tipo, excluirJaAvisados.demandaId)
-      filtrosOpcionais += `\n         AND NOT EXISTS (SELECT 1 FROM push_entregas pe WHERE pe.tipo = $${params.length - 1} AND pe.demanda_id = $${params.length}::uuid AND pe.usuario_id = u.id)`
+      filtrosOpcionais += `\n         AND NOT EXISTS (SELECT 1 FROM push_entregas pe WHERE pe.tipo = $${params.length - 1} AND pe.demanda_id = $${params.length}::uuid AND ${sqlProfissionalDaPessoa('pe.usuario_id', 'u.id')})`
     }
+    // Subconsulta = os ELEGÍVEIS, UMA linha por pessoa (DISTINCT ON — ver SQL_PESSOA_DO_PUBLICO);
+    // o cursor e o LIMIT ficam por FORA, sobre as contas escolhidas, para a escolha não depender
+    // da página.
     const pagina = await pool.query(
-      `SELECT u.id, u.push_token
+      `SELECT x.id, x.push_token FROM (
+       SELECT DISTINCT ON (${SQL_PESSOA_DO_PUBLICO}) u.id, u.push_token
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
        WHERE ${sqlPublicoProfissional('$1')}
@@ -442,15 +468,18 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
          -- Suspenso por faltas não recebe isca de trabalho novo — mesmo predicado de QUERY do
          -- cron de proximidade (server.js, verificarPrestadoresProximos): quem dispara é o
          -- servidor, não o prestador, então o middleware exigirNaoSuspenso não passa por aqui.
-         AND u.suspenso_em IS NULL
+         -- Por PESSOA (Fase 2b): a suspensão de qualquer conta profissional do CPF vale para todas.
+         AND ${sqlPessoaNaoSuspensa('u.id')}
          AND u.desinstalado_em IS NULL
          AND NULLIF(btrim(u.cidade), '') IS NOT NULL
          AND NULLIF(btrim(u.uf), '')     IS NOT NULL
          AND ${SQL_CIDADE_PRESTADOR} = $2
          AND upper(btrim(u.uf)) = $3
-         AND ($4::uuid IS NULL OR u.id > $4::uuid)
          AND ${sqlCategorias}${filtrosOpcionais}
-       ORDER BY u.id
+       ORDER BY ${sqlOrdemDaPessoa('$1')}
+       ) x
+       WHERE ($4::uuid IS NULL OR x.id > $4::uuid)
+       ORDER BY x.id
        LIMIT $5`,
       params
     )
@@ -811,15 +840,22 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     // Elegíveis (espelho de broadcastPaginado, sem exigir token e exigindo e-mail). Com
     // lado.somenteSemToken ($6) só quem NÃO tem push_token entra (lembrete/reanúncio). Ordem
     // por u.id como lá, para o teto cortar de forma estável.
+    // Como no push: subconsulta = elegíveis, UMA linha por pessoa (DISTINCT ON); ordem final por id.
     const elegiveis = await client.query(
-      `SELECT u.id, u.nome, u.email
+      `SELECT x.id, x.nome, x.email FROM (
+       SELECT DISTINCT ON (${SQL_PESSOA_DO_PUBLICO}) u.id, u.nome, u.email
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
        WHERE ${sqlPublicoProfissional('$1')}
          AND ${SQL_ASSINATURA_ATIVA}
          AND (NOT $6::boolean OR u.push_token IS NULL)
          AND NULLIF(btrim(u.email), '') IS NOT NULL
-         AND u.suspenso_em IS NULL
+         AND ${sqlPessoaNaoSuspensa('u.id')}
+         -- Uma vez por PESSOA (Fase 2b): se a outra conta profissional do CPF já recebeu ESTE
+         -- e-mail (mesmo tipo, mesma demanda), esta não recebe — o UNIQUE de email_alertas é por conta.
+         AND NOT EXISTS (SELECT 1 FROM email_alertas ja
+                          WHERE ja.tipo = $9 AND ja.demanda_id = $5 AND ja.usuario_id <> u.id
+                            AND ${sqlProfissionalDaPessoa('ja.usuario_id', 'u.id')})
          AND u.desinstalado_em IS NULL
          AND NULLIF(btrim(u.cidade), '') IS NOT NULL
          AND NULLIF(btrim(u.uf), '')     IS NOT NULL
@@ -832,13 +868,15 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          -- por dia de São Paulo (política de 29/10/2026), além do UNIQUE por fatia.
          AND (NOT $7::boolean OR NOT EXISTS (
                SELECT 1 FROM email_alertas ea
-                WHERE ea.demanda_id = $5 AND ea.usuario_id = u.id AND ea.tipo LIKE 'lembrete\\_%'
+                WHERE ea.demanda_id = $5 AND ${sqlProfissionalDaPessoa('ea.usuario_id', 'u.id')} AND ea.tipo LIKE 'lembrete\\_%'
                   AND ea.created_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')))
          -- Categorias ADICIONADAS ($8, lado.excluirCategorias): só quem NÃO casava com o público
          -- antigo — o UNIQUE de email_alertas já barra quem recebeu o e-mail original.
          AND ($8::text[] IS NULL OR NOT COALESCE(u.especialidades && $8::text[], false))
-       ORDER BY u.id`,
-      [lado.publico, cidade, uf, categorias, demandaId, lado.somenteSemToken === true, /^lembrete_/.test(lado.tipo), lado.excluirCategorias ?? null]
+       ORDER BY ${sqlOrdemDaPessoa('$1')}
+       ) x
+       ORDER BY x.id`,
+      [lado.publico, cidade, uf, categorias, demandaId, lado.somenteSemToken === true, /^lembrete_/.test(lado.tipo), lado.excluirCategorias ?? null, lado.tipo]
     )
     if (elegiveis.rows.length === 0) return null
 
@@ -1568,11 +1606,30 @@ const ehOProprioAutor = ({ usuario_id, ator_id, rotulo }) => {
   console.warn(`[Entrega] ${rotulo}: destinatário é o próprio autor da ação (${usuario_id}) — aviso suprimido`)
   return true
 }
+// Aviso 1:1 a um PROFISSIONAL cuja conta está sem token: a pessoa pode estar logada no aparelho
+// com a OUTRA conta profissional (mesmo CPF — trocar de perfil leva o token junto e esvazia a
+// conta antiga), e o match/proposta do aviso é da conta sem token. O push vai ao token da conta
+// irmã; o e-mail e o claim continuam os da conta do aviso. Para dono/admin o conjunto é só a
+// própria conta: devolve null e nada muda. Nunca lança (aviso não pode cair por causa disto).
+const tokenDaContaIrmaProfissional = async (usuarioId) => {
+  if (!usuarioId) return null
+  try {
+    const r = await pool.query(
+      `SELECT irma.push_token FROM usuarios irma
+        WHERE irma.id <> $1::uuid AND ${sqlProfissionalDaPessoa('irma.id', '$1')}
+          AND irma.push_token IS NOT NULL AND irma.desinstalado_em IS NULL
+        ORDER BY irma.id LIMIT 1`, [usuarioId])
+    return r.rows[0]?.push_token || null
+  } catch (err) {
+    return null
+  }
+}
 const entregarPushOuEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, data, rotulo }) => {
   if (ehOProprioAutor({ usuario_id, ator_id, rotulo })) return 'autor'
   try {
-    if (push_token) {
-      const r = await enviarPushNotificacao(push_token, titulo, corpo, data, usuario_id)
+    const token = push_token || await tokenDaContaIrmaProfissional(usuario_id)
+    if (token) {
+      const r = await enviarPushNotificacao(token, titulo, corpo, data, usuario_id)
       if (r === 'enviado') return 'push'
     }
     const destino = String(email || '').trim()
@@ -1644,8 +1701,9 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
   if (ehOProprioAutor({ usuario_id, ator_id, rotulo })) return 'autor'
   const vias = []
   try {
-    if (push_token) {
-      const r = await enviarPushNotificacao(push_token, titulo, corpo, data, usuario_id)
+    const token = push_token || await tokenDaContaIrmaProfissional(usuario_id)
+    if (token) {
+      const r = await enviarPushNotificacao(token, titulo, corpo, data, usuario_id)
       if (r === 'enviado') vias.push('push')
     }
     const destino = String(email || '').trim()
@@ -1684,7 +1742,9 @@ const entregarLembrete = (args) => entregarPushEEmail({ ...args, lembrete: true 
 // mesmo CPF — utils/tipoConta) e o aviso vai UMA vez à pessoa, nunca uma por conta: token da
 // própria conta quando há, senão o de uma irmã contratante (quem trocou de perfil leva o
 // token junto e a conta antiga fica vazia); e-mail idem. usuario_id continua o da conta
-// pedida (claim de email_alertas, logs). PROFISSIONAL: a própria linha, como sempre.
+// pedida (claim de email_alertas, logs). PROFISSIONAL (role prestador): a MESMA regra desde a
+// Fase 2b, com as contas profissionais do mesmo CPF (sqlContasProfissionaisDaPessoa) — os dois
+// conjuntos são disjuntos, então dono nunca recebe pelo token do perfil profissional nem o inverso.
 const contatoDaPessoa = async (usuarioId, db = pool) => {
   if (!usuarioId) return null
   const r = await db.query(
@@ -1693,6 +1753,7 @@ const contatoDaPessoa = async (usuarioId, db = pool) => {
       WHERE u.id = $1::uuid
          OR (u.role = 'dono_obra' AND u.id IN (${sqlContasDaPessoa('$1')})
              AND (SELECT eu.role FROM usuarios eu WHERE eu.id = $1::uuid) = 'dono_obra')
+         OR (u.role = 'prestador' AND ${sqlProfissionalDaPessoa('u.id', '$1')})
       ORDER BY (u.id = $1::uuid) DESC, (u.push_token IS NOT NULL) DESC`,
     [usuarioId]
   )
@@ -2675,14 +2736,21 @@ const avaliarSuspensaoPorFaltas = async (usuarioId) => {
   if (!usuarioId) return
   try {
     // perdoada_em IS NULL: falta perdoada por um admin continua no histórico mas não conta.
+    // Por PESSOA (Fase 2b): contam as faltas de TODAS as contas profissionais do mesmo CPF —
+    // 2 faltas como pintor + 1 como reparador são 3 faltas do mesmo profissional.
     const c = await pool.query(
       `SELECT COUNT(*)::int AS n FROM faltas_profissional
-        WHERE usuario_id = $1
+        WHERE ${sqlProfissionalDaPessoa('usuario_id', '$1')}
           AND perdoada_em IS NULL
           AND criado_em > NOW() - INTERVAL '${JANELA_FALTAS}'`,
       [usuarioId]
     )
     if (c.rows[0].n < FALTAS_PARA_SUSPENDER) return
+    // Já suspensa por uma conta irmã: a pessoa já está barrada (a leitura é por pessoa) — não
+    // empilha uma segunda suspensão nem reenvia o aviso.
+    const jaSuspensa = await pool.query(
+      `SELECT 1 FROM usuarios WHERE ${sqlProfissionalDaPessoa('id', '$1')} AND suspenso_em IS NOT NULL LIMIT 1`, [usuarioId])
+    if (jaSuspensa.rows.length > 0) return
 
     // suspenso_em IS NULL no WHERE: suspende UMA vez. Sem isso, a 4ª, 5ª... falta reescreveria
     // o timestamp (empurrando o início da suspensão para frente) e reenviaria o push a cada
@@ -2698,7 +2766,9 @@ const avaliarSuspensaoPorFaltas = async (usuarioId) => {
     // quente continuaria passando por exigirNaoSuspenso (que lê req.usuario) por até 30
     // segundos depois de suspenso — janela para pegar mais um trabalho. Os aceites já
     // consultam o banco direto, mas os feeds e a criação de proposta dependem do cache.
-    invalidarCacheAssinatura(usuarioId)
+    // A suspensão é lida por PESSOA (carregarUsuario em middlewares/auth): derruba do cache
+    // TODAS as contas profissionais dela, não só a que levou a falta.
+    for (const id of await contasProfissionaisDaPessoa(usuarioId)) invalidarCacheAssinatura(id)
     console.log(`[Faltas] usuario ${usuarioId} suspenso — ${c.rows[0].n} faltas em ${JANELA_FALTAS}`)
     // Evento crítico (conta suspensa): push + e-mail sempre.
     avisarUsuario(usuarioId, {

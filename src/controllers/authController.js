@@ -5,8 +5,9 @@ const { invalidarCacheAssinatura } = require('../middlewares/auth')
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { MARCA } = require('../utils/marca')
 const { validarEspecialidades } = require('../utils/especialidades')
-// pode_obras / tem_candidaturas das respostas de sessão e perfil (Fase 2a — utils/capacidadeObras).
-const { podeObras, capacidadeObras } = require('../utils/capacidadeObras')
+// pode_obras / pode_servicos / tem_candidaturas / tem_interesses das respostas de sessão e perfil
+// (Fases 2a e 2b — utils/capacidadeObras), por PESSOA: contas profissionais do mesmo CPF.
+const { podeObras, podeServicos, capacidadesDaPessoa } = require('../utils/capacidadeObras')
 const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, multiplasContasAtivo, sqlDonoDaPessoa } = require('../utils/tipoConta')
 const { registrarPlataforma, detectarPlataforma } = require('../utils/plataforma')
 const { registrarReinstalacao } = require('../utils/desinstalacoes')
@@ -408,11 +409,14 @@ const cadastrar = async (req, res) => {
     // O app entra com este usuario (loginComToken) até reler o perfil: mesmos campos de
     // referências do GET /auth/perfil, calculados do que acabou de ser gravado.
     Object.assign(usuario, camposReferencias(referencias || [], usuario))
-    // Mesmos campos do login (montarSessao). Calculados do que acabou de ser gravado, SEM ir ao
-    // banco: já houve COMMIT, e um erro de leitura aqui responderia 500 a um cadastro feito.
-    // Conta recém-criada não tem candidatura.
-    usuario.pode_obras = podeObras({ role, tipo_prestador, especialidades: espCadastro.valor })
-    usuario.tem_candidaturas = false
+    // Mesmos campos do login (montarSessao), por PESSOA: a conta nova pode ser a 2ª conta
+    // profissional de um CPF (múltiplas contas) e herdar capacidade/propostas da irmã. Já houve
+    // COMMIT: se a leitura falhar, cai no cálculo local do que acabou de ser gravado em vez de
+    // responder 500 a um cadastro feito.
+    const linhaNova = { role, tipo_prestador, especialidades: espCadastro.valor }
+    Object.assign(usuario,
+      { pode_obras: podeObras(linhaNova), pode_servicos: podeServicos(linhaNova), tem_candidaturas: false, tem_interesses: false },
+      await capacidadesDaPessoa(usuario.id).catch(() => ({})))
     console.log(`[CADASTRO][${ts}] ✓ commit ok — token gerado | usuario_id=${usuario.id} — respondendo 201`)
     res.status(201).json({ usuario, token, assinatura })
     registrarPlataforma(usuario.id, req)
@@ -694,11 +698,12 @@ const montarSessao = async (usuario, req, contas = []) => {
     [usuario.id]
   )
 
-  // pode_obras / tem_candidaturas: lidos do BANCO pela conta (não da linha recebida — nem todo
-  // chamador traz especialidades, ex.: o RETURNING da conta vinculada), com a MESMA expressão do
-  // público do push de obra. Campos EXTRAS em `usuario`: app antigo ignora e segue decidindo a
-  // aba por tipo_prestador; o app novo mostra Obras por pode_obras.
-  const capacidade = await capacidadeObras(usuario.id)
+  // pode_obras / pode_servicos / tem_candidaturas / tem_interesses: lidos do BANCO (não da linha
+  // recebida — nem todo chamador traz especialidades, ex.: o RETURNING da conta vinculada), com as
+  // MESMAS expressões do público do push, e por PESSOA (contas profissionais do mesmo CPF —
+  // Fase 2b). Campos EXTRAS em `usuario`: app antigo ignora e segue decidindo as abas por
+  // tipo_prestador; o app novo mostra Obras por pode_obras e Serviços por pode_servicos.
+  const capacidade = await capacidadesDaPessoa(usuario.id)
 
   const token = gerarToken(usuario)
   registrarPlataforma(usuario.id, req)
@@ -718,8 +723,7 @@ const montarSessao = async (usuario, req, contas = []) => {
       tipo_prestador: usuario.tipo_prestador || null,
       boas_vindas_exibida: usuario.boas_vindas_exibida ?? false,
       verificacao_status: usuario.verificacao_status || 'nao_solicitada',
-      pode_obras: capacidade.pode_obras,
-      tem_candidaturas: capacidade.tem_candidaturas,
+      ...capacidade,
       // O app usa ESTE usuario até a próxima releitura do perfil (boot/revalidarSessao): sem
       // os campos aqui, "Minhas referências" ficava escondido logo depois do login.
       ...camposReferencias(usuario.referencias, usuario),
@@ -770,9 +774,9 @@ const trocarConta = async (req, res) => {
   }
 }
 
-// pode_obras / tem_candidaturas (Fase 2a) são da CONTA logada, não da pessoa: a capacidade de
-// trabalhar em obras (pintor OU reparador com especialidade de obra) e se ela já se candidatou a
-// alguma obra — utils/capacidadeObras. Mesmos valores de `usuario` no login e no perfil.
+// pode_obras / pode_servicos / tem_candidaturas / tem_interesses (Fases 2a e 2b): as capacidades
+// e o histórico de propostas da PESSOA no lado profissional (contas 'prestador' do mesmo CPF —
+// utils/capacidadeObras.capacidadesDaPessoa). Mesmos valores de `usuario` no login e no perfil.
 // GET /auth/contas (autenticado): { contas: [{ id, tipo, nome }], tem_obras }. `contas` é a MESMA
 // lista do login/trocar-conta (contas ativas do e-mail, sem admin). `tem_obras` é por PESSOA
 // (mesmo CPF, qualquer conta — utils/tipoConta.sqlDonoDaPessoa): com o lado contratante unificado
@@ -788,7 +792,7 @@ const listarContas = async (req, res) => {
       `SELECT EXISTS (SELECT 1 FROM obras WHERE ${sqlDonoDaPessoa('criado_por', '$1')}) AS tem`,
       [req.usuario.id]
     )
-    const capacidade = await capacidadeObras(req.usuario.id)
+    const capacidade = await capacidadesDaPessoa(req.usuario.id)
     res.json({ contas: resumoContas(linhas), tem_obras: obras.rows[0]?.tem === true, ...capacidade })
   } catch (err) {
     console.error('Erro ao listar contas:', err)
@@ -816,9 +820,9 @@ const perfil = async (req, res) => {
     if (usuario) {
       Object.assign(usuario, camposReferencias(usuario.referencias, usuario))
       delete usuario.referencias
-      // Mesmos campos do login (montarSessao): aba Obras por capacidade, "Minhas candidaturas"
-      // por histórico. Lidos do banco, com a expressão do público do push de obra.
-      Object.assign(usuario, await capacidadeObras(usuario.id))
+      // Mesmos campos do login (montarSessao): abas Obras/Serviços por capacidade, "Minhas
+      // candidaturas"/"Meus interesses" por histórico — por PESSOA, lidos do banco.
+      Object.assign(usuario, await capacidadesDaPessoa(usuario.id))
     }
     // Profissional: resumo das avaliações recebidas + selo "bem avaliado" (3× 5★) no payload
     // do perfil, para o app mostrar sem segunda chamada. Dono/admin não recebem o bloco.
@@ -928,12 +932,19 @@ const atualizarPerfil = async (req, res) => {
        mexeEspecialidades, especialidadesValidadas]
     )
     const salvo = result.rows[0]
-    // Especialidades mudam a CAPACIDADE de obras (reparador que marca/tira especialidade de obra):
-    // o cache de `autenticar` guarda a lista antiga por até 30s, e o gate exigirPodeObras a leria.
-    // Limpa nesta réplica; nas outras, o gate reconfere a negativa no banco antes do 403.
+    // Especialidades mudam as CAPACIDADES (reparador que marca/tira especialidade de obra, pintor
+    // que marca/tira especialidade de serviço): o cache de `autenticar` guarda a lista antiga por
+    // até 30s, e os gates exigirPodeObras / exigirPodeServicos a leriam. Limpa nesta réplica; nas
+    // outras, o gate reconfere a negativa no banco antes do 403.
     if (mexeEspecialidades) invalidarCacheAssinatura(req.usuario.id)
-    // pode_obras já na resposta do save (campo extra): o app liga/desliga a aba Obras sem reler o perfil.
-    if (salvo) salvo.pode_obras = podeObras({ role: req.usuario.role, tipo_prestador: req.usuario.tipo_prestador, especialidades: salvo.especialidades })
+    // pode_obras / pode_servicos já na resposta do save (campos extras): o app liga/desliga as abas
+    // sem reler o perfil. Por PESSOA, como no login; se a leitura falhar, vale o cálculo da conta.
+    if (salvo) {
+      const linhaSalva = { role: req.usuario.role, tipo_prestador: req.usuario.tipo_prestador, especialidades: salvo.especialidades }
+      const cap = await capacidadesDaPessoa(req.usuario.id).catch(() => null)
+      salvo.pode_obras = cap ? cap.pode_obras : podeObras(linhaSalva)
+      salvo.pode_servicos = cap ? cap.pode_servicos : podeServicos(linhaSalva)
+    }
     res.json(salvo)
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar perfil' })

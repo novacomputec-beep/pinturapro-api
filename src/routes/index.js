@@ -1,7 +1,7 @@
 require('dotenv').config()
 const express = require('express')
 const router = express.Router()
-const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirVerificado, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada } = require('../middlewares/auth')
+const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirVerificado, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada, contaDoToken } = require('../middlewares/auth')
 const { registrarVisita } = require('../utils/visitas')
 const { pool } = require('../utils/supabase')
 const { MARCA } = require('../utils/marca')
@@ -90,12 +90,17 @@ const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 // o broadcast de reparo novo casa categoria × especialidades (alertaService). Só POST
 // /reparos/dono valida; a rota de aprovação não reavalia linha já gravada.
 const { ESPECIALIDADES_REPARADOR, GRUPO_OBRAS_REPARADOR, validarEspecialidades } = require('../utils/especialidades')
-// Capacidade "pode trabalhar em obras" (pintor OU reparador com especialidade de obra) — gate exigirPodeObras.
-const { podeObras } = require('../utils/capacidadeObras')
+// Capacidades do profissional — pode_obras (pintor OU reparador com especialidade de obra) e
+// pode_servicos (reparador OU pintor com especialidade de serviço), por PESSOA nos gates
+// exigirPodeObras / exigirPodeServicos.
+const { podeObras, podeServicos, capacidadesDaPessoa } = require('../utils/capacidadeObras')
 const { enviarEmail } = require('../services/emailService')
 // sqlDonoDaPessoa / ehMesmaPessoa: posse de demanda por PESSOA (mesmo CPF), não por conta — um
 // dono_reparo gerencia as obras da sua conta de pintura e vice-versa (Fase 1 do lado contratante).
-const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL, sqlDonoDaPessoa, ehMesmaPessoa } = require('../utils/tipoConta')
+// sqlProfissionalDaPessoa / sqlArrayProfissionaisDaPessoa / sqlPessoaNaoSuspensa: o espelho para
+// quem TRABALHA (Fase 2b) — contas profissionais do mesmo CPF são UM profissional.
+const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL, sqlDonoDaPessoa, ehMesmaPessoa,
+        sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa, contasProfissionaisDaPessoa } = require('../utils/tipoConta')
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
@@ -1776,11 +1781,13 @@ const exigirPrestador = async (req, res, next) => {
       return res.status(403).json({ erro: 'Acesso restrito a prestadores de serviços domésticos' })
     }
     if (req.usuario.role === 'admin') return next()
+    // A assinatura é da conta do TOKEN (contaDoToken), mesmo quando `autenticar` assumiu a conta
+    // irmã vinculada à demanda (mesma pessoa, Fase 2b).
 
     // Lê pelo cache COMPARTILHADO de middlewares/auth: é a mesma consulta e o mesmo predicado
     // que exigirAssinaturaAtiva usa. A mensagem do 403 segue a daqui ("serviços"), diferente
     // da de lá ("obras") — só a fonte da resposta foi unificada.
-    const ativa = await assinaturaAtivaCacheada(req.usuario.id)
+    const ativa = await assinaturaAtivaCacheada(contaDoToken(req).id)
     if (!ativa) return res.status(403).json({ erro: 'Assinatura inativa. Renove seu plano para acessar os serviços.' })
     next()
   } catch (err) {
@@ -1788,23 +1795,13 @@ const exigirPrestador = async (req, res, next) => {
   }
 }
 
-// Enforça o TIER do prestador no servidor (não só na UI): pintor/construtor
-// (tipo_prestador='pintor') só participa de OBRAS; reparador participa de REPAROS — e de
-// OBRAS só quando marcou especialidade de obra (exigirPodeObras, logo abaixo).
-// Antes, nenhum feed/ação filtrava por tipo_prestador — a separação
-// existia só no app, então um pintor via reparos e um reparador via obras.
-// tipo_prestador vem em req.usuario (carregado no autenticar). admin/aprovador
-// passam (painel/moderação). Qualquer outro tier — inclusive prestador com
-// tipo_prestador NULL (legado) — falha FECHADO com 403, nunca vaza o feed errado.
-const exigirTipoPrestador = (tipoEsperado, msg) => (req, res, next) => {
-  if (req.usuario.role === 'admin' || req.usuario.role === 'aprovador') return next()
-  if (req.usuario.role !== 'prestador' || req.usuario.tipo_prestador !== tipoEsperado) {
-    return res.status(403).json({ erro: msg, codigo: 'TIER_INCORRETO' })
-  }
-  next()
-}
-// Verificar cada tier explicitamente (regra do projeto: um não replica o outro).
-const exigirReparador = exigirTipoPrestador('reparador', 'Este recurso é exclusivo para prestadores de serviços domésticos.')
+// Enforça o TIER do prestador no servidor (não só na UI). Nasceu por TIPO (pintor só em obras,
+// reparador só em reparos — exigirPintor / exigirReparador); desde as Fases 2a/2b é por
+// CAPACIDADE: pintor/construtor participa de OBRAS e, se marcou especialidade de serviço, de
+// REPAROS; reparador participa de REPAROS e, se marcou especialidade de obra, de OBRAS
+// (exigirPodeObras / exigirPodeServicos, logo abaixo). admin/aprovador passam (painel/
+// moderação). Qualquer outro caso — inclusive prestador com tipo_prestador NULL (legado) —
+// falha FECHADO com 403 TIER_INCORRETO, nunca vaza o feed errado.
 
 // OBRAS — gate por CAPACIDADE, não mais por tipo (Fase 2a, 09/11/2026): passa a conta 'pintor' E a
 // conta 'reparador' que marcou ao menos uma especialidade de obra (utils/capacidadeObras.podeObras).
@@ -1819,44 +1816,63 @@ const exigirReparador = exigirTipoPrestador('reparador', 'Este recurso é exclus
 // nada, e a liberação vale na hora em qualquer réplica. O sentido inverso (tirou a especialidade)
 // pode levar até 30s nas outras réplicas, o que é inofensivo.
 //
-// ouCandidato (rotas de proposta EM ANDAMENTO: /pintor-responder e /match, com :id da obra): quem
-// tirou a especialidade de obra com candidatura já feita NESTA obra ainda precisa responder à
-// contraproposta e confirmar a ida — sem isso a obra ficaria presa num match que ninguém destrava.
+// Variante "em andamento" (exigirPodeObrasOuCandidato / exigirPodeServicosOuInteressado, nas rotas
+// /pintor-responder, /prestador-responder e /match, com :id da demanda): quem tirou a especialidade
+// com proposta já feita NESTA demanda ainda precisa responder à contraproposta e confirmar a ida —
+// sem isso a demanda ficaria presa num match que ninguém destrava.
 const ERRO_TIER_OBRAS = Object.freeze({
   erro: 'Este recurso é exclusivo para profissionais de obras (construção/pintura).',
   codigo: 'TIER_INCORRETO',
 })
+// SERVIÇOS — o gate simétrico (Fase 2b, 09/11/2026): passa a conta 'reparador' E a conta 'pintor'
+// que marcou ao menos uma especialidade de serviço (utils/capacidadeObras.podeServicos). Substitui
+// o antigo exigirReparador nas 7 rotas de serviço, com o MESMO 403 TIER_INCORRETO de sempre.
+//
+// Os dois gates são por PESSOA (Fase 2b): a pessoa com conta de pintor E de reparador (mesmo CPF)
+// tem UM feed — a conta logada pode o que qualquer conta profissional ATIVA dela pode
+// (capacidadesDaPessoa). A conta julgada é a do TOKEN (contaDoToken), não a conta irmã que
+// `autenticar` pode ter assumido para esta demanda. O caminho feliz (a própria conta pode, pelo
+// req.usuario do cache) não consulta nada; só a NEGATIVA de um prestador vai ao banco — e essa
+// mesma leitura resolve o cache velho (especialidade gravada noutra réplica) e a conta irmã.
+// emAndamento: a tabela de propostas e sua FK — quem (a conta que age, req.usuario) já tem
+// proposta NESTA demanda passa mesmo sem a capacidade.
+const ERRO_TIER_SERVICOS = Object.freeze({
+  erro: 'Este recurso é exclusivo para prestadores de serviços domésticos.',
+  codigo: 'TIER_INCORRETO',
+})
 const RE_UUID_GATE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const criarExigirPodeObras = ({ ouCandidato = false } = {}) => async (req, res, next) => {
+const criarExigirCapacidade = ({ pode, campo, erro, emAndamento = null }) => async (req, res, next) => {
   try {
-    const u = req.usuario
-    if (u.role === 'admin' || u.role === 'aprovador') return next()
-    if (podeObras(u)) return next()
-    if (u.role === 'prestador' && u.tipo_prestador === 'reparador') {
-      const fresco = await pool.query(`SELECT especialidades FROM usuarios WHERE id = $1`, [u.id])
-      const especialidades = fresco.rows[0]?.especialidades
-      if (podeObras({ ...u, especialidades })) {
-        invalidarCachesUsuario(u.id)
-        // Cópia: o objeto de req.usuario é o MESMO guardado no cache — não se altera no lugar.
-        req.usuario = { ...u, especialidades }
+    const conta = contaDoToken(req)
+    if (conta.role === 'admin' || conta.role === 'aprovador') return next()
+    if (pode(conta)) return next()
+    // tipo_prestador NULL (legado) falha fechado sem consultar nada: não tem capacidade própria
+    // e, por regra, não a recebe emprestada.
+    if (conta.role === 'prestador' && (conta.tipo_prestador === 'pintor' || conta.tipo_prestador === 'reparador')) {
+      const cap = await capacidadesDaPessoa(conta.id)
+      if (cap[campo]) {
+        // A linha do cache estava velha (ou a capacidade vem da conta irmã): a próxima chamada relê.
+        invalidarCachesUsuario(conta.id)
         return next()
       }
-      if (ouCandidato && RE_UUID_GATE.test(String(req.params.id || ''))) {
-        const cand = await pool.query(
-          `SELECT 1 FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2 LIMIT 1`,
-          [req.params.id, u.id]
+      if (emAndamento && RE_UUID_GATE.test(String(req.params.id || ''))) {
+        const prop = await pool.query(
+          `SELECT 1 FROM ${emAndamento.tabela} WHERE ${emAndamento.fk} = $1 AND usuario_id = $2 LIMIT 1`,
+          [req.params.id, req.usuario.id]
         )
-        if (cand.rows.length > 0) return next()
+        if (prop.rows.length > 0) return next()
       }
     }
-    return res.status(403).json(ERRO_TIER_OBRAS)
+    return res.status(403).json(erro)
   } catch (err) {
-    console.error('[exigirPodeObras]', err.message)
+    console.error(`[exigirCapacidade ${campo}]`, err.message)
     res.status(500).json({ erro: 'Erro de autenticação' })
   }
 }
-const exigirPodeObras = criarExigirPodeObras()
-const exigirPodeObrasOuCandidato = criarExigirPodeObras({ ouCandidato: true })
+const exigirPodeObras = criarExigirCapacidade({ pode: podeObras, campo: 'pode_obras', erro: ERRO_TIER_OBRAS })
+const exigirPodeObrasOuCandidato = criarExigirCapacidade({ pode: podeObras, campo: 'pode_obras', erro: ERRO_TIER_OBRAS, emAndamento: { tabela: 'candidaturas', fk: 'obra_id' } })
+const exigirPodeServicos = criarExigirCapacidade({ pode: podeServicos, campo: 'pode_servicos', erro: ERRO_TIER_SERVICOS })
+const exigirPodeServicosOuInteressado = criarExigirCapacidade({ pode: podeServicos, campo: 'pode_servicos', erro: ERRO_TIER_SERVICOS, emAndamento: { tabela: 'interesse_reparos', fk: 'reparo_id' } })
 
 // Rede de segurança de coordenadas na criação — simétrica ao `uf || ufDeCidade(cidade)`.
 // O app geocodifica no cliente (ViaCEP -> Nominatim) e isso falha em silêncio: CEP sem
@@ -1885,9 +1901,23 @@ const resolverCoordenadas = (cidade, uf, latitude, longitude, rotulo) => {
 // então serve tanto para `if (await estaSuspenso(x))` quanto para quem precisa do motivo.
 const estaSuspenso = async (usuarioId) => {
   if (!usuarioId) return null
-  const r = await pool.query(`SELECT suspenso_em, suspenso_motivo FROM usuarios WHERE id = $1`, [usuarioId])
-  return r.rows[0]?.suspenso_em ? r.rows[0] : null
+  // Por PESSOA (Fase 2b): a suspensão de QUALQUER conta profissional do mesmo CPF vale para o
+  // candidato — a da própria conta primeiro, senão a mais antiga das irmãs.
+  const r = await pool.query(
+    `SELECT suspenso_em, suspenso_motivo FROM usuarios
+      WHERE ${sqlProfissionalDaPessoa('id', '$1')} AND suspenso_em IS NOT NULL
+      ORDER BY (id = $1::uuid) DESC, suspenso_em LIMIT 1`, [usuarioId])
+  return r.rows[0] || null
 }
+
+// Uma proposta por PESSOA por demanda (Fase 2b): a 2ª conta profissional do mesmo CPF que tenta
+// se candidatar / demonstrar interesse onde a outra já o fez. Nas rotas com a demanda na URL quem
+// detecta é `autenticar` (req.contaLogada preenchido = o handler está agindo como a conta irmã,
+// que já tem proposta); `codigo` é a chave estável para o app.
+const ERRO_PROPOSTA_OUTRO_PERFIL = Object.freeze({
+  erro: 'Você já enviou proposta para este pedido pelo seu outro perfil profissional. Acompanhe por lá — é uma proposta por pessoa.',
+  codigo: 'PROPOSTA_OUTRO_PERFIL',
+})
 
 const ERRO_ACEITE_SUSPENSO = {
   erro: 'Este profissional está com a conta suspensa e não pode assumir novos trabalhos. Escolha outro candidato.',
@@ -2636,13 +2666,17 @@ router.get('/obras/meus-contratos', autenticar, async (req, res) => {
                 WHERE a.contrato_tipo = 'obra' AND a.contrato_id = o.id AND a.avaliador_id = $1
               ) AS ja_avaliei,
               ${sqlAvaliacaoRecebida('obra', 'o.id')} AS avaliacao_recebida,
+              -- Conta profissional (da pessoa) que fez o trabalho — Fase 2b, campo extra.
+              o.match_usuario_id AS conta_id,
               -- Total ANTES do LIMIT, no mesmo statement: evita uma segunda query repetindo
               -- o WHERE — duplicar predicado é exatamente onde os dois lados divergem depois.
               COUNT(*) OVER()::int AS _total
        FROM obras o
        JOIN usuarios u ON o.criado_por = u.id
-       LEFT JOIN candidaturas c ON c.obra_id = o.id AND c.usuario_id = $1
-       WHERE o.match_usuario_id = $1 AND o.status = 'encerrada'
+       -- Por PESSOA (Fase 2b): contratos de QUALQUER conta profissional do mesmo CPF; a
+       -- candidatura (valor acordado) é a da conta que casou.
+       LEFT JOIN candidaturas c ON c.obra_id = o.id AND c.usuario_id = o.match_usuario_id
+       WHERE ${sqlProfissionalDaPessoa('o.match_usuario_id', '$1')} AND o.status = 'encerrada'
        -- o.id como desempate: match_feito_em sozinho não é determinístico, e com LIMIT um
        -- empate na borda faria a mesma linha aparecer duas vezes (ou sumir) num load-more.
        ORDER BY o.match_feito_em DESC NULLS LAST, o.id DESC
@@ -3578,7 +3612,7 @@ const criarHandlerResposta = (tabela) => async (req, res) => {
 // Mesmas guardas de POST /obras/:id/candidatura e POST /reparos/:id/interesse: conta não
 // suspensa, assinatura ativa, tier do lado certo, verificação de identidade aprovada.
 router.post('/obras/:id/perguntas',   autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPodeObras, exigirVerificado, criarHandlerPergunta('obras'))
-router.post('/reparos/:id/perguntas', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, exigirVerificado, criarHandlerPergunta('reparos'))
+router.post('/reparos/:id/perguntas', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPodeServicos, exigirVerificado, criarHandlerPergunta('reparos'))
 router.post('/obras/:id/perguntas/:pid/resposta',   autenticar, criarHandlerResposta('obras'))
 router.post('/reparos/:id/perguntas/:pid/resposta', autenticar, criarHandlerResposta('reparos'))
 
@@ -3790,7 +3824,7 @@ router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssin
       `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
       [req.params.id, req.usuario.id]
     )
-    if (existente.rows.length > 0) { await client.query('ROLLBACK'); return res.status(409).json({ erro: 'Você já se candidatou nesta obra' }) }
+    if (existente.rows.length > 0) { await client.query('ROLLBACK'); return res.status(409).json(req.contaLogada ? ERRO_PROPOSTA_OUTRO_PERFIL : { erro: 'Você já se candidatou nesta obra' }) }
     const result = await client.query(
       `INSERT INTO candidaturas (obra_id, usuario_id, mensagem, valor_proposto, status) VALUES ($1, $2, $3, $4, 'pendente') RETURNING *`,
       [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
@@ -4890,6 +4924,10 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
     if (req.usuario.role !== 'prestador') return res.status(403).json({ erro: 'Acesso restrito a prestadores' })
     const result = await pool.query(`
       SELECT ir.id, ir.status, ir.valor_proposto, ir.valor_contraproposta, ir.rodada, ir.criado_em,
+             -- Fase 2b (campos extras): a conta profissional da pessoa que fez a proposta e se o
+             -- match do reparo é de uma conta DELA — o app não precisa comparar ids de conta.
+             ir.usuario_id AS conta_id,
+             COALESCE(${sqlProfissionalDaPessoa('r.match_usuario_id', '$1')}, false) AS match_da_pessoa,
              r.id as reparo_id, r.titulo, r.categoria, r.categorias, r.descricao, r.valor_estimado,
              r.cidade, r.bairro, r.latitude, r.longitude, r.expira_em, r.status as reparo_status, r.prazo_atendimento_horas,
              r.match_usuario_id, r.match_feito_em,
@@ -4918,7 +4956,8 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM interesse_reparos ir
       JOIN reparos r ON ir.reparo_id = r.id
-      WHERE ir.usuario_id = $1
+      -- Por PESSOA (Fase 2b): interesses de QUALQUER conta profissional do mesmo CPF.
+      WHERE ${sqlProfissionalDaPessoa('ir.usuario_id', '$1')}
       ORDER BY ir.criado_em DESC
     `, [req.usuario.id])
     const agora = new Date()
@@ -4962,8 +5001,10 @@ router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
               COUNT(*) OVER()::int AS _total
        FROM reparos r
        JOIN usuarios u ON r.criado_por = u.id
-       LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.usuario_id = $1
-       WHERE r.match_usuario_id = $1 AND r.status = 'encerrada'
+       -- Por PESSOA (Fase 2b): contratos de QUALQUER conta profissional do mesmo CPF; o
+       -- interesse (valor acordado) é o da conta que casou.
+       LEFT JOIN interesse_reparos ir ON ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id
+       WHERE ${sqlProfissionalDaPessoa('r.match_usuario_id', '$1')} AND r.status = 'encerrada'
        ORDER BY r.match_feito_em DESC NULLS LAST, r.id DESC
        LIMIT 200`,
       [req.usuario.id]
@@ -5013,7 +5054,7 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
   }
 })
 
-router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, async (req, res) => {
+router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPodeServicos, async (req, res) => {
   try {
     const { page, limit, offset } = paginacaoAdmin(req.query)
     const { categoria, raio_km, lat, lng } = req.query
@@ -5038,10 +5079,13 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
       FROM reparos r
       WHERE r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()
         AND r.match_usuario_id IS NULL
-        AND NOT ($1::uuid = ANY(COALESCE(r.prestadores_bloqueados, '{}')))
+        -- Lista negra, bloqueio do dono e recusa por PESSOA (Fase 2b): valem para QUALQUER conta
+        -- profissional do mesmo CPF (utils/tipoConta.sqlContasProfissionaisDaPessoa) — a outra
+        -- conta de quem furou aqui, foi bloqueado por este dono ou já foi recusado não vê o card.
+        AND NOT (COALESCE(r.prestadores_bloqueados, '{}') && ${sqlArrayProfissionaisDaPessoa('$1')})
         AND NOT EXISTS (
           SELECT 1 FROM prestadores_bloqueados_dono pb
-          WHERE pb.dono_id = r.criado_por AND pb.prestador_id = $1
+          WHERE pb.dono_id = r.criado_por AND ${sqlProfissionalDaPessoa('pb.prestador_id', '$1')}
         )
         -- Reparo que este prestador já recusou não volta ao feed: o card ficava visível
         -- mas POST /reparos/:id/interesse rejeita com 409 (guarda de duplicidade), então
@@ -5050,7 +5094,7 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
         -- sem recorte). Só 'recusado' — pendente/contraproposta_dono/aceito seguem iguais.
         AND NOT EXISTS (
           SELECT 1 FROM interesse_reparos ir
-          WHERE ir.reparo_id = r.id AND ir.usuario_id = $1 AND ir.status = 'recusado'
+          WHERE ir.reparo_id = r.id AND ${sqlProfissionalDaPessoa('ir.usuario_id', '$1')} AND ir.status = 'recusado'
         )
         -- Pedido criado pela OUTRA conta da mesma pessoa (mesmo CPF normalizado): não aparece
         -- — POST /reparos/:id/interesse o recusa com 400 demanda_propria. Sem CPF, não filtra.
@@ -5123,7 +5167,7 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirRep
   }
 })
 
-router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, exigirVerificado, async (req, res) => {
+router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPodeServicos, exigirVerificado, async (req, res) => {
   let client
   try {
     const { mensagem, valor_proposto } = req.body
@@ -5138,7 +5182,7 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
     const { demanda, recusa } = await travarDemandaAberta(client, 'reparos', req.params.id)
     if (recusa) { await client.query('ROLLBACK'); return res.status(recusa.status).json(recusa.corpo) }
     const existente = await client.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
-    if (existente.rows.length > 0) { await client.query('ROLLBACK'); return res.status(409).json({ erro: 'Você já demonstrou interesse neste serviço' }) }
+    if (existente.rows.length > 0) { await client.query('ROLLBACK'); return res.status(409).json(req.contaLogada ? ERRO_PROPOSTA_OUTRO_PERFIL : { erro: 'Você já demonstrou interesse neste serviço' }) }
     const result = await client.query(
       `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem, valor_proposto, rodada) VALUES ($1, $2, $3, $4, 1) RETURNING *`,
       [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
@@ -5169,7 +5213,7 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
 // longitude, NÃO GPS ao vivo). Aqui NÃO há push nem checagem de GPS ao vivo — só grava a
 // linha de armamento. O disparo do push (quando a posição AO VIVO chega a <5km de um reparo
 // armado) fica no cron verificarPrestadoresProximos e no POST /feed/checar-proximidade.
-router.post('/reparos/:id/abertura', autenticar, exigirPrestador, exigirReparador, async (req, res) => {
+router.post('/reparos/:id/abertura', autenticar, exigirPrestador, exigirPodeServicos, async (req, res) => {
   try {
     // Mesmas condições de validade que a checagem de proximidade usa (index.js:3300-3313
     // e o cron server.js:152-161): aberta/aprovada, não expirada, sem match, com coords.
@@ -5222,7 +5266,7 @@ router.post('/reparos/:id/abertura', autenticar, exigirPrestador, exigirReparado
   }
 })
 
-router.post('/reparos/:id/match', autenticar, exigirReparador, async (req, res) => {
+router.post('/reparos/:id/match', autenticar, exigirPodeServicosOuInteressado, async (req, res) => {
   try {
     const reparo = await pool.query(`SELECT * FROM reparos WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
@@ -5424,7 +5468,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
 })
 
 // Prestador responde a uma contraproposta do dono
-router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autenticar, exigirReparador, async (req, res) => {
+router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autenticar, exigirPodeServicosOuInteressado, async (req, res) => {
   let client
   // Encerra a transação (ROLLBACK para recusas, COMMIT para efeitos) e responde.
   const sair = async (fim, status, corpo) => { await client.query(fim); return res.status(status).json(corpo) }
@@ -7336,6 +7380,9 @@ router.post('/auth/contas/:tipo', autenticar, async (req, res) => {
     client.release(); client = null
     if (aprovada && !assinaturaHerdada) await aprovarPrestador(novo.id)
 
+    // A conta de origem acaba de ganhar uma conta irmã (contas_irmas e a suspensão por pessoa
+    // vivem na linha de sessão do cache de `autenticar`): relê na próxima chamada.
+    invalidarCachesUsuario(origem.id)
     console.log(`[CONTA VINCULADA] ${tipoDaLinha(origem)} ${origem.id} → ${tipoNovo} ${novo.id} aprovada=${aprovada} assinatura_herdada=${!!assinaturaHerdada}`)
     // Sessão da conta nova com o MESMO payload do login (usuario, assinatura, token, contas):
     // o app grava o token e entra no perfil novo sem pedir senha.
@@ -8038,8 +8085,14 @@ router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiv
     const obraResult = await pool.query(`SELECT id, titulo, status FROM obras WHERE id = $1 AND status = 'aberta'`, [obra_id])
     if (obraResult.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada ou não está disponível' })
     if (await ehDemandaPropria('obras', obra_id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
-    const existente = await pool.query(`SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`, [obra_id, req.usuario.id])
-    if (existente.rows.length > 0) return res.status(409).json({ erro: 'Você já demonstrou interesse nesta obra' })
+    // Uma proposta por PESSOA por obra (Fase 2b): esta rota recebe a obra no CORPO, então
+    // `autenticar` não assume a conta irmã — a duplicidade é conferida aqui nas contas da pessoa.
+    const existente = await pool.query(
+      `SELECT usuario_id FROM candidaturas WHERE obra_id = $1 AND ${sqlProfissionalDaPessoa('usuario_id', '$2')}`, [obra_id, req.usuario.id])
+    if (existente.rows.length > 0) {
+      return res.status(409).json(existente.rows.some(c => c.usuario_id === req.usuario.id)
+        ? { erro: 'Você já demonstrou interesse nesta obra' } : ERRO_PROPOSTA_OUTRO_PERFIL)
+    }
     // Contato em referencias (texto, lista ou objeto) e na mensagem vira "[contato removido]"
     // antes de gravar (+ linha em tentativas_contato por campo alterado).
     const { valores: limpos, registrar: registrarContato } = limparCamposEscrita({ referencias, mensagem }, { usuario_id: req.usuario.id, tipo: 'candidatura', demanda_id: obra_id })
@@ -8666,10 +8719,10 @@ router.post('/feed/visualizacoes', autenticar, async (req, res) => {
 // POST /feed/checar-proximidade — chamado na abertura do app com a localização AO VIVO.
 // Redesenho: dispara sobre reparos ARMADOS (aberturas_detalhe.notificado=false — o reparador
 // abriu o detalhe estando a >5km do cadastro), NÃO sobre impressões de feed. Reparadores +
-// reparos apenas (gate exigirReparador, estrito tipo_prestador='reparador'). Quando a posição
+// reparos apenas (gate exigirPodeServicos: reparador, ou pintor com especialidade de serviço). Quando a posição
 // ao vivo chega a <5km de um reparo armado, envia UM push (o mais próximo) e marca notificado
 // via CLAIM ATÔMICO. One-time por reparo, para sempre.
-router.post('/feed/checar-proximidade', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, async (req, res) => {
+router.post('/feed/checar-proximidade', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPodeServicos, async (req, res) => {
   try {
     const { latitude, longitude } = req.body
     const lat = parseFloat(latitude)
@@ -8693,9 +8746,10 @@ router.post('/feed/checar-proximidade', autenticar, exigirNaoSuspenso, exigirPre
          AND r.expira_em > NOW() AND r.match_usuario_id IS NULL
          AND r.latitude IS NOT NULL AND r.longitude IS NOT NULL
          AND ABS(r.latitude - $2) < $4 AND ABS(r.longitude - $3) < $4
-         AND NOT ($1::uuid = ANY(COALESCE(r.prestadores_bloqueados, '{}')))
+         -- Lista negra e engajamento prévio por PESSOA (Fase 2b — qualquer conta profissional do CPF).
+         AND NOT (COALESCE(r.prestadores_bloqueados, '{}') && ${sqlArrayProfissionaisDaPessoa('$1')})
          AND NOT EXISTS (
-           SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = r.id AND ir.usuario_id = $1
+           SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = r.id AND ${sqlProfissionalDaPessoa('ir.usuario_id', '$1')}
          )
          -- Outra conta da mesma pessoa que criou o reparo (mesmo CPF): sem aviso de proximidade
          -- (mesmo predicado do cron verificarPrestadoresProximos em server.js).
@@ -9077,9 +9131,12 @@ router.post('/admin/suspensos/:id/liberar', autenticar, exigirAdmin, async (req,
     }
     // Perdoa exatamente as faltas CONTADAS (não perdoadas, dentro da janela) — as antigas já
     // não contavam e não precisam ser tocadas. Depois disto a contagem dele volta a zero.
+    // Por PESSOA (Fase 2b), como a contagem em avaliarSuspensaoPorFaltas: entram as faltas de
+    // TODAS as contas profissionais do mesmo CPF — perdoar só as desta conta deixaria a pessoa
+    // a uma falta de ser suspensa de novo.
     const perdoadas = await client.query(
       `UPDATE faltas_profissional SET perdoada_em = NOW(), perdoada_por = $2::uuid
-        WHERE usuario_id = $1
+        WHERE ${sqlProfissionalDaPessoa('usuario_id', '$1')}
           AND perdoada_em IS NULL
           AND criado_em > NOW() - INTERVAL '${JANELA_FALTAS}'
         RETURNING id`,
@@ -9089,7 +9146,8 @@ router.post('/admin/suspensos/:id/liberar', autenticar, exigirAdmin, async (req,
 
     // Fora da transação: o cache é do processo, não do banco — derrubar antes de commitar
     // deixaria a próxima request recarregar a linha AINDA suspensa e cachear isso de novo.
-    invalidarCacheAssinatura(req.params.id)
+    // A suspensão é lida por PESSOA: derruba também a(s) conta(s) irmã(s) profissional(is).
+    for (const id of await contasProfissionaisDaPessoa(req.params.id)) invalidarCacheAssinatura(id)
 
     res.json({
       mensagem: 'Suspensão removida',
