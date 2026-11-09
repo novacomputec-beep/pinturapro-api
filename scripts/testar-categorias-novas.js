@@ -23,6 +23,7 @@ const NOVAS = {
   informatica:     { rotulo: 'Informática',       emoji: '🖥️', grupo: 'Elétrica e tecnologia', chave: 'eletrica_tec', irmao: 'eletrica' },
   gesseiro:        { rotulo: 'Gesseiro',          emoji: '🪜', grupo: 'Reparos da casa',       chave: 'reparos_casa', irmao: 'alvenaria' },
   placas_fachadas: { rotulo: 'Placas e fachadas', emoji: '🪧', grupo: 'Arte e criação',       chave: 'arte',         irmao: 'artesanato' },
+  borracheiro:     { rotulo: 'Borracheiro',       emoji: '🛞', grupo: 'Transporte',            chave: 'transporte',   irmao: 'mecanica' },
 }
 
 const main = async () => {
@@ -34,9 +35,14 @@ const main = async () => {
 
   // ---- listas
   const slugsApp = C.CATEGORIAS_SERVICO.map(c => c.slug)
-  ok(E.ESPECIALIDADES_REPARADOR.length === 57 && slugsApp.length === 57 && JSON.stringify(E.ESPECIALIDADES_REPARADOR) === JSON.stringify(slugsApp),
-     'ESPECIALIDADES_REPARADOR e CATEGORIAS_SERVICO: 57 slugs, mesma ordem', { n: E.ESPECIALIDADES_REPARADOR.length })
-  ok(E.ESPECIALIDADES_REPARADOR.slice(-4).join() === 'informatica,gesseiro,placas_fachadas,outros', "as 3 novas entram antes de 'outros'", E.ESPECIALIDADES_REPARADOR.slice(-4))
+  ok(E.ESPECIALIDADES_REPARADOR.length === 58 && slugsApp.length === 58 && JSON.stringify(E.ESPECIALIDADES_REPARADOR) === JSON.stringify(slugsApp),
+     'ESPECIALIDADES_REPARADOR e CATEGORIAS_SERVICO: 58 slugs, mesma ordem', { n: E.ESPECIALIDADES_REPARADOR.length })
+  ok(E.ESPECIALIDADES_REPARADOR.slice(-5).join() === 'informatica,gesseiro,placas_fachadas,borracheiro,outros', "as novas entram antes de 'outros', na ordem em que chegaram", E.ESPECIALIDADES_REPARADOR.slice(-5))
+  ok(new Set(E.ESPECIALIDADES_REPARADOR).size === 58, 'nenhum slug repetido')
+  ok(JSON.stringify(G.GRUPOS_RELACIONADOS['Transporte']) === JSON.stringify(['motorista', 'motociclista', 'mudancas', 'mecanica', 'lavajato', 'borracheiro']),
+     'grupo Transporte: Motorista, Motociclista, Mudanças, Mecânica, Lava-jato + Borracheiro', G.GRUPOS_RELACIONADOS['Transporte'])
+  ok(!E.ESPECIALIDADES_OBRA.includes('borracheiro') && !C.CATEGORIAS_OBRA.some(c => c.slug === 'borracheiro') && !C.CATEGORIAS_CONSTRUCAO.some(c => c.slug === 'borracheiro'),
+     'borracheiro é SERVIÇO: fora das especialidades e das categorias de obra')
   ok(!E.ESPECIALIDADES_OBRA.some(s => NOVAS[s]), 'lado obra intacto (4 papéis)', E.ESPECIALIDADES_OBRA)
 
   for (const [slug, n] of Object.entries(NOVAS)) {
@@ -69,7 +75,11 @@ const main = async () => {
   await db.query(`UPDATE configuracoes SET valor = 'false'`)
   ok(JSON.stringify(await G.expandirCategoria('gesseiro')) === '["gesseiro"]', 'chave desligada: expandirCategoria = só o slug')
   // POST /reparos: a validação de categorias usa ESPECIALIDADES_REPARADOR.includes — coberto pela lista
-  ok(['informatica', 'gesseiro', 'placas_fachadas'].every(s => E.ESPECIALIDADES_REPARADOR.includes(s)), 'categorias de reparo (POST/PUT /reparos) aceitam as 3')
+  ok(['informatica', 'gesseiro', 'placas_fachadas', 'borracheiro'].every(s => E.ESPECIALIDADES_REPARADOR.includes(s)), 'categorias de reparo (POST/PUT /reparos) aceitam as novas')
+  // Conta pintor com especialidade de serviço (Fase 2b) e o grupo de exibição de obras não mudam.
+  const vp = E.validarEspecialidades(['pintor', 'borracheiro'], true, 'pintor')
+  ok(!vp.erro && vp.valor.length === 2, 'pintor pode marcar borracheiro como especialidade de serviço', vp)
+  ok(!E.GRUPO_OBRAS_REPARADOR.categorias.includes('borracheiro'), 'grupo "Obras de Construção Civil" intacto')
 
   console.log(falhas === 0 ? '\nTUDO OK' : `\n${falhas} FALHA(S)`)
   process.exit(falhas ? 1 : 0)

@@ -27,7 +27,7 @@ const GRUPOS_RELACIONADOS = {
   'Festas e eventos':             ['aluguel_festas', 'decoracao_festas', 'recreacao_infantil', 'dj', 'musico', 'garcom',
                                    'churrasqueiro', 'cozinheiro', 'confeiteiro', 'salgadeiro', 'filmagem_fotografia'],
   'Cuidado':                      ['baba', 'cuidador', 'pet'],
-  'Transporte':                   ['motorista', 'motociclista', 'mudancas', 'mecanica', 'lavajato'],
+  'Transporte':                   ['motorista', 'motociclista', 'mudancas', 'mecanica', 'lavajato', 'borracheiro'],
   'Segurança':                    ['vigia', 'seguranca'],
   'Digital e aulas':              ['editor_video', 'social_midia', 'profissional_home_office', 'panfletagem',
                                    'aula_particular', 'personal_trainer', 'tradutor'],

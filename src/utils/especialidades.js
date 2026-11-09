@@ -1,8 +1,8 @@
 // Vocabulário FECHADO das especialidades do profissional — DUAS listas, uma por lado:
-//   - REPARADOR (tipo_prestador = 'reparador'): as 57 categorias de SERVIÇO doméstico
+//   - REPARADOR (tipo_prestador = 'reparador'): as 58 categorias de SERVIÇO doméstico
 //     (+ as 4 de obra, opcionais — ver ESPECIALIDADES_REPARADOR_COM_OBRA);
 //   - OBRA (tipo_prestador = 'pintor', que cobre pintor E construtor): os 4 papéis de obra
-//     (+ as 57 de serviço, opcionais — Fase 2b).
+//     (+ as 58 de serviço, opcionais — Fase 2b).
 // Mesmo estilo de slug nas duas: minúsculas, sem acento, '_' como separador (aula_particular).
 //
 // Mora em src/utils/ porque é a convenção deste repo para constante compartilhada e inerte:
@@ -29,6 +29,7 @@ const ESPECIALIDADES_REPARADOR = [
   'aluguel_festas', 'decoracao_festas', 'recreacao_infantil',
   'design_sobrancelhas', 'vidraceiro', 'serralheria',
   'informatica', 'gesseiro', 'placas_fachadas',
+  'borracheiro',
   'outros',
 ]
 

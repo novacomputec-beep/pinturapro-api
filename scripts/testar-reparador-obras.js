@@ -2,7 +2,7 @@
 // Lado profissional unificado, Fase 2a (decisão do dono, 09/11/2026): uma conta REPARADOR que marca
 // ao menos uma das 4 especialidades de obra ("Obras de Construção Civil") passa a PODER TRABALHAR EM
 // OBRAS — feed, pergunta, candidatura, push e e-mail de obra — sem mudar tipo_prestador. Cobre:
-//   1. vocabulário (validarEspecialidades: 57 + 4 para reparador, teto 5 no total; listas de
+//   1. vocabulário (validarEspecialidades: serviços + 4 de obra para reparador, teto 5 no total; listas de
 //      reparos.categoria e GRUPOS_RELACIONADOS intactas; grupo de exibição);
 //   2. podeObras (JS) ≡ sqlPodeObras (SQL), linha a linha, com falha fechada para tipo NULL;
 //   3. gate exigirPodeObras nas 6 rotas (cadeia REAL de middlewares, autenticar com JWT e cache),
@@ -137,8 +137,8 @@ const main = async () => {
   ok(/inválida/.test(v.erro || ''), 'tipo NULL (legado): slug de obra continua recusado', v)
   v = esp.validarEspecialidades(['eletrica'], true, null)
   ok(!v.erro, 'tipo NULL (legado): lista de serviços como antes', v)
-  ok(esp.ESPECIALIDADES_REPARADOR.length === 57 && !OBRA4.some(s => esp.ESPECIALIDADES_REPARADOR.includes(s)),
-     'ESPECIALIDADES_REPARADOR (vocabulário de reparos.categoria) segue com 57 e SEM slug de obra', esp.ESPECIALIDADES_REPARADOR.length)
+  ok(esp.ESPECIALIDADES_REPARADOR.length === 58 && !OBRA4.some(s => esp.ESPECIALIDADES_REPARADOR.includes(s)),
+     'ESPECIALIDADES_REPARADOR (vocabulário de reparos.categoria) segue só com serviços (58) e SEM slug de obra', esp.ESPECIALIDADES_REPARADOR.length)
   ok(esp.ESPECIALIDADES_VALIDAS === esp.ESPECIALIDADES_REPARADOR, 'alias ESPECIALIDADES_VALIDAS intacto')
   ok(!Object.values(GRUPOS_RELACIONADOS).flat().some(s => OBRA4.includes(s)), 'GRUPOS_RELACIONADOS sem slug de obra (casamento de reparo não expande)')
   ok(esp.GRUPO_OBRAS_REPARADOR.nome === 'Obras de Construção Civil' && igual(esp.GRUPO_OBRAS_REPARADOR.categorias, esp.ESPECIALIDADES_OBRA),
