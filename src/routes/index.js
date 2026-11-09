@@ -108,7 +108,7 @@ const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinh
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
-const { sqlNaoDemandaPropria, sqlNaoMesmoCpf, ERRO_DEMANDA_PROPRIA, ehDemandaPropria } = require('../utils/demandaPropria')
+const { sqlNaoDemandaPropria, sqlNaoMesmoCpf, ERRO_DEMANDA_PROPRIA, ehDemandaPropria, sqlCpfNormalizado } = require('../utils/demandaPropria')
 // Demanda ABERTA sob trava (FOR UPDATE) nas rotas do profissional: 409 PEDIDO_INDISPONIVEL fora de 'aberta'.
 const { travarDemandaAberta } = require('../utils/demandaAberta')
 // profissionais_avisados (GET /obras/:id e /reparos/:id, só para o dono): quantos profissionais
@@ -2482,14 +2482,124 @@ const enviarEmailExclusaoConta = (email, nome) =>
     `
   })
 
-// DELETE /conta/excluir — usuário exclui a PRÓPRIA conta (self-service, exigência da Google Play).
-// Requer confirmação por senha. Reproduz a cascata do DELETE /usuarios/:id (admin), sempre sobre
-// req.usuario.id. Não altera o endpoint admin. avaliacoes cai por ON DELETE CASCADE.
+// Cascata de exclusão de UMA conta — os statements que DELETE /conta/excluir sempre rodou, na mesma
+// ordem, sem nenhuma alteração; só passaram a morar numa função para a rota aplicá-los a CADA conta
+// da pessoa dentro da MESMA transação. `client` = o client da transação aberta por quem chama.
+// Reproduz a cascata do DELETE /usuarios/:id (admin). avaliacoes cai por ON DELETE CASCADE.
+const excluirContaNoBanco = async (client, id) => {
+  // Contratos ANTES de candidaturas/interesse_reparos/obras/reparos (ver comentário
+  // em SQL_DELETE_CONTRATOS_DO_USUARIO): evita contratos órfãos no fluxo reparo.
+  await client.query(SQL_DELETE_CONTRATOS_DO_USUARIO, [id])
+
+  // Cascade obras criadas por este usuário (colunas idênticas ao DELETE /usuarios/:id)
+  await client.query(`DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
+  await client.query(`DELETE FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
+  await client.query(enfileirarOrfas(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1) RETURNING url, tipo`), [id])
+  await client.query(`DELETE FROM obras WHERE criado_por = $1`, [id])
+
+  // Cascade reparos criados por este usuário
+  await client.query(`DELETE FROM interesse_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1)`, [id])
+  await client.query(enfileirarOrfas(`DELETE FROM midias_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1) RETURNING url, tipo`), [id])
+  await client.query(`DELETE FROM reparos WHERE criado_por = $1`, [id])
+
+  // NULL out match_usuario_id caso o usuário estivesse em atendimento
+  await client.query(`UPDATE obras SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1`, [id])
+  await client.query(`UPDATE reparos SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1`, [id])
+  // Idem para solicitações de encerramento em aberto (FK encerramento_solicitado_por).
+  await client.query(`UPDATE obras SET encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL WHERE encerramento_solicitado_por = $1`, [id])
+  await client.query(`UPDATE reparos SET encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL WHERE encerramento_solicitado_por = $1`, [id])
+
+  // Cascade registros do próprio usuário como candidato/interessado/autor
+  await client.query(`DELETE FROM assinaturas WHERE usuario_id = $1`, [id])
+  await client.query(`DELETE FROM candidaturas WHERE usuario_id = $1`, [id])
+  await client.query(`DELETE FROM mensagens WHERE autor_id = $1`, [id])
+  await client.query(`DELETE FROM interesse_reparos WHERE usuario_id = $1`, [id])
+  await client.query(`DELETE FROM localizacoes_prestadores WHERE usuario_id = $1`, [id])
+  await client.query(`DELETE FROM prestadores_bloqueados_dono WHERE dono_id = $1 OR prestador_id = $1`, [id])
+  // FK sem CASCADE (ver o mesmo DELETE no caminho de exclusão pelo admin): sem isto, um
+  // profissional com falta registrada não consegue mais excluir a própria conta.
+  await client.query(`DELETE FROM faltas_profissional WHERE usuario_id = $1`, [id])
+
+  // Conta em si (avaliacoes cai por ON DELETE CASCADE).
+  //
+  // As 4 URLs de Cloudinary que moram na PRÓPRIA linha de usuarios (foto de perfil, frente e
+  // verso do documento, selfie) entram na fila de órfãs no MESMO statement do DELETE. Sem
+  // isto, excluir a conta apagava a única referência a esses arquivos e o documento de
+  // identidade ficava no Cloudinary para sempre: os dois braços do cron enxergam mídia só
+  // através de obras/reparos, e midias_orfas só recebia o que passava por enfileirarOrfas.
+  //
+  // NÃO usa o wrapper enfileirarOrfas: ele assume um DELETE que devolve UMA LINHA POR MÍDIA
+  // já com as colunas (url, tipo), que é a forma de midias/midias_reparos. Aqui é o oposto —
+  // uma linha só, com quatro colunas de URL —, então o RETURNING precisa ser despivotado com
+  // unnest antes de virar linhas da fila. Mesma ideia, forma diferente.
+  //
+  // CTE em vez de um SELECT antes do DELETE: as URLs saem do RETURNING da linha REALMENTE
+  // apagada, então é impossível enfileirar arquivo de uma conta que não foi excluída (WHERE
+  // sem correspondência → nenhuma linha no del → nenhuma inserção).
+  // WHERE u IS NOT NULL: coluna vazia não vira linha na fila.
+  // 'foto' porque as quatro são imagens (todas gravadas como /image/upload/ no Cloudinary) e
+  // deletarDoCloudinary mapeia qualquer tipo != 'video' para resource_type 'image'.
+  // DISTINCT + ON CONFLICT: o mesmo arquivo reaproveitado em duas colunas entra uma vez, e
+  // URL já enfileirada por outro caminho não duplica.
+  await client.query(
+    `WITH del AS (
+       DELETE FROM usuarios WHERE id = $1
+       RETURNING foto_url, verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url
+     )
+     INSERT INTO midias_orfas (url, tipo)
+     SELECT DISTINCT u, 'foto'
+       FROM del, unnest(ARRAY[
+              del.foto_url,
+              del.verificacao_doc_frente_url,
+              del.verificacao_doc_verso_url,
+              del.verificacao_selfie_url
+            ]) AS u
+      WHERE u IS NOT NULL
+     ON CONFLICT (url) DO NOTHING`,
+    [id]
+  )
+}
+
+// Contas que a exclusão alcança — a PESSOA inteira (decisão do dono, 09/11/2026): a conta logada e
+// TODAS as contas com o mesmo CPF/CNPJ normalizado (só dígitos — a mesma expressão do índice único
+// de cadastro), de QUALQUER papel (dono_obra, dono_reparo, pintor, reparador, legado) e ativas ou
+// não. NUNCA por e-mail: outra pessoa pode ter conta com o mesmo e-mail e outro CPF, e ela fica.
+// Conta sem CPF alcança só a si mesma (NULL = NULL é NULL). Duas travas de painel: contas
+// admin/aprovador nunca entram como "irmãs" (excluir um perfil de teste não pode derrubar o acesso
+// ao painel) e a conta admin/aprovador que exclui a si mesma apaga só a própria linha.
+// FOR UPDATE em ordem de id: duas exclusões simultâneas da mesma pessoa não se cruzam.
+const SQL_CONTAS_DA_EXCLUSAO = `
+  SELECT u.id, u.nome, u.email, u.role FROM usuarios u
+   WHERE u.id = $1::uuid
+      OR (u.role NOT IN ('admin', 'aprovador')
+          AND ${sqlCpfNormalizado('u.cpf_cnpj')} = (
+                SELECT ${sqlCpfNormalizado('eu.cpf_cnpj')} FROM usuarios eu
+                 WHERE eu.id = $1::uuid AND eu.role NOT IN ('admin', 'aprovador')))
+   ORDER BY u.id
+     FOR UPDATE OF u`
+
+// DELETE /conta/excluir — a pessoa exclui a PRÓPRIA conta (self-service, exigência da Google Play).
+// CONFIRMAÇÃO: corpo { confirmacao: "EXCLUIR" } — sem senha (conta de login social não tem senha
+// que o usuário conheça, e quem está logado já provou a identidade pelo token). O corpo antigo
+// { senha } dos apps já nas lojas continua aceito, conferido como sempre (401 se errada).
+// ALCANCE: todas as contas da pessoa (SQL_CONTAS_DA_EXCLUSAO), cada uma pela cascata de sempre
+// (excluirContaNoBanco), numa ÚNICA transação — ou saem todas, ou nenhuma. Não altera o endpoint admin.
+// Sem limiter próprio: vale o limiter global por IP/token de server.js, como antes.
+const CONFIRMACAO_EXCLUSAO = 'EXCLUIR'
 router.delete('/conta/excluir', autenticar, async (req, res) => {
   const client = await pool.connect()
+  let emTransacao = false
   try {
-    const { senha } = req.body
-    if (!senha) return res.status(400).json({ erro: 'Senha é obrigatória para confirmar a exclusão' })
+    const corpo = req.body || {}
+    const temConfirmacao = Object.prototype.hasOwnProperty.call(corpo, 'confirmacao')
+    const confirmou = typeof corpo.confirmacao === 'string' && corpo.confirmacao.trim().toUpperCase() === CONFIRMACAO_EXCLUSAO
+    const senha = corpo.senha
+    if (!confirmou) {
+      if (temConfirmacao && !senha) {
+        return res.status(400).json({ erro: `Digite ${CONFIRMACAO_EXCLUSAO} para confirmar a exclusão da conta`, codigo: 'CONFIRMACAO_INVALIDA' })
+      }
+      if (!senha) return res.status(400).json({ erro: 'Senha é obrigatória para confirmar a exclusão' })
+    }
 
     const userResult = await pool.query(
       `SELECT id, nome, email, senha_hash FROM usuarios WHERE id = $1`,
@@ -2498,95 +2608,31 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
     if (userResult.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
 
     const usuario = userResult.rows[0]
-    const senhaValida = await bcrypt.compare(senha, usuario.senha_hash)
-    if (!senhaValida) return res.status(401).json({ erro: 'Senha incorreta' })
-
-    const id = usuario.id
+    if (!confirmou) {
+      // Caminho antigo ({ senha }): conta sem senha utilizável (login social) ou senha que não é
+      // texto não conferem — 401, nunca um erro do bcrypt virando 500.
+      const senhaValida = typeof senha === 'string' && !!usuario.senha_hash && await bcrypt.compare(senha, usuario.senha_hash)
+      if (!senhaValida) return res.status(401).json({ erro: 'Senha incorreta' })
+    }
 
     await client.query('BEGIN')
-
-    // Contratos ANTES de candidaturas/interesse_reparos/obras/reparos (ver comentário
-    // em SQL_DELETE_CONTRATOS_DO_USUARIO): evita contratos órfãos no fluxo reparo.
-    await client.query(SQL_DELETE_CONTRATOS_DO_USUARIO, [id])
-
-    // Cascade obras criadas por este usuário (colunas idênticas ao DELETE /usuarios/:id)
-    await client.query(`DELETE FROM mensagens WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
-    await client.query(`DELETE FROM candidaturas WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1)`, [id])
-    await client.query(enfileirarOrfas(`DELETE FROM midias WHERE obra_id IN (SELECT id FROM obras WHERE criado_por = $1) RETURNING url, tipo`), [id])
-    await client.query(`DELETE FROM obras WHERE criado_por = $1`, [id])
-
-    // Cascade reparos criados por este usuário
-    await client.query(`DELETE FROM interesse_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1)`, [id])
-    await client.query(enfileirarOrfas(`DELETE FROM midias_reparos WHERE reparo_id IN (SELECT id FROM reparos WHERE criado_por = $1) RETURNING url, tipo`), [id])
-    await client.query(`DELETE FROM reparos WHERE criado_por = $1`, [id])
-
-    // NULL out match_usuario_id caso o usuário estivesse em atendimento
-    await client.query(`UPDATE obras SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1`, [id])
-    await client.query(`UPDATE reparos SET match_usuario_id = NULL, match_feito_em = NULL WHERE match_usuario_id = $1`, [id])
-    // Idem para solicitações de encerramento em aberto (FK encerramento_solicitado_por).
-    await client.query(`UPDATE obras SET encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL WHERE encerramento_solicitado_por = $1`, [id])
-    await client.query(`UPDATE reparos SET encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL WHERE encerramento_solicitado_por = $1`, [id])
-
-    // Cascade registros do próprio usuário como candidato/interessado/autor
-    await client.query(`DELETE FROM assinaturas WHERE usuario_id = $1`, [id])
-    await client.query(`DELETE FROM candidaturas WHERE usuario_id = $1`, [id])
-    await client.query(`DELETE FROM mensagens WHERE autor_id = $1`, [id])
-    await client.query(`DELETE FROM interesse_reparos WHERE usuario_id = $1`, [id])
-    await client.query(`DELETE FROM localizacoes_prestadores WHERE usuario_id = $1`, [id])
-    await client.query(`DELETE FROM prestadores_bloqueados_dono WHERE dono_id = $1 OR prestador_id = $1`, [id])
-    // FK sem CASCADE (ver o mesmo DELETE no caminho de exclusão pelo admin): sem isto, um
-    // profissional com falta registrada não consegue mais excluir a própria conta.
-    await client.query(`DELETE FROM faltas_profissional WHERE usuario_id = $1`, [id])
-
-    // Conta em si (avaliacoes cai por ON DELETE CASCADE).
-    //
-    // As 4 URLs de Cloudinary que moram na PRÓPRIA linha de usuarios (foto de perfil, frente e
-    // verso do documento, selfie) entram na fila de órfãs no MESMO statement do DELETE. Sem
-    // isto, excluir a conta apagava a única referência a esses arquivos e o documento de
-    // identidade ficava no Cloudinary para sempre: os dois braços do cron enxergam mídia só
-    // através de obras/reparos, e midias_orfas só recebia o que passava por enfileirarOrfas.
-    //
-    // NÃO usa o wrapper enfileirarOrfas: ele assume um DELETE que devolve UMA LINHA POR MÍDIA
-    // já com as colunas (url, tipo), que é a forma de midias/midias_reparos. Aqui é o oposto —
-    // uma linha só, com quatro colunas de URL —, então o RETURNING precisa ser despivotado com
-    // unnest antes de virar linhas da fila. Mesma ideia, forma diferente.
-    //
-    // CTE em vez de um SELECT antes do DELETE: as URLs saem do RETURNING da linha REALMENTE
-    // apagada, então é impossível enfileirar arquivo de uma conta que não foi excluída (WHERE
-    // sem correspondência → nenhuma linha no del → nenhuma inserção).
-    // WHERE u IS NOT NULL: coluna vazia não vira linha na fila.
-    // 'foto' porque as quatro são imagens (todas gravadas como /image/upload/ no Cloudinary) e
-    // deletarDoCloudinary mapeia qualquer tipo != 'video' para resource_type 'image'.
-    // DISTINCT + ON CONFLICT: o mesmo arquivo reaproveitado em duas colunas entra uma vez, e
-    // URL já enfileirada por outro caminho não duplica.
-    await client.query(
-      `WITH del AS (
-         DELETE FROM usuarios WHERE id = $1
-         RETURNING foto_url, verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url
-       )
-       INSERT INTO midias_orfas (url, tipo)
-       SELECT DISTINCT u, 'foto'
-         FROM del, unnest(ARRAY[
-                del.foto_url,
-                del.verificacao_doc_frente_url,
-                del.verificacao_doc_verso_url,
-                del.verificacao_selfie_url
-              ]) AS u
-        WHERE u IS NOT NULL
-       ON CONFLICT (url) DO NOTHING`,
-      [id]
-    )
-
+    emTransacao = true
+    const contas = (await client.query(SQL_CONTAS_DA_EXCLUSAO, [usuario.id])).rows
+    for (const conta of contas) await excluirContaNoBanco(client, conta.id)
     await client.query('COMMIT')
+    emTransacao = false
 
-    invalidarCachesUsuario(id)
+    for (const conta of contas) invalidarCachesUsuario(conta.id)
+    console.log(`[ExcluirConta] ${usuario.id}: ${contas.length} conta(s) da pessoa excluída(s) (${contas.map(c => c.role).join(', ')}) — confirmação por ${confirmou ? 'palavra' : 'senha'}`)
 
-    // E-mail de confirmação — fire and forget, não bloqueia a resposta
-    enviarEmailExclusaoConta(usuario.email, usuario.nome).catch(() => {})
+    // E-mail de confirmação — fire and forget, não bloqueia a resposta. Um por ENDEREÇO distinto
+    // das contas excluídas (normalmente um só: as contas da pessoa dividem o e-mail).
+    const enderecos = [...new Set(contas.map(c => String(c.email || '').trim().toLowerCase()).filter(Boolean))]
+    for (const email of enderecos) enviarEmailExclusaoConta(email, usuario.nome).catch(() => {})
 
-    res.json({ mensagem: 'Conta excluída com sucesso.' })
+    res.json({ mensagem: 'Conta excluída com sucesso.', contas_excluidas: contas.length })
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
+    if (emTransacao) await client.query('ROLLBACK').catch(() => {})
     console.error('[ExcluirConta] Erro:', err.message)
     res.status(500).json({ erro: 'Erro ao excluir conta. Tente novamente.' })
   } finally {
