@@ -170,7 +170,7 @@ const main = async () => {
   const colsDemanda = `id uuid PRIMARY KEY, titulo text, descricao text, categoria text, cidade text, uf text, estado text, bairro text, criado_por uuid, status text DEFAULT 'aberta',
       status_aprovacao text DEFAULT 'aprovada', encerrado_em timestamptz, match_usuario_id uuid, match_feito_em timestamptz, expira_em timestamptz,
       criado_em timestamptz DEFAULT now(), publicado_em timestamptz, a_caminho_em timestamptz, prestadores_bloqueados uuid[], codigo_publico text,
-      push_novo_enviado_em timestamptz, valor_aumentado_em timestamptz, latitude numeric, longitude numeric, coordenadas_origem text, tags text[],
+      push_novo_enviado_em timestamptz, email_novo_pendente_em timestamptz, valor_aumentado_em timestamptz, latitude numeric, longitude numeric, coordenadas_origem text, tags text[],
       prazo_modo text, ultima_extensao_horas numeric, encerramento_solicitado_por uuid, encerramento_solicitado_em timestamptz,
       chegada_janela text, chegada_prevista_em timestamptz, chegada_declarada_por uuid, chegada_declarada_em timestamptz, chegada_confirmada_em timestamptz,
       chegada_pendente_janela text, chegada_pendente_em timestamptz, chegada_recusada_em timestamptz, chegada_proposta_por uuid, chegada_pendente_rodada int DEFAULT 0`

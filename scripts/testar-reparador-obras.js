@@ -150,7 +150,7 @@ const main = async () => {
   const colsDemanda = `id uuid PRIMARY KEY, titulo text, descricao text, categoria text, cidade text, uf text, bairro text, criado_por uuid, status text DEFAULT 'aberta',
       status_aprovacao text DEFAULT 'aprovada', encerrado_em timestamptz, match_usuario_id uuid, match_feito_em timestamptz, expira_em timestamptz,
       criado_em timestamptz DEFAULT now(), publicado_em timestamptz, a_caminho_em timestamptz, prestadores_bloqueados uuid[], codigo_publico text,
-      push_novo_enviado_em timestamptz, valor_aumentado_em timestamptz, latitude numeric, longitude numeric, tags text[]`
+      push_novo_enviado_em timestamptz, email_novo_pendente_em timestamptz, valor_aumentado_em timestamptz, latitude numeric, longitude numeric, tags text[]`
   await db.exec(`
     CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, telefone text, cidade text, uf text, role text, tipo_dono text, tipo_prestador text, cpf_cnpj text,
       ativo boolean DEFAULT true, push_token text, criado_em timestamptz DEFAULT now(), suspenso_em timestamptz, suspenso_motivo text, desinstalado_em timestamptz,

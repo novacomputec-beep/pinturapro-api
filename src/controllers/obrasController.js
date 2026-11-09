@@ -3,7 +3,9 @@ const { pool } = require('../utils/supabase')
 // assinantes ATIVOS da MESMA cidade+uf da obra, com push_token. O antigo
 // notificacaoService.notificarNovaObra selecionava role = 'assinante' — papel que não existe
 // em produção (0 linhas) — e por isso a obra criada pelo painel nunca avisava ninguém.
-const { notificarPintoresSobreNovaObra } = require('../services/alertaService')
+const { notificarPintoresSobreNovaObra, dispararPushNovoComClaim } = require('../services/alertaService')
+// Valor obrigatório e > 0 ao criar e ao editar ("Informe quanto quer pagar").
+const { validarValorDemanda } = require('../utils/valorDemanda')
 const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra } = require('../utils/totalExtensao')
 const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
@@ -165,19 +167,20 @@ const detalhe = async (req, res) => {
 const criar = async (req, res) => {
   try {
     const {
-      titulo, categoria, valor, cidade, bairro, uf,
+      titulo, categoria, cidade, bairro, uf,
       latitude, longitude, metragem,
       prazo_execucao_dias, horas_para_expirar,
       descricao, tags
     } = req.body
 
     // Validações básicas
-    if (!titulo || !categoria || !valor || !cidade) {
+    if (!titulo || !categoria || !cidade) {
       return res.status(400).json({ erro: 'Título, categoria, valor e cidade são obrigatórios' })
     }
-    if (isNaN(parseFloat(valor)) || parseFloat(valor) <= 0) {
-      return res.status(400).json({ erro: 'Valor inválido' })
-    }
+    // Valor obrigatório e > 0, a MESMA regra e mensagem do caminho do dono (utils/valorDemanda).
+    const valorObra = validarValorDemanda(req.body.valor)
+    if (valorObra.erro) return res.status(400).json(valorObra)
+    const valor = valorObra.valor
 
     // Rede de segurança: deriva o uf da cidade quando o cliente não envia
     const ufFinal = uf || await ufDeCidade(cidade)
@@ -202,7 +205,11 @@ const criar = async (req, res) => {
     // publicado_em = NOW()), então o aviso sai já na criação — o mesmo público-alvo e o
     // mesmo texto do caminho do dono, que só avisa na aprovação. Assíncrono: a resposta
     // ao admin não espera o Expo. A função relê cidade/uf da linha recém-inserida.
-    notificarPintoresSobreNovaObra(obra.id).catch(err =>
+    // Pelo MESMO claim das demais rotas (dispararPushNovoComClaim): envia, CARIMBA
+    // push_novo_enviado_em e dispara o e-mail e o aviso "fora da sua área". Antes o push saía
+    // direto, sem carimbo — e a rede de segurança (enviarPushNovoPendente), que procura
+    // exatamente carimbo NULL, avisava todo mundo DE NOVO 10 minutos depois.
+    dispararPushNovoComClaim('obras', obra.id, notificarPintoresSobreNovaObra).catch(err =>
       console.error('Erro ao enviar notificações:', err)
     )
 
@@ -242,7 +249,12 @@ const editar = async (req, res) => {
 
     if (tem('titulo')) set('titulo', titulo)
     if (tem('categoria')) set('categoria', categoria)
-    if (tem('valor')) set('valor', valor)
+    if (tem('valor')) {
+      // Edição não zera nem negativa o valor: mesma regra da criação (utils/valorDemanda).
+      const valorNovo = validarValorDemanda(valor)
+      if (valorNovo.erro) return res.status(400).json(valorNovo)
+      set('valor', valorNovo.valor)
+    }
     if (tem('cidade')) set('cidade', cidade)
     if (tem('bairro')) set('bairro', bairro)
     if (tem('metragem')) set('metragem', metragem)

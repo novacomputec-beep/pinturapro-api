@@ -788,6 +788,25 @@ const notificarOfertaAumentadaReparo = async (reparoId) => {
 const EMAIL_ALERTAS_TETO_DIA = 250
 const EMAIL_ALERTAS_RESERVA_CRITICOS = 60
 const EMAIL_ALERTAS_TETO_DEMANDA = EMAIL_ALERTAS_TETO_DIA - EMAIL_ALERTAS_RESERVA_CRITICOS
+// SUB-TETO dos LEMBRETES "ainda aberto" DENTRO do teto de demanda (decisão do dono, 09/11/2026):
+// os lembretes reusam o mesmo orçamento e começam às 08h — num dia com muitas demandas abertas
+// eles gastavam os 190 antes de uma demanda NOVA ser publicada, e ela saía com ZERO e-mails
+// (caso "Limpeza de quintal", 07/11). Com o sub-teto, demanda nova (e reanúncio) tem sempre ao
+// menos 190 − 60 = 130 e-mails por dia.
+const EMAIL_ALERTAS_TETO_LEMBRETES = 60
+// Orçamento de HOJE (dia de São Paulo) dos e-mails de demanda: { restante } para demanda nova /
+// reanúncio e { restanteLembretes } para os lembretes (o menor entre o que sobra do total e o
+// que sobra do sub-teto). Linhas 'aviso:%' (avisos críticos 1:1) não contam em nenhum dos dois.
+const orcamentoEmailsDeDemanda = async (db = pool) => {
+  const r = await db.query(
+    `SELECT count(*)::int AS n, (count(*) FILTER (WHERE tipo LIKE 'lembrete\\_%'))::int AS lembretes
+       FROM email_alertas
+      WHERE created_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')
+        AND tipo NOT LIKE 'aviso:%'`
+  )
+  const restante = Math.max(0, EMAIL_ALERTAS_TETO_DEMANDA - r.rows[0].n)
+  return { restante, restanteLembretes: Math.max(0, Math.min(restante, EMAIL_ALERTAS_TETO_LEMBRETES - r.rows[0].lembretes)) }
+}
 const EMAIL_ALERTAS_URL_BAIXAR = 'https://protudo.app.br/baixar'
 // Página pública da demanda (routes/paginaPublica.js, via redirect do site): o botão principal
 // do e-mail aponta para ela quando a linha tem codigo_publico; sem código (linha anterior à
@@ -862,6 +881,23 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     const cidade = normalizar(demanda.cidade)
     const uf = String(demanda.uf || '').trim().toUpperCase()
     if (!cidade || !uf) return null // mesmo silêncio do push: sem lugar não há alvo
+    const ehLembrete = /^lembrete_/.test(lado.tipo)
+    // Só o e-mail de demanda NOVA (tipo 'obra' / 'reparo') é carregado para o dia seguinte: o
+    // lembrete se repete sozinho e o reanúncio é um aviso de ocasião. A marca é acessória — falha
+    // ao gravá-la fica no log e nunca derruba o envio.
+    const ehDemandaNova = lado.tipo === LADOS_EMAIL[tabela]?.tipo
+    const marcarPendente = async (pendente) => {
+      if (!ehDemandaNova) return
+      try {
+        await client.query(
+          `UPDATE ${tabela} SET email_novo_pendente_em = CASE WHEN $2::boolean THEN COALESCE(email_novo_pendente_em, NOW()) ELSE NULL END
+            WHERE id = $1 AND (email_novo_pendente_em IS NOT NULL) IS DISTINCT FROM $2::boolean`,
+          [demandaId, pendente]
+        )
+      } catch (err) {
+        console.error(`[EmailAlerta] ${lado.tipo} ${demandaId}: não foi possível ${pendente ? 'marcar' : 'limpar'} a pendência de e-mail:`, err.message)
+      }
+    }
     // Lista `email` de publicoDemanda (utils/gruposCategorias): categorias + grupos; com 'outros'
     // entre elas, só os grupos das OUTRAS categorias ou, 'outros' sozinho, só quem marcou
     // 'outros' — o push é que vai a todos. null no lado obra (obras.categoria não é ofício e as
@@ -871,10 +907,14 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     // Elegíveis (espelho de broadcastPaginado, sem exigir token e exigindo e-mail). Com
     // lado.somenteSemToken ($6) só quem NÃO tem push_token entra (lembrete/reanúncio). Ordem
     // por u.id como lá, para o teto cortar de forma estável.
-    // Como no push: subconsulta = elegíveis, UMA linha por pessoa (DISTINCT ON); ordem final por id.
+    // Como no push: subconsulta = elegíveis, UMA linha por pessoa (DISTINCT ON).
+    // Elegível = quem AINDA NÃO recebeu este e-mail (mesmo tipo, mesma demanda, por pessoa): é o
+    // que permite reenviar "o que faltou" no dia seguinte sem gastar o corte com quem já recebeu.
+    // Ordem final = SEM TOKEN PRIMEIRO, depois id: quando o teto corta, o que sobra do orçamento
+    // vai a quem não tem o push como alternativa; quem tem token já foi avisado por ele.
     const elegiveis = await client.query(
       `SELECT x.id, x.nome, x.email FROM (
-       SELECT DISTINCT ON (${SQL_PESSOA_DO_PUBLICO}) u.id, u.nome, u.email
+       SELECT DISTINCT ON (${SQL_PESSOA_DO_PUBLICO}) u.id, u.nome, u.email, u.push_token
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
        WHERE ${sqlPublicoProfissional('$1')}
@@ -882,10 +922,10 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          AND (NOT $6::boolean OR u.push_token IS NULL)
          AND NULLIF(btrim(u.email), '') IS NOT NULL
          AND ${sqlPessoaNaoSuspensa('u.id')}
-         -- Uma vez por PESSOA (Fase 2b): se a outra conta profissional do CPF já recebeu ESTE
-         -- e-mail (mesmo tipo, mesma demanda), esta não recebe — o UNIQUE de email_alertas é por conta.
+         -- Uma vez por PESSOA (Fase 2b): se ESTA conta ou a outra conta profissional do CPF já
+         -- recebeu este e-mail (mesmo tipo, mesma demanda), não entra de novo.
          AND NOT EXISTS (SELECT 1 FROM email_alertas ja
-                          WHERE ja.tipo = $9 AND ja.demanda_id = $5 AND ja.usuario_id <> u.id
+                          WHERE ja.tipo = $9 AND ja.demanda_id = $5
                             AND ${sqlProfissionalDaPessoa('ja.usuario_id', 'u.id')})
          AND u.desinstalado_em IS NULL
          AND NULLIF(btrim(u.cidade), '') IS NOT NULL
@@ -906,17 +946,21 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          AND ($8::text[] IS NULL OR NOT COALESCE(u.especialidades && $8::text[], false))
        ORDER BY ${sqlOrdemDaPessoa('$1')}
        ) x
-       ORDER BY x.id`,
-      [lado.publico, cidade, uf, categorias, demandaId, lado.somenteSemToken === true, /^lembrete_/.test(lado.tipo), lado.excluirCategorias ?? null, lado.tipo]
+       ORDER BY (x.push_token IS NULL) DESC, x.id`,
+      [lado.publico, cidade, uf, categorias, demandaId, lado.somenteSemToken === true, ehLembrete, lado.excluirCategorias ?? null, lado.tipo]
     )
-    if (elegiveis.rows.length === 0) return null
+    if (elegiveis.rows.length === 0) {
+      await marcarPendente(false) // ninguém falta: o que estava devido (se estava) foi quitado
+      return null
+    }
 
-    const hoje = await client.query(
-      `SELECT count(*)::int AS n FROM email_alertas
-        WHERE created_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')
-          AND tipo NOT LIKE 'aviso:%'`
-    )
-    const restante = EMAIL_ALERTAS_TETO_DEMANDA - hoje.rows[0].n
+    // Lembrete gasta o SUB-teto (EMAIL_ALERTAS_TETO_LEMBRETES); demanda nova / reanúncio, o teto de demanda.
+    const orcamento = await orcamentoEmailsDeDemanda(client)
+    const restante = ehLembrete ? orcamento.restanteLembretes : orcamento.restante
+    // CORTE pelo teto (parcial ou total) numa demanda NOVA: fica marcada para o cron
+    // enviarEmailsPendentesNovaDemanda mandar o que faltou quando houver orçamento — antes o
+    // corte era definitivo e a demanda publicada depois de o teto estourar ficava com ZERO e-mails.
+    await marcarPendente(elegiveis.rows.length > restante)
     if (restante <= 0) {
       console.warn(`[EmailAlerta] ${lado.tipo} ${demandaId}: teto diário de ${EMAIL_ALERTAS_TETO_DEMANDA} e-mails de demanda atingido (${EMAIL_ALERTAS_RESERVA_CRITICOS} reservados aos avisos críticos) — ${elegiveis.rows.length} elegível(is) sem aviso`)
       return null
@@ -964,6 +1008,52 @@ const enviarEmailsNovaDemanda = async (tabela, demandaId, ladoOverride = null) =
     console.log(`[EmailAlerta] ${lado.tipo} ${demandaId} | elegíveis${lado.somenteSemToken ? ' sem token' : ''}: ${fase1.elegiveis} | enviados: ${enviados} | falhos: ${falhos} | cortados pelo teto: ${fase1.cortados}`)
   } catch (err) {
     console.error(`[EmailAlerta] erro em ${tabela} ${demandaId}:`, err.message)
+  }
+}
+
+// E-mails de demanda NOVA que o teto diário cortou (email_novo_pendente_em — ver marcarPendente
+// em reivindicarEmailsNovaDemanda): manda o que faltou quando há orçamento. Como o corte só
+// acontece com o teto do dia esgotado, na prática isto roda no DIA SEGUINTE; server.js chama este
+// cron no mesmo tique e ANTES dos lembretes, e os lembretes têm sub-teto próprio, então o que
+// ficou devido sai primeiro. Mais antiga primeiro; dentro de cada demanda, sem token primeiro.
+// Só entre LEMBRETE_HORA_INICIO e LEMBRETE_HORA_FIM (São Paulo): o orçamento novo abre à
+// meia-noite, mas e-mail atrasado não precisa chegar de madrugada.
+// Demanda que deixou de estar aberta, aprovada, sem match e no prazo perde a marca sem envio.
+// Para quando o orçamento do dia acaba — o que sobrar continua marcado para o dia seguinte.
+// Guarda de sobreposição própria (um tique não começa com o anterior ainda enviando): o
+// semSobreposicao dos demais crons é definido mais abaixo no arquivo.
+let pendentesDoTetoEmExecucao = false
+const enviarEmailsPendentesNovaDemanda = async () => {
+  if (pendentesDoTetoEmExecucao) return
+  pendentesDoTetoEmExecucao = true
+  try {
+    const pendentes = await pool.query(
+      `SELECT x.tabela, x.id, x.viva, (${SQL_JANELA_LEMBRETE}) AS na_janela FROM (
+         SELECT 'obras' AS tabela, id, email_novo_pendente_em AS desde,
+                (status = 'aberta' AND status_aprovacao = 'aprovada' AND match_usuario_id IS NULL AND expira_em > NOW()) AS viva
+           FROM obras WHERE email_novo_pendente_em IS NOT NULL
+         UNION ALL
+         SELECT 'reparos', id, email_novo_pendente_em,
+                (status = 'aberta' AND status_aprovacao = 'aprovada' AND match_usuario_id IS NULL AND expira_em > NOW())
+           FROM reparos WHERE email_novo_pendente_em IS NOT NULL) x
+        ORDER BY x.desde, x.id`
+    )
+    if (pendentes.rows.length === 0 || !pendentes.rows[0].na_janela) return
+    let enviadas = 0
+    for (const d of pendentes.rows) {
+      if (!d.viva) {
+        await pool.query(`UPDATE ${d.tabela} SET email_novo_pendente_em = NULL WHERE id = $1`, [d.id])
+        continue
+      }
+      if ((await orcamentoEmailsDeDemanda()).restante <= 0) break
+      await enviarEmailsNovaDemanda(d.tabela, d.id)
+      enviadas++
+    }
+    if (enviadas > 0) console.log(`[EmailAlerta] pendentes do teto: ${enviadas} demanda(s) reprocessada(s) de ${pendentes.rows.length} marcada(s)`)
+  } catch (err) {
+    console.error('[EmailAlerta] erro ao reenviar e-mails pendentes do teto:', err.message)
+  } finally {
+    pendentesDoTetoEmExecucao = false
   }
 }
 
@@ -3529,6 +3619,9 @@ module.exports = {
   notificarDonoSobreAnaliseObra,
   dispararPushNovoComClaim,
   enviarEmailsNovaDemanda,
+  enviarEmailsPendentesNovaDemanda,
+  orcamentoEmailsDeDemanda,
+  EMAIL_ALERTAS_TETO_LEMBRETES,
   montarEmailNovaDemanda,
   EMAIL_ALERTAS_TETO_DIA,
   EMAIL_ALERTAS_RESERVA_CRITICOS,

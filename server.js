@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, pedirIndicacoes, avisarForaDaArea, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, entregarLembrete, lembrarRespostaHorario, repetirRespostaHorarioDono, lembrarPerguntasSemResposta, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, pedirIndicacoes, avisarForaDaArea, enviarEmailsPendentesNovaDemanda, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, entregarLembrete, lembrarRespostaHorario, repetirRespostaHorarioDono, lembrarPerguntasSemResposta, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -876,7 +876,9 @@ const iniciarAgendador = () => {
   // diária na última semana; 08–20h SP nas repetidas): de 5 em 5 min, como os claims de
   // cronômetro — a fatia de W=1h cai em 30 min e não pode esperar 10. Fora do warm-up: a
   // fatia fica devida até acabar, então o próximo tique a pega.
-  setInterval(() => { lembrarDemandasSemResposta() }, INTERVALO_LEMBRETE)
+  // No MESMO tique e ANTES dos lembretes: os e-mails de demanda nova que o teto diário cortou
+  // (alertaService.enviarEmailsPendentesNovaDemanda) saem primeiro; nunca lança.
+  setInterval(async () => { await enviarEmailsPendentesNovaDemanda(); lembrarDemandasSemResposta() }, INTERVALO_LEMBRETE)
   // "Pedido de indicação": demanda sem match e sem manifestação 48h+ após criado_em pede, UMA vez,
   // a quem não faz aquele serviço que indique o app (push só, 08–20h SP, 1 por profissional a
   // cada 3 dias). Mesma cadência do lembrete; fora do warm-up: a condição fica devida até o match
