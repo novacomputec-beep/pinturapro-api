@@ -3,7 +3,8 @@
 //   • alcance = MESMA cidade + UF (sempre, qualquer que seja o raio) OU a até min(raio escolhido,
 //     50 km) da demanda, pelas coordenadas do perfil — a distância só SOMA cidades vizinhas; sem
 //     coordenadas (do profissional ou da demanda) ou com "minha cidade" → só a própria cidade;
-//   • vale para obra e serviço, push e e-mail, na demanda NOVA, no lembrete e no reanúncio; os
+//   • vale para obra e serviço, push e e-mail, na demanda NOVA, no lembrete, no reanúncio e na
+//     "oferta aumentada" (só push); os
 //     demais filtros continuam (especialidade, pode_obras, assinatura, suspensão, desinstalado,
 //     conta do criador, teto de e-mails);
 //   • teto de 15 pushes de demanda por pessoa por dia (São Paulo), contando "fora da área",
@@ -339,7 +340,23 @@ const main = async () => {
   let lem = await lembrar()
   ok(igual(quem(lem), ['RELE']) && lem[0].data.reparo_id === D(30), 'LEMBRETE do serviço em Lagoa Formosa: chega ao reparador de elétrica de Patos (25 km) — antes, ninguém', quem(lem))
   ok(await usadosHoje(P.RELE) === antesRele + 1, 'lembrete enviado CONTA no teto diário', { antes: antesRele, depois: await usadosHoje(P.RELE) })
-  await db.query(`INSERT INTO push_entregas (tipo, demanda_id, usuario_id, resultado) SELECT 'reparo', gen_random_uuid(), $1::uuid, 'enviado' FROM generate_series(1, $2::int)`, [P.RELE.id, 15 - (antesRele + 1)])
+
+  // ═══ 9. OFERTA AUMENTADA: mesmo alcance e conta no teto ════════════════════════════════════
+  const oferta = async (fn, id) => { silenciar(true); pushes.length = 0; await fn(id); await assentar(); silenciar(false); return pushes.filter(p => p.data?.oferta_aumentada) }
+  let ofe = await oferta(alerta.notificarOfertaAumentadaReparo, D(30))
+  ok(igual(quem(ofe), ['RELE']), 'OFERTA AUMENTADA do serviço em Lagoa Formosa: chega ao reparador de elétrica de Patos (25 km)', quem(ofe))
+  ok(await usadosHoje(P.RELE) === antesRele + 2
+     && (await db.query(`SELECT count(*)::int AS n FROM lembretes_push_enviados WHERE demanda_id = $1 AND motivo = 'oferta'`, [D(30)])).rows[0].n === 1,
+     'oferta aumentada enviada CONTA no teto diário', await usadosHoje(P.RELE))
+  // obra de Lagoa Formosa (a do lote): cidade (LFX, raio de 5 km a 12 km) + vizinhos por distância; PAT está no teto (15)
+  ofe = await oferta(alerta.notificarOfertaAumentadaObra, D(21))
+  ok(await usadosHoje(P.PAT) >= 15 && !quem(ofe).includes('PAT'), 'oferta aumentada com a pessoa no teto: PAT não recebe', { usados: await usadosHoje(P.PAT) })
+  ok(quem(ofe).includes('LFX') && quem(ofe).includes('PAT30') && quem(ofe).includes('ROBR') && !quem(ofe).includes('PTR') && !quem(ofe).includes('PATSC'),
+     'oferta aumentada da obra: mesma cidade sempre + até min(raio, 50 km); a 64 km e sem coordenadas em outra cidade ficam fora', quem(ofe))
+  ok((await acimaDoTeto(D(21))).length === 0, 'oferta aumentada acima do teto não entra no "Mais N pedidos"', await acimaDoTeto(D(21)))
+  await db.query(`INSERT INTO push_entregas (tipo, demanda_id, usuario_id, resultado) SELECT 'reparo', gen_random_uuid(), $1::uuid, 'enviado' FROM generate_series(1, $2::int)`, [P.RELE.id, 15 - (antesRele + 2)])
+  ofe = await oferta(alerta.notificarOfertaAumentadaReparo, D(30))
+  ok(ofe.length === 0, 'oferta aumentada do serviço com RELE no teto (15): não sai', quem(ofe))
   await reparoAntigo(D(31), 'Tomada sem energia')
   lem = await lembrar()
   ok(lem.length === 0 && (await acimaDoTeto(D(31))).length === 0, 'lembrete com a pessoa no teto (15): não sai e não entra no resumo', { pushes: quem(lem), acima: await acimaDoTeto(D(31)) })

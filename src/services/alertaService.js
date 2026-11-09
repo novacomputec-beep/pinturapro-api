@@ -437,12 +437,12 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
                                    foraDasCategorias = null, semIndicacaoRecente = false, excluirUsuarioId = null, aposPagina = null,
                                    excluirCategorias = null, excluirJaAvisados = null, foraDaArea = null,
                                    porDistancia = null, tetoDiario = null }) => {
-  // porDistancia { lat, lng } (demanda NOVA, lembrete e reanúncio): além da MESMA CIDADE (que
+  // porDistancia { lat, lng } (demanda NOVA, lembrete, reanúncio e oferta aumentada): além da MESMA CIDADE (que
   //   recebe sempre), alcança quem está a até min(raio escolhido, 50 km) da demanda.
   // tetoDiario { tabela, demandaId, lat, lng, lote, resumo } (demanda nova, "fora da área",
   //   lembrete e reanúncio): quem já recebeu TETO_PUSH_DEMANDA_DIA pushes de demanda hoje NÃO
   //   recebe este. Com resumo !== false fica registrado em avisos_acima_do_teto para o
-  //   push-resumo (lembrete e reanúncio passam resumo: false — não são pedido NOVO). `lote` =
+  //   push-resumo (lembrete, reanúncio e oferta aumentada passam resumo: false — não são pedido NOVO). `lote` =
   //   [{ lat, lng }] das demandas que saem JUNTO com esta e ainda não foram processadas: as mais
   //   próximas do profissional têm preferência no que resta do teto.
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0, acimaDoTeto: 0 }
@@ -773,7 +773,7 @@ const mensagemOfertaAumentadaReparo = (reparo, reparoId) => {
 // notificadores de demanda nova). Erro do broadcast SOBE: o chamador decide o que responder —
 // o valor já foi gravado antes do push, então a rota loga e responde 200 com push: { erro }.
 const notificarOfertaAumentadaObra = async (obraId) => {
-  const r = await pool.query(`SELECT titulo, cidade, uf, categoria, valor FROM obras WHERE id = $1`, [obraId])
+  const r = await pool.query(`SELECT titulo, cidade, uf, categoria, valor, latitude, longitude FROM obras WHERE id = $1`, [obraId])
   if (r.rows.length === 0) return null
   const obra = r.rows[0]
   const cidade = normalizar(obra.cidade)
@@ -788,10 +788,15 @@ const notificarOfertaAumentadaObra = async (obraId) => {
     rotulo: `oferta aumentada obra ${obraId}`,
     entrega: null,
     demanda: { tabela: 'obras', id: obraId },
+    // Mesmo alcance da demanda nova (cidade OU até min(raio, 50 km)) e conta no teto de 15 pushes
+    // de demanda por dia; acima do teto não sai (e não entra no resumo "Mais N pedidos").
+    porDistancia: ponto(obra),
+    tetoDiario: { tabela: 'obras', demandaId: obraId, ...ponto(obra), lote: [], resumo: false },
+    aposPagina: (resultados) => registrarLembretesPush('obras', obraId, 'oferta', resultados),
   })
 }
 const notificarOfertaAumentadaReparo = async (reparoId) => {
-  const r = await pool.query(`SELECT titulo, cidade, uf, categoria, categorias, valor_estimado FROM reparos WHERE id = $1`, [reparoId])
+  const r = await pool.query(`SELECT titulo, cidade, uf, categoria, categorias, valor_estimado, latitude, longitude FROM reparos WHERE id = $1`, [reparoId])
   if (r.rows.length === 0) return null
   const reparo = r.rows[0]
   const cidade = normalizar(reparo.cidade)
@@ -806,6 +811,10 @@ const notificarOfertaAumentadaReparo = async (reparoId) => {
     rotulo: `oferta aumentada reparo ${reparoId}`,
     entrega: null,
     demanda: { tabela: 'reparos', id: reparoId },
+    // Alcance e teto diário: como no lado obra.
+    porDistancia: ponto(reparo),
+    tetoDiario: { tabela: 'reparos', demandaId: reparoId, ...ponto(reparo), lote: [], resumo: false },
+    aposPagina: (resultados) => registrarLembretesPush('reparos', reparoId, 'oferta', resultados),
   })
 }
 

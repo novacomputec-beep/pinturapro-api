@@ -16,15 +16,15 @@ const { sqlProfissionalDaPessoa } = require('./tipoConta')
 //        → 50 km; 0 (escolheu "minha cidade") → só a própria cidade.
 //      • SEM coordenadas de um dos lados (perfil antigo, demanda sem geocodificação) → só a
 //        mesma cidade + UF, como antes.
-//    Vale para o aviso de demanda NOVA, o lembrete "ainda aberto" e o reanúncio. Oferta aumentada,
-//    pedido de indicação e "fora da sua área" continuam só por cidade.
+//    Vale para o aviso de demanda NOVA, o lembrete "ainda aberto", o reanúncio e a "oferta
+//    aumentada". Pedido de indicação e "fora da sua área" continuam só por cidade.
 //
 // 2. TETO — no máximo 15 pushes de demanda por PESSOA por dia de São Paulo, somando demanda nova,
-//    "fora da sua área", lembrete e reanúncio. Demanda NOVA (e "fora da área") que passa do teto
-//    NÃO vira push: fica em avisos_acima_do_teto e sai, no máximo UMA vez por dia e só entre 08h e
-//    20h, num push-resumo "Mais N pedidos perto de você hoje". Lembrete e reanúncio acima do teto
-//    simplesmente não saem (não são pedido NOVO para entrar no "Mais N"). O e-mail não é afetado
-//    (tem o teto dele).
+//    "fora da sua área", lembrete, reanúncio e oferta aumentada. Demanda NOVA (e "fora da área")
+//    que passa do teto NÃO vira push: fica em avisos_acima_do_teto e sai, no máximo UMA vez por dia
+//    e só entre 08h e 20h, num push-resumo "Mais N pedidos perto de você hoje". Lembrete, reanúncio
+//    e oferta aumentada acima do teto simplesmente não saem (não são pedido NOVO para entrar no
+//    "Mais N"). O e-mail não é afetado (tem o teto dele).
 //    Quando várias demandas saem JUNTAS (rede de segurança, fila da manhã do "fora da área", tique
 //    dos lembretes), o que resta do teto vai às mais PRÓXIMAS de cada profissional (sqlMaisPertoNoLote).
 const RAIO_MAX_KM = 50
@@ -45,14 +45,15 @@ const migrarAvisosPorDistancia = async (client) => {
     )`)
   await client.query(`CREATE INDEX IF NOT EXISTS avisos_acima_do_teto_usuario_idx ON avisos_acima_do_teto (usuario_id, criado_em)`)
   await client.query(`CREATE INDEX IF NOT EXISTS avisos_acima_do_teto_pendente_idx ON avisos_acima_do_teto (criado_em) WHERE resumo_em IS NULL`)
-  // Lembrete "ainda aberto" e reanúncio não gravam push_entregas (uma demanda tem vários); este
-  // log existe só para eles contarem no teto diário. Sem PK: a mesma demanda lembra mais de uma vez.
+  // Lembrete "ainda aberto", reanúncio e oferta aumentada não gravam push_entregas (uma demanda
+  // tem vários); este log existe só para eles contarem no teto diário. Sem PK: a mesma demanda
+  // lembra mais de uma vez.
   await client.query(`
     CREATE TABLE IF NOT EXISTS lembretes_push_enviados (
       tabela     TEXT NOT NULL CHECK (tabela IN ('obras', 'reparos')),
       demanda_id UUID NOT NULL,
       usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
-      motivo     TEXT NOT NULL CHECK (motivo IN ('lembrete', 'reanuncio')),
+      motivo     TEXT NOT NULL CHECK (motivo IN ('lembrete', 'reanuncio', 'oferta')),
       enviado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`)
   await client.query(`CREATE INDEX IF NOT EXISTS lembretes_push_enviados_usuario_idx ON lembretes_push_enviados (usuario_id, enviado_em)`)
@@ -111,7 +112,7 @@ const sqlAlcance = ({ pLat, pLng, sqlMesmaCidade, alias = 'u' }) => `(${sqlMesma
 
 // Pushes de demanda que a PESSOA de `exprId` já recebeu hoje (dia de São Paulo): os do aviso de
 // demanda nova (push_entregas 'enviado') + os "fora da sua área" (avisos_fora_area) + os de
-// lembrete e reanúncio (lembretes_push_enviados).
+// lembrete, reanúncio e oferta aumentada (lembretes_push_enviados).
 const SQL_INICIO_DO_DIA_SP = `(date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')`
 const sqlPushesDeDemandaHoje = (exprId = 'u.id') => `(
           (SELECT count(*) FROM push_entregas teto_pe
@@ -150,7 +151,7 @@ const limparAcimaDoTetoAntigos = async (db = pool) => {
   await db.query(`DELETE FROM avisos_acima_do_teto WHERE criado_em < NOW() - INTERVAL '7 days'`)
   await db.query(`DELETE FROM lembretes_push_enviados WHERE enviado_em < NOW() - INTERVAL '7 days'`)
 }
-// Lembrete / reanúncio que SAIU (resultado 'enviado'): entra na contagem do teto diário.
+// Lembrete / reanúncio / oferta aumentada que SAIU (resultado 'enviado'): entra na contagem do teto diário.
 const registrarLembretesPush = async (tabela, demandaId, motivo, resultados, db = pool) => {
   const ids = (resultados || []).filter(r => r.resultado === 'enviado').map(r => r.id)
   if (ids.length === 0) return 0
