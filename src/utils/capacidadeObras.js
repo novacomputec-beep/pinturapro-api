@@ -10,7 +10,7 @@ const { sqlProfissionalDaPessoa } = require('./tipoConta')
 // (ESPECIALIDADES_OBRA — grupo "Obras de Construção Civil" do seletor) vê o feed de obras, recebe
 // o push/e-mail de obra e se candidata como um pintor.
 // Fase 2b — SERVIÇOS (simétrico): a conta PINTOR que marcou ao menos uma especialidade de serviço
-// (ESPECIALIDADES_REPARADOR, as 57) vê o feed de serviços, recebe o push/e-mail de serviço POR
+// (ESPECIALIDADES_REPARADOR) vê o feed de serviços, recebe o push/e-mail de serviço POR
 // ESPECIALIDADE (categoria × especialidades, como todo reparador) e demonstra interesse.
 //
 //   pode_obras    = role 'prestador' E ( tipo 'pintor'    OU ( tipo 'reparador' E especialidades ∩ obra    ≠ ∅ ) )

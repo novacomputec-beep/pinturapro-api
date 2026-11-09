@@ -67,6 +67,7 @@ const CATEGORIAS_SERVICO = [
   { slug: 'informatica',     rotulo: 'Informática',       emoji: '🖥️' },
   { slug: 'gesseiro',        rotulo: 'Gesseiro',          emoji: '🪜' },
   { slug: 'placas_fachadas', rotulo: 'Placas e fachadas', emoji: '🪧' },
+  { slug: 'borracheiro',     rotulo: 'Borracheiro',       emoji: '🛞' },
   { slug: 'outros',          rotulo: 'Outros',            emoji: '➕' },
 ]
 
