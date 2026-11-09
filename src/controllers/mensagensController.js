@@ -47,7 +47,7 @@ const enviar = async (req, res) => {
       para: process.env.EMAIL_EQUIPE || process.env.SMTP_USER,
       assunto: `Nova dúvida sobre — ${obra.titulo}`,
       html: `
-        <p><strong>Pintor:</strong> ${req.usuario.nome}</p>
+        <p><strong>Profissional:</strong> ${req.usuario.nome}</p>
         <p><strong>Obra:</strong> ${obra.titulo}</p>
         <p><strong>Dúvida:</strong> ${conteudo}</p>
         <p>Acesse o painel para responder.</p>

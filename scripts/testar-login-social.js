@@ -105,6 +105,7 @@ const main = async () => {
     CREATE INDEX usuarios_apple_sub_idx ON usuarios (apple_sub) WHERE apple_sub IS NOT NULL;
     CREATE TABLE assinaturas (usuario_id uuid, plano text, valor_mensal numeric, status text, tipo text, proximo_vencimento timestamptz, criado_em timestamptz DEFAULT now());
     CREATE TABLE configuracoes (chave text, valor text);
+    CREATE TABLE candidaturas (obra_id uuid, usuario_id uuid); -- montarSessao lê tem_candidaturas (Fase 2a)
     CREATE TABLE tentativas_auth (acao text, identificador text, tentativas int DEFAULT 0, janela_em timestamptz DEFAULT now(), PRIMARY KEY (acao, identificador));
     INSERT INTO configuracoes VALUES ('multiplas_contas', 'true');
     CREATE FUNCTION gerar_codigo_indicacao() RETURNS text LANGUAGE sql AS $$ SELECT 'COD' || floor(random()*100000)::text $$;

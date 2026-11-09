@@ -697,7 +697,7 @@ const TETO_LEMBRETE_AVALIACAO_DIAS = 7
 // com obras/reparos e 0/3 com contratos. Trocar isso faria o NOT EXISTS nunca casar, e o job
 // cutucaria justamente quem já avaliou.
 const LADOS_AVALIACAO = [
-  { tabela: 'obras',   tipo: 'obra',   chave: 'obra_id',   rotulo: 'a obra',    profissional: 'o pintor' },
+  { tabela: 'obras',   tipo: 'obra',   chave: 'obra_id',   rotulo: 'a obra',    profissional: 'o profissional' },
   { tabela: 'reparos', tipo: 'reparo', chave: 'reparo_id', rotulo: 'o serviço', profissional: 'o profissional' },
 ]
 

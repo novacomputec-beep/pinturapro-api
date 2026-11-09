@@ -46,12 +46,12 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const LADOS = {
   obras: {
     tabela: 'obras', chave: 'obra_id', proposta: { tabela: 'candidaturas', coluna: 'obra_id' },
-    profissional: 'pintor', nome: 'a obra', artigo: 'A obra', naoEncontrada: 'Obra não encontrada',
+    profissional: 'profissional', rotuloProfissional: 'Profissional', nome: 'a obra', artigo: 'A obra', naoEncontrada: 'Obra não encontrada',
     disponivel: 'Obra disponível novamente.',
   },
   reparos: {
     tabela: 'reparos', chave: 'reparo_id', proposta: { tabela: 'interesse_reparos', coluna: 'reparo_id' },
-    profissional: 'prestador', nome: 'o serviço', artigo: 'O serviço', naoEncontrada: 'Serviço não encontrado',
+    profissional: 'prestador', rotuloProfissional: 'Prestador', nome: 'o serviço', artigo: 'O serviço', naoEncontrada: 'Serviço não encontrado',
     disponivel: 'Serviço disponível novamente.',
   },
 }
@@ -429,7 +429,7 @@ const handlersLegados = (tabela) => {
             ator_id: req.usuario.id,
           }).catch(() => {})
         }
-        res.json({ mensagem: `${lado.profissional === 'pintor' ? 'Pintor' : 'Prestador'} notificado para informar o tempo.`, ...camposAtraso(d) })
+        res.json({ mensagem: `${lado.rotuloProfissional} notificado para informar o tempo.`, ...camposAtraso(d) })
       } catch (err) {
         console.error(`[Atraso] perguntar-tempo ${tabela}:`, err.message)
         res.status(500).json({ erro: 'Erro ao perguntar tempo' })
@@ -457,7 +457,7 @@ const handlersLegados = (tabela) => {
         const d = upd.rows[0] || atual
         const dono = await contato(d.criado_por)
         entregar(dono, {
-          titulo: `⏳ ${lado.profissional === 'pintor' ? 'Pintor' : 'Prestador'} precisa de mais tempo`,
+          titulo: `⏳ ${lado.rotuloProfissional} precisa de mais tempo`,
           corpo: `Ele precisa de ${min} minuto(s) a mais para chegar em "${d.titulo}". Aceitar ou recusar? Sem resposta em ${RESPOSTA_AUTO_MIN} min, o pedido é aceito.`,
           data: { tipo: 'pedido_atraso', [lado.chave]: d.id },
           rotulo: `informar tempo ${tabela} ${d.id}`,

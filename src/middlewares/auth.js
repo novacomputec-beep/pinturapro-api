@@ -87,8 +87,10 @@ const autenticar = async (req, res, next) => {
     // Tenta cache primeiro
     let usuario = getCacheUsuario(decoded.id)
     if (!usuario) {
+      // especialidades: o gate de obras (exigirPodeObras, routes/index.js) decide pela
+      // capacidade — tipo 'pintor' OU reparador com especialidade de obra (utils/capacidadeObras).
       const result = await pool.query(
-        'SELECT id, nome, email, role, ativo, tipo_prestador, suspenso_em, suspenso_motivo, token_version FROM usuarios WHERE id = $1',
+        'SELECT id, nome, email, role, ativo, tipo_prestador, especialidades, suspenso_em, suspenso_motivo, token_version FROM usuarios WHERE id = $1',
         [decoded.id]
       )
       if (result.rows.length === 0) {
