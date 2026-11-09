@@ -62,6 +62,7 @@ const main = async () => {
       tipo_prestador text, cep text, latitude numeric, longitude numeric, logradouro text, numero text, complemento text, bairro text,
       foto_url text, codigo_indicacao text, token_version int NOT NULL DEFAULT 1, boas_vindas_exibida boolean DEFAULT false,
       aceita_promocoes boolean, aprovado_automaticamente boolean, criado_em timestamptz DEFAULT now());
+    ALTER TABLE usuarios ADD COLUMN avisos_todas_areas boolean NOT NULL DEFAULT true; -- preferência do aviso "fora da sua área" (migração de boot)
     CREATE TABLE assinaturas (usuario_id uuid, plano text, valor_mensal numeric, status text, tipo text, proximo_vencimento timestamptz, criado_em timestamptz DEFAULT now());
     CREATE TABLE avaliacoes (avaliado_id uuid, estrelas int);
     CREATE TABLE configuracoes (chave text, valor text);

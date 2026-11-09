@@ -77,9 +77,15 @@ const sqlCasaCategorias = (param) =>
 // O lado obra continua SEM filtro de especialidade por demanda (obras.categoria é residencial/
 // comercial/…, não um ofício): qualquer especialidade de obra recebe toda obra da cidade.
 const { sqlPodeObras, sqlPodeServicos } = require('../utils/capacidadeObras')
+// Aviso "fora da sua área" (utils/avisosForaDaArea): teto diário por pessoa, bloqueios e o log de envios.
+const { lerLimiteAvisosForaDaArea, sqlAbaixoDoLimiteForaDaArea, sqlSemBloqueioNaDemanda,
+        registrarAvisosForaDaArea, limparAvisosForaDaAreaAntigos } = require('../utils/avisosForaDaArea')
 const sqlPublicoProfissional = (param) => `u.role = 'prestador' AND (CASE ${param}::text
            WHEN 'obras'   THEN ${sqlPodeObras('u')}
            WHEN 'reparos' THEN ${sqlPodeServicos('u')}
+           -- 'todos': qualquer profissional (pintor ou reparador), seja qual for a especialidade —
+           -- só o aviso "fora da sua área" usa (ver foraDaArea em broadcastPaginado).
+           WHEN 'todos'   THEN COALESCE(u.tipo_prestador IN ('pintor', 'reparador'), false)
            ELSE false END)`
 
 // UM AVISO POR PESSOA (Fase 2b): com as capacidades cruzadas, a conta de pintor e a de reparador
@@ -413,9 +419,16 @@ const sqlSemManifestacao = (interesse, param) => (interesse
 //     do primeiro aviso), por cima do casamento normal com `categoria` (o público novo).
 //   excluirJaAvisados { tipo, demandaId }: tira quem já tem linha em push_entregas desta demanda
 //     (enviado, falha ou inválido — todos já foram alvo do aviso original ou de uma repescagem).
+// Só o aviso "FORA DA SUA ÁREA" (avisarForaDaArea) passa este, junto com publico: 'todos':
+//   foraDaArea { publico: 'obras' | 'reparos', categorias: text[] | null, limiteDia: int }: o público
+//     vira "quem NÃO está no público normal da demanda" — fica só quem tem avisos_todas_areas
+//     ligado, cuja PESSOA (nenhuma conta profissional do CPF) pode trabalhar naquele lado casando
+//     a categoria (`categorias` = a lista de push de publicoDemanda; null = sem filtro), que está
+//     abaixo do teto diário (limiteDia; 0 = sem teto) e sem bloqueio na demanda (lista negra e
+//     bloqueio do dono, por pessoa — exige `demanda`).
 const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null, demanda = null,
                                    foraDasCategorias = null, semIndicacaoRecente = false, excluirUsuarioId = null, aposPagina = null,
-                                   excluirCategorias = null, excluirJaAvisados = null }) => {
+                                   excluirCategorias = null, excluirJaAvisados = null, foraDaArea = null }) => {
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
   // Lista de slugs a casar (categoria + grupo, ou só ela; null no lado obra), resolvida UMA vez
   // por broadcast — a chave de config é lida aqui, não a cada página.
@@ -449,6 +462,24 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
     if (excluirCategorias) {
       params.push(excluirCategorias)
       filtrosOpcionais += `\n         AND NOT COALESCE(u.especialidades && $${params.length}::text[], false)`
+    }
+    if (foraDaArea) {
+      if (!['obras', 'reparos'].includes(foraDaArea.publico)) throw new Error(`broadcast ${rotulo}: foraDaArea.publico inválido`)
+      const sqlPublicoNormal = foraDaArea.publico === 'obras' ? sqlPodeObras('nat') : sqlPodeServicos('nat')
+      params.push(foraDaArea.categorias ?? null)
+      const pCat = `$${params.length}`
+      params.push(Number.isInteger(foraDaArea.limiteDia) ? foraDaArea.limiteDia : 0)
+      const pLim = `$${params.length}`
+      filtrosOpcionais += `
+         AND u.avisos_todas_areas IS TRUE
+         AND NOT EXISTS (SELECT 1 FROM usuarios nat
+                          WHERE ${sqlProfissionalDaPessoa('nat.id', 'u.id')} AND ${sqlPublicoNormal}
+                            AND (${pCat}::text[] IS NULL OR nat.especialidades && ${pCat}::text[]))
+         AND ${sqlAbaixoDoLimiteForaDaArea(pLim)}`
+      if (demanda) {
+        params.push(demanda.id)
+        filtrosOpcionais += `\n         AND ${sqlSemBloqueioNaDemanda(demanda.tabela, `$${params.length}`)}`
+      }
     }
     if (excluirJaAvisados) {
       params.push(excluirJaAvisados.tipo, excluirJaAvisados.demandaId)
@@ -1170,6 +1201,11 @@ const dispararPushNovoComClaim = async (tabela, id, notificar, { criadoPor = nul
     // está gravado e fica.
     enviarEmailsNovaDemanda(tabela, id).catch(err =>
       console.error(`[EmailAlerta] erro inesperado em ${tabela} ${id}:`, err.message))
+    // Aviso "fora da sua área" aos demais profissionais da cidade (só push; claim próprio em
+    // aviso_fora_area_em). Também depois do COMMIT e fire-and-forget; fora da janela 08–20h o
+    // claim não acontece e o cron (avisarForaDaArea) envia quando ela abrir.
+    avisarForaDaAreaDemanda(tabela, id).catch(err =>
+      console.error(`[ForaDaArea] erro inesperado em ${tabela} ${id}:`, err.message))
     return true
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
@@ -1544,6 +1580,107 @@ const pedirIndicacoes = semSobreposicao('pedirIndicacoes', async () => {
       console.error(`[Indicacao] erro em ${lado.tabela}:`, err.message)
     }
   }
+})
+
+// ─── Aviso "FORA DA SUA ÁREA" (decisão do dono, 09/11/2026) ─────────────────────────────────────
+// Quando um serviço ou uma obra é publicado, os profissionais da MESMA CIDADE que NÃO estão no
+// público normal da demanda (não podem trabalhar naquele lado, ou a categoria não casa com as
+// especialidades — por PESSOA) e têm usuarios.avisos_todas_areas ligado recebem UM push:
+//   título: "📣 Pedido em <cidade> (fora da sua área)"
+//   corpo:  "<emoji> <título> · <bairro> · R$ <valor>. Sabe fazer ou conhece quem faz? Toque para ver."
+// SÓ PUSH — nenhum e-mail, então nada entra no teto diário do Brevo (EMAIL_ALERTAS_TETO_DIA).
+// Elegibilidade = a do aviso de demanda nova (broadcastPaginado: assinatura ativa, token, não
+// desinstalado, cidade+uf dobrados, suspensão por pessoa, uma linha por pessoa, fora a outra conta
+// do criador), MAIS: bloqueios da demanda por pessoa e o teto diário por pessoa
+// (configuracoes.limite_avisos_fora_area_dia; 0 = sem teto) — utils/avisosForaDaArea.
+// QUANDO: logo depois do push de demanda nova (dispararPushNovoComClaim chama
+// avisarForaDaAreaDemanda) e pelo cron avisarForaDaArea (INTERVALO_LEMBRETE em server.js), que
+// pega o que foi publicado no horário de silêncio. Só entre LEMBRETE_HORA_INICIO e
+// LEMBRETE_HORA_FIM (São Paulo): fora da janela o claim não acontece e a demanda espera.
+// UMA vez por demanda: claim atômico em aviso_fora_area_em, ANTES do envio e nunca desfeito (como
+// o lembrete e o pedido de indicação). Só demanda ainda aberta, aprovada, sem match, no prazo e
+// anunciada há no máximo FORA_AREA_MAX_HORAS — um NULL esquecido não vira aviso dias depois.
+// data do push = o mesmo tipo/id do aviso de demanda nova (o app já leva ao detalhe, que não tem
+// gate de capacidade); fora_da_area: true distingue a origem.
+const FORA_AREA_MAX_HORAS = 24
+const LADOS_FORA_AREA = [
+  { tabela: 'obras',   publico: 'obras',   comCategoria: false, colunaValor: 'valor',          tipoPush: 'nova_obra',   chave: 'obra_id' },
+  { tabela: 'reparos', publico: 'reparos', comCategoria: true,  colunaValor: 'valor_estimado', tipoPush: 'novo_reparo', chave: 'reparo_id' },
+]
+// Segmentos vazios somem (pedido sem bairro ou sem valor não deixa " ·  · " no texto).
+const mensagemForaDaArea = (lado, d) => {
+  const { emoji } = lado.comCategoria ? apresentacaoReparoLista(d, '🔧') : apresentacaoObra(d.categoria, '🎨')
+  const cidade = String(d.cidade || '').trim()
+  const partes = [String(d.titulo || '').trim(), String(d.bairro || '').trim(), Number(d.valor) > 0 ? formatarReaisPush(d.valor) : '']
+    .filter(Boolean)
+  return {
+    titulo: `📣 Pedido${cidade ? ` em ${cidade}` : ''} (fora da sua área)`,
+    corpo: `${emoji} ${partes.join(' · ')}. Sabe fazer ou conhece quem faz? Toque para ver.`,
+    data: { tipo: lado.tipoPush, [lado.chave]: d.id, fora_da_area: true },
+  }
+}
+// O claim (UPDATE … RETURNING). porId = uma demanda só ($1, logo após a publicação); sem ele, todas
+// as devidas (cron). Exportado para o teste executar o MESMO statement.
+const sqlClaimForaDaArea = (lado, porId = false) => `
+      UPDATE ${lado.tabela} d
+         SET aviso_fora_area_em = NOW()
+       WHERE ${porId ? 'd.id = $1 AND ' : ''}d.status = 'aberta' AND d.status_aprovacao = 'aprovada'
+         AND d.match_usuario_id IS NULL AND d.expira_em > NOW()
+         AND d.push_novo_enviado_em IS NOT NULL
+         AND d.push_novo_enviado_em > NOW() - (${FORA_AREA_MAX_HORAS} * INTERVAL '1 hour')
+         AND d.aviso_fora_area_em IS NULL
+         AND ${SQL_JANELA_LEMBRETE}
+   RETURNING d.id, d.titulo, d.cidade, d.uf, d.bairro, d.categoria, ${lado.comCategoria ? 'd.categorias, ' : ''}d.${lado.colunaValor} AS valor, d.criado_por`
+// Envia o aviso de UMA demanda já reivindicada. Erro fica no log: o claim não é desfeito.
+const enviarAvisoForaDaArea = async (lado, d) => {
+  const cidade = normalizar(d.cidade)
+  const uf = String(d.uf || '').trim().toUpperCase()
+  if (!cidade || !uf) {
+    console.log(`[ForaDaArea] ${lado.tabela} ${d.id} sem cidade/uf — ninguém avisado`)
+    return null
+  }
+  try {
+    // Lista de PUSH do público normal (categorias + grupos; null = todo mundo daquele lado, que é
+    // o caso da obra e do reparo com 'outros'): quem casa com ela já recebeu o aviso de sempre.
+    const { push: categorias } = await publicoDemanda(lado.comCategoria ? categoriasDoReparo(d) : null)
+    const limiteDia = await lerLimiteAvisosForaDaArea()
+    return await broadcastPaginado({
+      publico: 'todos', cidade, uf,
+      ...mensagemForaDaArea(lado, d),
+      rotulo: `fora da área ${lado.tabela} ${d.id}`,
+      entrega: null,
+      excluirUsuarioId: d.criado_por,
+      demanda: { tabela: lado.tabela, id: d.id },
+      foraDaArea: { publico: lado.publico, categorias, limiteDia },
+      aposPagina: (resultados) => registrarAvisosForaDaArea(lado.tabela, d.id, resultados),
+    })
+  } catch (err) {
+    console.error(`[ForaDaArea] push ${lado.tabela} ${d.id} falhou:`, err.message)
+    return null
+  }
+}
+// Logo depois da publicação: reivindica e avisa ESTA demanda (se estiver na janela). Devolve o
+// total do broadcast, ou null quando não havia o que reivindicar.
+const avisarForaDaAreaDemanda = async (tabela, id) => {
+  const lado = LADOS_FORA_AREA.find(l => l.tabela === tabela)
+  if (!lado || !id) return null
+  const claim = await pool.query(sqlClaimForaDaArea(lado, true), [id])
+  if (claim.rows.length === 0) return null
+  return enviarAvisoForaDaArea(lado, claim.rows[0])
+}
+// Cron: tudo que ficou devido (publicado fora da janela, ou cujo gancho da publicação não rodou).
+const avisarForaDaArea = semSobreposicao('avisarForaDaArea', async () => {
+  for (const lado of LADOS_FORA_AREA) {
+    try {
+      const claim = await pool.query(sqlClaimForaDaArea(lado))
+      if (claim.rows.length === 0) continue
+      console.log(`[ForaDaArea] ${lado.tabela}: ${claim.rows.length} demanda(s) devida(s) (${claim.rows.map(d => d.id.slice(0, 8)).join(', ')})`)
+      for (const d of claim.rows) await enviarAvisoForaDaArea(lado, d)
+    } catch (err) {
+      console.error(`[ForaDaArea] erro em ${lado.tabela}:`, err.message)
+    }
+  }
+  await limparAvisosForaDaAreaAntigos().catch(err => console.error('[ForaDaArea] limpeza do log:', err.message))
 })
 
 // Avisos ao PROFISSIONAL casado, sobre o prazo de chegada (o do cronômetro):
@@ -3404,6 +3541,12 @@ module.exports = {
   LADOS_LEMBRETE,
   // Pedido de indicação (cron + peças exportadas para o teste rodar o mesmo SQL em BEGIN…ROLLBACK).
   pedirIndicacoes,
+  // Aviso "fora da sua área" (cron + peças exportadas para o teste).
+  avisarForaDaArea,
+  avisarForaDaAreaDemanda,
+  mensagemForaDaArea,
+  sqlClaimForaDaArea,
+  LADOS_FORA_AREA,
   sqlClaimIndicacao,
   LADOS_INDICACAO,
   INDICACAO_APOS_HORAS,

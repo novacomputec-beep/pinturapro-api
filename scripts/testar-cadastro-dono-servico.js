@@ -74,6 +74,7 @@ const main = async () => {
       aceita_promocoes boolean, aprovado_automaticamente boolean, google_sub text, apple_sub text, criado_em timestamptz DEFAULT now());
     CREATE UNIQUE INDEX usuarios_cpf_cnpj_tipo_unico_idx ON usuarios ((regexp_replace(cpf_cnpj, '[^0-9]', '', 'g')), ${sqlTipoConta()}) WHERE cpf_cnpj IS NOT NULL AND cpf_cnpj <> '';
     CREATE UNIQUE INDEX usuarios_email_tipo_unico_idx ON usuarios (email, ${sqlTipoConta()});
+    ALTER TABLE usuarios ADD COLUMN avisos_todas_areas boolean NOT NULL DEFAULT true; -- preferência do aviso "fora da sua área" (migração de boot)
     CREATE TABLE assinaturas (usuario_id uuid, plano text, valor_mensal numeric, status text, tipo text, proximo_vencimento timestamptz, criado_em timestamptz DEFAULT now());
     CREATE TABLE configuracoes (chave text, valor text);
     CREATE TABLE candidaturas (obra_id uuid, usuario_id uuid); CREATE TABLE interesse_reparos (reparo_id uuid, usuario_id uuid); -- montarSessao lê tem_candidaturas / tem_interesses (Fases 2a e 2b)

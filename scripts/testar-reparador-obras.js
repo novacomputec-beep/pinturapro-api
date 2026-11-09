@@ -156,6 +156,7 @@ const main = async () => {
       ativo boolean DEFAULT true, push_token text, criado_em timestamptz DEFAULT now(), suspenso_em timestamptz, suspenso_motivo text, desinstalado_em timestamptz,
       foto_url text, senha_hash text, boas_vindas_exibida boolean DEFAULT false, token_version int NOT NULL DEFAULT 1, verificacao_status text DEFAULT 'aprovado',
       referencias jsonb, especialidades text[], anos_experiencia int, tamanho_equipe int, aceita_promocoes boolean, indicacao_pedida_em timestamptz);
+    ALTER TABLE usuarios ADD COLUMN avisos_todas_areas boolean NOT NULL DEFAULT true; -- preferência do aviso "fora da sua área" (migração de boot)
     CREATE TABLE assinaturas (usuario_id uuid, plano text, valor_mensal numeric, status text, tipo text, proximo_vencimento timestamptz, criado_em timestamptz DEFAULT now());
     CREATE TABLE obras (${colsDemanda}, valor numeric, horas_para_expirar numeric);
     CREATE TABLE reparos (${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
@@ -256,8 +257,9 @@ const main = async () => {
   const fonteAlerta = fs.readFileSync(path.join(REPO, 'src/services/alertaService.js'), 'utf8')
   ok(!/u\.tipo_prestador = \$1/.test(fonteAlerta) && (fonteAlerta.match(/\$\{sqlPublicoProfissional\('\$1'\)\}/g) || []).length === 2,
      'os 2 predicados de público (push e e-mail) usam o MESMO fragmento sqlPublicoProfissional')
-  ok((fonteAlerta.match(/publico: 'obras'/g) || []).length === 5 && !/tipoPrestador/.test(fonteAlerta),
-     "as 5 configurações do lado obra (nova, oferta, e-mail, lembrete, indicação) passam publico: 'obras'", (fonteAlerta.match(/publico: 'obras'/g) || []).length)
+  // 6 desde o aviso "fora da sua área" (LADOS_FORA_AREA também nomeia o lado da demanda).
+  ok((fonteAlerta.match(/publico: 'obras',/g) || []).length === 6 && !/tipoPrestador/.test(fonteAlerta),
+     "as configurações do lado obra (nova, oferta, e-mail, lembrete, indicação + fora da área) passam publico: 'obras'", (fonteAlerta.match(/publico: 'obras',/g) || []).length)
   const nenhum = await alerta.broadcastPaginado({ publico: 'pintor', cidade: 'uberlandia', uf: 'MG', titulo: 't', corpo: 'c', data: {}, rotulo: 'teste', entrega: null })
   ok(nenhum.elegiveis === 0, 'público desconhecido (valor antigo "pintor") → ninguém (falha fechado)', nenhum)
 

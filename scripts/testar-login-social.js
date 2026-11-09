@@ -103,6 +103,7 @@ const main = async () => {
     CREATE UNIQUE INDEX usuarios_email_tipo_unico_idx ON usuarios (email, ${sqlTipoConta()});
     CREATE INDEX usuarios_google_sub_idx ON usuarios (google_sub) WHERE google_sub IS NOT NULL;
     CREATE INDEX usuarios_apple_sub_idx ON usuarios (apple_sub) WHERE apple_sub IS NOT NULL;
+    ALTER TABLE usuarios ADD COLUMN avisos_todas_areas boolean NOT NULL DEFAULT true; -- preferência do aviso "fora da sua área" (migração de boot)
     CREATE TABLE assinaturas (usuario_id uuid, plano text, valor_mensal numeric, status text, tipo text, proximo_vencimento timestamptz, criado_em timestamptz DEFAULT now());
     CREATE TABLE configuracoes (chave text, valor text);
     CREATE TABLE candidaturas (obra_id uuid, usuario_id uuid); CREATE TABLE interesse_reparos (reparo_id uuid, usuario_id uuid); -- montarSessao lê tem_candidaturas / tem_interesses (Fases 2a e 2b)
