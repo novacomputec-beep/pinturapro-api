@@ -2455,7 +2455,8 @@ const SQL_BASE_AGENDAR = `d.status = 'aberta' AND d.match_usuario_id IS NOT NULL
         AND d.a_caminho_em IS NULL`
 const sqlClaimAgendar = (lado, conjunto, offsets) => `
       UPDATE ${lado.tabela} d SET lembrete_agendar_offsets = array_append(d.lembrete_agendar_offsets, s.off),
-             lembrete_agendar_enviados = d.lembrete_agendar_enviados + 1
+             lembrete_agendar_enviados = d.lembrete_agendar_enviados + 1,
+             lembrete_agendar_sem_proposta = d.lembrete_agendar_sem_proposta + 1
         FROM (SELECT d.id, ${SQL_PRAZO_CHEGADA} AS prazo, ${sqlOffsetDevido(offsets)} AS off, ${sqlReparoCurto(lado)} AS curto
                 FROM ${lado.tabela} d
                WHERE ${SQL_BASE_AGENDAR} AND ${SQL_PRAZO_CHEGADA} > NOW()
@@ -2494,6 +2495,59 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
   }
 })
 
+// PROPOSTA DE HORÁRIO VENCIDA (dono, 10/11/2026): o profissional propôs dia e hora
+// (chegada_pendente_em, chegada_proposta_por = ele) e o instante proposto passou sem o dono
+// aceitar nem contrapropor. Um job limpa a proposta — a demanda volta a "aguardando horário"
+// (SQL_BASE_AGENDAR volta a valer) —, zera os lembretes de resposta do dono, recomeça a cadência
+// dos lembretes "Agende" ao profissional (ultimo_em = NOW(): o próprio aviso abaixo é o primeiro
+// da nova rodada; offsets fixos zerados) e avisa o profissional por push + E-MAIL (evento
+// crítico): "O horário que você propôs venceu sem resposta — proponha um novo horário".
+// Só propostas do PROFISSIONAL: a contraproposta do dono (chegada_proposta_por = dono) espera a
+// resposta dele e não vence aqui. A proposta vencida fica registrada (horario_vencido_em,
+// horarios_vencidos) e continua contando no teto de sugestões do profissional. O contador de
+// lembretes sem proposta NÃO é mexido (ele propôs; zerou na proposta). Claim atômico (UPDATE …
+// WHERE … RETURNING). Toque: 'chegada_prevista_recusada' + id — o app abre o detalhe nos dois
+// lados (desde 08/2026) e é lá que ele propõe outro horário.
+const TITULO_HORARIO_VENCIDO = '⏰ O horário que você propôs venceu sem resposta'
+const corpoHorarioVencido = (d) => `Proponha um novo horário para "${d.titulo}".`
+const expirarPropostasDeHorario = semSobreposicao('expirarPropostasDeHorario', async () => {
+  for (const lado of Object.values(LADOS_MATCH)) {
+    try {
+      const claim = await pool.query(
+        `UPDATE ${lado.tabela} d
+            SET chegada_pendente_em = NULL, chegada_pendente_janela = NULL,
+                chegada_proposta_por = NULL, chegada_proposta_em = NULL,
+                lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL, lembrete_resposta_ultimo_em = NULL,
+                lembrete_agendar_ultimo_em = NOW(), lembrete_agendar_offsets = '{}',
+                horario_vencido_em = NOW(), horarios_vencidos = d.horarios_vencidos + 1
+           FROM usuarios u
+          WHERE u.id = d.match_usuario_id
+            AND d.status = 'aberta' AND d.match_usuario_id IS NOT NULL
+            AND d.chegada_pendente_em IS NOT NULL AND d.chegada_pendente_em <= NOW()
+            AND d.chegada_prevista_em IS NULL AND d.a_caminho_em IS NULL
+            AND d.chegada_declarada_em IS NULL AND d.chegada_confirmada_em IS NULL
+            AND COALESCE(d.chegada_proposta_por, d.match_usuario_id) = d.match_usuario_id
+      RETURNING d.id, d.titulo, d.match_usuario_id, d.horarios_vencidos, u.push_token, u.email, u.nome`
+      )
+      for (const d of claim.rows) {
+        try {
+          const via = await entregarPushEEmail({
+            usuario_id: d.match_usuario_id, push_token: d.push_token, email: d.email, nome: d.nome,
+            titulo: TITULO_HORARIO_VENCIDO, corpo: corpoHorarioVencido(d),
+            data: { tipo: 'chegada_prevista_recusada', [lado.chave]: d.id, horario_vencido: true },
+            rotulo: `horário vencido ${lado.tabela} ${d.id}`,
+          })
+          console.log(`[HorarioVencido] ${lado.tabela} ${d.id}: proposta nº ${d.horarios_vencidos} venceu sem resposta → profissional ${d.match_usuario_id} via ${via}`)
+        } catch (err) {
+          console.error(`[HorarioVencido] aviso ${lado.tabela} ${d.id}:`, err.message)
+        }
+      }
+    } catch (err) {
+      console.error(`[HorarioVencido] erro em ${lado.tabela}:`, err.message)
+    }
+  }
+})
+
 // "Agende seu atendimento" REPETIDO — complementa (não substitui) as antecedências fixas acima:
 // enquanto o match vive sem horário (o mesmo SQL_BASE_AGENDAR: nada proposto, aceito, declarado,
 // confirmado nem "a caminho"; demanda 'aberta'; prazo à frente), repete o aviso ao PROFISSIONAL
@@ -2525,6 +2579,7 @@ const sqlClaimRepetirAgendar = (lado) => `
       UPDATE ${lado.tabela} d SET lembrete_agendar_ultimo_em = NOW(),
              lembrete_agendar_ciclo = d.lembrete_agendar_ciclo + 1,
              lembrete_agendar_enviados = d.lembrete_agendar_enviados + 1,
+             lembrete_agendar_sem_proposta = d.lembrete_agendar_sem_proposta + 1,
              lembrete_agendar_dono_em = CASE
                WHEN d.lembrete_agendar_ultimo_em IS NOT NULL
                 AND (d.lembrete_agendar_dono_em IS NULL
@@ -3829,6 +3884,8 @@ module.exports = {
   lembrarPrazoChegada,
   lembrarAgendamento, LEMBRETES_AGENDA_DONO,
   lembrarAgendarAtendimento,
+  expirarPropostasDeHorario,
+  TITULO_HORARIO_VENCIDO,
   entregarLembrete,
   semPushAtivo,
   LEMBRETE_EMAIL_SEM_PUSH_TETO_DIA,

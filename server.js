@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, pedirIndicacoes, avisarForaDaArea, enviarResumosAcimaDoTeto, enviarEmailsPendentesNovaDemanda, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, entregarLembrete, lembrarRespostaHorario, repetirRespostaHorarioDono, lembrarPerguntasSemResposta, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, pedirIndicacoes, avisarForaDaArea, enviarResumosAcimaDoTeto, enviarEmailsPendentesNovaDemanda, lembrarPrazoChegada, expirarPropostasDeHorario, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, entregarLembrete, lembrarRespostaHorario, repetirRespostaHorarioDono, lembrarPerguntasSemResposta, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -835,6 +835,9 @@ const iniciarAgendador = () => {
   // "Responda o horário proposto": à parte que deve responder uma proposta de horário pendente,
   // 1h depois da proposta e 1h antes do horário. Mesma cadência; fora do warm-up (janela de 60 min).
   setInterval(() => { lembrarRespostaHorario() }, INTERVALO_CRONOMETRO)
+  // Proposta de horário do profissional que venceu sem resposta do dono: volta a "aguardando
+  // horário", avisa o profissional (push + e-mail) e os lembretes "Agende" recomeçam.
+  setInterval(() => { expirarPropostasDeHorario() }, INTERVALO_CRONOMETRO)
   // Ao DONO, proposta do profissional pendente: o mesmo aviso REPETIDO (push + e-mail) 30 min
   // após a proposta e depois pelo tempo restante até o horário proposto (12h/6h/2h/30 min),
   // silêncio 22–07 (SP), até ele responder ou o horário passar.
