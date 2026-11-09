@@ -55,12 +55,16 @@ const main = async () => {
   db = new PGlite()
   await db.exec(`
     CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, role text, tipo_prestador text, especialidades text[], push_token text,
-      suspenso_em timestamptz, desinstalado_em timestamptz, cidade text, uf text, cpf_cnpj text, indicacao_pedida_em timestamptz);
+      suspenso_em timestamptz, desinstalado_em timestamptz, cidade text, uf text, cpf_cnpj text, indicacao_pedida_em timestamptz,
+      latitude numeric, longitude numeric, raio_km_escolhido numeric);
     CREATE TABLE assinaturas (usuario_id uuid, status text, proximo_vencimento timestamptz);
     CREATE TABLE reparos (id uuid PRIMARY KEY, titulo text, cidade text, uf text, bairro text, categoria text, categorias text[], valor_estimado numeric,
       criado_por uuid, status text, status_aprovacao text, match_usuario_id uuid, expira_em timestamptz, push_novo_enviado_em timestamptz,
-      criado_em timestamptz DEFAULT now(), codigo_publico text);
+      criado_em timestamptz DEFAULT now(), codigo_publico text, latitude numeric, longitude numeric);
     CREATE TABLE interesse_reparos (reparo_id uuid, usuario_id uuid);
+    CREATE TABLE avisos_fora_area (tabela text, demanda_id uuid, usuario_id uuid, enviado_em timestamptz NOT NULL DEFAULT now());
+    CREATE TABLE lembretes_push_enviados (tabela text, demanda_id uuid, usuario_id uuid, motivo text, enviado_em timestamptz NOT NULL DEFAULT now());
+    CREATE TABLE avisos_acima_do_teto (tabela text, demanda_id uuid, usuario_id uuid, criado_em timestamptz NOT NULL DEFAULT now(), resumo_em timestamptz, PRIMARY KEY (tabela, demanda_id, usuario_id));
     CREATE TABLE push_entregas (tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1,
       primeira_tentativa_em timestamptz DEFAULT now(), ultima_tentativa_em timestamptz DEFAULT now(), PRIMARY KEY (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));

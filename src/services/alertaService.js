@@ -80,6 +80,13 @@ const { sqlPodeObras, sqlPodeServicos } = require('../utils/capacidadeObras')
 // Aviso "fora da sua área" (utils/avisosForaDaArea): teto diário por pessoa, bloqueios e o log de envios.
 const { lerLimiteAvisosForaDaArea, sqlAbaixoDoLimiteForaDaArea, sqlSemBloqueioNaDemanda,
         registrarAvisosForaDaArea, limparAvisosForaDaAreaAntigos } = require('../utils/avisosForaDaArea')
+// Aviso de demanda nova por DISTÂNCIA (min(raio escolhido, 50 km)) e teto diário de 15 pushes por
+// pessoa, com push-resumo do que passou do teto (utils/avisosPorDistancia).
+const { TETO_PUSH_DEMANDA_DIA, sqlAlcance, sqlPushesDeDemandaHoje, sqlMaisPertoNoLote,
+        registrarAcimaDoTeto, limparAcimaDoTetoAntigos, registrarLembretesPush } = require('../utils/avisosPorDistancia')
+// Coordenada vinda do banco (NUMERIC chega como texto) → número ou null.
+const coordenada = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
+const ponto = (linha) => ({ lat: coordenada(linha?.latitude), lng: coordenada(linha?.longitude) })
 const sqlPublicoProfissional = (param) => `u.role = 'prestador' AND (CASE ${param}::text
            WHEN 'obras'   THEN ${sqlPodeObras('u')}
            WHEN 'reparos' THEN ${sqlPodeServicos('u')}
@@ -428,8 +435,20 @@ const sqlSemManifestacao = (interesse, param) => (interesse
 //     bloqueio do dono, por pessoa — exige `demanda`).
 const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null, demanda = null,
                                    foraDasCategorias = null, semIndicacaoRecente = false, excluirUsuarioId = null, aposPagina = null,
-                                   excluirCategorias = null, excluirJaAvisados = null, foraDaArea = null }) => {
-  const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
+                                   excluirCategorias = null, excluirJaAvisados = null, foraDaArea = null,
+                                   porDistancia = null, tetoDiario = null }) => {
+  // porDistancia { lat, lng } (demanda NOVA, lembrete e reanúncio): além da MESMA CIDADE (que
+  //   recebe sempre), alcança quem está a até min(raio escolhido, 50 km) da demanda.
+  // tetoDiario { tabela, demandaId, lat, lng, lote, resumo } (demanda nova, "fora da área",
+  //   lembrete e reanúncio): quem já recebeu TETO_PUSH_DEMANDA_DIA pushes de demanda hoje NÃO
+  //   recebe este. Com resumo !== false fica registrado em avisos_acima_do_teto para o
+  //   push-resumo (lembrete e reanúncio passam resumo: false — não são pedido NOVO). `lote` =
+  //   [{ lat, lng }] das demandas que saem JUNTO com esta e ainda não foram processadas: as mais
+  //   próximas do profissional têm preferência no que resta do teto.
+  const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0, acimaDoTeto: 0 }
+  // A regra de cidade de sempre, como um predicado só (é também o recuo da regra por distância).
+  const SQL_MESMA_CIDADE = `(NULLIF(btrim(u.cidade), '') IS NOT NULL AND NULLIF(btrim(u.uf), '') IS NOT NULL
+              AND ${SQL_CIDADE_PRESTADOR} = $2 AND upper(btrim(u.uf)) = $3)`
   // Lista de slugs a casar (categoria + grupo, ou só ela; null no lado obra), resolvida UMA vez
   // por broadcast — a chave de config é lida aqui, não a cada página.
   const { push: categorias } = foraDasCategorias ? { push: foraDasCategorias } : await publicoDemanda(categoria)
@@ -481,6 +500,19 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
         filtrosOpcionais += `\n         AND ${sqlSemBloqueioNaDemanda(demanda.tabela, `$${params.length}`)}`
       }
     }
+    let sqlLugar = SQL_MESMA_CIDADE
+    if (porDistancia) {
+      params.push(porDistancia.lat ?? null, porDistancia.lng ?? null)
+      sqlLugar = sqlAlcance({ pLat: `$${params.length - 1}`, pLng: `$${params.length}`, sqlMesmaCidade: SQL_MESMA_CIDADE })
+    }
+    let sqlAcimaDoTeto = 'false'
+    if (tetoDiario) {
+      const lote = Array.isArray(tetoDiario.lote) ? tetoDiario.lote : []
+      params.push(lote.map(l => l.lat ?? null), lote.map(l => l.lng ?? null), tetoDiario.lat ?? null, tetoDiario.lng ?? null)
+      const n = params.length
+      sqlAcimaDoTeto = `(${sqlPushesDeDemandaHoje('u.id')}
+          + ${sqlMaisPertoNoLote({ pLats: `$${n - 3}`, pLngs: `$${n - 2}`, pLat: `$${n - 1}`, pLng: `$${n}` })}) >= ${TETO_PUSH_DEMANDA_DIA}`
+    }
     if (excluirJaAvisados) {
       params.push(excluirJaAvisados.tipo, excluirJaAvisados.demandaId)
       filtrosOpcionais += `\n         AND NOT EXISTS (SELECT 1 FROM push_entregas pe WHERE pe.tipo = $${params.length - 1} AND pe.demanda_id = $${params.length}::uuid AND ${sqlProfissionalDaPessoa('pe.usuario_id', 'u.id')})`
@@ -489,8 +521,8 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
     // o cursor e o LIMIT ficam por FORA, sobre as contas escolhidas, para a escolha não depender
     // da página.
     const pagina = await pool.query(
-      `SELECT x.id, x.push_token FROM (
-       SELECT DISTINCT ON (${SQL_PESSOA_DO_PUBLICO}) u.id, u.push_token
+      `SELECT x.id, x.push_token, x.acima_do_teto FROM (
+       SELECT DISTINCT ON (${SQL_PESSOA_DO_PUBLICO}) u.id, u.push_token, ${sqlAcimaDoTeto} AS acima_do_teto
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
        WHERE ${sqlPublicoProfissional('$1')}
@@ -502,10 +534,9 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
          -- Por PESSOA (Fase 2b): a suspensão de qualquer conta profissional do CPF vale para todas.
          AND ${sqlPessoaNaoSuspensa('u.id')}
          AND u.desinstalado_em IS NULL
-         AND NULLIF(btrim(u.cidade), '') IS NOT NULL
-         AND NULLIF(btrim(u.uf), '')     IS NOT NULL
-         AND ${SQL_CIDADE_PRESTADOR} = $2
-         AND upper(btrim(u.uf)) = $3
+         -- LUGAR: mesma cidade + UF (sempre) e, na demanda nova / lembrete / reanúncio, também
+         -- quem está a até min(raio escolhido, 50 km) da demanda (sqlAlcance).
+         AND ${sqlLugar}
          AND ${sqlCategorias}${filtrosOpcionais}
        ORDER BY ${sqlOrdemDaPessoa('$1')}
        ) x
@@ -516,17 +547,24 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
     )
     if (pagina.rows.length === 0) break
     total.paginas++
-    const resultados = await enviarPushEmLoteDetalhado(pagina.rows, titulo, corpo, data)
+    // Teto diário: quem já está no limite não recebe este push — fica registrado para o resumo.
+    const aEnviar = pagina.rows.filter(r => r.acima_do_teto !== true)
+    const acima = pagina.rows.filter(r => r.acima_do_teto === true)
+    const resultados = aEnviar.length > 0 ? await enviarPushEmLoteDetalhado(aEnviar, titulo, corpo, data) : []
     // Grava ANTES de somar/seguir: se o registro falhar, o erro sobe e o claim da demanda
     // dá ROLLBACK — melhor reenviar tudo do que ter enviado sem saber para quem.
     if (entrega) await registrarEntregas(entrega.tipo, entrega.demandaId, resultados)
     if (aposPagina) await aposPagina(resultados)
+    if (acima.length > 0 && tetoDiario) {
+      if (tetoDiario.resumo !== false) await registrarAcimaDoTeto(tetoDiario.tabela, tetoDiario.demandaId, acima.map(r => r.id))
+      total.acimaDoTeto += acima.length
+    }
     const s = contarResultados(resultados)
     total.elegiveis += s.elegiveis; total.invalidos += s.invalidos; total.enviados += s.enviados; total.falhos += s.falhos
     cursor = pagina.rows[pagina.rows.length - 1].id
     if (pagina.rows.length < PAGINA_BROADCAST) break
   }
-  console.log(`[Broadcast] ${rotulo} | elegíveis: ${total.elegiveis} | enviados: ${total.enviados} | falhos: ${total.falhos} | tokens inválidos: ${total.invalidos} | páginas: ${total.paginas}`)
+  console.log(`[Broadcast] ${rotulo} | elegíveis: ${total.elegiveis} | enviados: ${total.enviados} | falhos: ${total.falhos} | tokens inválidos: ${total.invalidos} | páginas: ${total.paginas}${total.acimaDoTeto ? ` | acima do teto diário: ${total.acimaDoTeto}` : ''}`)
   // Envio que não chegou a NINGUÉM apesar de haver alvo (Expo fora do ar, chunk inteiro
   // estourando) é falha, e precisa subir: o chamador (dispararPushNovoComClaim) só carimba
   // push_novo_enviado_em quando esta função volta sem erro — assim a rede de segurança
@@ -559,10 +597,10 @@ const mensagemNovoReparo = (reparo, reparoId) => {
   }
 }
 
-const notificarPintoresSobreNovaObra = async (obraId) => {
+const notificarPintoresSobreNovaObra = async (obraId, { lote = [] } = {}) => {
   try {
     const obraResult = await pool.query(
-      `SELECT titulo, cidade, uf, categoria FROM obras WHERE id = $1`,
+      `SELECT titulo, cidade, uf, categoria, latitude, longitude FROM obras WHERE id = $1`,
       [obraId]
     )
     if (obraResult.rows.length === 0) return
@@ -583,12 +621,16 @@ const notificarPintoresSobreNovaObra = async (obraId) => {
     // declarado nao da para afirmar que ele atende ali. Paginado por u.id (A5): todos os
     // profissionais de obra assinantes da cidade (publico 'obras': pintor OU reparador com
     // especialidade de obra — sqlPublicoProfissional) recebem, em páginas de 500.
+    // LUGAR (10/11/2026): não mais "mesma cidade" — quem está a até min(raio escolhido, 50 km) da
+    // obra (porDistancia; sem coordenadas, a cidade). E teto de 15 pushes de demanda por dia.
     await broadcastPaginado({
       publico: 'obras', cidade: cidadeObra, uf: ufObra,
       ...mensagemNovaObra(obra, obraId),
       rotulo: `nova obra ${obraId}`,
       entrega: { tipo: 'obra', demandaId: obraId },
       demanda: { tabela: 'obras', id: obraId },
+      porDistancia: ponto(obra),
+      tetoDiario: { tabela: 'obras', demandaId: obraId, ...ponto(obra), lote },
     })
   } catch (err) {
     // Loga E propaga: o claim de push_novo_enviado_em (dispararPushNovoComClaim) só grava
@@ -598,10 +640,10 @@ const notificarPintoresSobreNovaObra = async (obraId) => {
   }
 }
 
-const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
+const notificarPrestadoresSobreNovoReparo = async (reparoId, { lote = [] } = {}) => {
   try {
     const reparoResult = await pool.query(
-      `SELECT titulo, cidade, uf, categoria, categorias FROM reparos WHERE id = $1`,
+      `SELECT titulo, cidade, uf, categoria, categorias, latitude, longitude FROM reparos WHERE id = $1`,
       [reparoId]
     )
     if (reparoResult.rows.length === 0) return
@@ -625,12 +667,15 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     // categorias o push vai a todo reparador elegível da cidade (publicoDemanda — ver
     // broadcastPaginado); o e-mail segue restrito (reivindicarEmailsNovaDemanda).
     // Os DOIS chamadores (POST /reparos/dono e a rota de aprovação) passam por aqui.
+    // LUGAR e teto diário: como no lado obra (porDistancia / tetoDiario).
     await broadcastPaginado({
       publico: 'reparos', cidade: cidadeReparo, uf: ufReparo, categoria: categoriasDoReparo(reparo),
       ...mensagemNovoReparo(reparo, reparoId),
       rotulo: `novo reparo ${reparoId}`,
       entrega: { tipo: 'reparo', demandaId: reparoId },
       demanda: { tabela: 'reparos', id: reparoId },
+      porDistancia: ponto(reparo),
+      tetoDiario: { tabela: 'reparos', demandaId: reparoId, ...ponto(reparo), lote },
     })
   } catch (err) {
     // Loga E propaga — mesmo motivo do lado obra (ver notificarPintoresSobreNovaObra).
@@ -656,7 +701,8 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
 // falha total do push (como broadcastPaginado); o chamador é fire-and-forget e loga.
 const notificarCategoriasAdicionadas = async (reparoId, categoriasAntes) => {
   const r = await pool.query(
-    `SELECT id, titulo, cidade, uf, categoria, categorias, criado_por, status, status_aprovacao, match_usuario_id, expira_em, push_novo_enviado_em
+    `SELECT id, titulo, cidade, uf, categoria, categorias, criado_por, status, status_aprovacao, match_usuario_id, expira_em, push_novo_enviado_em,
+            latitude, longitude
        FROM reparos WHERE id = $1`, [reparoId]
   )
   const reparo = r.rows[0]
@@ -686,6 +732,9 @@ const notificarCategoriasAdicionadas = async (reparoId, categoriasAntes) => {
       excluirUsuarioId: reparo.criado_por,
       excluirCategorias: publicoAntes.push,
       excluirJaAvisados: { tipo: 'reparo', demandaId: reparoId },
+      // É o aviso de demanda nova para o público que entrou: mesmo alcance e mesmo teto.
+      porDistancia: ponto(reparo),
+      tetoDiario: { tabela: 'reparos', demandaId: reparoId, ...ponto(reparo), lote: [] },
     })
   }
   await enviarEmailsNovaDemanda('reparos', reparoId, { excluirCategorias: publicoAntes.email || [] })
@@ -872,7 +921,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
   try {
     // `interessados` só no lembrete (lado.interesse): é o que escolhe o texto do corpo.
     const dem = await client.query(
-      `SELECT d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor, d.codigo_publico
+      `SELECT d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor, d.codigo_publico, d.latitude, d.longitude
               ${lado.comCategoria ? ', d.categorias' : ''}
               ${lado.interesse ? `, (SELECT count(*)::int FROM ${lado.interesse.tabela} x WHERE x.${lado.interesse.coluna} = d.id) AS interessados` : ''}
          FROM ${tabela} d WHERE d.id = $1`, [demandaId])
@@ -907,6 +956,14 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     // Elegíveis (espelho de broadcastPaginado, sem exigir token e exigindo e-mail). Com
     // lado.somenteSemToken ($6) só quem NÃO tem push_token entra (lembrete/reanúncio). Ordem
     // por u.id como lá, para o teto cortar de forma estável.
+    // Parâmetros e o predicado de lugar entram JUNTOS (o pg recusa parâmetro que a consulta não cita).
+    const paramsEmail = [lado.publico, cidade, uf, categorias, demandaId, lado.somenteSemToken === true, ehLembrete, lado.excluirCategorias ?? null, lado.tipo]
+    const SQL_MESMA_CIDADE_EMAIL = `(NULLIF(btrim(u.cidade), '') IS NOT NULL AND NULLIF(btrim(u.uf), '') IS NOT NULL
+              AND ${SQL_CIDADE_PRESTADOR} = $2 AND upper(btrim(u.uf)) = $3)`
+    // Todo e-mail que passa por aqui (demanda nova, o que ficou para o dia seguinte, lembrete e
+    // reanúncio) segue o alcance do push: mesma cidade OU até min(raio, 50 km).
+    paramsEmail.push(coordenada(demanda.latitude), coordenada(demanda.longitude))
+    const sqlLugarEmail = sqlAlcance({ pLat: '$10', pLng: '$11', sqlMesmaCidade: SQL_MESMA_CIDADE_EMAIL })
     // Como no push: subconsulta = elegíveis, UMA linha por pessoa (DISTINCT ON).
     // Elegível = quem AINDA NÃO recebeu este e-mail (mesmo tipo, mesma demanda, por pessoa): é o
     // que permite reenviar "o que faltou" no dia seguinte sem gastar o corte com quem já recebeu.
@@ -928,10 +985,8 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
                           WHERE ja.tipo = $9 AND ja.demanda_id = $5
                             AND ${sqlProfissionalDaPessoa('ja.usuario_id', 'u.id')})
          AND u.desinstalado_em IS NULL
-         AND NULLIF(btrim(u.cidade), '') IS NOT NULL
-         AND NULLIF(btrim(u.uf), '')     IS NOT NULL
-         AND ${SQL_CIDADE_PRESTADOR} = $2
-         AND upper(btrim(u.uf)) = $3
+         -- LUGAR: como no push — mesma cidade + UF ou até min(raio escolhido, 50 km) da demanda.
+         AND ${sqlLugarEmail}
          AND ${sqlCasaCategorias('$4')}
          ${sqlSemManifestacao(lado.interesse, '$5')}
          AND ${sqlNaoMesmoCpfDoCriador(tabela, '$5')}
@@ -947,7 +1002,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
        ORDER BY ${sqlOrdemDaPessoa('$1')}
        ) x
        ORDER BY (x.push_token IS NULL) DESC, x.id`,
-      [lado.publico, cidade, uf, categorias, demandaId, lado.somenteSemToken === true, ehLembrete, lado.excluirCategorias ?? null, lado.tipo]
+      paramsEmail
     )
     if (elegiveis.rows.length === 0) {
       await marcarPendente(false) // ninguém falta: o que estava devido (se estava) foi quitado
@@ -1172,7 +1227,7 @@ const sqlFatiaDevida = (lado) => `
       AND (s.fase <> 'unica' OR d.lembretes_enviados = 0)
       AND (s.fase = 'unica' OR (${SQL_JANELA_LEMBRETE}
            AND (d.lembrete_enviado_em IS NULL OR d.lembrete_enviado_em < NOW() - (${LEMBRETE_GAP_MIN_HORAS} * INTERVAL '1 hour'))))`
-const COLUNAS_LEMBRETE = (lado) => `d.id, d.titulo, d.cidade, d.uf, d.categoria, ${lado.comCategoria ? 'd.categorias, ' : ''}d.${lado.colunaValor} AS valor, d.lembretes_enviados, ${sqlInteressados(lado)} AS interessados`
+const COLUNAS_LEMBRETE = (lado) => `d.id, d.titulo, d.cidade, d.uf, d.categoria, ${lado.comCategoria ? 'd.categorias, ' : ''}d.${lado.colunaValor} AS valor, d.lembretes_enviados, d.latitude, d.longitude, ${sqlInteressados(lado)} AS interessados`
 // O claim em si (UPDATE … RETURNING). Exportado só para o dry-run executar o MESMO statement
 // dentro de um BEGIN…ROLLBACK; o cron (lembrarDemandasSemResposta) é o único chamador real.
 const sqlClaimLembrete = (lado) => `
@@ -1267,7 +1322,7 @@ const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
 // rotas de aprovação e o create de reparo não os passam, como antes.
 // Devolve true quando ESTA chamada enviou e carimbou; false quando não havia o que
 // reivindicar. Erro de notificar() SOBE para o chamador — aqui nunca é engolido.
-const dispararPushNovoComClaim = async (tabela, id, notificar, { criadoPor = null, exigirPublicada = false } = {}) => {
+const dispararPushNovoComClaim = async (tabela, id, notificar, { criadoPor = null, exigirPublicada = false, lote = [] } = {}) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -1283,7 +1338,9 @@ const dispararPushNovoComClaim = async (tabela, id, notificar, { criadoPor = nul
       await client.query('ROLLBACK')
       return false
     }
-    await notificar(id)
+    // lote: as demais demandas que a rede de segurança dispara no mesmo tique (teto diário —
+    // as mais próximas de cada profissional primeiro). Nas rotas é uma demanda só: lote vazio.
+    await notificar(id, { lote })
     await client.query(`UPDATE ${tabela} SET push_novo_enviado_em = NOW() WHERE id = $1`, [id])
     await client.query('COMMIT')
     // E-mail a TODOS os elegíveis (com e sem token; claim em email_alertas): só DEPOIS do COMMIT,
@@ -1397,7 +1454,7 @@ const enviarPushNovoPendente = async () => {
   for (const lado of lados) {
     try {
       const pendentes = await pool.query(
-        `SELECT id FROM ${lado.tabela}
+        `SELECT id, latitude, longitude FROM ${lado.tabela}
           WHERE push_novo_enviado_em IS NULL
             AND status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW()
             AND ${lado.ancora} <= NOW() - ($1::int * INTERVAL '1 minute')
@@ -1406,11 +1463,11 @@ const enviarPushNovoPendente = async () => {
       )
       if (pendentes.rowCount === 0) continue
       console.log(`[PushNovoPendente] ${lado.tabela}: ${pendentes.rowCount} demanda(s) publicada(s) há mais de ${JANELA_PUSH_NOVO_MIN} min sem aviso — disparando`)
-      for (const r of pendentes.rows) {
+      for (const [i, r] of pendentes.rows.entries()) {
         // Uma falha não derruba as demais candidatas do tique: loga e segue. A linha que
         // falhou continua NULL (ROLLBACK no helper) e volta a ser candidata no próximo tique.
         try {
-          await dispararPushNovoComClaim(lado.tabela, r.id, lado.notificar, { exigirPublicada: true })
+          await dispararPushNovoComClaim(lado.tabela, r.id, lado.notificar, { exigirPublicada: true, lote: pendentes.rows.slice(i + 1).map(ponto) })
         } catch (err) {
           console.error(`[PushNovoPendente] ${lado.tabela} ${r.id}: envio falhou, segue sem carimbo para nova tentativa:`, err.message)
         }
@@ -1528,7 +1585,7 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
       const claim = await pool.query(sqlClaimLembrete(lado))
       if (claim.rowCount === 0) continue
       console.log(`[Lembrete] ${lado.tabela}: ${claim.rowCount} demanda(s) sem match com fatia devida — lembrando (${claim.rows.map(d => `${d.id.slice(0, 8)} ${d.fase} #${d.lembretes_enviados} interessados=${d.interessados}`).join(', ')})`)
-      for (const d of claim.rows) {
+      for (const [i, d] of claim.rows.entries()) {
         const cidade = normalizar(d.cidade)
         const uf = String(d.uf || '').trim().toUpperCase()
         if (!cidade || !uf) {
@@ -1546,6 +1603,11 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
             entrega: null,
             excluirManifestados: { interesse: lado.interesse, demandaId: d.id },
             demanda: { tabela: lado.tabela, id: d.id },
+            // Mesmo alcance da demanda nova (cidade OU até min(raio, 50 km)) e conta no teto de 15
+            // pushes de demanda por dia; acima do teto o lembrete não sai (e não entra no resumo).
+            porDistancia: ponto(d),
+            tetoDiario: { tabela: lado.tabela, demandaId: d.id, ...ponto(d), lote: claim.rows.slice(i + 1).map(ponto), resumo: false },
+            aposPagina: (resultados) => registrarLembretesPush(lado.tabela, d.id, 'lembrete', resultados),
           })
         } catch (err) {
           console.error(`[Lembrete] push ${lado.tabela} ${d.id} falhou:`, err.message)
@@ -1720,9 +1782,10 @@ const sqlClaimForaDaArea = (lado, porId = false) => `
          AND d.push_novo_enviado_em > NOW() - (${FORA_AREA_MAX_HORAS} * INTERVAL '1 hour')
          AND d.aviso_fora_area_em IS NULL
          AND ${SQL_JANELA_LEMBRETE}
-   RETURNING d.id, d.titulo, d.cidade, d.uf, d.bairro, d.categoria, ${lado.comCategoria ? 'd.categorias, ' : ''}d.${lado.colunaValor} AS valor, d.criado_por`
+   RETURNING d.id, d.titulo, d.cidade, d.uf, d.bairro, d.categoria, ${lado.comCategoria ? 'd.categorias, ' : ''}d.${lado.colunaValor} AS valor, d.criado_por, d.latitude, d.longitude`
 // Envia o aviso de UMA demanda já reivindicada. Erro fica no log: o claim não é desfeito.
-const enviarAvisoForaDaArea = async (lado, d) => {
+// lote = [{ lat, lng }] das outras demandas devidas no mesmo tique (teto diário: as mais próximas primeiro).
+const enviarAvisoForaDaArea = async (lado, d, lote = []) => {
   const cidade = normalizar(d.cidade)
   const uf = String(d.uf || '').trim().toUpperCase()
   if (!cidade || !uf) {
@@ -1742,6 +1805,8 @@ const enviarAvisoForaDaArea = async (lado, d) => {
       excluirUsuarioId: d.criado_por,
       demanda: { tabela: lado.tabela, id: d.id },
       foraDaArea: { publico: lado.publico, categorias, limiteDia },
+      // Conta no teto diário de pushes de demanda (15 por pessoa); o alcance continua por cidade.
+      tetoDiario: { tabela: lado.tabela, demandaId: d.id, ...ponto(d), lote },
       aposPagina: (resultados) => registrarAvisosForaDaArea(lado.tabela, d.id, resultados),
     })
   } catch (err) {
@@ -1765,13 +1830,108 @@ const avisarForaDaArea = semSobreposicao('avisarForaDaArea', async () => {
       const claim = await pool.query(sqlClaimForaDaArea(lado))
       if (claim.rows.length === 0) continue
       console.log(`[ForaDaArea] ${lado.tabela}: ${claim.rows.length} demanda(s) devida(s) (${claim.rows.map(d => d.id.slice(0, 8)).join(', ')})`)
-      for (const d of claim.rows) await enviarAvisoForaDaArea(lado, d)
+      for (const [i, d] of claim.rows.entries()) await enviarAvisoForaDaArea(lado, d, claim.rows.slice(i + 1).map(ponto))
     } catch (err) {
       console.error(`[ForaDaArea] erro em ${lado.tabela}:`, err.message)
     }
   }
   await limparAvisosForaDaAreaAntigos().catch(err => console.error('[ForaDaArea] limpeza do log:', err.message))
 })
+
+// ─── Push-RESUMO do que passou do teto diário (decisão do dono, 10/11/2026) ─────────────────────
+// Quem bateu os TETO_PUSH_DEMANDA_DIA pushes de demanda do dia deixa de receber um push por pedido;
+// os pedidos seguintes ficam em avisos_acima_do_teto e viram, no MÁXIMO UMA vez por dia (São
+// Paulo) e só entre LEMBRETE_HORA_INICIO e LEMBRETE_HORA_FIM, um push só:
+//   "Mais N pedidos perto de você hoje" / "Toque para ver."
+// data.tipo: 'novo_reparo' (ou 'nova_obra' quando só há obras) SEM id de demanda — o roteador de
+// toques do app (AppNavigator.navegarParaNotificacao) já trata os dois e, sem id, abre o FEED do
+// profissional; nas versões anteriores à aba unificada também (abaFeedPro). Um tipo novo cairia
+// em "tipo sem rota" e o toque não faria nada. `resumo: true` só distingue nos registros.
+// N = pedidos ainda ABERTOS (aprovados, sem match, no prazo) entre os que ficaram de fora nas
+// últimas 24 h e ainda não entraram em resumo — o que sobrou da noite entra no resumo da manhã.
+// Espera RESUMO_TETO_ESPERA_MIN desde o primeiro pedido de fora, para juntar os seguintes em vez de
+// gastar o único resumo do dia com "Mais 1 pedido". Por PESSOA (contas profissionais do mesmo CPF):
+// um resumo, pelo token que ela tiver. Só push — nenhum e-mail.
+// Claim atômico: o UPDATE marca resumo_em ANTES do envio e devolve as linhas; réplica ou tique
+// repetido não reenvia. Cadência: INTERVALO_LEMBRETE (server.js).
+const RESUMO_TETO_ESPERA_MIN = 60
+const SQL_PESSOA_DA_CONTA = (alias) => `COALESCE(${sqlCpfNormalizado(`${alias}.cpf_cnpj`)}, ${alias}.id::text)`
+const mensagemResumoTeto = (n, soObras = false) => ({
+  titulo: n === 1 ? 'Mais 1 pedido perto de você hoje' : `Mais ${n} pedidos perto de você hoje`,
+  corpo: 'Toque para ver.',
+  data: { tipo: soObras ? 'nova_obra' : 'novo_reparo', resumo: true, total: n },
+})
+let resumosDoTetoEmExecucao = false
+const enviarResumosAcimaDoTeto = async () => {
+  if (resumosDoTetoEmExecucao) return
+  resumosDoTetoEmExecucao = true
+  try {
+    const claim = await pool.query(
+      `WITH pendentes AS (
+         SELECT t.tabela, t.demanda_id, t.usuario_id, t.criado_em, ${SQL_PESSOA_DA_CONTA('u')} AS pessoa
+           FROM avisos_acima_do_teto t JOIN usuarios u ON u.id = t.usuario_id
+          WHERE t.resumo_em IS NULL AND t.criado_em > NOW() - INTERVAL '24 hours'
+       ), devidas AS (
+         SELECT p.pessoa FROM pendentes p
+          WHERE ${SQL_JANELA_LEMBRETE}
+          GROUP BY p.pessoa
+         HAVING min(p.criado_em) <= NOW() - (${RESUMO_TETO_ESPERA_MIN} * INTERVAL '1 minute')
+            AND NOT EXISTS (
+                  SELECT 1 FROM avisos_acima_do_teto r JOIN usuarios ru ON ru.id = r.usuario_id
+                   WHERE r.resumo_em >= (date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')
+                     AND ${SQL_PESSOA_DA_CONTA('ru')} = p.pessoa)
+       )
+       UPDATE avisos_acima_do_teto t SET resumo_em = NOW()
+         FROM pendentes p
+        WHERE t.tabela = p.tabela AND t.demanda_id = p.demanda_id AND t.usuario_id = p.usuario_id
+          AND t.resumo_em IS NULL AND p.pessoa IN (SELECT pessoa FROM devidas)
+       RETURNING t.tabela, t.demanda_id, t.usuario_id, p.pessoa`
+    )
+    if (claim.rows.length > 0) {
+      // Só conta o pedido que continua aberto: "Mais N pedidos" tem de bater com o que o feed mostra.
+      const vivos = new Set()
+      for (const tabela of ['obras', 'reparos']) {
+        const ids = [...new Set(claim.rows.filter(l => l.tabela === tabela).map(l => l.demanda_id))]
+        if (ids.length === 0) continue
+        const r = await pool.query(
+          `SELECT id FROM ${tabela}
+            WHERE id = ANY($1::uuid[]) AND status = 'aberta' AND status_aprovacao = 'aprovada'
+              AND match_usuario_id IS NULL AND expira_em > NOW()`, [ids])
+        r.rows.forEach(l => vivos.add(`${tabela}:${l.id}`))
+      }
+      const porPessoa = new Map()
+      for (const l of claim.rows) {
+        const p = porPessoa.get(l.pessoa) || { usuarioId: l.usuario_id, demandas: new Set() }
+        if (vivos.has(`${l.tabela}:${l.demanda_id}`)) p.demandas.add(`${l.tabela}:${l.demanda_id}`)
+        porPessoa.set(l.pessoa, p)
+      }
+      let enviados = 0
+      for (const { usuarioId, demandas } of porPessoa.values()) {
+        if (demandas.size === 0) continue
+        try {
+          // Mesmas travas do aviso de demanda: assinatura ativa, pessoa não suspensa, app não desinstalado.
+          const apto = await pool.query(
+            `SELECT 1 FROM usuarios u JOIN assinaturas a ON a.usuario_id = u.id
+              WHERE u.id = $1 AND ${SQL_ASSINATURA_ATIVA} AND ${sqlPessoaNaoSuspensa('u.id')} AND u.desinstalado_em IS NULL`, [usuarioId])
+          if (apto.rows.length === 0) continue
+          const contato = await contatoDaPessoa(usuarioId)
+          if (!contato?.push_token) continue
+          const msg = mensagemResumoTeto(demandas.size, [...demandas].every(x => x.startsWith('obras:')))
+          const r = await enviarPushNotificacao(contato.push_token, msg.titulo, msg.corpo, msg.data, usuarioId)
+          if (r === 'enviado') enviados++
+        } catch (err) {
+          console.error(`[ResumoTeto] usuário ${usuarioId}:`, err.message)
+        }
+      }
+      console.log(`[ResumoTeto] ${porPessoa.size} pessoa(s) com pedidos acima do teto | resumos enviados: ${enviados}`)
+    }
+    await limparAcimaDoTetoAntigos().catch(err => console.error('[ResumoTeto] limpeza do log:', err.message))
+  } catch (err) {
+    console.error('[ResumoTeto] erro:', err.message)
+  } finally {
+    resumosDoTetoEmExecucao = false
+  }
+}
 
 // Avisos ao PROFISSIONAL casado, sobre o prazo de chegada (o do cronômetro):
 //   (1) avisarMatchFeito — logo após o match: "use Pedir mais tempo se combinar outra data".
@@ -2885,7 +3045,7 @@ const reanunciarDemanda = async (tabela, demandaId) => {
   if (!lado || !lembrete) return
   try {
     const r = await pool.query(
-      `SELECT titulo, cidade, uf, categoria${lado.comCategoria ? ', categorias' : ''} FROM ${tabela}
+      `SELECT titulo, cidade, uf, categoria, latitude, longitude${lado.comCategoria ? ', categorias' : ''} FROM ${tabela}
         WHERE id = $1 AND status = 'aberta' AND match_usuario_id IS NULL AND expira_em > NOW()`,
       [demandaId]
     )
@@ -2903,6 +3063,10 @@ const reanunciarDemanda = async (tabela, demandaId) => {
       entrega: null,
       excluirManifestados: { interesse: lembrete.interesse, demandaId },
       demanda: { tabela, id: demandaId },
+      // Mesmo alcance e mesmo teto diário do lembrete (ver lembrarDemandasSemResposta).
+      porDistancia: ponto(d),
+      tetoDiario: { tabela, demandaId, ...ponto(d), lote: [], resumo: false },
+      aposPagina: (resultados) => registrarLembretesPush(tabela, demandaId, 'reanuncio', resultados),
     })
     // Reanúncio = demanda nova de novo no feed: e-mail a TODOS os elegíveis, como a demanda nova
     // (política de 29/10/2026); antes só a quem não tinha token.
@@ -3637,6 +3801,10 @@ module.exports = {
   // Aviso "fora da sua área" (cron + peças exportadas para o teste).
   avisarForaDaArea,
   avisarForaDaAreaDemanda,
+  // Push-resumo do que passou do teto diário de pushes de demanda (cron).
+  enviarResumosAcimaDoTeto,
+  mensagemResumoTeto,
+  RESUMO_TETO_ESPERA_MIN,
   mensagemForaDaArea,
   sqlClaimForaDaArea,
   LADOS_FORA_AREA,

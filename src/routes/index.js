@@ -98,6 +98,8 @@ const { podeObras, podeServicos, capacidadesDaPessoa } = require('../utils/capac
 const { migrarAvisosForaDaArea, lerLimiteAvisosForaDaArea, gravarLimiteAvisosForaDaArea } = require('../utils/avisosForaDaArea')
 // Valor da demanda obrigatório e > 0 ao criar e ao editar ("Informe quanto quer pagar").
 const { validarValorDemanda, MENSAGEM_VALOR_OBRIGATORIO } = require('../utils/valorDemanda')
+// Aviso de demanda nova por distância: migração de boot e o raio que o app manda no feed (só registro).
+const { migrarAvisosPorDistancia, registrarRaioEscolhido } = require('../utils/avisosPorDistancia')
 // Limite por CONTA nas tentativas de DELETE /conta/excluir (tabela tentativas_auth, vale entre réplicas).
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { enviarEmail } = require('../services/emailService')
@@ -703,6 +705,11 @@ const migracaoPronta = (async () => {
     // manda o que faltou quando houver orçamento (na prática, no dia seguinte). NULL = nada devido.
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS email_novo_pendente_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS email_novo_pendente_em TIMESTAMPTZ`)
+    // Aviso de demanda nova por DISTÂNCIA e teto diário de pushes (utils/avisosPorDistancia):
+    // usuarios.raio_km_escolhido (o raio que o app manda no feed) e avisos_acima_do_teto (o que
+    // passou do teto de 15 pushes/dia e entra no push-resumo).
+    // (o índice de push_entregas para a contagem do teto é criado junto da tabela, mais abaixo).
+    await migrarAvisosPorDistancia(client)
     // Avisos ao PROFISSIONAL casado (alertaService.avisarMatchFeito / lembrarPrazoChegada):
     // aviso_match_enviado_em = push "Match feito!" logo após o match; lembrete_chegada_enviado_em
     // = lembrete antes do prazo de chegada. Cada um é um claim atômico (UPDATE ... WHERE IS NULL
@@ -1438,6 +1445,9 @@ const migracaoPronta = (async () => {
     // Índice PARCIAL só do que a rede de segurança procura: falhas ainda repescáveis. A PK
     // cobre o lookup por demanda; este evita varrer as linhas 'enviado' (a maioria).
     await client.query(`CREATE INDEX IF NOT EXISTS push_entregas_falha_idx ON push_entregas (tipo, demanda_id, ultima_tentativa_em) WHERE resultado = 'falha' AND tentativas < 3`)
+    // Teto diário de pushes de demanda (utils/avisosPorDistancia.sqlPushesDeDemandaHoje): a contagem
+    // "pushes desta pessoa hoje" roda para cada candidato do broadcast — por usuário e data.
+    await client.query(`CREATE INDEX IF NOT EXISTS push_entregas_usuario_dia_idx ON push_entregas (usuario_id, primeira_tentativa_em)`)
     // Diagnóstico de push (utils/pushRecibos): uma linha por mensagem enviada ao Expo, com o
     // ticket do envio e o recibo consultado ~15 s depois (processarRecibos). Só observação —
     // nada no envio lê esta tabela. tipo = data.tipo do push; demanda_id = reparo_id/obra_id
@@ -3064,6 +3074,8 @@ router.get('/obras', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigi
     req.query.page  = page
     req.query.limit = limit
     req.query.offset = offset
+    // Só REGISTRA o raio que o app mandou (para o aviso de demanda nova por distância); o feed não muda.
+    if (req.usuario.role === 'prestador') registrarRaioEscolhido(req.usuario.id, req.query.raio_km)
     return obrasCtrl.listar(req, res)
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar obras' })
@@ -5159,6 +5171,8 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPod
   try {
     const { page, limit, offset } = paginacaoAdmin(req.query)
     const { categoria, raio_km, lat, lng } = req.query
+    // Só REGISTRA o raio que o app mandou (para o aviso de demanda nova por distância); o feed não muda.
+    if (req.usuario.role === 'prestador') registrarRaioEscolhido(req.usuario.id, raio_km)
 
     // $1 reservado para o usuario_id (filtro de bloqueados)
     const params = [req.usuario.id]

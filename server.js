@@ -9,7 +9,7 @@ const rotasApp = require('./src/routes')
 const paginaPublica = require('./src/routes/paginaPublica')
 const publico = require('./src/routes/publico')
 const { pool } = require('./src/utils/supabase')
-const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, pedirIndicacoes, avisarForaDaArea, enviarEmailsPendentesNovaDemanda, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, entregarLembrete, lembrarRespostaHorario, repetirRespostaHorarioDono, lembrarPerguntasSemResposta, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
+const { verificarObrasComBaixoEngajamento, verificarObrasExpirando, enviarPushNotificacao, verificarMarcosExpiracao, verificarCronometroReparos, verificarCronometroObras, autoEncerrarPendentes, lembrarConfirmacaoEncerramento, lembrarConclusaoPendente, lembrarDemandasSemResposta, pedirIndicacoes, avisarForaDaArea, enviarResumosAcimaDoTeto, enviarEmailsPendentesNovaDemanda, lembrarPrazoChegada, lembrarAgendamento, lembrarAgendarAtendimento, repetirLembreteAgendar, avisarUsuario, entregarLembrete, lembrarRespostaHorario, repetirRespostaHorarioDono, lembrarPerguntasSemResposta, vigiarComparecimento, semSobreposicao } = require('./src/services/alertaService')
 const { invalidarCachesUsuario } = require('./src/routes')
 const { deletarDoCloudinary, extrairPublicId } = require('./src/services/uploadService')
 const { flushVisitas, iniciarFlushVisitas, INTERVALO_FLUSH_MS } = require('./src/utils/visitas')
@@ -887,6 +887,9 @@ const iniciarAgendador = () => {
   // Aviso "fora da sua área": o gancho da publicação envia na hora; este tique pega as demandas
   // publicadas fora da janela 08–20h SP (ou cujo gancho não rodou) e limpa o log do teto diário.
   setInterval(() => { avisarForaDaArea() }, INTERVALO_LEMBRETE)
+  // Push-resumo "Mais N pedidos perto de você hoje": o que passou do teto diário de 15 pushes de
+  // demanda por pessoa — no máximo um por dia, só entre 08h e 20h de São Paulo.
+  setInterval(() => { enviarResumosAcimaDoTeto() }, INTERVALO_LEMBRETE)
   // Lembretes ao dono (30 min / 2h) da solicitação de encerramento pendente do profissional.
   setInterval(() => { lembrarConfirmacaoEncerramento() }, INTERVALO_LEMBRETE)
   // "Ainda trabalhando?" ao profissional com chegada confirmada e sem pedido de conclusão de
