@@ -94,6 +94,8 @@ const { ESPECIALIDADES_REPARADOR, GRUPO_OBRAS_REPARADOR, validarEspecialidades }
 // pode_servicos (reparador OU pintor com especialidade de serviço), por PESSOA nos gates
 // exigirPodeObras / exigirPodeServicos.
 const { podeObras, podeServicos, capacidadesDaPessoa } = require('../utils/capacidadeObras')
+// Aviso "fora da sua área": migração de boot e o teto diário por pessoa (config do painel).
+const { migrarAvisosForaDaArea, lerLimiteAvisosForaDaArea, gravarLimiteAvisosForaDaArea } = require('../utils/avisosForaDaArea')
 const { enviarEmail } = require('../services/emailService')
 // sqlDonoDaPessoa / ehMesmaPessoa: posse de demanda por PESSOA (mesmo CPF), não por conta — um
 // dono_reparo gerencia as obras da sua conta de pintura e vice-versa (Fase 1 do lado contratante).
@@ -687,6 +689,11 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE obras    ADD COLUMN IF NOT EXISTS indicacao_enviada_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos  ADD COLUMN IF NOT EXISTS indicacao_enviada_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS indicacao_pedida_em  TIMESTAMPTZ`)
+    // Aviso "fora da sua área" (alertaService.avisarForaDaArea): usuarios.avisos_todas_areas
+    // (preferência, DEFAULT TRUE para todos), aviso_fora_area_em (claim por demanda, com backfill
+    // ÚNICO das já anunciadas), o log avisos_fora_area (teto diário) e a chave
+    // limite_avisos_fora_area_dia ('0' = sem limite). Statements em utils/avisosForaDaArea.
+    await migrarAvisosForaDaArea(client)
     // Avisos ao PROFISSIONAL casado (alertaService.avisarMatchFeito / lembrarPrazoChegada):
     // aviso_match_enviado_em = push "Match feito!" logo após o match; lembrete_chegada_enviado_em
     // = lembrete antes do prazo de chegada. Cada um é um claim atômico (UPDATE ... WHERE IS NULL
@@ -7993,6 +8000,33 @@ router.post('/config/limite-demandas', autenticar, exigirSuperAdmin, async (req,
     res.json({ mensagem: 'Limite de demandas atualizado', limite: n })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar limite de demandas' })
+  }
+})
+
+// Teto diário, por PESSOA, dos avisos "fora da sua área" (alertaService.avisarForaDaArea;
+// chave limite_avisos_fora_area_dia). Mesmo par dos demais tetos: o GET devolve o valor EFETIVO
+// (lerLimiteAvisosForaDaArea, o mesmo que o envio lê). 0 = sem limite.
+router.get('/config/limite-avisos-fora-area', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    res.json({ limite: await lerLimiteAvisosForaDaArea() })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar limite de avisos fora da área' })
+  }
+})
+
+// Admin ajusta o teto. Inteiro ≥ 0 (0 desliga o teto); o resto é 400 — valor inválido cairia no
+// padrão em silêncio.
+router.post('/config/limite-avisos-fora-area', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const bruto = req.body?.limite
+    const n = typeof bruto === 'number' ? bruto : (typeof bruto === 'string' && bruto.trim() !== '' ? Number(bruto) : NaN)
+    if (!Number.isInteger(n) || n < 0 || n > 1000) {
+      return res.status(400).json({ erro: 'limite inválido — use um número inteiro de 0 (sem limite) a 1000' })
+    }
+    await gravarLimiteAvisosForaDaArea(n)
+    res.json({ mensagem: n === 0 ? 'Avisos fora da área sem limite diário' : 'Limite diário de avisos fora da área atualizado', limite: n })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao atualizar limite de avisos fora da área' })
   }
 })
 

@@ -417,6 +417,8 @@ const cadastrar = async (req, res) => {
     Object.assign(usuario,
       { pode_obras: podeObras(linhaNova), pode_servicos: podeServicos(linhaNova), tem_candidaturas: false, tem_interesses: false },
       await capacidadesDaPessoa(usuario.id).catch(() => ({})))
+    // Conta nova nasce com o aviso "fora da sua área" ligado (DEFAULT TRUE da coluna).
+    usuario.avisos_todas_areas = true
     console.log(`[CADASTRO][${ts}] ✓ commit ok — token gerado | usuario_id=${usuario.id} — respondendo 201`)
     res.status(201).json({ usuario, token, assinatura })
     registrarPlataforma(usuario.id, req)
@@ -511,7 +513,7 @@ const login = async (req, res) => {
 
     const result = await pool.query(
       // Mais ANTIGA primeiro: com 2+ contas e nenhum `tipo` no corpo (app antigo), é ela que entra.
-      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version, verificacao_status, referencias FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC',
+      'SELECT id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version, verificacao_status, referencias, avisos_todas_areas FROM usuarios WHERE email = $1 ORDER BY criado_em ASC, id ASC',
       [emailNormalizado]
     )
 
@@ -682,7 +684,8 @@ const loginSocial = async (req, res) => {
 
 // Colunas que o payload de sessão precisa (login, trocar-conta e a conta vinculada de
 // POST /auth/contas/:tipo leem a MESMA lista, para o `usuario` sair igual nos três).
-const COLUNAS_SESSAO = 'id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version, verificacao_status, referencias, criado_em'
+// avisos_todas_areas: preferência do aviso "fora da sua área" (utils/avisosForaDaArea), DEFAULT TRUE.
+const COLUNAS_SESSAO = 'id, nome, email, telefone, cidade, role, senha_hash, ativo, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, token_version, verificacao_status, referencias, criado_em, avisos_todas_areas'
 
 // Payload de sessão de UMA conta — exatamente o que o login sempre devolveu: usuario,
 // assinatura (a melhor linha), token (gerarToken) e, só com 2+ contas ativas no e-mail, a
@@ -724,6 +727,9 @@ const montarSessao = async (usuario, req, contas = []) => {
       boas_vindas_exibida: usuario.boas_vindas_exibida ?? false,
       verificacao_status: usuario.verificacao_status || 'nao_solicitada',
       ...capacidade,
+      // Preferência do aviso "fora da sua área". A coluna nasce TRUE; linha sem o campo (o
+      // RETURNING da conta vinculada, recém-criada) é uma conta nova, logo ligada.
+      avisos_todas_areas: usuario.avisos_todas_areas !== false,
       // O app usa ESTE usuario até a próxima releitura do perfil (boot/revalidarSessao): sem
       // os campos aqui, "Minhas referências" ficava escondido logo depois do login.
       ...camposReferencias(usuario.referencias, usuario),
@@ -803,7 +809,7 @@ const listarContas = async (req, res) => {
 const perfil = async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, aceita_promocoes, verificacao_status, referencias FROM usuarios WHERE id = $1',
+      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, aceita_promocoes, verificacao_status, referencias, avisos_todas_areas FROM usuarios WHERE id = $1',
       [req.usuario.id]
     )
     const assinaturaResult = await pool.query(
@@ -891,7 +897,14 @@ const atualizarPerfil = async (req, res) => {
     // muda nada e devolve 200 como se tivesse salvo.
     const mexeCidade = Object.prototype.hasOwnProperty.call(req.body, 'cidade')
     const mexeUf = Object.prototype.hasOwnProperty.call(req.body, 'uf')
-    if (!mexeNome && !mexeTelefone && !mexeCidade && !mexeUf && !mexeEspecialidades) {
+    // avisos_todas_areas: liga/desliga o aviso "fora da sua área" (pedidos da cidade que não são
+    // da área do profissional — alertaService.avisarForaDaArea). Só booleano de verdade: 'false'
+    // (texto) ou 0 virariam "ligado" numa coerção distraída, o contrário do que o usuário pediu.
+    const mexeAvisos = Object.prototype.hasOwnProperty.call(req.body, 'avisos_todas_areas')
+    if (mexeAvisos && typeof req.body.avisos_todas_areas !== 'boolean') {
+      return res.status(400).json({ erro: 'avisos_todas_areas deve ser true ou false' })
+    }
+    if (!mexeNome && !mexeTelefone && !mexeCidade && !mexeUf && !mexeEspecialidades && !mexeAvisos) {
       return res.status(400).json({ erro: 'Nenhum campo para atualizar' })
     }
 
@@ -923,13 +936,15 @@ const atualizarPerfil = async (req, res) => {
               telefone = CASE WHEN $3::boolean THEN $4::text ELSE telefone END,
               cidade   = COALESCE(NULLIF(btrim($5), ''), cidade),
               uf       = COALESCE(NULLIF(btrim($6), ''), uf),
-              especialidades = CASE WHEN $8::boolean THEN $9::text[] ELSE especialidades END
+              especialidades = CASE WHEN $8::boolean THEN $9::text[] ELSE especialidades END,
+              avisos_todas_areas = CASE WHEN $10::boolean THEN $11::boolean ELSE avisos_todas_areas END
         WHERE id = $7
-        RETURNING id, nome, email, telefone, cidade, uf, foto_url, especialidades`,
+        RETURNING id, nome, email, telefone, cidade, uf, foto_url, especialidades, avisos_todas_areas`,
       [mexeNome, mexeNome ? nome.trim() : null,
        mexeTelefone, mexeTelefone ? telefone : null,
        cidade || '', uf || '', req.usuario.id,
-       mexeEspecialidades, especialidadesValidadas]
+       mexeEspecialidades, especialidadesValidadas,
+       mexeAvisos, mexeAvisos ? req.body.avisos_todas_areas : null]
     )
     const salvo = result.rows[0]
     // Especialidades mudam as CAPACIDADES (reparador que marca/tira especialidade de obra, pintor
