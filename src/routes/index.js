@@ -102,7 +102,7 @@ const { enviarEmail } = require('../services/emailService')
 // sqlProfissionalDaPessoa / sqlArrayProfissionaisDaPessoa / sqlPessoaNaoSuspensa: o espelho para
 // quem TRABALHA (Fase 2b) — contas profissionais do mesmo CPF são UM profissional.
 const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL, sqlDonoDaPessoa, ehMesmaPessoa,
-        sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa, contasProfissionaisDaPessoa } = require('../utils/tipoConta')
+        sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa, contasProfissionaisDaPessoa, ehMesmoProfissional } = require('../utils/tipoConta')
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
@@ -1916,6 +1916,23 @@ const estaSuspenso = async (usuarioId) => {
       ORDER BY (id = $1::uuid) DESC, suspenso_em LIMIT 1`, [usuarioId])
   return r.rows[0] || null
 }
+
+// Identidade de quem lê o DETALHE de uma demanda (GET /obras/:id e GET /reparos/:id), por PESSOA —
+// o app não precisa (nem deve) comparar match_usuario_id / criado_por com o id da conta logada:
+//   conta_id      — a conta da pessoa que tem a proposta ou o match NESTA demanda; sem vínculo, a
+//                   conta logada. É req.usuario.id: `autenticar` já assume a conta irmã vinculada
+//                   (middlewares/auth.assumirContaVinculada), e é como ela que o resto do detalhe
+//                   (minha_candidatura / meu_interesse, endereço, telefone) é montado. Dono e
+//                   admin: a própria conta.
+//   sou_escolhido — o match é de QUALQUER conta profissional da pessoa (Fase 2b); false sem match.
+//   sou_dono      — criado_por é QUALQUER conta contratante da pessoa (Fase 1) — o `ehDono` que o
+//                   handler já calculou. Os dois conjuntos são disjuntos: nunca os dois true.
+// Campos EXTRAS no nível de cima da resposta; nada do que já saía muda.
+const identidadeNaDemanda = async (req, demanda, ehDono) => ({
+  conta_id: req.usuario.id,
+  sou_escolhido: !!demanda.match_usuario_id && await ehMesmoProfissional(demanda.match_usuario_id, req.usuario.id),
+  sou_dono: ehDono === true,
+})
 
 // Uma proposta por PESSOA por demanda (Fase 2b): a 2ª conta profissional do mesmo CPF que tenta
 // se candidatar / demonstrar interesse onde a outra já o fez. Nas rotas com a demanda na URL quem
@@ -3799,7 +3816,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
     // encerramento_automatico_em: quando o cron fecha sozinho a solicitação pendente do pintor
     // (solicitado_em + 2 dias — alertaService.encerramentoAutomaticoEm); null sem solicitação.
-    res.json({ obra, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, desistencias, interessados_ativos, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
+    res.json({ obra, ...(await identidadeNaDemanda(req, obra, ehDono)), midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, desistencias, interessados_ativos, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -6581,6 +6598,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     const interessados_ativos = ehDono ? await contarInteressadosAtivos('reparos', req.params.id) : null
     res.json({
       reparo,
+      // conta_id / sou_escolhido / sou_dono — identidade por pessoa (identidadeNaDemanda).
+      ...(await identidadeNaDemanda(req, reparo, ehDono)),
       midias: midias.rows,
       meu_interesse: interesse.rows[0] || null,
       interessados,
