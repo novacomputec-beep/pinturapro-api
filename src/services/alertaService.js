@@ -57,6 +57,24 @@ const { registrarTickets, registrarRecibos } = require('../utils/pushRecibos')
 const sqlCasaCategorias = (param) =>
   `(${param}::text[] IS NULL OR u.especialidades && ${param}::text[])`
 
+// PÚBLICO PROFISSIONAL de uma demanda, por LADO — o ÚNICO lugar do predicado de role/tipo. As
+// duas consultas de público (push em broadcastPaginado, e-mail em reivindicarEmailsNovaDemanda)
+// usam ESTE fragmento, então não há mais como uma mudar sem a outra. `param` é o placeholder do
+// lado, que todo chamador passa em `publico`:
+//   'obras'   → quem PODE TRABALHAR EM OBRAS (utils/capacidadeObras.sqlPodeObras): conta 'pintor'
+//               OU conta 'reparador' com ao menos uma especialidade de obra (Fase 2a, 09/11/2026).
+//               É a MESMA regra do gate exigirPodeObras — quem recebe o push consegue abrir a obra.
+//   'reparos' → tipo_prestador = 'reparador' ESTRITO (D87), o mesmo predicado de exigirReparador.
+//   qualquer outro valor → ninguém (falha fechado).
+// Prestador com tipo_prestador NULL (legado) não entra em nenhum dos dois, como sempre.
+// O lado obra continua SEM filtro de especialidade por demanda (obras.categoria é residencial/
+// comercial/…, não um ofício): qualquer especialidade de obra recebe toda obra da cidade.
+const { sqlPodeObras } = require('../utils/capacidadeObras')
+const sqlPublicoProfissional = (param) => `u.role = 'prestador' AND (CASE ${param}::text
+           WHEN 'obras'   THEN ${sqlPodeObras('u')}
+           WHEN 'reparos' THEN u.tipo_prestador = 'reparador'
+           ELSE false END)`
+
 const expo = new Expo()
 
 // Opções comuns a TODA mensagem Expo (unitária e lote) — um só lugar, para não divergir.
@@ -373,7 +391,7 @@ const sqlSemManifestacao = (interesse, param) => (interesse
 //     do primeiro aviso), por cima do casamento normal com `categoria` (o público novo).
 //   excluirJaAvisados { tipo, demandaId }: tira quem já tem linha em push_entregas desta demanda
 //     (enviado, falha ou inválido — todos já foram alvo do aviso original ou de uma repescagem).
-const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null, demanda = null,
+const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null, demanda = null,
                                    foraDasCategorias = null, semIndicacaoRecente = false, excluirUsuarioId = null, aposPagina = null,
                                    excluirCategorias = null, excluirJaAvisados = null }) => {
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0 }
@@ -389,7 +407,7 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
     // que a consulta não cita ("bind message supplies N parameters, but prepared statement
     // requires N-1"), e era isso que o $7 fixo fazia com o broadcast de demanda nova (sem
     // excluirManifestados o fragmento era '' e o 7º valor sobrava → o claim dava ROLLBACK).
-    const params = [tipoPrestador, cidade, uf, cursor, PAGINA_BROADCAST, categorias]
+    const params = [publico, cidade, uf, cursor, PAGINA_BROADCAST, categorias]
     let filtrosOpcionais = ''
     if (excluirManifestados?.interesse) {
       params.push(excluirManifestados.demandaId)
@@ -418,7 +436,7 @@ const broadcastPaginado = async ({ tipoPrestador, cidade, uf, titulo, corpo, dat
       `SELECT u.id, u.push_token
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
-       WHERE u.role = 'prestador' AND u.tipo_prestador = $1
+       WHERE ${sqlPublicoProfissional('$1')}
          AND ${SQL_ASSINATURA_ATIVA}
          AND u.push_token IS NOT NULL
          -- Suspenso por faltas não recebe isca de trabalho novo — mesmo predicado de QUERY do
@@ -496,16 +514,17 @@ const notificarPintoresSobreNovaObra = async (obraId) => {
     const cidadeObra = normalizar(obra.cidade)
     const ufObra = String(obra.uf || '').trim().toUpperCase()
     if (!cidadeObra || !ufObra) {
-      console.log('[Push] Obra sem cidade/uf — nenhum pintor notificado |', obraId)
+      console.log('[Push] Obra sem cidade/uf — nenhum profissional notificado |', obraId)
       return
     }
 
     // cidade E uf, nunca cidade sozinha: ha municipios homonimos em estados diferentes.
     // Prestador sem cidade ou sem uf fica de FORA (NULLIF ... IS NOT NULL) — sem lugar
     // declarado nao da para afirmar que ele atende ali. Paginado por u.id (A5): todos os
-    // pintores assinantes da cidade recebem, em páginas de 500.
+    // profissionais de obra assinantes da cidade (publico 'obras': pintor OU reparador com
+    // especialidade de obra — sqlPublicoProfissional) recebem, em páginas de 500.
     await broadcastPaginado({
-      tipoPrestador: 'pintor', cidade: cidadeObra, uf: ufObra,
+      publico: 'obras', cidade: cidadeObra, uf: ufObra,
       ...mensagemNovaObra(obra, obraId),
       rotulo: `nova obra ${obraId}`,
       entrega: { tipo: 'obra', demandaId: obraId },
@@ -540,14 +559,14 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId) => {
     // assinatura vencida e nem consegue demonstrar interesse depois de abrir o app.
     // tipo_prestador = 'reparador' ESTRITO (D87), o mesmo predicado de exigirReparador: o
     // "IS DISTINCT FROM 'pintor'" antigo incluía NULL/legado, que recebia o push e caía em
-    // 403 TIER_INCORRETO ao tocar. Paridade com o broadcast de obra (= 'pintor').
+    // 403 TIER_INCORRETO ao tocar. O predicado mora em sqlPublicoProfissional (publico 'reparos').
     // Paginado por u.id (A5), mesmo helper do lado obra.
     // categoria: só quem declarou esse serviço em especialidades recebe; com 'outros' entre as
     // categorias o push vai a todo reparador elegível da cidade (publicoDemanda — ver
     // broadcastPaginado); o e-mail segue restrito (reivindicarEmailsNovaDemanda).
     // Os DOIS chamadores (POST /reparos/dono e a rota de aprovação) passam por aqui.
     await broadcastPaginado({
-      tipoPrestador: 'reparador', cidade: cidadeReparo, uf: ufReparo, categoria: categoriasDoReparo(reparo),
+      publico: 'reparos', cidade: cidadeReparo, uf: ufReparo, categoria: categoriasDoReparo(reparo),
       ...mensagemNovoReparo(reparo, reparoId),
       rotulo: `novo reparo ${reparoId}`,
       entrega: { tipo: 'reparo', demandaId: reparoId },
@@ -599,7 +618,7 @@ const notificarCategoriasAdicionadas = async (reparoId, categoriasAntes) => {
     console.log(`[Categorias] reparo ${reparoId}: público antigo já era todo reparador da cidade ('outros') — sem push novo`)
   } else {
     push = await broadcastPaginado({
-      tipoPrestador: 'reparador', cidade, uf, categoria: depois,
+      publico: 'reparos', cidade, uf, categoria: depois,
       ...mensagemNovoReparo(reparo, reparoId),
       rotulo: `categorias adicionadas reparo ${reparoId} (+${adicionadas.join(',')})`,
       entrega: { tipo: 'reparo', demandaId: reparoId },
@@ -615,7 +634,7 @@ const notificarCategoriasAdicionadas = async (reparoId, categoriasAntes) => {
 
 // Push "oferta aumentada" (POST /obras/:id/aumentar-valor e /reparos/:id/aumentar-valor em
 // routes/index.js). MESMOS destinatários do push de demanda nova: o mesmo broadcastPaginado,
-// com o mesmo tipoPrestador, a mesma dobra cidade+uf e, no lado reparo, o mesmo filtro de
+// com o mesmo público (publico), a mesma dobra cidade+uf e, no lado reparo, o mesmo filtro de
 // categoria × especialidades. Emoji e rótulo da categoria saem de apresentacaoObra/Reparo,
 // como em mensagemNovaObra/NovoReparo. data.tipo repete o da demanda nova para o app abrir o
 // mesmo detalhe; oferta_aumentada: true distingue a origem.
@@ -655,7 +674,7 @@ const notificarOfertaAumentadaObra = async (obraId) => {
     return null
   }
   return broadcastPaginado({
-    tipoPrestador: 'pintor', cidade, uf,
+    publico: 'obras', cidade, uf,
     ...mensagemOfertaAumentadaObra(obra, obraId),
     rotulo: `oferta aumentada obra ${obraId}`,
     entrega: null,
@@ -673,7 +692,7 @@ const notificarOfertaAumentadaReparo = async (reparoId) => {
     return null
   }
   return broadcastPaginado({
-    tipoPrestador: 'reparador', cidade, uf, categoria: categoriasDoReparo(reparo),
+    publico: 'reparos', cidade, uf, categoria: categoriasDoReparo(reparo),
     ...mensagemOfertaAumentadaReparo(reparo, reparoId),
     rotulo: `oferta aumentada reparo ${reparoId}`,
     entrega: null,
@@ -684,8 +703,9 @@ const notificarOfertaAumentadaReparo = async (reparoId) => {
 // E-mail do aviso "nova obra / novo serviço": vai a TODO prestador ELEGÍVEL do broadcast — com
 // ou sem push_token (push e e-mail juntos, decisão do dono em 28/10/2026); a única exigência a
 // mais é ter e-mail. Consulta SEPARADA da do push (broadcastPaginado continua intocado): os
-// predicados abaixo ESPELHAM os de lá (role, tipo_prestador, assinatura ativa, não suspenso,
-// cidade+uf dobrados, categoria × especialidades) e mudar um sem o outro deve saltar aos olhos.
+// predicados abaixo ESPELHAM os de lá (assinatura ativa, não suspenso, cidade+uf dobrados,
+// categoria × especialidades) e mudar um sem o outro deve saltar aos olhos. O de role/tipo é o
+// MESMO fragmento nas duas (sqlPublicoProfissional) — esse não tem como divergir.
 // lado.somenteSemToken = true restringe a quem NÃO tem token (comportamento de reserva, mantido
 // no lembrete "ainda aberto" e no reanúncio); ausente/false = todos os elegíveis.
 //
@@ -723,8 +743,8 @@ const botaoEmailDemanda = (codigoPublico) => {
 // o lembrete "ainda aberto" (lembrarDemandasSemResposta) a mostra no corpo.
 // somenteSemToken: false — demanda nova manda e-mail a todos os elegíveis (com e sem push_token).
 const LADOS_EMAIL = {
-  obras:   { tipo: 'obra',   tipoPrestador: 'pintor',    comCategoria: false, mensagem: mensagemNovaObra,   aba: 'Obras',    colunaValor: 'valor',          somenteSemToken: false },
-  reparos: { tipo: 'reparo', tipoPrestador: 'reparador', comCategoria: true,  mensagem: mensagemNovoReparo, aba: 'Serviços', colunaValor: 'valor_estimado', somenteSemToken: false },
+  obras:   { tipo: 'obra',   publico: 'obras',   comCategoria: false, mensagem: mensagemNovaObra,   aba: 'Obras',    colunaValor: 'valor',          somenteSemToken: false },
+  reparos: { tipo: 'reparo', publico: 'reparos', comCategoria: true,  mensagem: mensagemNovoReparo, aba: 'Serviços', colunaValor: 'valor_estimado', somenteSemToken: false },
 }
 const escaparHtml = (s) => String(s ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
 const htmlEmailNovaDemanda = ({ nome, titulo, corpo, aba, botao = botaoEmailDemanda(null) }) => `
@@ -784,8 +804,8 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     if (!cidade || !uf) return null // mesmo silêncio do push: sem lugar não há alvo
     // Lista `email` de publicoDemanda (utils/gruposCategorias): categorias + grupos; com 'outros'
     // entre elas, só os grupos das OUTRAS categorias ou, 'outros' sozinho, só quem marcou
-    // 'outros' — o push é que vai a todos. null no lado obra (pintor não tem 'outros' no
-    // vocabulário de especialidades, então o lado obra segue sem filtro).
+    // 'outros' — o push é que vai a todos. null no lado obra (obras.categoria não é ofício e as
+    // especialidades de obra não têm 'outros', então o lado obra segue sem filtro).
     const { email: categorias } = await publicoDemanda(lado.comCategoria ? categoriasDoReparo(demanda) : null, client)
 
     // Elegíveis (espelho de broadcastPaginado, sem exigir token e exigindo e-mail). Com
@@ -795,7 +815,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
       `SELECT u.id, u.nome, u.email
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
-       WHERE u.role = 'prestador' AND u.tipo_prestador = $1
+       WHERE ${sqlPublicoProfissional('$1')}
          AND ${SQL_ASSINATURA_ATIVA}
          AND (NOT $6::boolean OR u.push_token IS NULL)
          AND NULLIF(btrim(u.email), '') IS NOT NULL
@@ -818,7 +838,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          -- antigo — o UNIQUE de email_alertas já barra quem recebeu o e-mail original.
          AND ($8::text[] IS NULL OR NOT COALESCE(u.especialidades && $8::text[], false))
        ORDER BY u.id`,
-      [lado.tipoPrestador, cidade, uf, categorias, demandaId, lado.somenteSemToken === true, /^lembrete_/.test(lado.tipo), lado.excluirCategorias ?? null]
+      [lado.publico, cidade, uf, categorias, demandaId, lado.somenteSemToken === true, /^lembrete_/.test(lado.tipo), lado.excluirCategorias ?? null]
     )
     if (elegiveis.rows.length === 0) return null
 
@@ -881,7 +901,7 @@ const enviarEmailsNovaDemanda = async (tabela, demandaId, ladoOverride = null) =
 // Lembretes "ainda aberto" — demanda aberta, aprovada, SEM MATCH e não expirada recebe avisos
 // repetidos até fechar com alguém (match_usuario_id) ou expirar — ter interesses/candidaturas
 // NÃO a tira da cadência. Público = os MESMOS elegíveis do broadcast de demanda nova (mesmo
-// broadcastPaginado: tipoPrestador, cidade+uf dobrados, categoria × especialidades no lado
+// broadcastPaginado: publico (lado), cidade+uf dobrados, categoria × especialidades no lado
 // reparo) MENOS quem já se manifestou nesta demanda (sqlSemManifestacao: candidaturas /
 // interesse_reparos, qualquer status — push e e-mail). Mesmo data.tipo/id para o toque abrir o
 // mesmo detalhe (lembrete: true distingue a origem, como oferta_aumentada), e o mesmo e-mail de
@@ -949,11 +969,11 @@ const mensagemLembreteReparo = (reparo, reparoId) => {
 // interesse = { tabela, coluna }: onde o prestador se manifesta nesta demanda. Conta os
 // `interessados` (texto do corpo) e exclui do público quem já está lá (sqlSemManifestacao).
 const LADOS_LEMBRETE = [
-  { tabela: 'obras',   tipoEmail: 'lembrete_obra',   tipoPrestador: 'pintor',    comCategoria: false, colunaValor: 'valor',
+  { tabela: 'obras',   tipoEmail: 'lembrete_obra',   publico: 'obras',   comCategoria: false, colunaValor: 'valor',
     ancora: 'COALESCE(d.publicado_em, d.criado_em)', janelaCol: 'horas_para_expirar',
     interesse: { tabela: 'candidaturas', coluna: 'obra_id' },
     mensagem: mensagemLembreteObra },
-  { tabela: 'reparos', tipoEmail: 'lembrete_reparo', tipoPrestador: 'reparador', comCategoria: true,  colunaValor: 'valor_estimado',
+  { tabela: 'reparos', tipoEmail: 'lembrete_reparo', publico: 'reparos', comCategoria: true,  colunaValor: 'valor_estimado',
     ancora: 'd.criado_em', janelaCol: 'prazo_atendimento_horas',
     interesse: { tabela: 'interesse_reparos', coluna: 'reparo_id' },
     mensagem: mensagemLembreteReparo },
@@ -1066,7 +1086,7 @@ const notificarDonoSobreAnaliseObra = async (obraId, aprovada) => {
   await avisarUsuario(criado_por, {
     titulo: aprovada ? '✅ Obra aprovada!' : '❌ Obra não aprovada',
     corpo: aprovada
-      ? `"${titulo}" já está publicada e visível para os pintores.`
+      ? `"${titulo}" já está publicada e visível para os profissionais.`
       : `"${titulo}" não foi publicada desta vez. Toque para rever os detalhes e cadastrar novamente.`,
     data: { tipo: aprovada ? 'obra_aprovada' : 'obra_recusada', obra_id: obraId },
     rotulo: `análise obra ${obraId}`,
@@ -1355,7 +1375,7 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
         // da fatia já está gravado — sem repescagem; a demanda espera a próxima fatia.
         try {
           await broadcastPaginado({
-            tipoPrestador: lado.tipoPrestador, cidade, uf,
+            publico: lado.publico, cidade, uf,
             categoria: lado.comCategoria ? categoriasDoReparo(d) : null,
             ...lado.mensagem(d, d.id),
             rotulo: `lembrete ${lado.tabela} ${d.id}`,
@@ -1387,8 +1407,9 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
 // expandirCategoria — ou só 'outros', quando é a única), menos o criador (as duas contas) e menos
 // quem já se manifestou nela (por definição ninguém, mas o predicado fica, por segurança).
 // Lado reparo: reparadores fora dos grupos. Lado obra: obras.categoria não tem grupo (residencial/
-// comercial/… não casam com especialidade), e só o tipo 'pintor' tem a aba Obras no app — um
-// reparador que tocasse no push cairia no nada. Então, na obra, o público é todo pintor elegível
+// comercial/… não casam com especialidade), e só quem PODE TRABALHAR EM OBRAS tem a aba Obras no
+// app (publico 'obras': pintor OU reparador com especialidade de obra) — um reparador sem ela que
+// tocasse no push cairia no nada. Então, na obra, o público é todo profissional de obra elegível
 // da cidade (nenhum se manifestou), e o texto pede a indicação do mesmo jeito.
 // LIMITES: uma vez por demanda (claim atômico em indicacao_enviada_em, ANTES do envio e nunca
 // desfeito, como o lembrete) e no máx. um pedido por profissional a cada INDICACAO_GAP_DIAS em
@@ -1423,9 +1444,9 @@ const mensagemIndicacaoObra = (obra, obraId) => {
   }
 }
 const LADOS_INDICACAO = [
-  { tabela: 'reparos', tipoPrestador: 'reparador', comCategoria: true,  colunaValor: 'valor_estimado',
+  { tabela: 'reparos', publico: 'reparos', comCategoria: true,  colunaValor: 'valor_estimado',
     interesse: { tabela: 'interesse_reparos', coluna: 'reparo_id' }, mensagem: mensagemIndicacaoReparo },
-  { tabela: 'obras',   tipoPrestador: 'pintor',    comCategoria: false, colunaValor: 'valor',
+  { tabela: 'obras',   publico: 'obras',   comCategoria: false, colunaValor: 'valor',
     interesse: { tabela: 'candidaturas', coluna: 'obra_id' },        mensagem: mensagemIndicacaoObra },
 ]
 // O claim (UPDATE … RETURNING). Exportado para o teste executar o MESMO statement num
@@ -1466,7 +1487,7 @@ const pedirIndicacoes = semSobreposicao('pedirIndicacoes', async () => {
         // try/catch POR demanda, como o lembrete: o claim já está gravado; falha fica no log.
         try {
           await broadcastPaginado({
-            tipoPrestador: lado.tipoPrestador, cidade, uf,
+            publico: lado.publico, cidade, uf,
             foraDasCategorias: await categoriasExcluidasIndicacao(lado, d),
             semIndicacaoRecente: true,
             excluirUsuarioId: d.criado_por,
@@ -2533,7 +2554,7 @@ const verificarMarcosExpiracao = async () => {
 // título/tipo dos handlers POST /:id/expirar-match, para o app tratar tudo por 'match_expirado'.
 // `tabela` sai de literal no chamador, nunca do request.
 const ROTULOS_MATCH_DESFEITO = {
-  obras:   { chave: 'obra_id',   profissional: 'pintor',    artigo: 'A obra',   volta: 'A obra voltou' },
+  obras:   { chave: 'obra_id',   profissional: 'profissional', artigo: 'A obra',  volta: 'A obra voltou' },
   reparos: { chave: 'reparo_id', profissional: 'prestador', artigo: 'O serviço', volta: 'O serviço voltou' },
 }
 
@@ -2587,7 +2608,7 @@ const reanunciarDemanda = async (tabela, demandaId) => {
     if (!cidade || !uf) return
     const msg = lado.mensagem(d, demandaId)
     await broadcastPaginado({
-      tipoPrestador: lado.tipoPrestador, cidade, uf,
+      publico: lado.publico, cidade, uf,
       categoria: lado.comCategoria ? categoriasDoReparo(d) : null,
       titulo: msg.titulo, corpo: msg.corpo, data: { ...msg.data, reaberta: true },
       rotulo: `reanúncio ${lado.tipo} ${demandaId}`,
@@ -2940,7 +2961,7 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
     for (const obra of cincoMin.rows) {
       await entregarLembrete({
         usuario_id: obra.criado_por, push_token: obra.push_token, email: obra.email, nome: obra.nome,
-        titulo: '⏰ O pintor ainda não chegou?',
+        titulo: '⏰ O profissional ainda não chegou?',
         corpo: 'Faltam 5 minutos. Se ele ainda não chegou, você pode aumentar o prazo ou aguardar o cronômetro zerar.',
         data: { tipo: 'obra_5min_restantes', obra_id: obra.id }, rotulo: `5 min obras ${obra.id}`,
       })

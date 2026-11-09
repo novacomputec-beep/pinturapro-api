@@ -52,7 +52,7 @@ const LADOS = {
     tabela: 'obras', tipo: 'obra', chave: 'obra_id', janelaCol: 'horas_para_expirar',
     proposta: { tabela: 'candidaturas', coluna: 'obra_id' },
     nome: 'a obra', artigo: 'A obra', tituloCancelado: '❌ Obra cancelada', naoEncontrada: 'Obra não encontrada',
-    profissional: 'pintor',
+    profissional: 'profissional',
   },
   reparos: {
     tabela: 'reparos', tipo: 'reparo', chave: 'reparo_id', janelaCol: 'prazo_atendimento_horas',

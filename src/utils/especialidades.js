@@ -1,5 +1,6 @@
 // Vocabulário FECHADO das especialidades do profissional — DUAS listas, uma por lado:
-//   - REPARADOR (tipo_prestador = 'reparador'): as 57 categorias de SERVIÇO doméstico;
+//   - REPARADOR (tipo_prestador = 'reparador'): as 57 categorias de SERVIÇO doméstico
+//     (+ as 4 de obra, opcionais — ver ESPECIALIDADES_REPARADOR_COM_OBRA);
 //   - OBRA (tipo_prestador = 'pintor', que cobre pintor E construtor): os 4 papéis de obra.
 // Mesmo estilo de slug nas duas: minúsculas, sem acento, '_' como separador (aula_particular).
 //
@@ -36,16 +37,38 @@ const ESPECIALIDADES_OBRA = ['engenheiro', 'construtor', 'pedreiro_servente', 'p
 // Nome antigo mantido como alias da lista de reparador (era a única lista até aqui).
 const ESPECIALIDADES_VALIDAS = ESPECIALIDADES_REPARADOR
 
+// Fase 2a (09/11/2026): a conta REPARADOR pode declarar, além dos serviços, as 4 especialidades
+// de obra — é o que lhe dá o feed/push/candidatura de obras (utils/capacidadeObras). O teto
+// continua 5 NO TOTAL (serviço + obra somados).
+// Lista À PARTE, de propósito: ESPECIALIDADES_REPARADOR é também o vocabulário de
+// reparos.categoria (POST /reparos e a edição de categorias validam contra ela) — acrescentar os
+// slugs de obra ali deixaria um dono abrir um SERVIÇO de categoria 'pintor'. E eles também NÃO
+// entram em GRUPOS_RELACIONADOS (utils/gruposCategorias): o casamento de reparo não os expande.
+const ESPECIALIDADES_REPARADOR_COM_OBRA = [...ESPECIALIDADES_REPARADOR, ...ESPECIALIDADES_OBRA]
+
+// Grupo de EXIBIÇÃO das especialidades de obra no seletor do reparador (só apresentação: sai em
+// GET /config/grupos-categorias como `grupo_obras`, fora de `grupos`). Ordem pedida para a tela.
+const GRUPO_OBRAS_REPARADOR = Object.freeze({
+  chave: 'obras_construcao_civil',
+  nome: 'Obras de Construção Civil',
+  categorias: Object.freeze(['pedreiro_servente', 'pintor', 'construtor', 'engenheiro']),
+})
+
 // Qual lista vale para um lado. lado = tipo_prestador ('pintor' | 'reparador' | null).
-// Só 'pintor' cai na lista de obra; 'reparador' E null/desconhecido caem na lista de
-// reparador — que é EXATAMENTE o comportamento de antes deste split (uma lista só, a de
-// serviços), então conta sem tipo_prestador (legado, ou cadastro sem tipo_conta) não muda.
-const listaPorLado = (lado) => (lado === 'pintor' ? ESPECIALIDADES_OBRA : ESPECIALIDADES_REPARADOR)
+// 'pintor' → só a lista de obra. 'reparador' → serviços + obra (acima). null/desconhecido →
+// só a de serviços, EXATAMENTE como antes: conta sem tipo_prestador (legado, ou cadastro sem
+// tipo_conta) não ganha os slugs de obra — ela falha fechado no gate de obras de qualquer jeito.
+const listaPorLado = (lado) => {
+  if (lado === 'pintor') return ESPECIALIDADES_OBRA
+  if (lado === 'reparador') return ESPECIALIDADES_REPARADOR_COM_OBRA
+  return ESPECIALIDADES_REPARADOR
+}
 
 // Sets para o teste de pertinência não virar um scan por item a cada validação.
 const SETS_POR_LISTA = new Map([
   [ESPECIALIDADES_REPARADOR, new Set(ESPECIALIDADES_REPARADOR)],
   [ESPECIALIDADES_OBRA, new Set(ESPECIALIDADES_OBRA)],
+  [ESPECIALIDADES_REPARADOR_COM_OBRA, new Set(ESPECIALIDADES_REPARADOR_COM_OBRA)],
 ])
 
 const ESPECIALIDADES_MIN = 1
@@ -132,6 +155,8 @@ module.exports = {
   ESPECIALIDADES_VALIDAS,
   ESPECIALIDADES_REPARADOR,
   ESPECIALIDADES_OBRA,
+  ESPECIALIDADES_REPARADOR_COM_OBRA,
+  GRUPO_OBRAS_REPARADOR,
   listaPorLado,
   ESPECIALIDADES_MIN,
   ESPECIALIDADES_MAX,

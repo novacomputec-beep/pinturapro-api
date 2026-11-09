@@ -65,6 +65,7 @@ const main = async () => {
     CREATE TABLE assinaturas (usuario_id uuid, plano text, valor_mensal numeric, status text, tipo text, proximo_vencimento timestamptz, criado_em timestamptz DEFAULT now());
     CREATE TABLE avaliacoes (avaliado_id uuid, estrelas int);
     CREATE TABLE configuracoes (chave text, valor text);
+    CREATE TABLE candidaturas (obra_id uuid, usuario_id uuid); -- montarSessao lê tem_candidaturas (Fase 2a)
     INSERT INTO configuracoes VALUES ('multiplas_contas', 'true');
     CREATE FUNCTION gerar_codigo_indicacao() RETURNS text LANGUAGE sql AS $$ SELECT 'COD' || floor(random()*100000)::text $$;
   `)
@@ -90,16 +91,20 @@ const main = async () => {
   ok(r.status === 409 && r.body.codigo === 'tipo_duplicado', 'dono_reparo → dono_reparo: 409 tipo_duplicado', r.body)
   r = await criar(U(1), 'reparador', {})
   ok(r.status === 400 && /especialidade/i.test(r.body.erro), 'dono → reparador sem especialidades: 400', r.body)
-  r = await criar(U(1), 'reparador', { especialidades: ['pintor'] })
-  ok(r.status === 400 && /inválida/.test(r.body.erro), 'reparador com slug de obra: 400', r.body)
+  // Fase 2a: slug de ESPECIALIDADE de obra (pintor, pedreiro_servente…) passou a valer para o reparador;
+  // o que segue inválido é o que não é especialidade nenhuma — ex.: categoria de obra.
+  r = await criar(U(1), 'reparador', { especialidades: ['residencial'] })
+  ok(r.status === 400 && /inválida/.test(r.body.erro), 'reparador com slug que não é especialidade (categoria de obra): 400', r.body)
 
-  r = await criar(U(1), 'reparador', { especialidades: ['eletrica', 'vidraceiro'] })
+  r = await criar(U(1), 'reparador', { especialidades: ['eletrica', 'pedreiro_servente'] })
+  ok(r.status === 201 && r.body.usuario.pode_obras === true && r.body.usuario.tem_candidaturas === false && r.body.usuario.tipo_prestador === 'reparador',
+     'reparador vinculado COM especialidade de obra: sessão traz pode_obras true (tipo_prestador segue reparador)', r.body.usuario && { pode_obras: r.body.usuario.pode_obras })
   ok(r.status === 201 && r.body.conta.tipo === 'reparador' && r.body.aprovada === false && r.body.assinatura_herdada === false, 'dono_reparo → reparador: 201, sem docs, 1º perfil profissional (nada a herdar)', { conta: r.body.conta, herdada: r.body.assinatura_herdada })
   const repAna = (await db.query(`SELECT * FROM usuarios WHERE id = $1`, [r.body.conta.id])).rows[0]
   ok(repAna.nome === 'Ana Dona' && repAna.email === 'ana@x.invalid' && repAna.telefone === '34999990000' && repAna.cpf_cnpj === '111.111.111-11'
      && repAna.senha_hash === '$2b$10$hashdaana' && repAna.cidade === 'Uberlândia' && repAna.uf === 'MG' && repAna.bairro === 'Centro' && repAna.cep === '38400000',
      'copiou nome, e-mail, telefone, CPF, senha_hash, cidade/UF e endereço')
-  ok(repAna.role === 'prestador' && repAna.tipo_prestador === 'reparador' && repAna.tipo_dono === null && JSON.stringify(repAna.especialidades) === '["eletrica","vidraceiro"]'
+  ok(repAna.role === 'prestador' && repAna.tipo_prestador === 'reparador' && repAna.tipo_dono === null && JSON.stringify(repAna.especialidades) === '["eletrica","pedreiro_servente"]'
      && repAna.verificacao_status === 'nao_solicitada' && !!repAna.codigo_indicacao, 'role/tipo_prestador/especialidades/verificação/código de indicação')
   let ass = (await db.query(`SELECT * FROM assinaturas WHERE usuario_id = $1`, [repAna.id])).rows[0]
   ok(ass && ass.status === 'pendente' && Number(ass.valor_mensal) === 49.9 && ass.plano === 'mensal', 'assinatura do 1º profissional: pendente 49,90 (como o cadastro)', { status: ass.status, valor: ass.valor_mensal })

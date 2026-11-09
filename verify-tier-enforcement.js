@@ -2,7 +2,8 @@
 // contra produção. Ferramenta de regressão — roda antes/depois do deploy.
 //
 // A API deve ENFORÇAR o tier (não só a UI):
-//   reparador  → SÓ reparos   (GET /obras deve dar 403 TIER_INCORRETO)
+//   reparador  → SÓ reparos   (GET /obras deve dar 403 TIER_INCORRETO) — use uma conta SEM especialidade
+//                de obra: desde a Fase 2a, reparador com especialidade de obra PASSA em /obras
 //   pintor     → SÓ obras     (GET /reparos deve dar 403 TIER_INCORRETO)
 //   admin      → ambos (bypass)
 // E os feeds CORRETOS de cada tier devem continuar 200 (guardas de regressão).

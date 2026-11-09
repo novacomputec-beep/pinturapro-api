@@ -89,7 +89,9 @@ const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 // Vocabulário de reparos.categoria = a lista de especialidades do reparador: é contra ela que
 // o broadcast de reparo novo casa categoria × especialidades (alertaService). Só POST
 // /reparos/dono valida; a rota de aprovação não reavalia linha já gravada.
-const { ESPECIALIDADES_REPARADOR, validarEspecialidades } = require('../utils/especialidades')
+const { ESPECIALIDADES_REPARADOR, GRUPO_OBRAS_REPARADOR, validarEspecialidades } = require('../utils/especialidades')
+// Capacidade "pode trabalhar em obras" (pintor OU reparador com especialidade de obra) — gate exigirPodeObras.
+const { podeObras } = require('../utils/capacidadeObras')
 const { enviarEmail } = require('../services/emailService')
 // sqlDonoDaPessoa / ehMesmaPessoa: posse de demanda por PESSOA (mesmo CPF), não por conta — um
 // dono_reparo gerencia as obras da sua conta de pintura e vice-versa (Fase 1 do lado contratante).
@@ -1787,8 +1789,9 @@ const exigirPrestador = async (req, res, next) => {
 }
 
 // Enforça o TIER do prestador no servidor (não só na UI): pintor/construtor
-// (tipo_prestador='pintor') só participa de OBRAS; reparador só participa de
-// REPAROS. Antes, nenhum feed/ação filtrava por tipo_prestador — a separação
+// (tipo_prestador='pintor') só participa de OBRAS; reparador participa de REPAROS — e de
+// OBRAS só quando marcou especialidade de obra (exigirPodeObras, logo abaixo).
+// Antes, nenhum feed/ação filtrava por tipo_prestador — a separação
 // existia só no app, então um pintor via reparos e um reparador via obras.
 // tipo_prestador vem em req.usuario (carregado no autenticar). admin/aprovador
 // passam (painel/moderação). Qualquer outro tier — inclusive prestador com
@@ -1801,8 +1804,59 @@ const exigirTipoPrestador = (tipoEsperado, msg) => (req, res, next) => {
   next()
 }
 // Verificar cada tier explicitamente (regra do projeto: um não replica o outro).
-const exigirPintor    = exigirTipoPrestador('pintor',    'Este recurso é exclusivo para prestadores de construção/pintura (obras).')
 const exigirReparador = exigirTipoPrestador('reparador', 'Este recurso é exclusivo para prestadores de serviços domésticos.')
+
+// OBRAS — gate por CAPACIDADE, não mais por tipo (Fase 2a, 09/11/2026): passa a conta 'pintor' E a
+// conta 'reparador' que marcou ao menos uma especialidade de obra (utils/capacidadeObras.podeObras).
+// Substitui o antigo exigirPintor nas 6 rotas de obra. Continua falhando FECHADO — prestador com
+// tipo_prestador NULL (legado), reparador sem especialidade de obra e qualquer outro role levam o
+// MESMO 403 TIER_INCORRETO de sempre (os apps já nas lojas tratam esse código). admin/aprovador
+// passam (painel/moderação).
+//
+// req.usuario vem do cache de `autenticar` (30s, POR PROCESSO): quem acabou de marcar a
+// especialidade de obra noutra réplica chegaria aqui com a lista antiga. Por isso a NEGATIVA de um
+// reparador é reconferida no banco (uma linha pela PK) antes do 403 — o caminho feliz não consulta
+// nada, e a liberação vale na hora em qualquer réplica. O sentido inverso (tirou a especialidade)
+// pode levar até 30s nas outras réplicas, o que é inofensivo.
+//
+// ouCandidato (rotas de proposta EM ANDAMENTO: /pintor-responder e /match, com :id da obra): quem
+// tirou a especialidade de obra com candidatura já feita NESTA obra ainda precisa responder à
+// contraproposta e confirmar a ida — sem isso a obra ficaria presa num match que ninguém destrava.
+const ERRO_TIER_OBRAS = Object.freeze({
+  erro: 'Este recurso é exclusivo para profissionais de obras (construção/pintura).',
+  codigo: 'TIER_INCORRETO',
+})
+const RE_UUID_GATE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const criarExigirPodeObras = ({ ouCandidato = false } = {}) => async (req, res, next) => {
+  try {
+    const u = req.usuario
+    if (u.role === 'admin' || u.role === 'aprovador') return next()
+    if (podeObras(u)) return next()
+    if (u.role === 'prestador' && u.tipo_prestador === 'reparador') {
+      const fresco = await pool.query(`SELECT especialidades FROM usuarios WHERE id = $1`, [u.id])
+      const especialidades = fresco.rows[0]?.especialidades
+      if (podeObras({ ...u, especialidades })) {
+        invalidarCachesUsuario(u.id)
+        // Cópia: o objeto de req.usuario é o MESMO guardado no cache — não se altera no lugar.
+        req.usuario = { ...u, especialidades }
+        return next()
+      }
+      if (ouCandidato && RE_UUID_GATE.test(String(req.params.id || ''))) {
+        const cand = await pool.query(
+          `SELECT 1 FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2 LIMIT 1`,
+          [req.params.id, u.id]
+        )
+        if (cand.rows.length > 0) return next()
+      }
+    }
+    return res.status(403).json(ERRO_TIER_OBRAS)
+  } catch (err) {
+    console.error('[exigirPodeObras]', err.message)
+    res.status(500).json({ erro: 'Erro de autenticação' })
+  }
+}
+const exigirPodeObras = criarExigirPodeObras()
+const exigirPodeObrasOuCandidato = criarExigirPodeObras({ ouCandidato: true })
 
 // Rede de segurança de coordenadas na criação — simétrica ao `uf || ufDeCidade(cidade)`.
 // O app geocodifica no cliente (ViaCEP -> Nominatim) e isso falha em silêncio: CEP sem
@@ -2875,7 +2929,7 @@ router.post('/obras-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req,
   }
 })
 
-router.get('/obras', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, async (req, res) => {
+router.get('/obras', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPodeObras, async (req, res) => {
   try {
     const { page, limit, offset } = paginacaoAdmin(req.query)
     req.query.page  = page
@@ -3090,7 +3144,7 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
     const o = obra.rows[0]
     if (o.status !== 'aberta') return res.status(409).json({ erro: 'Só é possível estender uma obra aberta' })
-    if (o.match_usuario_id) return res.status(409).json({ erro: 'Não é possível estender uma obra com pintor a caminho' })
+    if (o.match_usuario_id) return res.status(409).json({ erro: 'Não é possível estender uma obra com profissional a caminho' })
 
     const horas = Number(req.body?.horas)
     // Teto por requisição = janela original da obra, piso de 24h (tetoExtensaoObraHoras): nunca
@@ -3340,7 +3394,7 @@ const aumentarValorDemanda = (lado) => async (req, res) => {
 router.post('/obras/:id/aumentar-valor', autenticar, aumentarValorDemanda(LADOS_AUMENTO_VALOR.obras))
 
 // ───────────────────────── Pergunta única ao dono ANTES do match ─────────────────────────
-// Um profissional aprovado do lado certo (pintor em obras, reparador em reparos — as mesmas
+// Um profissional aprovado do lado certo (quem pode obras em obras, reparador em reparos — as mesmas
 // guardas de candidatura/interesse) faz UMA pergunta por demanda, enquanto ela está aberta,
 // aprovada, dentro do prazo e sem match. O dono responde UMA vez (409 depois). Pergunta e
 // resposta passam pelo MESMO sanitizador das descrições (sanitizarTexto: telefone, e-mail,
@@ -3523,7 +3577,7 @@ const criarHandlerResposta = (tabela) => async (req, res) => {
 
 // Mesmas guardas de POST /obras/:id/candidatura e POST /reparos/:id/interesse: conta não
 // suspensa, assinatura ativa, tier do lado certo, verificação de identidade aprovada.
-router.post('/obras/:id/perguntas',   autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, exigirVerificado, criarHandlerPergunta('obras'))
+router.post('/obras/:id/perguntas',   autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPodeObras, exigirVerificado, criarHandlerPergunta('obras'))
 router.post('/reparos/:id/perguntas', autenticar, exigirNaoSuspenso, exigirPrestador, exigirReparador, exigirVerificado, criarHandlerPergunta('reparos'))
 router.post('/obras/:id/perguntas/:pid/resposta',   autenticar, criarHandlerResposta('obras'))
 router.post('/reparos/:id/perguntas/:pid/resposta', autenticar, criarHandlerResposta('reparos'))
@@ -3718,7 +3772,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
 })
 
 // POST /obras/:id/candidatura — pintor se candidata a uma obra
-router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, exigirVerificado, async (req, res) => {
+router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPodeObras, exigirVerificado, async (req, res) => {
   let client
   try {
     const { mensagem, valor_proposto } = req.body
@@ -3747,7 +3801,7 @@ router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssin
     avisarUsuario(demanda.criado_por, {
       ator_id: req.usuario.id,
       titulo: '🎨 Novo candidato!',
-      corpo: `Um pintor se candidatou na obra "${demanda.titulo}"`,
+      corpo: `Um profissional se candidatou na obra "${demanda.titulo}"`,
       data: { tipo: 'nova_candidatura', obra_id: req.params.id, candidatura_id: result.rows[0].id },
       rotulo: `nova candidatura obras ${req.params.id}`,
     })
@@ -3878,7 +3932,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
 })
 
 // POST /obras/:id/candidatura/:candidaturaId/pintor-responder — pintor responde a contraproposta
-router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar, exigirPintor, async (req, res) => {
+router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar, exigirPodeObrasOuCandidato, async (req, res) => {
   let client
   // Encerra a transação (ROLLBACK para recusas, COMMIT para efeitos) e responde.
   const sair = async (fim, status, corpo) => { await client.query(fim); return res.status(status).json(corpo) }
@@ -3916,7 +3970,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
       avisarUsuario(obra.criado_por, {
         ator_id: req.usuario.id,
         titulo: '💬 Nova contraproposta do profissional!',
-        corpo: `O pintor propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${obra.titulo}". Veja no app!`,
+        corpo: `O profissional propôs R$ ${Number(valor).toLocaleString('pt-BR')} para "${obra.titulo}". Veja no app!`,
         data: { tipo: 'contra_oferta', obra_id, candidatura_id: candidaturaId }, rotulo: `contraproposta pintor obras ${obra_id}`,
       })
       return res.json({ mensagem: 'Contraproposta enviada!' })
@@ -3956,7 +4010,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
       avisarUsuario(obra.criado_por, {
         ator_id: req.usuario.id,
         titulo: '❌ Proposta recusada',
-        corpo: `O pintor recusou sua contraproposta para "${obra.titulo}".`,
+        corpo: `O profissional recusou sua contraproposta para "${obra.titulo}".`,
         data: { tipo: 'candidatura_recusada', obra_id, candidatura_id: candidaturaId }, rotulo: `contraproposta recusada obras ${obra_id}`,
       })
       return res.json({ mensagem: 'Proposta recusada.' })
@@ -3972,7 +4026,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
 })
 
 // POST /obras/:id/match — pintor confirma ida ao local
-router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
+router.post('/obras/:id/match', autenticar, exigirPodeObrasOuCandidato, async (req, res) => {
   try {
     const obra = await pool.query(`SELECT * FROM obras WHERE id = $1 AND status = 'aberta'`, [req.params.id])
     if (obra.rows.length === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
@@ -4006,7 +4060,7 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
             usuario_id: obra.rows[0].criado_por, ator_id: req.usuario.id,
             ...dono.rows[0],
             titulo: `🚗 ${nome} está a caminho!`,
-            corpo: `O pintor saiu para "${obra.rows[0].titulo}". O telefone dele já aparece no app.`,
+            corpo: `O profissional saiu para "${obra.rows[0].titulo}". O telefone dele já aparece no app.`,
             data: { tipo: 'a_caminho', obra_id: req.params.id },
             rotulo: `a caminho obras ${req.params.id}`,
           }).then(via => console.log(`[ACaminho] obras ${req.params.id} → dono via ${via}`))
@@ -4014,7 +4068,7 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
         }
         return
       }
-      return res.status(409).json({ erro: 'Esta obra já tem um pintor a caminho' })
+      return res.status(409).json({ erro: 'Esta obra já tem um profissional a caminho' })
     }
     const candidaturaAceita = await pool.query(
       `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2 AND status = 'aceito'`,
@@ -4037,8 +4091,8 @@ router.post('/obras/:id/match', autenticar, exigirPintor, async (req, res) => {
     // Match + a caminho ao dono: push + e-mail sempre (política de 29/10/2026).
     avisarUsuario(obra.rows[0].criado_por, {
       ator_id: req.usuario.id,
-      titulo: '🚀 Pintor a caminho!',
-      corpo: `Um pintor confirmou que está indo até você para "${obra.rows[0].titulo}"`,
+      titulo: '🚀 Profissional a caminho!',
+      corpo: `Um profissional confirmou que está indo até você para "${obra.rows[0].titulo}"`,
       data: { tipo: 'match_obra', obra_id: req.params.id }, rotulo: `match a caminho obras ${req.params.id}`,
     })
     avisarMatchFeito('obras', req.params.id, req.usuario.id)
@@ -4140,7 +4194,7 @@ router.post('/obras/:id/encerrar', autenticar, async (req, res) => {
       if (pintor.rows[0]) avisarEncerramento(pintor.rows[0], '✅ Obra encerrada!', `O solicitante encerrou a obra "${o.titulo}".`)
     } else if (ehPintor) {
       const dono = await pool.query(`SELECT id AS usuario_id, push_token, email, nome FROM usuarios WHERE id = $1`, [o.criado_por])
-      if (dono.rows[0]) avisarEncerramento(dono.rows[0], '✅ Serviço concluído!', `O pintor concluiu a obra "${o.titulo}".`)
+      if (dono.rows[0]) avisarEncerramento(dono.rows[0], '✅ Serviço concluído!', `O profissional concluiu a obra "${o.titulo}".`)
     }
     res.json({ mensagem: 'Obra encerrada com sucesso!', encerramento: 'concluido' })
   } catch (err) {
@@ -4255,7 +4309,7 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
     const dataExpirado = { tipo: 'match_expirado', obra_id: req.params.id, match_feito_em: o.match_feito_em }
     avisarUsuario(o.criado_por, {
       ator_id: req.usuario.id, titulo: '⏰ Prazo expirado!',
-      corpo: `O pintor não chegou a tempo para "${o.titulo}". A obra está disponível novamente.`,
+      corpo: `O profissional não chegou a tempo para "${o.titulo}". A obra está disponível novamente.`,
       data: dataExpirado, rotulo: `match expirado obras ${req.params.id} (dono)`,
     })
     if (pintorId) {
@@ -5698,10 +5752,11 @@ const JANELAS_CHEGADA = {
 }
 
 // Rótulos por tabela para os pushes: a chave do payload segue a convenção das notificações de
-// match (obra_id / reparo_id) e o substantivo acompanha o tier (pintor em obra, prestador em
-// reparo), como em '🚀 Pintor a caminho!' vs '🚀 Profissional a caminho!'.
+// match (obra_id / reparo_id). Na obra o substantivo é "profissional" (era "pintor" até a Fase
+// 2a: quem atende uma obra pode ser pintor, construtor, pedreiro, engenheiro — ou um reparador
+// com especialidade de obra); no reparo segue "prestador".
 const ROTULOS_CHEGADA = {
-  obras:   { chave: 'obra_id',   profissional: 'pintor' },
+  obras:   { chave: 'obra_id',   profissional: 'profissional' },
   reparos: { chave: 'reparo_id', profissional: 'prestador' },
 }
 
@@ -7618,6 +7673,11 @@ router.get('/config/grupos-categorias', async (req, res) => {
     res.set('Cache-Control', 'public, max-age=300')
     res.json({
       grupos: Object.entries(GRUPOS_RELACIONADOS).map(([nome, categorias]) => ({ nome, categorias })),
+      // Campo EXTRA (Fase 2a): grupo de EXIBIÇÃO das 4 especialidades de obra no seletor de
+      // especialidades do REPARADOR ("Obras de Construção Civil"). Fica FORA de `grupos` de
+      // propósito — `grupos` monta o seletor de categorias de um SERVIÇO novo (um reparo não
+      // pode ter categoria de obra) e é o mapa do casamento de reparo; app antigo ignora a chave.
+      grupo_obras: { chave: GRUPO_OBRAS_REPARADOR.chave, nome: GRUPO_OBRAS_REPARADOR.nome, categorias: [...GRUPO_OBRAS_REPARADOR.categorias] },
       maximo_por_reparo: CATEGORIAS_MAX_REPARO,
       ativo: await gruposRelacionadosAtivo(),
     })
@@ -7964,7 +8024,7 @@ router.post('/upload/dono', autenticar,              upload.single('arquivo'), u
 // ============================================================
 // CANDIDATURAS
 // ============================================================
-router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPintor, exigirVerificado,async (req, res) => {
+router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPodeObras, exigirVerificado,async (req, res) => {
   try {
     // D83: este caminho gravava valor_oferta/mensagem_oferta, colunas que NENHUM leitor de
     // preço usa (contrato, finalizadas, minhas, meus-contratos leem valor_proposto/
@@ -7998,8 +8058,8 @@ router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiv
         ator_id: req.usuario.id,
         titulo: temOferta ? '🎨 Nova contra-oferta recebida!' : '👀 Novo interesse na sua obra!',
         corpo: temOferta
-          ? `Um pintor fez uma oferta de R$ ${Number(valor_oferta).toLocaleString('pt-BR')} para "${dono.rows[0].titulo}"`
-          : `Um pintor demonstrou interesse em "${dono.rows[0].titulo}"`,
+          ? `Um profissional fez uma oferta de R$ ${Number(valor_oferta).toLocaleString('pt-BR')} para "${dono.rows[0].titulo}"`
+          : `Um profissional demonstrou interesse em "${dono.rows[0].titulo}"`,
         data: { tipo: 'nova_candidatura', obra_id, candidatura_id: result.rows[0].id },
         rotulo: `nova candidatura obras ${obra_id}`,
       })
