@@ -175,7 +175,7 @@ const main = async () => {
       chegada_janela text, chegada_prevista_em timestamptz, chegada_declarada_por uuid, chegada_declarada_em timestamptz, chegada_confirmada_em timestamptz,
       chegada_pendente_janela text, chegada_pendente_em timestamptz, chegada_recusada_em timestamptz, chegada_proposta_por uuid, chegada_pendente_rodada int DEFAULT 0`
   await db.exec(`
-    CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, telefone text, cidade text, uf text, role text, tipo_dono text, tipo_prestador text, cpf_cnpj text,
+    CREATE TABLE usuarios (id uuid PRIMARY KEY, latitude numeric, longitude numeric, raio_km_escolhido numeric, nome text, email text, telefone text, cidade text, uf text, role text, tipo_dono text, tipo_prestador text, cpf_cnpj text,
       ativo boolean DEFAULT true, push_token text, criado_em timestamptz DEFAULT now(), suspenso_em timestamptz, suspenso_motivo text, desinstalado_em timestamptz,
       foto_url text, senha_hash text, boas_vindas_exibida boolean DEFAULT false, token_version int NOT NULL DEFAULT 1, verificacao_status text DEFAULT 'aprovado',
       referencias jsonb, especialidades text[], anos_experiencia int, tamanho_equipe int, aceita_promocoes boolean, indicacao_pedida_em timestamptz);
@@ -192,7 +192,10 @@ const main = async () => {
     CREATE TABLE avaliacoes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), contrato_tipo text, contrato_id uuid, avaliador_id uuid, avaliado_id uuid, estrelas int, etiquetas text[], criado_em timestamptz DEFAULT now());
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid, UNIQUE (dono_id, prestador_id));
     CREATE TABLE faltas_profissional (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), usuario_id uuid, tabela text, demanda_id uuid, motivo text, criado_em timestamptz DEFAULT now(), perdoada_em timestamptz);
-    CREATE TABLE push_entregas (tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(),
+    CREATE TABLE avisos_fora_area (tabela text, demanda_id uuid, usuario_id uuid, enviado_em timestamptz NOT NULL DEFAULT now());
+    CREATE TABLE lembretes_push_enviados (tabela text, demanda_id uuid, usuario_id uuid, motivo text, enviado_em timestamptz NOT NULL DEFAULT now());
+    CREATE TABLE avisos_acima_do_teto (tabela text, demanda_id uuid, usuario_id uuid, criado_em timestamptz NOT NULL DEFAULT now(), resumo_em timestamptz, PRIMARY KEY (tabela, demanda_id, usuario_id));
+    CREATE TABLE push_entregas (primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(),
       criado_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz DEFAULT now());
