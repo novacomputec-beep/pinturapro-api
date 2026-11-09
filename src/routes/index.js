@@ -30,7 +30,7 @@ const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaCon
 // Cancelamento justo de match pelas partes (antecedência, acordo mútuo, falta no tardio) —
 // substitui o uso de POST /:id/expirar-match por dono/profissional.
 const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQL_LIMPAR_MATCH } = require('../services/cancelamentoMatchService')
-const { handler: desfazerEscolhaHandler, sqlDesfazerLiberadoEm } = require('../services/desfazerEscolhaService')
+const { handler: desfazerEscolhaHandler, sqlDesfazerLiberadoEm, sqlPodeEscolherOutro } = require('../services/desfazerEscolhaService')
 // Tolerância de chegada (15 min) e pedido de atraso (15/30/60 min, 2 por match, auto-aceite em
 // 10 min). Os endpoints antigos pedir-tempo/perguntar-tempo/informar-tempo/responder-tempo caem
 // na mesma lógica (handlersLegados). GET /:id expõe camposAtraso.
@@ -519,6 +519,14 @@ const migracaoPronta = (async () => {
       // Claim do aviso ao dono "você já pode escolher outro profissional" quando o desfazer libera
       // (services/desfazerEscolhaService.avisarDesfazerLiberado); zerado em SQL_ZERAR_AGENDA.
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS desfazer_aviso_em TIMESTAMPTZ`)
+      // "Escolher outro" (dono, 10/11/2026 — desfazerEscolhaService modo 'escolher_outro'): nº de
+      // lembretes "Agende" (fixos + repetidos) SEGUIDOS sem o profissional propor horário; zera na
+      // proposta (chegada-prevista) e em SQL_ZERAR_AGENDA. Com 2, o dono pode escolher outro sem falta.
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS lembrete_agendar_sem_proposta INTEGER NOT NULL DEFAULT 0`)
+      // Proposta de horário do profissional que VENCEU sem resposta do dono (alertaService.
+      // expirarPropostasDeHorario): quando foi a última e quantas neste match (zera em SQL_ZERAR_AGENDA).
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS horario_vencido_em TIMESTAMPTZ`)
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS horarios_vencidos INTEGER NOT NULL DEFAULT 0`)
       // "Responda o horário proposto" REPETIDO ao dono (alertaService.repetirRespostaHorarioDono):
       // claim do último ciclo — zerado a cada proposta nova e em SQL_ZERAR_AGENDA — e o nº do
       // ciclo (chave aviso:resposta_horario#n), que nunca zera pelo mesmo motivo acima.
@@ -3749,6 +3757,11 @@ for (const tabela of ['obras', 'reparos']) {
   // proposto/combinado e de "Estou a caminho", quando resta ≤ 25% do intervalo match→prazo.
   // 409 AGUARDE com liberado_em antes da hora; GET /:id expõe desfazer_liberado_em.
   router.post(`/${tabela}/dono/:id/desfazer-match`, autenticar, desfazerEscolhaHandler(tabela))
+  // "Escolher outro" (mesmo serviço, modo 'escolher_outro'): SÓ o dono, quando o escolhido deixou 2
+  // lembretes "Agende" seguidos sem propor horário (pode_escolher_outro em GET /:id). Desfaz o match
+  // SEM falta para ninguém, reabre com candidaturas/interesses/perguntas intactos e bloqueia o
+  // profissional nesta demanda. 409 ESCOLHER_OUTRO_INDISPONIVEL quando pode_escolher_outro é false.
+  router.post(`/${tabela}/dono/:id/escolher-outro`, autenticar, desfazerEscolhaHandler(tabela, 'escolher_outro'))
   // Pedido de atraso (services/atrasoChegadaService): profissional pede 15/30/60 min depois do
   // "Estou a caminho"; dono aceita/recusa (sem resposta em 10 min, aceito pelo cron).
   const a = atrasoHandlers(tabela)
@@ -3769,6 +3782,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         -- desfazer_liberado_em: a partir de quando o dono pode desfazer a escolha (services/
         -- desfazerEscolhaService); NULL sem match, com horário em negociação ou já a caminho.
         ${sqlDesfazerLiberadoEm('o.')} AS desfazer_liberado_em,
+        -- pode_escolher_outro: 2 lembretes "Agende" seguidos sem proposta (desfazerEscolhaService); só dono.
+        ${sqlPodeEscolherOutro('o.')} AS pode_escolher_outro,
         -- Lembretes "Agende seu atendimento" deste match: quantos já saíram ao profissional e
         -- quando sai o próximo (alertaService.sqlProximoLembreteAgendar); só para o dono.
         ${sqlProximoLembreteAgendar('obras', 'o.')} AS proximo_lembrete_agendar_em,
@@ -3901,6 +3916,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     const lembretes_agendar_enviados = ehDono ? Number(obra.lembrete_agendar_enviados || 0) : null
     const proximo_lembrete_agendar_em = ehDono ? (obra.proximo_lembrete_agendar_em || null) : null
     delete obra.proximo_lembrete_agendar_em
+    // pode_escolher_outro (POST /obras/dono/:id/escolher-outro): SÓ dono; null para os demais.
+    const pode_escolher_outro = ehDono ? obra.pode_escolher_outro === true : null
+    delete obra.pode_escolher_outro
     // desistencias (pintores que cancelaram depois de escolhidos, mais recente primeiro) e
     // interessados_ativos (ainda na disputa): SÓ dono (utils/desistencias); null para os demais.
     const desistencias = ehDono ? await listarDesistencias('obras', req.params.id) : null
@@ -5993,7 +6011,8 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
            chegada_proposta_em = NOW(),
            lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL, lembrete_resposta_ultimo_em = NULL,
            chegada_pendente_rodada = d.chegada_pendente_rodada + 1,
-           sugestoes_horario_profissional = d.sugestoes_horario_profissional + 1
+           sugestoes_horario_profissional = d.sugestoes_horario_profissional + 1,
+           lembrete_agendar_sem_proposta = 0
          WHERE d.id = $1 AND d.match_usuario_id = $3
            AND d.chegada_prevista_em IS NULL AND d.chegada_pendente_em IS NULL
            AND d.sugestoes_horario_profissional < $5::int
@@ -6066,6 +6085,7 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
          ) AS prevista
        )
        UPDATE ${tabela} d SET
+         lembrete_agendar_sem_proposta = 0,
          chegada_janela = CASE
            WHEN c.prevista <= COALESCE(d.expira_em, 'infinity'::timestamptz) THEN $2::text
            ELSE d.chegada_janela END,
@@ -6571,6 +6591,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
               -- desfazer_liberado_em: a partir de quando o dono pode desfazer a escolha
               -- (services/desfazerEscolhaService); NULL quando não se aplica.
               ${sqlDesfazerLiberadoEm()} AS desfazer_liberado_em,
+              -- pode_escolher_outro: 2 lembretes "Agende" seguidos sem proposta (desfazerEscolhaService); só dono.
+              ${sqlPodeEscolherOutro()} AS pode_escolher_outro,
               -- Lembretes "Agende seu atendimento" deste match: quando sai o próximo ao
               -- profissional (alertaService.sqlProximoLembreteAgendar); só para o dono.
               ${sqlProximoLembreteAgendar('reparos', 'reparos.')} AS proximo_lembrete_agendar_em
@@ -6693,6 +6715,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     const lembretes_agendar_enviados = ehDono ? Number(reparo.lembrete_agendar_enviados || 0) : null
     const proximo_lembrete_agendar_em = ehDono ? (reparo.proximo_lembrete_agendar_em || null) : null
     delete reparo.proximo_lembrete_agendar_em
+    // pode_escolher_outro (POST /reparos/dono/:id/escolher-outro): SÓ dono; null para os demais.
+    const pode_escolher_outro = ehDono ? reparo.pode_escolher_outro === true : null
+    delete reparo.pode_escolher_outro
     // desistencias (prestadores que cancelaram depois de escolhidos, mais recente primeiro) e
     // interessados_ativos (ainda na disputa): SÓ dono (utils/desistencias); null para os demais.
     const desistencias = ehDono ? await listarDesistencias('reparos', req.params.id) : null

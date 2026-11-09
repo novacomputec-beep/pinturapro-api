@@ -30,6 +30,17 @@
 // Depois do commit (push + e-mail, cota crítica 'aviso:', nunca lançam): ao profissional, a
 // cada interessado que segue valendo e ao dono (com o nº de interessados avisados). Motivo
 // 'escolha_desfeita' fica fora da contagem de cancelamentos frequentes (cancelamentoMatchService).
+//
+// "ESCOLHER OUTRO" (dono, 10/11/2026) — o MESMO caminho, em outro modo (handler(tabela,
+// 'escolher_outro'), POST /:tabela/dono/:id/escolher-outro): libera quando o escolhido deixou
+// LEMBRETES_PARA_ESCOLHER_OUTRO (2) lembretes "Agende" SEGUIDOS sem propor horário
+// (lembrete_agendar_sem_proposta, contado em alertaService e zerado na proposta), sem esperar os
+// 75% do prazo; sai em GET /:id como pode_escolher_outro (só dono). Diferenças: NENHUMA falta
+// para ninguém (nem suspensão), motivo 'escolheu_outro' na proposta cancelada (também fora da
+// contagem de cancelamentos frequentes) e o aviso ao profissional "O cliente escolheu outro
+// profissional". O resto é igual: match zerado, demanda de volta ao feed com candidaturas,
+// interesses, perguntas e respostas intactos, profissional bloqueado nesta demanda.
+// 409 ESCOLHER_OUTRO_INDISPONIVEL quando pode_escolher_outro é false.
 const { pool } = require('../utils/supabase')
 const { formatarDataHoraSP } = require('../utils/agendamento')
 const { SQL_LIMPAR_MATCH } = require('./cancelamentoMatchService')
@@ -40,6 +51,9 @@ const { ehMesmaPessoa } = require('../utils/tipoConta')
 const LIBERA_FRACAO_RESTANTE = 0.25
 const PISO_PRAZO_RESTANTE = '1 hour'
 const MOTIVO_ESCOLHA_DESFEITA = 'escolha_desfeita'
+const MOTIVO_ESCOLHEU_OUTRO = 'escolheu_outro'
+const LEMBRETES_PARA_ESCOLHER_OUTRO = 2
+const MODOS = ['desfazer', 'escolher_outro']
 const MOTIVO_FALTA = MOTIVO_FALTA_SEM_HORARIO // 'não marcou horário' — o mesmo do cronômetro
 const STATUS_VALENDO = ['pendente', 'contraproposta_dono']
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -58,6 +72,10 @@ const sqlPodeDesfazer = (p = '') =>
   `(${p}status = 'aberta' AND ${p}match_usuario_id IS NOT NULL AND ${p}match_feito_em IS NOT NULL
     AND ${p}chegada_pendente_em IS NULL AND ${p}chegada_prevista_em IS NULL
     AND ${p}a_caminho_em IS NULL AND ${p}chegada_declarada_em IS NULL AND ${p}chegada_confirmada_em IS NULL)`
+// pode_escolher_outro de GET /:tabela/:id (e da rota): as mesmas condições do desfazer + 2
+// lembretes "Agende" seguidos sem proposta. Booleano (false quando não se aplica).
+const sqlPodeEscolherOutro = (p = '') =>
+  `COALESCE(${sqlPodeDesfazer(p)} AND ${p}lembrete_agendar_sem_proposta >= ${LEMBRETES_PARA_ESCOLHER_OUTRO}, false)`
 // desfazer_liberado_em de GET /:tabela/:id (e da rota): match_feito_em + espera, ou NULL.
 const sqlDesfazerLiberadoEm = (p = '') =>
   `(CASE WHEN ${sqlPodeDesfazer(p)} THEN ${p}match_feito_em + ${sqlEspera(p)} ELSE NULL END)`
@@ -73,8 +91,8 @@ const avisar = async (u, aviso) => {
 
 // Guardas sobre a linha (já travada). Devolve null para seguir ou { status, corpo }.
 // ehDono: posse por PESSOA, resolvida pelo handler (utils/tipoConta.ehMesmaPessoa) na transação.
-const recusa = (lado, d, ehDono) => {
-  if (!ehDono) return { status: 403, corpo: { erro: 'Só o cliente pode desfazer a escolha' } }
+const recusa = (lado, d, ehDono, modo = 'desfazer') => {
+  if (!ehDono) return { status: 403, corpo: { erro: modo === 'escolher_outro' ? 'Só o cliente pode escolher outro profissional' : 'Só o cliente pode desfazer a escolha' } }
   if (d.status !== 'aberta') return { status: 409, corpo: { erro: `${lado.artigo} não está mais em andamento`, codigo: 'DEMANDA_FECHADA' } }
   if (!d.match_usuario_id || !d.match_feito_em) return { status: 409, corpo: { erro: 'Não há profissional escolhido para desfazer', codigo: 'SEM_MATCH' } }
   if (d.a_caminho_em || d.chegada_declarada_em || d.chegada_confirmada_em) {
@@ -83,6 +101,15 @@ const recusa = (lado, d, ehDono) => {
   if (d.chegada_pendente_em || d.chegada_prevista_em) {
     return { status: 409, corpo: { erro: 'O profissional já propôs ou combinou um horário. Para sair do atendimento, use o cancelamento.', codigo: 'HORARIO_EM_NEGOCIACAO' } }
   }
+  if (modo === 'escolher_outro') {
+    if (d.pode_escolher_outro !== true) {
+      return { status: 409, corpo: {
+        erro: `Escolher outro profissional libera depois de ${LEMBRETES_PARA_ESCOLHER_OUTRO} lembretes de agendamento sem resposta.`,
+        codigo: 'ESCOLHER_OUTRO_INDISPONIVEL', lembretes_sem_proposta: Number(d.lembrete_agendar_sem_proposta || 0), necessarios: LEMBRETES_PARA_ESCOLHER_OUTRO,
+      } }
+    }
+    return null
+  }
   if (!d.liberado_em) return { status: 409, corpo: { erro: 'Não é possível desfazer a escolha agora', codigo: 'ESTADO_MUDOU' } }
   if (new Date(d.agora) < new Date(d.liberado_em)) {
     return { status: 409, corpo: { erro: `Dê um tempo ao profissional: você pode desfazer a escolha a partir de ${formatarDataHoraSP(d.liberado_em)}.`, codigo: 'AGUARDE', liberado_em: d.liberado_em } }
@@ -90,10 +117,15 @@ const recusa = (lado, d, ehDono) => {
   return null
 }
 
-// POST /:tabela/dono/:id/desfazer-match — só o dono.
-const handler = (tabela) => {
+// POST /:tabela/dono/:id/desfazer-match (modo 'desfazer') e /:tabela/dono/:id/escolher-outro
+// (modo 'escolher_outro') — só o dono.
+const handler = (tabela, modo = 'desfazer') => {
   const lado = LADOS[tabela]
   if (!lado) throw new Error(`desfazerEscolhaService: lado desconhecido "${tabela}"`)
+  if (!MODOS.includes(modo)) throw new Error(`desfazerEscolhaService: modo desconhecido "${modo}"`)
+  const escolherOutro = modo === 'escolher_outro'
+  const motivo = escolherOutro ? MOTIVO_ESCOLHEU_OUTRO : MOTIVO_ESCOLHA_DESFEITA
+  const rotuloLog = escolherOutro ? 'EscolherOutro' : 'DesfazerEscolha'
   return async (req, res) => {
     const id = String(req.params.id)
     if (!UUID_RE.test(id)) return res.status(404).json({ erro: lado.naoEncontrada })
@@ -105,13 +137,14 @@ const handler = (tabela) => {
       const r = await client.query(
         `SELECT id, titulo, criado_por, match_usuario_id, match_feito_em, status, a_caminho_em,
                 chegada_pendente_em, chegada_prevista_em, chegada_declarada_em, chegada_confirmada_em,
+                lembrete_agendar_sem_proposta, ${sqlPodeEscolherOutro()} AS pode_escolher_outro,
                 ${sqlDesfazerLiberadoEm()} AS liberado_em, NOW() AS agora
            FROM ${lado.tabela} WHERE id = $1 FOR UPDATE`,
         [id]
       )
       d = r.rows[0]
       if (!d) { await client.query('ROLLBACK'); return res.status(404).json({ erro: lado.naoEncontrada }) }
-      const neg = recusa(lado, d, await ehMesmaPessoa(d.criado_por, req.usuario.id, client))
+      const neg = recusa(lado, d, await ehMesmaPessoa(d.criado_por, req.usuario.id, client), modo)
       if (neg) { await client.query('ROLLBACK'); return res.status(neg.status).json(neg.corpo) }
       profissionalId = d.match_usuario_id
 
@@ -124,7 +157,7 @@ const handler = (tabela) => {
                                               THEN prestadores_bloqueados
                                               ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
           WHERE id = $1 AND match_usuario_id = $2 AND ${sqlPodeDesfazer()}
-            AND NOW() >= match_feito_em + ${sqlEspera()}
+            AND ${escolherOutro ? sqlPodeEscolherOutro() : `NOW() >= match_feito_em + ${sqlEspera()}`}
           RETURNING id`,
         [d.id, profissionalId]
       )
@@ -134,7 +167,7 @@ const handler = (tabela) => {
             SET status = 'cancelado', cancelado_por = $3, cancelado_motivo = $4, cancelado_detalhe = NULL,
                 cancelado_em = NOW(), cancelado_acordo = false, status_antes_match = NULL
           WHERE ${lado.proposta.coluna} = $1 AND usuario_id = $2 AND status = 'aceito'`,
-        [d.id, profissionalId, req.usuario.id, MOTIVO_ESCOLHA_DESFEITA]
+        [d.id, profissionalId, req.usuario.id, motivo]
       )
       // Propostas rebaixadas PELO MATCH voltam ao status que tinham.
       await client.query(
@@ -148,26 +181,33 @@ const handler = (tabela) => {
           WHERE ${lado.proposta.coluna} = $1 AND usuario_id <> $2 AND status = ANY($3::text[])`,
         [d.id, profissionalId, STATUS_VALENDO]
       )).rows.map(x => x.usuario_id)
-      await inserirFaltaUnica(client, lado.tabela, d.id, profissionalId, MOTIVO_FALTA) // única por (profissional, demanda)
+      // Falta SÓ no desfazer; "escolher outro" não penaliza ninguém.
+      if (!escolherOutro) await inserirFaltaUnica(client, lado.tabela, d.id, profissionalId, MOTIVO_FALTA) // única por (profissional, demanda)
       await client.query('COMMIT')
     } catch (err) {
       if (client) { try { await client.query('ROLLBACK') } catch {} }
-      console.error(`[DesfazerEscolha] ${tabela} ${req.params.id}:`, err.message)
-      return res.status(500).json({ erro: 'Erro ao desfazer a escolha' })
+      console.error(`[${rotuloLog}] ${tabela} ${req.params.id}:`, err.message)
+      return res.status(500).json({ erro: escolherOutro ? 'Erro ao escolher outro profissional' : 'Erro ao desfazer a escolha' })
     } finally {
       if (client) client.release()
     }
-    console.log(`[DesfazerEscolha] ${lado.tipo} ${d.id}: dono ${req.usuario.id} desfez a escolha de ${profissionalId} (falta registrada; ${interessados.length} interessado(s) seguem valendo)`)
-    res.json({ mensagem: `Escolha desfeita. ${lado.artigo} voltou ao feed.`, profissional_id: profissionalId, interessados_avisados: interessados.length })
+    console.log(`[${rotuloLog}] ${lado.tipo} ${d.id}: dono ${req.usuario.id} desfez a escolha de ${profissionalId} (${escolherOutro ? 'sem falta' : 'falta registrada'}; ${interessados.length} interessado(s) seguem valendo)`)
+    res.json({ mensagem: `Escolha desfeita. ${lado.artigo} voltou ao feed.`, profissional_id: profissionalId, interessados_avisados: interessados.length, modo })
 
     // Fora da transação e depois da resposta. Ordem: suspensão (pode mandar "Conta suspensa"),
     // profissional, interessados, dono. ator_id só no aviso ao profissional e aos interessados
     // (o dono é o autor e PRECISA receber o dele).
     ;(async () => {
-      await avaliarSuspensaoPorFaltas(profissionalId)
+      if (!escolherOutro) await avaliarSuspensaoPorFaltas(profissionalId)
       const [prof] = await contatos([profissionalId])
       if (prof) {
-        await avisar(prof, {
+        await avisar(prof, escolherOutro ? {
+          ator_id: req.usuario.id,
+          titulo: 'O cliente escolheu outro profissional',
+          corpo: `"${d.titulo}": o cliente escolheu outro profissional porque o horário não foi marcado. Sem falta para você.`,
+          data: { tipo: lado.tipoPushProfissional, [lado.chave]: d.id, motivo: MOTIVO_ESCOLHEU_OUTRO },
+          rotulo: `escolheu outro ${lado.tipo} ${d.id} profissional`,
+        } : {
           ator_id: req.usuario.id,
           titulo: `Você saiu do serviço "${d.titulo}"`,
           corpo: 'Você não marcou dia e horário a tempo e o cliente desfez a escolha. Isso contou como 1 falta.',
@@ -194,7 +234,7 @@ const handler = (tabela) => {
           rotulo: `escolha desfeita ${lado.tipo} ${d.id} dono`,
         })
       }
-    })().catch(err => console.error(`[DesfazerEscolha] avisos ${lado.tipo} ${d.id}:`, err.message))
+    })().catch(err => console.error(`[${rotuloLog}] avisos ${lado.tipo} ${d.id}:`, err.message))
   }
 }
 
@@ -231,4 +271,4 @@ const avisarDesfazerLiberado = semSobreposicao('avisarDesfazerLiberado', async (
   }
 })
 
-module.exports = { LIBERA_FRACAO_RESTANTE, MOTIVO_ESCOLHA_DESFEITA, MOTIVO_FALTA, sqlEspera, sqlDesfazerLiberadoEm, handler, avisarDesfazerLiberado, TITULO_LIBERADO, corpoLiberado }
+module.exports = { LIBERA_FRACAO_RESTANTE, MOTIVO_ESCOLHA_DESFEITA, MOTIVO_ESCOLHEU_OUTRO, LEMBRETES_PARA_ESCOLHER_OUTRO, MOTIVO_FALTA, sqlEspera, sqlDesfazerLiberadoEm, sqlPodeEscolherOutro, handler, avisarDesfazerLiberado, TITULO_LIBERADO, corpoLiberado }

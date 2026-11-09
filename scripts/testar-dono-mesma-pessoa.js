@@ -84,7 +84,7 @@ const main = async () => {
       lembrete_agenda_vespera_em timestamptz, lembrete_agenda_2h_em timestamptz, lembrete_agenda_hora_em timestamptz, lembrete_agenda_dono_vespera_em timestamptz,
       lembrete_agenda_dono_2h_em timestamptz, vigia_comparecimento_em timestamptz, comparecimento_resposta text, comparecimento_respondido_em timestamptz,
       lembrete_agendar_offsets int[] NOT NULL DEFAULT '{}', lembrete_agendar_ultimo_em timestamptz, lembrete_agendar_dono_em timestamptz, lembrete_agendar_ciclo int DEFAULT 0,
-      lembrete_agendar_enviados int NOT NULL DEFAULT 0, desfazer_aviso_em timestamptz, chegada_proposta_em timestamptz, lembrete_resposta_1h_em timestamptz,
+      lembrete_agendar_enviados int NOT NULL DEFAULT 0, lembrete_agendar_sem_proposta int NOT NULL DEFAULT 0, horario_vencido_em timestamptz, horarios_vencidos int NOT NULL DEFAULT 0, desfazer_aviso_em timestamptz, chegada_proposta_em timestamptz, lembrete_resposta_1h_em timestamptz,
       lembrete_resposta_antes_em timestamptz, lembrete_resposta_ultimo_em timestamptz, sugestoes_horario_dono int DEFAULT 0, sugestoes_horario_profissional int DEFAULT 0,
       prazo_chegada_extra_em timestamptz, aviso_atraso_enviado_em timestamptz, pedido_atraso_minutos int, pedido_atraso_motivo text, pedido_atraso_em timestamptz,
       pedido_atraso_status text, pedido_atraso_respondido_em timestamptz, pedidos_atraso_usados int DEFAULT 0, cancelamento_pedido_por uuid, cancelamento_pedido_motivo text,
