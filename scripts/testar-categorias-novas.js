@@ -23,7 +23,7 @@ const NOVAS = {
   informatica:     { rotulo: 'Informática',       emoji: '🖥️', grupo: 'Elétrica e tecnologia', chave: 'eletrica_tec', irmao: 'eletrica' },
   gesseiro:        { rotulo: 'Gesseiro',          emoji: '🪜', grupo: 'Reparos da casa',       chave: 'reparos_casa', irmao: 'alvenaria' },
   placas_fachadas: { rotulo: 'Placas e fachadas', emoji: '🪧', grupo: 'Arte e criação',       chave: 'arte',         irmao: 'artesanato' },
-  borracheiro:     { rotulo: 'Borracheiro',       emoji: '🛞', grupo: 'Transporte',            chave: 'transporte',   irmao: 'mecanica' },
+  borracheiro:     { rotulo: 'Borracheiro',       emoji: '🚙', grupo: 'Transporte',            chave: 'transporte',   irmao: 'mecanica' },
 }
 
 const main = async () => {
