@@ -100,6 +100,9 @@ const { migrarAvisosForaDaArea, lerLimiteAvisosForaDaArea, gravarLimiteAvisosFor
 const { validarValorDemanda, MENSAGEM_VALOR_OBRIGATORIO } = require('../utils/valorDemanda')
 // Aviso de demanda nova por distância: migração de boot e o raio que o app manda no feed (só registro).
 const { migrarAvisosPorDistancia, registrarRaioEscolhido } = require('../utils/avisosPorDistancia')
+// Mensagens prontas (frases do catálogo entre o dono e o profissional escolhido): migração e rotas.
+const { migrarMensagensProntas } = require('../utils/mensagensProntas')
+const { handlers: mensagensProntasHandlers } = require('../services/mensagensProntasService')
 // Limite por CONTA nas tentativas de DELETE /conta/excluir (tabela tentativas_auth, vale entre réplicas).
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { enviarEmail } = require('../services/emailService')
@@ -710,6 +713,8 @@ const migracaoPronta = (async () => {
     // passou do teto de 15 pushes/dia e entra no push-resumo).
     // (o índice de push_entregas para a contagem do teto é criado junto da tabela, mais abaixo).
     await migrarAvisosPorDistancia(client)
+    // Mensagens prontas entre o dono e o profissional escolhido (utils/mensagensProntas).
+    await migrarMensagensProntas(client)
     // Avisos ao PROFISSIONAL casado (alertaService.avisarMatchFeito / lembrarPrazoChegada):
     // aviso_match_enviado_em = push "Match feito!" logo após o match; lembrete_chegada_enviado_em
     // = lembrete antes do prazo de chegada. Cada um é um claim atômico (UPDATE ... WHERE IS NULL
@@ -3735,6 +3740,11 @@ for (const tabela of ['obras', 'reparos']) {
   router.post(`/${tabela}/:id/cancelar-match`, autenticar, h.cancelar)
   router.post(`/${tabela}/:id/cancelamento-acordo`, autenticar, h.pedirAcordo)
   router.post(`/${tabela}/:id/cancelamento-acordo/responder`, autenticar, h.responderAcordo)
+  // Mensagens prontas (services/mensagensProntasService): catálogo da fase + histórico, e o envio
+  // por frase_id (sem texto livre). Só o dono (qualquer conta da pessoa) e o profissional escolhido.
+  const mp = mensagensProntasHandlers(tabela)
+  router.get(`/${tabela}/:id/mensagens-prontas`, autenticar, mp.listar)
+  router.post(`/${tabela}/:id/mensagens-prontas`, autenticar, mp.enviar)
   // "Desfazer escolha" (services/desfazerEscolhaService): SÓ o dono, antes de qualquer horário
   // proposto/combinado e de "Estou a caminho", quando resta ≤ 25% do intervalo match→prazo.
   // 409 AGUARDE com liberado_em antes da hora; GET /:id expõe desfazer_liberado_em.
