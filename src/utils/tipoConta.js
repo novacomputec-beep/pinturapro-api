@@ -133,4 +133,54 @@ const ehMesmaPessoa = async (criadoPor, usuarioId, db = pool) => {
   return r.rows.length > 0
 }
 
-module.exports = { TIPOS_CADASTRO, MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, multiplasContasAtivo, sqlContasDaPessoa, sqlDonoDaPessoa, contasDaPessoa, ehMesmaPessoa }
+// ─── Contas PROFISSIONAIS da mesma pessoa (lado profissional unificado, Fase 2b — 09/11/2026) ──
+// O espelho do bloco acima para quem TRABALHA: a pessoa com conta de pintor E de reparador (mesmo
+// CPF) é UM profissional. Mesma identidade (CPF/CNPJ normalizado, NUNCA e-mail; conta sem CPF casa
+// só consigo mesma) e a mesma regra de papel nos DOIS sentidos: a conta de `param` só ganha irmãs
+// se ela mesma for 'prestador', e só irmãs 'prestador'. Os dois conjuntos são DISJUNTOS — conta
+// contratante nunca entra aqui, conta profissional nunca entra em sqlContasDaPessoa: o perfil
+// profissional não ganha posse das demandas da pessoa, e o perfil de dono não vira candidato.
+// A própria conta entra sempre. Inclui contas inativas (falta, bloqueio e proposta de uma conta
+// desativada continuam sendo da pessoa). O índice único (cpf normalizado, tipo) limita a 2 contas.
+//
+// Usos: uma proposta por pessoa por demanda, listas "minhas" (candidaturas, interesses, contratos),
+// lista negra por demanda e bloqueio do dono, faltas e suspensão, e um aviso por pessoa.
+// `param` pode ser um placeholder ('$1') ou uma expressão de coluna ('u.id', 'ad.reparador_id').
+const sqlContasProfissionaisDaPessoa = (param = '$1') => `
+      SELECT eu_prof.id FROM usuarios eu_prof WHERE eu_prof.id = ${param}::uuid
+      UNION
+      SELECT irma_prof.id FROM usuarios irma_prof
+        JOIN usuarios eu_prof ON eu_prof.id = ${param}::uuid
+       WHERE eu_prof.role = 'prestador' AND irma_prof.role = 'prestador'
+         AND ${sqlCpfNormalizado('irma_prof.cpf_cnpj')} = ${sqlCpfNormalizado('eu_prof.cpf_cnpj')}`
+
+// Predicado: `${coluna} IN (contas profissionais da pessoa de ${param})`.
+const sqlProfissionalDaPessoa = (coluna, param = '$1') => `${coluna} IN (${sqlContasProfissionaisDaPessoa(param)})`
+// O mesmo conjunto como uuid[] — para cruzar com colunas de lista (prestadores_bloqueados &&).
+const sqlArrayProfissionaisDaPessoa = (param = '$1') => `ARRAY(${sqlContasProfissionaisDaPessoa(param)})`
+
+// SUSPENSÃO por PESSOA: verdadeiro quando NENHUMA conta profissional da pessoa de `exprId` está
+// suspensa. A suspensão continua gravada na conta que a mereceu (é lá que o admin a levanta); o
+// que muda é a LEITURA — a outra conta profissional da mesma pessoa não serve de porta dos fundos.
+// Para conta que não é 'prestador' o conjunto é só ela: equivale a suspenso_em IS NULL.
+const sqlPessoaNaoSuspensa = (exprId = 'u.id') => `NOT EXISTS (
+        SELECT 1 FROM usuarios susp WHERE susp.suspenso_em IS NOT NULL
+           AND ${sqlProfissionalDaPessoa('susp.id', exprId)})`
+
+// ids das contas profissionais da pessoa (a própria sempre incluída, seja qual for o role).
+const contasProfissionaisDaPessoa = async (usuarioId, db = pool) => {
+  if (!usuarioId) return []
+  const r = await db.query(sqlContasProfissionaisDaPessoa('$1'), [usuarioId])
+  return r.rows.map(x => x.id)
+}
+
+// true quando `outroId` é uma conta profissional da mesma pessoa de `usuarioId` (ou a própria).
+const ehMesmoProfissional = async (outroId, usuarioId, db = pool) => {
+  if (!outroId || !usuarioId) return false
+  if (String(outroId) === String(usuarioId)) return true
+  const r = await db.query(`SELECT 1 WHERE $2::uuid IN (${sqlContasProfissionaisDaPessoa('$1')})`, [usuarioId, outroId])
+  return r.rows.length > 0
+}
+
+module.exports = { TIPOS_CADASTRO, MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, multiplasContasAtivo, sqlContasDaPessoa, sqlDonoDaPessoa, contasDaPessoa, ehMesmaPessoa,
+  sqlContasProfissionaisDaPessoa, sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa, sqlPessoaNaoSuspensa, contasProfissionaisDaPessoa, ehMesmoProfissional }

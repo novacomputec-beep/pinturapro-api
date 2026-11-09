@@ -1,6 +1,7 @@
 const { pool } = require('../utils/supabase')
 // Posse da obra por PESSOA (mesmo CPF, qualquer conta contratante) — utils/tipoConta.
-const { ehMesmaPessoa } = require('../utils/tipoConta')
+// sqlProfissionalDaPessoa: o espelho do lado profissional (Fase 2b) — contas 'prestador' do mesmo CPF.
+const { ehMesmaPessoa, sqlProfissionalDaPessoa } = require('../utils/tipoConta')
 const { enviarContratoObra } = require('./contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 const { enviarPushNotificacao, avisarMatchFeito, avisarUsuario } = require('../services/alertaService')
@@ -19,6 +20,10 @@ const minhas = async (req, res) => {
 
     const result = await pool.query(
       `SELECT c.id, c.status, c.criado_em, c.valor_contraproposta, c.valor_proposto,
+              -- Fase 2b (campos extras): a conta profissional da pessoa que fez a proposta e se o
+              -- match da obra é de uma conta DELA — o app não precisa comparar ids de conta.
+              c.usuario_id AS conta_id,
+              COALESCE(${sqlProfissionalDaPessoa('o.match_usuario_id', '$1')}, false) AS match_da_pessoa,
               o.id as obra_id, o.titulo, o.categoria, o.valor, o.cidade, o.status as obra_status,
               o.match_usuario_id, o.match_feito_em,
               -- Encerramento assimétrico: só o PINTOR cria solicitação pendente. O dono não
@@ -47,7 +52,8 @@ const minhas = async (req, res) => {
               (o.status <> 'encerrada' AND o.expira_em <= NOW()) AS obra_expirada
        FROM candidaturas c
        JOIN obras o ON c.obra_id = o.id
-       WHERE c.usuario_id = $1
+       -- Por PESSOA (Fase 2b): candidaturas de QUALQUER conta profissional do mesmo CPF.
+       WHERE ${sqlProfissionalDaPessoa('c.usuario_id', '$1')}
        ORDER BY c.criado_em DESC
        LIMIT $2 OFFSET $3`,
       [req.usuario.id, limit, offset]
@@ -173,8 +179,9 @@ const aprovar = async (req, res) => {
     // Suspensão do CANDIDATO (quem chama aqui é o dono ou um admin). Terceiro caminho de
     // aceite, junto de POST /obras/:id/candidatura/:candidaturaId/responder e o equivalente
     // de reparo — todos casam o profissional, então todos precisam da mesma trava.
+    // Por PESSOA (Fase 2b): vale a suspensão de qualquer conta profissional do mesmo CPF.
     const suspenso = await pool.query(
-      `SELECT suspenso_em FROM usuarios WHERE id = $1`,
+      `SELECT suspenso_em FROM usuarios WHERE ${sqlProfissionalDaPessoa('id', '$1')} AND suspenso_em IS NOT NULL LIMIT 1`,
       [existe.rows[0].usuario_id]
     )
     if (suspenso.rows[0]?.suspenso_em) {

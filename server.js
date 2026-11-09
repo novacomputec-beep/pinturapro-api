@@ -18,6 +18,10 @@ const { limparTentativasAntigas } = require('./src/utils/tentativasAuth')
 const { cronPromoverVersaoAtual } = require('./src/utils/versaoApp')
 // Proximidade: a outra conta do criador do reparo (mesmo CPF) não recebe "serviço próximo".
 const { sqlNaoMesmoCpf } = require('./src/utils/demandaPropria')
+// Lado profissional por PESSOA no cron de proximidade (Fase 2b): capacidade de serviços, suspensão,
+// lista negra e engajamento valem para qualquer conta 'prestador' do mesmo CPF.
+const { sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa, sqlPessoaNaoSuspensa } = require('./src/utils/tipoConta')
+const { sqlPessoaPodeServicos } = require('./src/utils/capacidadeObras')
 const { recalcularIndicador } = require('./src/utils/indicacoes')
 // Suspensão por tentativa de compartilhar contato dura 7 dias: o cron horário levanta as vencidas.
 const { liberarSuspensoesContato } = require('./src/utils/tentativasContato')
@@ -331,8 +335,8 @@ const verificarPrestadoresProximos = async () => {
     //
     // Uma linha = um par (reparador armado, reparo) elegível: reparo válido (aberta/aprovada/não
     // expirado/sem match/com coords — mesma validade do endpoint app-open), reparador com
-    // localização fresca (<30min), assinatura ativa, tier ESTRITO reparador (= exigirReparador:
-    // role='prestador' AND tipo_prestador='reparador'), push_token, e sem engajamento prévio.
+    // localização fresca (<30min), assinatura ativa, capacidade de serviços (= exigirPodeServicos:
+    // reparador, ou pintor com especialidade de serviço), push_token, e sem engajamento prévio.
     const armados = await pool.query(`
       SELECT ad.reparador_id, ad.reparo_id,
              r.titulo, r.cidade, r.coordenadas_origem,
@@ -350,14 +354,17 @@ const verificarPrestadoresProximos = async () => {
         AND r.latitude IS NOT NULL AND r.longitude IS NOT NULL
         AND lp.atualizado_em > NOW() - INTERVAL '30 minutes'
         AND u.push_token IS NOT NULL
-        AND u.role = 'prestador' AND u.tipo_prestador = 'reparador'
+        -- Mesma regra do gate exigirPodeServicos (Fase 2b): reparador, pintor com especialidade
+        -- de serviço, ou a conta irmã (mesmo CPF) de quem pode — tipo NULL continua de fora.
+        AND u.role = 'prestador' AND ${sqlPessoaPodeServicos('u.id')}
         -- Suspenso por faltas não recebe isca de trabalho novo. Aqui é filtro de QUERY (não
-        -- middleware): quem dispara o cron é o servidor, não o prestador.
-        AND u.suspenso_em IS NULL
-        AND NOT (ad.reparador_id = ANY(COALESCE(r.prestadores_bloqueados, '{}')))
+        -- middleware): quem dispara o cron é o servidor, não o prestador. Por PESSOA, como a
+        -- lista negra do reparo e o engajamento prévio logo abaixo.
+        AND ${sqlPessoaNaoSuspensa('u.id')}
+        AND NOT (COALESCE(r.prestadores_bloqueados, '{}') && ${sqlArrayProfissionaisDaPessoa('ad.reparador_id')})
         AND NOT EXISTS (
           SELECT 1 FROM interesse_reparos ir
-          WHERE ir.reparo_id = r.id AND ir.usuario_id = ad.reparador_id
+          WHERE ir.reparo_id = r.id AND ${sqlProfissionalDaPessoa('ir.usuario_id', 'ad.reparador_id')}
         )
         -- Outra conta da mesma pessoa que criou o reparo (mesmo CPF normalizado): sem aviso.
         AND ${sqlNaoMesmoCpf('r.criado_por', 'u.id')}

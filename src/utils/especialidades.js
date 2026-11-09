@@ -1,7 +1,8 @@
 // Vocabulário FECHADO das especialidades do profissional — DUAS listas, uma por lado:
 //   - REPARADOR (tipo_prestador = 'reparador'): as 57 categorias de SERVIÇO doméstico
 //     (+ as 4 de obra, opcionais — ver ESPECIALIDADES_REPARADOR_COM_OBRA);
-//   - OBRA (tipo_prestador = 'pintor', que cobre pintor E construtor): os 4 papéis de obra.
+//   - OBRA (tipo_prestador = 'pintor', que cobre pintor E construtor): os 4 papéis de obra
+//     (+ as 57 de serviço, opcionais — Fase 2b).
 // Mesmo estilo de slug nas duas: minúsculas, sem acento, '_' como separador (aula_particular).
 //
 // Mora em src/utils/ porque é a convenção deste repo para constante compartilhada e inerte:
@@ -55,12 +56,13 @@ const GRUPO_OBRAS_REPARADOR = Object.freeze({
 })
 
 // Qual lista vale para um lado. lado = tipo_prestador ('pintor' | 'reparador' | null).
-// 'pintor' → só a lista de obra. 'reparador' → serviços + obra (acima). null/desconhecido →
-// só a de serviços, EXATAMENTE como antes: conta sem tipo_prestador (legado, ou cadastro sem
-// tipo_conta) não ganha os slugs de obra — ela falha fechado no gate de obras de qualquer jeito.
+// 'reparador' → serviços + obra (Fase 2a). 'pintor' → a MESMA união (Fase 2b, simétrico: a conta
+// pintor pode declarar serviços, e é isso que lhe dá o feed/push/interesse de serviços —
+// utils/capacidadeObras.podeServicos). Teto de 5 NO TOTAL nos dois. null/desconhecido → só a de
+// serviços, EXATAMENTE como antes: conta sem tipo_prestador (legado, ou cadastro sem tipo_conta)
+// não ganha os slugs de obra — ela falha fechado nos dois gates de qualquer jeito.
 const listaPorLado = (lado) => {
-  if (lado === 'pintor') return ESPECIALIDADES_OBRA
-  if (lado === 'reparador') return ESPECIALIDADES_REPARADOR_COM_OBRA
+  if (lado === 'pintor' || lado === 'reparador') return ESPECIALIDADES_REPARADOR_COM_OBRA
   return ESPECIALIDADES_REPARADOR
 }
 

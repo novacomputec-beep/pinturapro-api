@@ -65,7 +65,7 @@ const main = async () => {
     CREATE TABLE assinaturas (usuario_id uuid, plano text, valor_mensal numeric, status text, tipo text, proximo_vencimento timestamptz, criado_em timestamptz DEFAULT now());
     CREATE TABLE avaliacoes (avaliado_id uuid, estrelas int);
     CREATE TABLE configuracoes (chave text, valor text);
-    CREATE TABLE candidaturas (obra_id uuid, usuario_id uuid); -- montarSessao lê tem_candidaturas (Fase 2a)
+    CREATE TABLE candidaturas (obra_id uuid, usuario_id uuid); CREATE TABLE interesse_reparos (reparo_id uuid, usuario_id uuid); -- montarSessao lê tem_candidaturas / tem_interesses (Fases 2a e 2b)
     INSERT INTO configuracoes VALUES ('multiplas_contas', 'true');
     CREATE FUNCTION gerar_codigo_indicacao() RETURNS text LANGUAGE sql AS $$ SELECT 'COD' || floor(random()*100000)::text $$;
   `)

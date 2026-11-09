@@ -8,6 +8,8 @@ const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra } = require('../utils/totalExtensao')
 const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { sqlNaoDemandaPropria } = require('../utils/demandaPropria')
+// Lista negra / bloqueio do dono / recusa por PESSOA no feed (Fase 2b — contas 'prestador' do mesmo CPF).
+const { sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa } = require('../utils/tipoConta')
 const { mascararLista } = require('../utils/tentativasContato')
 
 const listar = async (req, res) => {
@@ -32,10 +34,12 @@ const listar = async (req, res) => {
       -- Lista negra desta obra: pintor que já teve um match desfeito aqui não vê o card de
       -- novo. Mesma expressão do feed de reparos (index.js, GET /reparos). Fica na BASE do
       -- WHERE, antes de qualquer filtro dinâmico, para valer em todos os modos de busca.
-      AND NOT ($1::uuid = ANY(COALESCE(o.prestadores_bloqueados, '{}')))
+      -- Lista negra, bloqueio do dono e recusa por PESSOA (Fase 2b): valem para QUALQUER conta
+      -- profissional do mesmo CPF (utils/tipoConta.sqlContasProfissionaisDaPessoa).
+      AND NOT (COALESCE(o.prestadores_bloqueados, '{}') && ${sqlArrayProfissionaisDaPessoa('$1')})
       AND NOT EXISTS (
         SELECT 1 FROM prestadores_bloqueados_dono pb
-        WHERE pb.dono_id = o.criado_por AND pb.prestador_id = $1
+        WHERE pb.dono_id = o.criado_por AND ${sqlProfissionalDaPessoa('pb.prestador_id', '$1')}
       )
       -- Obra que este pintor já recusou não volta ao feed: o card ficava visível mas
       -- POST /obras/:id/candidatura rejeita com 409 (guarda de duplicidade), então era
@@ -44,7 +48,7 @@ const listar = async (req, res) => {
       -- recorte). Só 'recusado' — pendente/contraproposta_dono/aceito seguem iguais.
       AND NOT EXISTS (
         SELECT 1 FROM candidaturas c
-        WHERE c.obra_id = o.id AND c.usuario_id = $1 AND c.status = 'recusado'
+        WHERE c.obra_id = o.id AND ${sqlProfissionalDaPessoa('c.usuario_id', '$1')} AND c.status = 'recusado'
       )
       -- Obra criada pela OUTRA conta da mesma pessoa (mesmo CPF normalizado): não aparece —
       -- POST /obras/:id/candidatura a recusa com 400 demanda_propria. Sem CPF, não filtra.
