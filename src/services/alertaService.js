@@ -2502,13 +2502,15 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
 // dos lembretes "Agende" ao profissional (ultimo_em = NOW(): o próprio aviso abaixo é o primeiro
 // da nova rodada; offsets fixos zerados) e avisa o profissional por push + E-MAIL (evento
 // crítico): "O horário que você propôs venceu sem resposta — proponha um novo horário".
-// Só propostas do PROFISSIONAL: a contraproposta do dono (chegada_proposta_por = dono) espera a
-// resposta dele e não vence aqui. A proposta vencida fica registrada (horario_vencido_em,
+// Vale também para a CONTRAPROPOSTA do dono (chegada_proposta_por = dono) que o profissional
+// deixou vencer: some do mesmo jeito e o profissional é chamado a propor um novo horário (título
+// próprio). A proposta vencida fica registrada (horario_vencido_em,
 // horarios_vencidos) e continua contando no teto de sugestões do profissional. O contador de
 // lembretes sem proposta NÃO é mexido (ele propôs; zerou na proposta). Claim atômico (UPDATE …
 // WHERE … RETURNING). Toque: 'chegada_prevista_recusada' + id — o app abre o detalhe nos dois
 // lados (desde 08/2026) e é lá que ele propõe outro horário.
 const TITULO_HORARIO_VENCIDO = '⏰ O horário que você propôs venceu sem resposta'
+const TITULO_CONTRAPROPOSTA_VENCIDA = '⏰ O horário sugerido pelo cliente venceu sem resposta'
 const corpoHorarioVencido = (d) => `Proponha um novo horário para "${d.titulo}".`
 const expirarPropostasDeHorario = semSobreposicao('expirarPropostasDeHorario', async () => {
   for (const lado of Object.values(LADOS_MATCH)) {
@@ -2520,24 +2522,24 @@ const expirarPropostasDeHorario = semSobreposicao('expirarPropostasDeHorario', a
                 lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL, lembrete_resposta_ultimo_em = NULL,
                 lembrete_agendar_ultimo_em = NOW(), lembrete_agendar_offsets = '{}',
                 horario_vencido_em = NOW(), horarios_vencidos = d.horarios_vencidos + 1
-           FROM usuarios u
-          WHERE u.id = d.match_usuario_id
+           FROM usuarios u, ${lado.tabela} antes
+          WHERE u.id = d.match_usuario_id AND antes.id = d.id
             AND d.status = 'aberta' AND d.match_usuario_id IS NOT NULL
             AND d.chegada_pendente_em IS NOT NULL AND d.chegada_pendente_em <= NOW()
             AND d.chegada_prevista_em IS NULL AND d.a_caminho_em IS NULL
             AND d.chegada_declarada_em IS NULL AND d.chegada_confirmada_em IS NULL
-            AND COALESCE(d.chegada_proposta_por, d.match_usuario_id) = d.match_usuario_id
-      RETURNING d.id, d.titulo, d.match_usuario_id, d.horarios_vencidos, u.push_token, u.email, u.nome`
+      RETURNING d.id, d.titulo, d.match_usuario_id, d.horarios_vencidos, u.push_token, u.email, u.nome,
+                (antes.chegada_proposta_por IS NOT NULL AND antes.chegada_proposta_por <> d.match_usuario_id) AS era_do_dono`
       )
       for (const d of claim.rows) {
         try {
           const via = await entregarPushEEmail({
             usuario_id: d.match_usuario_id, push_token: d.push_token, email: d.email, nome: d.nome,
-            titulo: TITULO_HORARIO_VENCIDO, corpo: corpoHorarioVencido(d),
-            data: { tipo: 'chegada_prevista_recusada', [lado.chave]: d.id, horario_vencido: true },
+            titulo: d.era_do_dono ? TITULO_CONTRAPROPOSTA_VENCIDA : TITULO_HORARIO_VENCIDO, corpo: corpoHorarioVencido(d),
+            data: { tipo: 'chegada_prevista_recusada', [lado.chave]: d.id, horario_vencido: true, contraproposta: d.era_do_dono === true },
             rotulo: `horário vencido ${lado.tabela} ${d.id}`,
           })
-          console.log(`[HorarioVencido] ${lado.tabela} ${d.id}: proposta nº ${d.horarios_vencidos} venceu sem resposta → profissional ${d.match_usuario_id} via ${via}`)
+          console.log(`[HorarioVencido] ${lado.tabela} ${d.id}: ${d.era_do_dono ? 'contraproposta do dono' : 'proposta'} nº ${d.horarios_vencidos} venceu sem resposta → profissional ${d.match_usuario_id} via ${via}`)
         } catch (err) {
           console.error(`[HorarioVencido] aviso ${lado.tabela} ${d.id}:`, err.message)
         }
@@ -3886,6 +3888,7 @@ module.exports = {
   lembrarAgendarAtendimento,
   expirarPropostasDeHorario,
   TITULO_HORARIO_VENCIDO,
+  TITULO_CONTRAPROPOSTA_VENCIDA,
   entregarLembrete,
   semPushAtivo,
   LEMBRETE_EMAIL_SEM_PUSH_TETO_DIA,

@@ -2,7 +2,8 @@
 // Duas regras pós-match (dono, 10/11/2026), obras e reparos:
 //   (1) PROPOSTA DE HORÁRIO VENCIDA — o horário proposto pelo profissional passa sem resposta do
 //       dono: o job expirarPropostasDeHorario limpa a proposta (volta a "aguardando horário"),
-//       avisa o profissional por push + e-mail e os lembretes "Agende" recomeçam;
+//       avisa o profissional por push + e-mail e os lembretes "Agende" recomeçam — o mesmo para a
+//       contraproposta do dono que o profissional deixou vencer;
 //   (2) ESCOLHER OUTRO — pode_escolher_outro (detalhe do dono) fica true com 2 lembretes "Agende"
 //       seguidos sem proposta; POST /:tabela/dono/:id/escolher-outro desfaz o match SEM falta,
 //       reabre com candidaturas/interesses/perguntas intactos, bloqueia o profissional nesta
@@ -169,7 +170,7 @@ const main = async () => {
   await fixarAgora(149); await job(A.expirarPropostasDeHorario)
   l = await linha('reparos', D(1))
   ok(iso(l.chegada_pendente_em) === emMin(150) && pushes.length === 0, '12:29: proposta ainda não venceu — nada muda')
-  // contraproposta do DONO pendente (outra demanda): não vence por este job
+  // contraproposta do DONO pendente (outra demanda), já vencida: some do mesmo jeito
   await db.query(`UPDATE reparos SET chegada_pendente_em = $2, chegada_pendente_janela = 'agendado', chegada_proposta_por = $3, chegada_proposta_em = now() WHERE id = $1`, [D(3), emMin(100), DONO])
   await fixarAgora(151); await job(A.expirarPropostasDeHorario)
   l = await linha('reparos', D(1))
@@ -179,13 +180,19 @@ const main = async () => {
      'registro do vencimento (horario_vencido_em, horarios_vencidos = 1); lembretes de resposta do dono zerados')
   ok(iso(l.lembrete_agendar_ultimo_em) === emMin(151) && igualArr(l.lembrete_agendar_offsets, []) && l.lembrete_agendar_sem_proposta === 0 && l.sugestoes_horario_profissional === 1,
      'lembretes "Agende" recomeçam (último = agora, fixos zerados); contador segue 0; a sugestão vencida continua contando no teto', { ultimo: iso(l.lembrete_agendar_ultimo_em), sugestoes: l.sugestoes_horario_profissional })
-  const pa = pushesDe('alex')
+  const pa = pushesDe('alex').filter(p => p.data?.reparo_id === D(1))
   ok(pa.length === 1 && pa[0].title === A.TITULO_HORARIO_VENCIDO && pa[0].body === 'Proponha um novo horário para "Trocar chuveiro".' && pa[0].data.tipo === 'chegada_prevista_recusada' && pa[0].data.reparo_id === D(1) && pa[0].data.horario_vencido === true,
      'push ao profissional: "O horário que você propôs venceu sem resposta" + proponha um novo horário; toque abre o detalhe', pa[0] && { title: pa[0].title, body: pa[0].body, data: pa[0].data })
-  ok(emails.length === 1 && emails[0].para === 'alex@x.invalid' && emails[0].assunto === A.TITULO_HORARIO_VENCIDO, 'e-mail ao profissional (push + e-mail)', emails[0] && [emails[0].para, emails[0].assunto])
+  ok(emails.some(e => e.para === 'alex@x.invalid' && e.assunto === A.TITULO_HORARIO_VENCIDO), 'e-mail ao profissional (push + e-mail)', emails.map(e => [e.para, e.assunto]))
   ok(pushesDe('maria').length === 0, 'o dono não é avisado do vencimento')
   const l3 = await linha('reparos', D(3))
-  ok(iso(l3.chegada_pendente_em) === emMin(100) && l3.chegada_proposta_por === DONO, 'contraproposta do DONO vencida NÃO é limpa por este job (espera a resposta do profissional)')
+  const pc = pushesDe('alex').filter(p => p.data?.reparo_id === D(3))
+  ok(l3.chegada_pendente_em === null && l3.chegada_proposta_por === null && l3.horarios_vencidos === 1 && iso(l3.lembrete_agendar_ultimo_em) === emMin(151),
+     'contraproposta do DONO vencida: limpa do mesmo jeito (aguardando horário, lembretes recomeçam)', { pendente: l3.chegada_pendente_em, vencidos: l3.horarios_vencidos })
+  ok(pc.length === 1 && pc[0].title === A.TITULO_CONTRAPROPOSTA_VENCIDA && pc[0].body === 'Proponha um novo horário para "Contraproposta do dono".' && pc[0].data.contraproposta === true
+     && emails.some(e => e.para === 'alex@x.invalid' && e.assunto === A.TITULO_CONTRAPROPOSTA_VENCIDA),
+     'profissional avisado (push + e-mail) para propor um novo horário, com título próprio', pc[0] && { title: pc[0].title, body: pc[0].body })
+  ok(pa[0].data.contraproposta === false, 'proposta do próprio profissional vencida: contraproposta = false no payload')
   await job(A.expirarPropostasDeHorario)
   l = await linha('reparos', D(1))
   ok(l.horarios_vencidos === 1 && pushes.length === 0, 'tique seguinte: nada a vencer (claim)')
