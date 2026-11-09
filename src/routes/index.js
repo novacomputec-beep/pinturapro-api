@@ -98,6 +98,8 @@ const { podeObras, podeServicos, capacidadesDaPessoa } = require('../utils/capac
 const { migrarAvisosForaDaArea, lerLimiteAvisosForaDaArea, gravarLimiteAvisosForaDaArea } = require('../utils/avisosForaDaArea')
 // Valor da demanda obrigatório e > 0 ao criar e ao editar ("Informe quanto quer pagar").
 const { validarValorDemanda, MENSAGEM_VALOR_OBRIGATORIO } = require('../utils/valorDemanda')
+// Limite por CONTA nas tentativas de DELETE /conta/excluir (tabela tentativas_auth, vale entre réplicas).
+const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { enviarEmail } = require('../services/emailService')
 // sqlDonoDaPessoa / ehMesmaPessoa: posse de demanda por PESSOA (mesmo CPF), não por conta — um
 // dono_reparo gerencia as obras da sua conta de pintura e vice-versa (Fase 1 do lado contratante).
@@ -1561,7 +1563,7 @@ const migracaoPronta = (async () => {
     // exclusão dela.
     await client.query(`
       CREATE TABLE IF NOT EXISTS tentativas_auth (
-        acao          TEXT NOT NULL CHECK (acao IN ('login', 'reset', 'reset_confirmar', 'link_assinatura', 'link_assinatura_token')),
+        acao          TEXT NOT NULL CHECK (acao IN ('login', 'reset', 'reset_confirmar', 'link_assinatura', 'link_assinatura_token', 'excluir_conta')),
         identificador TEXT NOT NULL,
         tentativas    INT NOT NULL DEFAULT 0,
         janela_em     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1575,7 +1577,7 @@ const migracaoPronta = (async () => {
     // por e-mail e validação por id do link). Sem ampliar o CHECK aqui, registrarTentativa
     // estourava a constraint em produção e as três rotas do link nunca funcionariam.
     await client.query(`ALTER TABLE tentativas_auth DROP CONSTRAINT IF EXISTS tentativas_auth_acao_check`)
-    await client.query(`ALTER TABLE tentativas_auth ADD CONSTRAINT tentativas_auth_acao_check CHECK (acao IN ('login', 'reset', 'reset_confirmar', 'link_assinatura', 'link_assinatura_token'))`)
+    await client.query(`ALTER TABLE tentativas_auth ADD CONSTRAINT tentativas_auth_acao_check CHECK (acao IN ('login', 'reset', 'reset_confirmar', 'link_assinatura', 'link_assinatura_token', 'excluir_conta'))`)
     // A PK atende as buscas; este índice serve só à varredura diária por idade.
     await client.query(`CREATE INDEX IF NOT EXISTS tentativas_auth_janela_idx ON tentativas_auth (janela_em)`)
     // Fila de mídias cujo ARQUIVO ainda está no Cloudinary mas cuja LINHA já foi apagada.
@@ -2584,12 +2586,20 @@ const SQL_CONTAS_DA_EXCLUSAO = `
 // { senha } dos apps já nas lojas continua aceito, conferido como sempre (401 se errada).
 // ALCANCE: todas as contas da pessoa (SQL_CONTAS_DA_EXCLUSAO), cada uma pela cascata de sempre
 // (excluirContaNoBanco), numa ÚNICA transação — ou saem todas, ou nenhuma. Não altera o endpoint admin.
-// Sem limiter próprio: vale o limiter global por IP/token de server.js, como antes.
+// LIMITE PRÓPRIO: 5 tentativas por CONTA por hora (utils/tentativasAuth, ação 'excluir_conta',
+// chave = id da conta do token) — a 6ª leva 429. Conta TODA chamada autenticada, válida ou não,
+// ANTES de olhar o corpo: é o que limita a adivinhação de senha pelo caminho antigo. Janela fixa
+// a partir da 1ª tentativa; fica ao lado do limiter global por IP/token de server.js.
 const CONFIRMACAO_EXCLUSAO = 'EXCLUIR'
+const ERRO_MUITAS_TENTATIVAS_EXCLUSAO = 'Muitas tentativas. Tente novamente mais tarde.'
 router.delete('/conta/excluir', autenticar, async (req, res) => {
   const client = await pool.connect()
   let emTransacao = false
   try {
+    const tentativa = await registrarTentativa('excluir_conta', String(req.usuario.id))
+    if (tentativa.excedeu) {
+      return res.status(429).json({ erro: ERRO_MUITAS_TENTATIVAS_EXCLUSAO, codigo: 'MUITAS_TENTATIVAS', retry_apos_segundos: tentativa.segundosRestantes })
+    }
     const corpo = req.body || {}
     const temConfirmacao = Object.prototype.hasOwnProperty.call(corpo, 'confirmacao')
     const confirmou = typeof corpo.confirmacao === 'string' && corpo.confirmacao.trim().toUpperCase() === CONFIRMACAO_EXCLUSAO
@@ -2623,6 +2633,8 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
     emTransacao = false
 
     for (const conta of contas) invalidarCachesUsuario(conta.id)
+    // Contas excluídas não tentam de novo: some com os contadores delas (mantém a tabela pequena).
+    for (const conta of contas) limparTentativas('excluir_conta', String(conta.id)).catch(() => {})
     console.log(`[ExcluirConta] ${usuario.id}: ${contas.length} conta(s) da pessoa excluída(s) (${contas.map(c => c.role).join(', ')}) — confirmação por ${confirmou ? 'palavra' : 'senha'}`)
 
     // E-mail de confirmação — fire and forget, não bloqueia a resposta. Um por ENDEREÇO distinto

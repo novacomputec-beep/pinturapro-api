@@ -27,6 +27,10 @@ const LIMITES = {
   // do link (força bruta no segredo, mesmo com o id em mãos).
   link_assinatura: { max: 3, janela: '1 hour' },
   link_assinatura_token: { max: 10, janela: '15 minutes' },
+  // DELETE /conta/excluir, por CONTA (identificador = id do usuário logado): a 6ª tentativa em
+  // 1 hora é barrada. Fecha a adivinhação de senha pelo caminho antigo ({ senha }) e o martelo
+  // na rota; quem quer mesmo excluir acerta na primeira. A linha não tem FK e sobrevive à conta.
+  excluir_conta: { max: 5, janela: '1 hour' },
 }
 
 // Registra a tentativa e DEVOLVE o total da janela — checar e incrementar no MESMO statement

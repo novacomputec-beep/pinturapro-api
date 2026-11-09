@@ -71,6 +71,7 @@ const conta = async (tabela, where = 'true', params = []) => (await db.query(`SE
 const PA = U(1), PB = U(2), PC = U(3), PD = U(4)
 const EST = U(5), SOC = U(6), N1 = U(7), N2 = U(8), V1 = U(9), V2 = U(10)
 const ADM_P = U(11), ADM2 = U(12), DONO2 = U(13), XD = U(14), XP = U(15), T1 = U(16), T2 = U(17)
+const L1 = U(18), L2 = U(19) // limite de tentativas: duas contas de pessoas diferentes
 
 const main = async () => {
   db = new PGlite()
@@ -96,6 +97,7 @@ const main = async () => {
     CREATE TABLE faltas_profissional (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), usuario_id uuid REFERENCES usuarios(id), tabela text, demanda_id uuid);
     CREATE TABLE avaliacoes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), avaliador_id uuid REFERENCES usuarios(id) ON DELETE CASCADE, avaliado_id uuid REFERENCES usuarios(id) ON DELETE CASCADE, estrelas int);
     CREATE TABLE trava_teste (usuario_id uuid REFERENCES usuarios(id));
+    CREATE TABLE tentativas_auth (acao text NOT NULL, identificador text NOT NULL, tentativas int NOT NULL DEFAULT 0, janela_em timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (acao, identificador));
   `)
   const usr = (id, nome, email, role, extra = {}) => db.query(
     `INSERT INTO usuarios (id, nome, email, role, tipo_dono, tipo_prestador, cpf_cnpj, senha_hash, push_token, google_sub, foto_url, verificacao_doc_frente_url, verificacao_selfie_url)
@@ -119,6 +121,8 @@ const main = async () => {
   await usr(XP, 'Terceiro profissional', 'xp@x.invalid', 'prestador', { tipo_prestador: 'pintor', cpf: '901' })
   await usr(T1, 'Transação 1', 'tx@x.invalid', 'dono_obra', { tipo_dono: 'reparo', cpf: '777.777.777-77' })
   await usr(T2, 'Transação 2', 'tx@x.invalid', 'prestador', { tipo_prestador: 'reparador', cpf: '77777777777' })
+  await usr(L1, 'Limite 1', 'limite1@x.invalid', 'dono_obra', { tipo_dono: 'reparo', cpf: '888.888.888-88', senha_hash: hashAntigo })
+  await usr(L2, 'Limite 2', 'limite2@x.invalid', 'dono_obra', { tipo_dono: 'reparo', cpf: '999.999.999-99' })
   for (const id of [PC, PD, EST, N2, V2, XP, T2]) await db.query(`INSERT INTO assinaturas VALUES ($1, 'ativa', 'mensal')`, [id])
 
   // Demandas ABERTAS da pessoa (com proposta, mídia e conversa de terceiros)
@@ -213,6 +217,22 @@ const main = async () => {
   ok(r.status === 200 && r.body.contas_excluidas === 1 && await existem(ADM2) === 0 && await existem(DONO2) === 1, 'admin que se exclui apaga SÓ a própria linha — a conta de dono com o mesmo CPF fica', r.body)
   r = await excluir(DONO2, { confirmacao: 'EXCLUIR' })
   ok(r.status === 200 && r.body.contas_excluidas === 1, 'depois, o dono exclui a sua normalmente', r.body)
+
+  // ═══ 7b. Limite próprio: 5 tentativas por CONTA por hora ══════════════════════════════════
+  const tentativasL1 = []
+  for (let i = 1; i <= 5; i++) tentativasL1.push(await excluir(L1, { senha: `palpite-${i}` }))
+  ok(tentativasL1.every(x => x.status === 401), 'as 5 primeiras tentativas (senha errada) respondem 401 como sempre', tentativasL1.map(x => x.status))
+  r = await excluir(L1, { senha: 'segredo123' })
+  ok(r.status === 429 && r.body.erro === 'Muitas tentativas. Tente novamente mais tarde.' && r.body.codigo === 'MUITAS_TENTATIVAS' && r.body.retry_apos_segundos > 0 && r.body.retry_apos_segundos <= 3600,
+     '6ª tentativa na mesma hora → 429 "Muitas tentativas. Tente novamente mais tarde." — mesmo com a senha CERTA', r.body)
+  r = await excluir(L1, { confirmacao: 'EXCLUIR' })
+  ok(r.status === 429 && await existem(L1) === 1, '7ª, agora com a palavra de confirmação → 429 também; a conta continua lá', r.status)
+  r = await excluir(L2, { confirmacao: 'EXCLUIR' })
+  ok(r.status === 200 && await existem(L2) === 0, 'o limite é por CONTA: outra conta exclui normalmente enquanto a primeira está bloqueada', r.body)
+  ok(await conta('tentativas_auth', `acao = 'excluir_conta' AND identificador = $1`, [L2]) === 0, 'conta excluída não deixa contador para trás')
+  await db.query(`UPDATE tentativas_auth SET janela_em = now() - INTERVAL '61 minutes' WHERE acao = 'excluir_conta' AND identificador = $1`, [L1])
+  r = await excluir(L1, { confirmacao: 'EXCLUIR' })
+  ok(r.status === 200 && await existem(L1) === 0, 'passada 1 hora da primeira tentativa, a janela zera e a exclusão acontece', r.body)
 
   // ═══ 8. Ninguém de fora foi tocado ════════════════════════════════════════════════════════
   ok(await existem(EST, N2, ADM_P, XD, XP, T1, T2) === 7, 'estranho, 2ª conta sem CPF, admin, terceiros e a pessoa do teste de transação: todos intactos')
