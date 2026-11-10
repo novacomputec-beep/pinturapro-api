@@ -175,6 +175,8 @@ const main = async () => {
     INSERT INTO configuracoes (chave, valor) VALUES ('grupos_relacionados_ativo', 'true'), ('multiplas_contas', 'true');
     SET search_path = public, pg_catalog;
   `)
+  // obras.especialidades_inferidas (capacidadesDaPessoa / feed / aviso de obra nova leem a coluna) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(db)
   // n → conta. Todas em Uberlândia/MG, assinatura ativa, token e verificadas, salvo a observação.
   const CONTAS = {
     DONO:   { n: 1,  role: 'dono_obra', tipo_dono: 'pintura' },
@@ -258,7 +260,10 @@ const main = async () => {
      'push NOVO SERVIÇO (elétrica): reparadores que casam (RO, RS) — pintor NÃO, reparador só-obra NÃO, tipo NULL NÃO (lado reparo inalterado)', destinatarios())
 
   const fonteAlerta = fs.readFileSync(path.join(REPO, 'src/services/alertaService.js'), 'utf8')
-  ok(!/u\.tipo_prestador = \$1/.test(fonteAlerta) && (fonteAlerta.match(/\$\{sqlPublicoProfissional\('\$1'\)\}/g) || []).length === 2,
+  // Desde as especialidades inferidas (10/11/2026) o fragmento entra via sqlPublico / sqlPublicoEmail,
+  // montados SÓ por sqlPublicoProfissional — continua um predicado único para push e e-mail.
+  ok(!/u\.tipo_prestador = \$1/.test(fonteAlerta) && (fonteAlerta.match(/WHERE \$\{sqlPublico(Email)?\}/g) || []).length === 2
+     && (fonteAlerta.match(/sqlPublicoProfissional\('\$1'/g) || []).length >= 2,
      'os 2 predicados de público (push e e-mail) usam o MESMO fragmento sqlPublicoProfissional')
   // 6 desde o aviso "fora da sua área" (LADOS_FORA_AREA também nomeia o lado da demanda).
   ok((fonteAlerta.match(/publico: 'obras',/g) || []).length === 6 && !/tipoPrestador/.test(fonteAlerta),

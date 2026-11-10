@@ -82,6 +82,9 @@ const main = async () => {
     INSERT INTO configuracoes VALUES ('multiplas_contas', 'true');
     CREATE FUNCTION gerar_codigo_indicacao() RETURNS text LANGUAGE sql AS $$ SELECT 'COD' || floor(random()*100000)::text $$;
   `)
+  await db.exec(`CREATE TABLE IF NOT EXISTS obras (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), status text, status_aprovacao text, expira_em timestamptz, match_usuario_id uuid)`)
+  // obras.especialidades_inferidas (capacidadesDaPessoa / feed / aviso de obra nova leem a coluna) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(db)
   const hash = bcrypt.hashSync(SENHA, 4)
   // Forma do caso real: reparador às 13:46 e dona de pintura às 16:52 (SP, no dia anterior ao
   // teste, para a conta nova ficar por último na ordem de criação), mesmo e-mail e CPF.

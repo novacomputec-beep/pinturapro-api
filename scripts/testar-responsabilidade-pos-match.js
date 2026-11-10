@@ -125,7 +125,7 @@ const main = async () => {
   await db.exec(`
     CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, push_token text, suspenso_em timestamptz, suspenso_motivo text, desinstalado_em timestamptz, role text, tipo_dono text, tipo_prestador text, cpf_cnpj text,
       cidade text, anos_experiencia int, tamanho_equipe int, especialidades text[], embaixador boolean DEFAULT false, foto_url text, logradouro text, numero text, telefone text, uf text,
-      bairro text, verificacao_status text, avisos_todas_areas boolean NOT NULL DEFAULT true, latitude double precision, longitude double precision, raio_km_escolhido int);
+      ativo boolean DEFAULT true, bairro text, verificacao_status text, avisos_todas_areas boolean NOT NULL DEFAULT true, latitude double precision, longitude double precision, raio_km_escolhido int);
     CREATE TABLE assinaturas (usuario_id uuid PRIMARY KEY, status text, tipo text, plano text, valor_mensal numeric, proximo_vencimento timestamptz, atualizado_em timestamptz, criado_em timestamptz DEFAULT now());
     CREATE TABLE midias (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, url text, ordem int);
     CREATE TABLE midias_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, url text, ordem int);
@@ -145,6 +145,8 @@ const main = async () => {
     SET search_path = public, pg_catalog;
   `)
   await U_.migrarResponsabilidade(db)
+  // obras.especialidades_inferidas (capacidadesDaPessoa / feed / aviso de obra nova leem a coluna) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(db)
   await db.query(`INSERT INTO usuarios (id, nome, email, push_token, role, tipo_dono, tipo_prestador, cpf_cnpj) VALUES
     ($1, 'Maria', 'maria@x.invalid', $10, 'dono_obra', 'reparo', NULL, '111.111.111-11'), ($2, 'Alex Silva', 'alex@x.invalid', $11, 'prestador', NULL, 'reparador', '222'),
     ($3, 'Ana', 'ana@x.invalid', $12, 'prestador', NULL, 'reparador', '333'), ($4, 'Beto', 'beto@x.invalid', NULL, 'prestador', NULL, 'reparador', '444'),
@@ -299,6 +301,8 @@ const main = async () => {
   ok(detP.status === 200 && detP.body.reparo?.cliente_nao_respondeu_90d === 2, 'GET /reparos/:id (profissional): cliente_nao_respondeu_90d = 2', { status: detP.status, v: detP.body.reparo?.cliente_nao_respondeu_90d })
   const detO = await quieto(() => chamar(handlerDe('get', '/obras/:id'), CAIO, D(5)))
   ok(detO.status === 200 && detO.body.obra?.cliente_nao_respondeu_90d === 2, 'GET /obras/:id (profissional): cliente_nao_respondeu_90d = 2', { status: detO.status, v: detO.body.obra?.cliente_nao_respondeu_90d })
+  // Feed de obras: só o público de obras (ou quem casa por especialidade inferida) vê cards — Caio vira pintor.
+  await db.query(`UPDATE usuarios SET tipo_prestador = 'pintor' WHERE id = $1`, [CAIO])
   const feedO = await quieto(() => chamar(handlerDe('get', '/obras'), CAIO, undefined, {}, { raio_km: 'estado', uf: 'RJ', page: '1', limit: '20' }))
   const cardO = (feedO.body.obras || []).find(x => x.id === D(5))
   ok(feedO.status === 200 && cardO && cardO.cliente_nao_respondeu_90d === 2, 'feed de obras (profissional): card traz cliente_nao_respondeu_90d = 2', { status: feedO.status, n: (feedO.body.obras || []).length })

@@ -40,6 +40,7 @@ const { verificarEscolhaPendente } = require('./src/services/escolhaPendenteServ
 // intervalo match→prazo restando, sem horário proposto). Cadência dos cronômetros.
 const { avisarDesfazerLiberado } = require('./src/services/desfazerEscolhaService')
 const { avisarRespostaFinalDono, aplicarCreditosPendentes } = require('./src/services/responsabilidadeService')
+const { rodarBackfillEReanuncioUnico } = require('./src/services/obrasInferidasService')
 // Resumo do dia ao admin às 18:00 SP (push + e-mail com o link da aba Canal do WhatsApp).
 const { enviarResumoDiaAdmin } = require('./src/services/resumoDiaAdminService')
 // Mesmo caminho de e-mail do reset/link de assinatura (SMTP/nodemailer do authController).
@@ -900,6 +901,9 @@ const iniciarAgendador = () => {
   // Crédito de compensação guardado (7 dias por cliente que não respondeu) de quem passou a ter
   // assinatura paga e ativa: vira dias de vencimento, sem cobrança (utils/responsabilidade).
   setInterval(() => { aplicarCreditosPendentes() }, INTERVALO_LEMBRETE)
+  // Especialidades inferidas das obras: backfill das abertas sem lista e, UMA vez (claim em
+  // configuracoes), o reanúncio de YS5XR/BR5V3 aos recém-casados. 90 s após o boot, depois da migração.
+  setTimeout(() => { rodarBackfillEReanuncioUnico() }, 90 * 1000)
   // Lembretes ao dono (30 min / 2h) da solicitação de encerramento pendente do profissional.
   setInterval(() => { lembrarConfirmacaoEncerramento() }, INTERVALO_LEMBRETE)
   // "Ainda trabalhando?" ao profissional com chegada confirmada e sem pedido de conclusão de
