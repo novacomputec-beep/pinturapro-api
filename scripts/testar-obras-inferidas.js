@@ -122,6 +122,9 @@ const main = async () => {
   ok(igual(I.inferirEspecialidades({ titulo: 'Instalar câmeras e cerca elétrica' }), ['eletrica', 'seguranca_eletronica']), 'palavras de CATEGORIAS_SERVICO (câmeras, cerca elétrica) → seguranca_eletronica (+ eletrica)')
   ok(igual(I.inferirEspecialidades({ titulo: 'Manutenção geral' }), []) && igual(I.inferirEspecialidades({ titulo: 'Obra comercial' }), []) && igual(I.inferirEspecialidades({}), []), 'termo genérico ("manutenção") e título sem ofício → [] (sem falso positivo)')
   ok(igual(I.inferirEspecialidades({ titulo: 'Aguardo orçamento' }), []), '"aguardo" não casa "agua" (começo de palavra)')
+  ok(igual(I.inferirEspecialidades({ titulo: 'Instalação de ponto de água e esgoto', descricao: 'Trocar o sifão e refazer o armário embaixo da pia, bancada de madeira' }), ['hidraulica', 'alvenaria', 'pedreiro_servente']),
+     'texto de encanamento com "armário"/"madeira" soltos NÃO puxa marcenaria (caso YS5XR)')
+  ok(igual(I.inferirEspecialidades({ titulo: 'Armários planejados e porta de madeira para a cozinha' }), ['marcenaria']), 'móvel sob medida / porta de madeira → marcenaria continua')
   ok(I.REGRAS.every(r => r.slugs.length > 0 && r.termos.every(t => t.replace(/[*]$/, '') === I.normalizar(t.replace(/[*]$/, '')))), 'regras: todas com slug válido e termos normalizados')
   ok(igual(I.inferirEspecialidades({ titulo: 'Novas tomadas e luminárias; eletricista' }), ['eletrica']), 'plural (-s) e prefixo (eletric*) casam')
 
