@@ -24,6 +24,7 @@ const NOVAS = {
   gesseiro:        { rotulo: 'Gesseiro',          emoji: '🪜', grupo: 'Reparos da casa',       chave: 'reparos_casa', irmao: 'alvenaria' },
   placas_fachadas: { rotulo: 'Placas e fachadas', emoji: '🪧', grupo: 'Arte e criação',       chave: 'arte',         irmao: 'artesanato' },
   borracheiro:     { rotulo: 'Borracheiro',       emoji: '🚙', grupo: 'Transporte',            chave: 'transporte',   irmao: 'mecanica' },
+  seguranca_eletronica: { rotulo: 'Segurança eletrônica', emoji: '📹', grupo: 'Elétrica e tecnologia', chave: 'eletrica_tec', irmao: 'eletrica' },
 }
 
 const main = async () => {
@@ -35,11 +36,11 @@ const main = async () => {
 
   // ---- listas
   const slugsApp = C.CATEGORIAS_SERVICO.map(c => c.slug)
-  ok(E.ESPECIALIDADES_REPARADOR.length === 58 && slugsApp.length === 58 && JSON.stringify(E.ESPECIALIDADES_REPARADOR) === JSON.stringify(slugsApp),
-     'ESPECIALIDADES_REPARADOR e CATEGORIAS_SERVICO: 58 slugs, mesma ordem', { n: E.ESPECIALIDADES_REPARADOR.length })
-  ok(E.ESPECIALIDADES_REPARADOR.slice(-5).join() === 'informatica,gesseiro,placas_fachadas,borracheiro,outros', "as novas entram antes de 'outros', na ordem em que chegaram", E.ESPECIALIDADES_REPARADOR.slice(-5))
-  ok(new Set(E.ESPECIALIDADES_REPARADOR).size === 58, 'nenhum slug repetido')
-  ok(JSON.stringify(G.GRUPOS_RELACIONADOS['Transporte']) === JSON.stringify(['motorista', 'motociclista', 'mudancas', 'mecanica', 'lavajato', 'borracheiro']),
+  ok(E.ESPECIALIDADES_REPARADOR.length === 59 && slugsApp.length === 59 && JSON.stringify(E.ESPECIALIDADES_REPARADOR) === JSON.stringify(slugsApp),
+     'ESPECIALIDADES_REPARADOR e CATEGORIAS_SERVICO: 59 slugs, mesma ordem', { n: E.ESPECIALIDADES_REPARADOR.length })
+  ok(E.ESPECIALIDADES_REPARADOR.slice(-5).join() === 'gesseiro,placas_fachadas,borracheiro,seguranca_eletronica,outros', "as novas entram antes de 'outros', na ordem em que chegaram", E.ESPECIALIDADES_REPARADOR.slice(-5))
+  ok(new Set(E.ESPECIALIDADES_REPARADOR).size === 59, 'nenhum slug repetido')
+  ok(JSON.stringify(G.GRUPOS_RELACIONADOS['Transporte']) === JSON.stringify(['motorista', 'motociclista', 'mudancas', 'mecanica', 'lavajato', 'borracheiro']) && JSON.stringify(G.GRUPOS_RELACIONADOS['Elétrica e tecnologia']) === JSON.stringify(['eletrica', 'eletronica', 'climatizacao', 'informatica', 'seguranca_eletronica']),
      'grupo Transporte: Motorista, Motociclista, Mudanças, Mecânica, Lava-jato + Borracheiro', G.GRUPOS_RELACIONADOS['Transporte'])
   ok(!E.ESPECIALIDADES_OBRA.includes('borracheiro') && !C.CATEGORIAS_OBRA.some(c => c.slug === 'borracheiro') && !C.CATEGORIAS_CONSTRUCAO.some(c => c.slug === 'borracheiro'),
      'borracheiro é SERVIÇO: fora das especialidades e das categorias de obra')

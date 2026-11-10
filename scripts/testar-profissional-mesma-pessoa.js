@@ -154,7 +154,7 @@ const main = async () => {
   ok(/inválida/.test(v.erro || ''), 'pintor: slug fora das duas listas continua recusado', v)
   v = esp.validarEspecialidades(['pintor'], true, null)
   ok(/inválida/.test(v.erro || ''), 'tipo NULL: lista de sempre (slug de obra recusado)', v)
-  ok(esp.ESPECIALIDADES_REPARADOR.length === 58 && esp.ESPECIALIDADES_OBRA.length === 4, 'listas de base intactas (58 serviços, 4 de obra)')
+  ok(esp.ESPECIALIDADES_REPARADOR.length === 59 && esp.ESPECIALIDADES_OBRA.length === 4, 'listas de base intactas (59 serviços, 4 de obra)')
   const P = (tipo, e, role = 'prestador') => ({ role, tipo_prestador: tipo, especialidades: e })
   ok(cap.podeServicos(P('reparador', ['eletrica'])) && cap.podeServicos(P('reparador', ['pintor'])) && cap.podeServicos(P('reparador', null)),
      'podeServicos: reparador sempre (mesmo só com especialidade de obra ou sem lista)')
