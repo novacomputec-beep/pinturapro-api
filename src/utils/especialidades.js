@@ -29,7 +29,7 @@ const ESPECIALIDADES_REPARADOR = [
   'aluguel_festas', 'decoracao_festas', 'recreacao_infantil',
   'design_sobrancelhas', 'vidraceiro', 'serralheria',
   'informatica', 'gesseiro', 'placas_fachadas',
-  'borracheiro',
+  'borracheiro', 'seguranca_eletronica',
   'outros',
 ]
 

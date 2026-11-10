@@ -68,6 +68,10 @@ const CATEGORIAS_SERVICO = [
   { slug: 'gesseiro',        rotulo: 'Gesseiro',          emoji: '🪜' },
   { slug: 'placas_fachadas', rotulo: 'Placas e fachadas', emoji: '🪧' },
   { slug: 'borracheiro',     rotulo: 'Borracheiro',       emoji: '🚙' },
+  // palavras: termos de busca da categoria (câmeras, portão eletrônico, cerca elétrica, alarme,
+  // interfone, manutenção) — só documentação/consumo pelo app; a API não os lê.
+  { slug: 'seguranca_eletronica', rotulo: 'Segurança eletrônica', emoji: '📹',
+    palavras: ['câmeras', 'portão eletrônico', 'cerca elétrica', 'alarme', 'interfone', 'manutenção'] },
   { slug: 'outros',          rotulo: 'Outros',            emoji: '➕' },
 ]
 
