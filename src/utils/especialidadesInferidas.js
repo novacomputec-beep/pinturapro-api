@@ -36,7 +36,11 @@ const REGRAS_BASE = [
   { termos: ['gesso', 'drywall', 'forro', 'sanca', 'gesseiro'], slugs: ['gesseiro'] },
   { termos: ['pedreiro', 'alvenaria', 'reboco', 'muro', 'laje', 'contrapiso', 'azulejo', 'revestimento', 'ceramica', 'porcelanato', 'rejunte', 'assentamento', 'demolicao', 'concreto', 'fundacao', 'calcada', 'piso', 'telhado', 'telha', 'calha', 'impermeabiliza*', 'reforma'],
     slugs: ['alvenaria', 'pedreiro_servente'] },
-  { termos: ['marcenaria', 'marceneiro', 'armario', 'madeira', 'deck', 'rodape de madeira'], slugs: ['marcenaria'] },
+  // Marcenaria só com termo de OFÍCIO ou de móvel sob medida. "armário" e "madeira" soltos saíram
+  // (11/11/2026): num texto de encanamento, "armário embaixo da pia" / "piso de madeira" puxavam
+  // marcenaria (YS5XR). A pia, bancada e gabinete são do encanador/pedreiro, não do marceneiro.
+  { termos: ['marcenaria', 'marceneiro', 'armario sob medida', 'armarios sob medida', 'armario planejado', 'armarios planejados', 'moveis sob medida', 'moveis planejados', 'movel sob medida', 'movel planejado',
+             'porta de madeira', 'portas de madeira', 'janela de madeira', 'deck', 'pergolado', 'rodape de madeira'], slugs: ['marcenaria'] },
   { termos: ['vidro', 'vidraca', 'box de vidro', 'espelho'], slugs: ['vidraceiro'] },
   { termos: ['serralheria', 'serralheiro', 'portao', 'portoes', 'grade', 'estrutura metalica', 'solda', 'corrimao'], slugs: ['serralheria'] },
   { termos: ['ar condicionado', 'ar-condicionado', 'split', 'climatiza*', 'refrigera*'], slugs: ['climatizacao'] },
