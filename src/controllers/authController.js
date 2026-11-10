@@ -50,6 +50,42 @@ const transporter = nodemailer.createTransport({
 const ERRO_NOME_PARECE_EMAIL = 'Digite seu nome, não o e-mail.'
 const nomePareceEmail = (nome) => typeof nome === 'string' && nome.includes('@')
 
+// Campos de perfil profissional + endereço + RG, normalizados como o cadastro SEMPRE os gravou
+// (anos_experiencia || 0, tamanho_equipe || 1, textos || null, coordenadas ?? null). Usado pelo
+// cadastro (base vazia) e por POST /auth/contas/:tipo (routes), onde `base` é a conta de origem:
+// o valor ENVIADO no corpo tem precedência campo a campo e a cópia da origem é o fallback —
+// campo ausente, null ou '' no corpo cai na origem; só então nos defaults do cadastro.
+const CAMPOS_TEXTO_PERFIL = ['rg', 'rg_orgao', 'rg_estado', 'cep', 'logradouro', 'numero', 'complemento', 'bairro']
+const enviado = (v) => v !== undefined && v !== null && v !== ''
+const camposPerfilCadastro = (corpo = {}, base = {}) => {
+  const escolher = (chave) => (enviado(corpo[chave]) ? corpo[chave] : base[chave])
+  const out = {
+    anos_experiencia: escolher('anos_experiencia') || 0,
+    tamanho_equipe: escolher('tamanho_equipe') || 1,
+    latitude: escolher('latitude') ?? null,
+    longitude: escolher('longitude') ?? null,
+  }
+  for (const c of CAMPOS_TEXTO_PERFIL) out[c] = escolher(c) || null
+  return out
+}
+
+// Indicação (utils/indicacoes): só profissional nasce indicado, e só por um código que existe e
+// não é da própria pessoa (mesmo e-mail ou mesmo CPF normalizado — a outra conta dela). Código
+// ausente, malformado, inexistente ou próprio é IGNORADO em silêncio: nunca barra o cadastro.
+// Devolve o id do indicador ou null. `db` é o client da transação do chamador.
+const buscarIndicador = async (db, { codigo_indicacao, ehProfissional, emailNormalizado, cpfLimpo }) => {
+  const codigo = ehProfissional ? normalizarCodigo(codigo_indicacao) : null
+  if (!codigo) return null
+  const indicador = await db.query(
+    `SELECT id FROM usuarios
+      WHERE codigo_indicacao = $1
+        AND LOWER(email) <> $2
+        AND (NULLIF(regexp_replace(COALESCE(cpf_cnpj, ''), '[^0-9]', '', 'g'), '') IS DISTINCT FROM $3::text OR $3::text IS NULL)`,
+    [codigo, emailNormalizado, cpfLimpo || null]
+  )
+  return indicador.rows[0]?.id || null
+}
+
 const cadastrar = async (req, res) => {
   const ts = new Date().toISOString()
   let client
@@ -293,19 +329,9 @@ const cadastrar = async (req, res) => {
     // existe e não é da própria pessoa (mesmo e-mail ou mesmo CPF normalizado — a outra conta
     // dela). Código ausente, malformado, inexistente ou próprio é IGNORADO em silêncio: nunca
     // barra o cadastro. O próprio código do novo profissional sai de gerar_codigo_indicacao().
-    let indicadoPor = null
-    const codigoIndicacao = role === 'prestador' ? normalizarCodigo(codigo_indicacao) : null
-    if (codigoIndicacao) {
-      const indicador = await client.query(
-        `SELECT id FROM usuarios
-          WHERE codigo_indicacao = $1
-            AND LOWER(email) <> $2
-            AND (NULLIF(regexp_replace(COALESCE(cpf_cnpj, ''), '[^0-9]', '', 'g'), '') IS DISTINCT FROM $3::text OR $3::text IS NULL)`,
-        [codigoIndicacao, emailNormalizado, cpfLimpo || null]
-      )
-      indicadoPor = indicador.rows[0]?.id || null
-      console.log(`[CADASTRO][${ts}] ${indicadoPor ? '✓ código de indicação aceito' : '· código de indicação ignorado'}`)
-    }
+    const indicadoPor = await buscarIndicador(client, { codigo_indicacao, ehProfissional: role === 'prestador', emailNormalizado, cpfLimpo })
+    if (normalizarCodigo(codigo_indicacao)) console.log(`[CADASTRO][${ts}] ${indicadoPor ? '✓ código de indicação aceito' : '· código de indicação ignorado'}`)
+    const perfil = camposPerfilCadastro({ anos_experiencia, tamanho_equipe, rg, rg_orgao, rg_estado, cep, latitude, longitude, logradouro, numero, complemento, bairro })
 
     console.log(`[CADASTRO][${ts}] ▶ INSERT usuarios | role=${role} tipo_dono=${tipo_dono} tipo_prestador=${tipo_prestador} verificacao_status=${verificacaoStatus}`)
     const result = await client.query(
@@ -319,8 +345,8 @@ const cadastrar = async (req, res) => {
                $30, CASE WHEN $31::boolean THEN gerar_codigo_indicacao() ELSE NULL END, $32, $33)
        RETURNING id, nome, email, telefone, cidade, role, tipo_dono, tipo_prestador, foto_url`,
       [nome.trim(), emailNormalizado, telefone, senha_hash, cidade, uf || null,
-       espCadastro.valor, anos_experiencia || 0,
-       tamanho_equipe || 1, cpf_cnpj, role,
+       espCadastro.valor, perfil.anos_experiencia,
+       perfil.tamanho_equipe, cpf_cnpj, role,
        tipo_dono,
        pix_reembolso || null,
        JSON.stringify(referencias || []),
@@ -328,10 +354,10 @@ const cadastrar = async (req, res) => {
        verificacao_doc_verso_url || null,
        verificacao_selfie_url || null,
        verificacaoStatus,
-       rg || null, rg_orgao || null, rg_estado || null,
+       perfil.rg, perfil.rg_orgao, perfil.rg_estado,
        tipo_prestador,
-       cep || null, latitude ?? null, longitude ?? null,
-       logradouro || null, numero || null, complemento || null, bairro || null,
+       perfil.cep, perfil.latitude, perfil.longitude,
+       perfil.logradouro, perfil.numero, perfil.complemento, perfil.bairro,
        indicadoPor, role === 'prestador',
        identidadeSocial?.provedor === 'google' ? identidadeSocial.sub : null,
        identidadeSocial?.provedor === 'apple' ? identidadeSocial.sub : null]
@@ -1161,4 +1187,6 @@ const resetarSenhaUsuario = async (req, res) => {
 // transporter exportado para o link de assinatura pela web usar o MESMO caminho de e-mail do reset.
 // gerarToken / montarSessao / contasDoEmail / resumoContas: exportados para POST /auth/contas/:tipo
 // (routes/index.js) devolver a sessão da conta vinculada recém-criada com o MESMO payload do login.
-module.exports = { cadastrar, login, loginSocial, trocarConta, listarContas, perfil, atualizarPerfil, alterarSenha, esqueciSenha, redefinirSenha, resetarSenhaUsuario, transporter, gerarToken, montarSessao, contasDoEmail, resumoContas }
+// camposPerfilCadastro / buscarIndicador: a mesma rota aceita os campos do cadastro profissional
+// (experiência, equipe, endereço, RG, código de indicação) com os mesmos normalizadores.
+module.exports = { cadastrar, login, loginSocial, trocarConta, listarContas, perfil, atualizarPerfil, alterarSenha, esqueciSenha, redefinirSenha, resetarSenhaUsuario, transporter, gerarToken, montarSessao, contasDoEmail, resumoContas, camposPerfilCadastro, buscarIndicador }

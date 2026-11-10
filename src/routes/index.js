@@ -7380,6 +7380,12 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
 // (tipo_duplicado), CPF não pode estar em outro e-mail, teto de 4.
 // Corpo: tipo PROFISSIONAL exige `especialidades` (lista do lado, 1 a 5) e aceita `plano`;
 // tipo DONO não exige nada (dono nasce com a assinatura gratuita do cadastro).
+// Campos do cadastro profissional (10/11/2026): o app manda também anos_experiencia,
+// tamanho_equipe, cep, latitude, longitude, logradouro, numero, complemento, bairro, rg, rg_orgao,
+// rg_estado e codigo_indicacao. Entram com os MESMOS normalizadores do cadastro
+// (authCtrl.camposPerfilCadastro / buscarIndicador): o valor enviado tem precedência campo a
+// campo, a cópia da origem continua como fallback (campo ausente/null/'' → origem), e o código
+// de indicação só vale para profissional, por código existente e que não seja da própria pessoa.
 // Documentos: origem COM documentos → profissional novo nasce 'pendente' e, se a origem já
 // está aprovada, aprovado na hora pelo MESMO aprovarPrestador de /verificacao/:id/aprovar;
 // origem SEM documentos (dono, ou profissional de verificação adiada) → 'nao_solicitada',
@@ -7440,6 +7446,8 @@ router.post('/auth/contas/:tipo', autenticar, async (req, res) => {
     }
     const planoEscolhido = req.body?.plano === 'anual' ? 'anual' : 'mensal'
     const valorMensal = ehProfissional ? PRECO_PRESTADOR[tipo_prestador][planoEscolhido] : 0
+    // Experiência, equipe, endereço e RG: corpo > origem > defaults do cadastro.
+    const perfil = authCtrl.camposPerfilCadastro(req.body || {}, origem)
 
     const emailNormalizado = origem.email.toLowerCase().trim()
     const cpfLimpo = origem.cpf_cnpj ? origem.cpf_cnpj.replace(/\D/g, '') : null
@@ -7485,6 +7493,8 @@ router.post('/auth/contas/:tipo', autenticar, async (req, res) => {
     // 'nao_solicitada' como o cadastro sem fotos. Dono nunca entra na fila.
     const semDocs = !origem.verificacao_doc_frente_url && !origem.verificacao_doc_verso_url && !origem.verificacao_selfie_url
     const verificacaoStatus = ehProfissional && !semDocs ? 'pendente' : 'nao_solicitada'
+    // Código de indicação: a mesma regra do cadastro (só profissional; nunca a própria pessoa).
+    const indicadoPor = await authCtrl.buscarIndicador(client, { codigo_indicacao: req.body?.codigo_indicacao, ehProfissional, emailNormalizado, cpfLimpo })
 
     const novo = (await client.query(
       `INSERT INTO usuarios (nome, email, telefone, senha_hash, cidade, uf,
@@ -7492,20 +7502,20 @@ router.post('/auth/contas/:tipo', autenticar, async (req, res) => {
         tipo_dono, pix_reembolso, referencias,
         verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url,
         verificacao_status, rg, rg_orgao, rg_estado, tipo_prestador, cep, latitude, longitude,
-        logradouro, numero, complemento, bairro, foto_url, codigo_indicacao)
+        logradouro, numero, complemento, bairro, foto_url, indicado_por, codigo_indicacao)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$28,true,$29,$11,$12,$13,$14,$15,$27,
-               $16,$17,$18,$30,$19,$20,$21,$22,$23,$24,$25,$26,
+               $16,$17,$18,$30,$19,$20,$21,$22,$23,$24,$25,$26, $32,
                CASE WHEN $31::boolean THEN gerar_codigo_indicacao() ELSE NULL END)
        RETURNING id, nome, email, telefone, cidade, role, tipo_prestador, tipo_dono, foto_url,
                  boas_vindas_exibida, verificacao_status, token_version, referencias, criado_em`,
       [origem.nome, emailNormalizado, origem.telefone, origem.senha_hash, origem.cidade, origem.uf,
-       especialidades, origem.anos_experiencia || 0, origem.tamanho_equipe || 1, origem.cpf_cnpj,
+       especialidades, perfil.anos_experiencia, perfil.tamanho_equipe, origem.cpf_cnpj,
        origem.pix_reembolso, JSON.stringify(origem.referencias || []),
        origem.verificacao_doc_frente_url, origem.verificacao_doc_verso_url, origem.verificacao_selfie_url,
-       origem.rg, origem.rg_orgao, origem.rg_estado,
-       origem.cep, origem.latitude, origem.longitude,
-       origem.logradouro, origem.numero, origem.complemento, origem.bairro, origem.foto_url,
-       verificacaoStatus, role, tipo_dono, tipo_prestador, ehProfissional]
+       perfil.rg, perfil.rg_orgao, perfil.rg_estado,
+       perfil.cep, perfil.latitude, perfil.longitude,
+       perfil.logradouro, perfil.numero, perfil.complemento, perfil.bairro, origem.foto_url,
+       verificacaoStatus, role, tipo_dono, tipo_prestador, ehProfissional, indicadoPor]
     )).rows[0]
 
     // Assinatura. Dono: gratuita e ativa, como no cadastro. Profissional: HERDA a assinatura de
