@@ -12,6 +12,10 @@ const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { sqlNaoDemandaPropria } = require('../utils/demandaPropria')
 // Lista negra / bloqueio do dono / recusa por PESSOA no feed (Fase 2b — contas 'prestador' do mesmo CPF).
 const { sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa } = require('../utils/tipoConta')
+// Feed por especialidade inferida (utils/especialidadesInferidas): quem não é do público genérico de
+// obras (capacidadeObras.sqlPessoaPodeObras) vê só as obras cuja lista inferida casa com as suas.
+const { sqlPessoaPodeObras } = require('../utils/capacidadeObras')
+const { sqlEspecialidadesDaPessoa, gravarEspecialidadesInferidas } = require('../utils/especialidadesInferidas')
 const { mascararLista } = require('../utils/tentativasContato')
 // Marca do dono no card (utils/responsabilidade): propostas de horário que ele deixou vencer em 90 dias.
 const { sqlClienteNaoRespondeu90d } = require('../utils/responsabilidade')
@@ -58,6 +62,9 @@ const listar = async (req, res) => {
       -- Obra criada pela OUTRA conta da mesma pessoa (mesmo CPF normalizado): não aparece —
       -- POST /obras/:id/candidatura a recusa com 400 demanda_propria. Sem CPF, não filtra.
       AND ${sqlNaoDemandaPropria('o')}
+      -- Público genérico de obras vê tudo (como sempre); quem só chegou aqui pelas especialidades
+      -- inferidas (capacidadeObras.capacidadesDaPessoa) vê as obras que casam com as suas.
+      AND (${sqlPessoaPodeObras('$1')} OR o.especialidades_inferidas && ${sqlEspecialidadesDaPessoa('$1')})
     `
     // $1 reservado para o usuario_id (filtro de bloqueio global por dono)
     const params = [req.usuario.id]
@@ -203,6 +210,8 @@ const criar = async (req, res) => {
     )
 
     const obra = result.rows[0]
+    // Especialidades inferidas do título + descrição (utils/especialidadesInferidas) ANTES do aviso.
+    await gravarEspecialidadesInferidas(pool, obra.id, obra)
 
     // Obra do painel nasce publicada (status 'aberta', status_aprovacao default 'aprovada',
     // publicado_em = NOW()), então o aviso sai já na criação — o mesmo público-alvo e o

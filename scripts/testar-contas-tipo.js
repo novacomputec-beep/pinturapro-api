@@ -70,6 +70,9 @@ const main = async () => {
     INSERT INTO configuracoes VALUES ('multiplas_contas', 'true');
     CREATE FUNCTION gerar_codigo_indicacao() RETURNS text LANGUAGE sql AS $$ SELECT 'COD' || floor(random()*100000)::text $$;
   `)
+  await db.exec(`CREATE TABLE IF NOT EXISTS obras (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), status text, status_aprovacao text, expira_em timestamptz, match_usuario_id uuid)`)
+  // obras.especialidades_inferidas (capacidadesDaPessoa / feed / aviso de obra nova leem a coluna) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(db)
   // Ana: dona de reparo SEM documentos. Beto: pintor com docs PENDENTES e assinatura ativa anual.
   // Dalva: pintora APROVADA com docs e assinatura ativa mensal vencendo em 2026-12-01.
   await db.query(`INSERT INTO usuarios (id, nome, email, telefone, senha_hash, cidade, uf, cpf_cnpj, role, tipo_dono, bairro, cep, criado_em)

@@ -79,11 +79,18 @@ const sqlPessoaPodeServicos = sqlPessoaPode(sqlPodeServicos)
 //                                tirou a especialidade com proposta ou match em andamento continua
 //                                precisando das telas "Minhas candidaturas" / "Meus interesses".
 // Conta inexistente → tudo false.
-const NADA = Object.freeze({ pode_obras: false, pode_servicos: false, tem_candidaturas: false, tem_interesses: false })
+const NADA = Object.freeze({ pode_obras: false, pode_servicos: false, obras_inferidas: false, tem_candidaturas: false, tem_interesses: false })
+// pode_obras também fica true enquanto houver obra ABERTA cuja lista de especialidades inferidas
+// (utils/especialidadesInferidas) casa com as especialidades da pessoa: é o que faz o app mostrar a
+// aba Obras ao encanador que recebeu "Nova obra" de um ponto de esgoto — o feed (obrasController)
+// mostra a ele SÓ essas obras. obras_inferidas diz de onde veio a capacidade. O PÚBLICO genérico do
+// aviso de obra nova (alertaService.sqlPublicoProfissional → sqlPodeObras) NÃO passa por aqui.
 const capacidadesDaPessoa = async (usuarioId, db = pool) => {
   if (!usuarioId) return { ...NADA }
+  const { sqlPessoaTemObrasInferidas } = require('./especialidadesInferidas')
   const r = await db.query(
-    `SELECT ${sqlPessoaPodeObras('$1')} AS pode_obras,
+    `SELECT (${sqlPessoaPodeObras('$1')} OR ${sqlPessoaTemObrasInferidas('$1')}) AS pode_obras,
+            (NOT ${sqlPessoaPodeObras('$1')} AND ${sqlPessoaTemObrasInferidas('$1')}) AS obras_inferidas,
             ${sqlPessoaPodeServicos('$1')} AS pode_servicos,
             EXISTS (SELECT 1 FROM candidaturas c WHERE ${sqlProfissionalDaPessoa('c.usuario_id', '$1')}) AS tem_candidaturas,
             EXISTS (SELECT 1 FROM interesse_reparos i WHERE ${sqlProfissionalDaPessoa('i.usuario_id', '$1')}) AS tem_interesses`,
@@ -91,7 +98,7 @@ const capacidadesDaPessoa = async (usuarioId, db = pool) => {
   )
   const l = r.rows[0] || {}
   return {
-    pode_obras: l.pode_obras === true, pode_servicos: l.pode_servicos === true,
+    pode_obras: l.pode_obras === true, pode_servicos: l.pode_servicos === true, obras_inferidas: l.obras_inferidas === true,
     tem_candidaturas: l.tem_candidaturas === true, tem_interesses: l.tem_interesses === true,
   }
 }

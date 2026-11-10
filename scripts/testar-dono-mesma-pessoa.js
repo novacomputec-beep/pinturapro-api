@@ -122,6 +122,8 @@ const main = async () => {
   await db.exec(`CREATE TABLE IF NOT EXISTS assinaturas (usuario_id uuid, status text, tipo text, plano text, proximo_vencimento timestamptz, atualizado_em timestamptz)`)
   // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
+  // obras.especialidades_inferidas (capacidadesDaPessoa / feed / aviso de obra nova leem a coluna) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(db)
   await db.query(`INSERT INTO usuarios (id, nome, email, role, tipo_dono, tipo_prestador, cpf_cnpj, push_token) VALUES
     ($1, 'Pessoa (obra)',   'pessoa@x.invalid', 'dono_obra', 'pintura', NULL, '111.111.111-11', NULL),
     ($2, 'Pessoa (reparo)', 'pessoa@x.invalid', 'dono_obra', 'reparo',  NULL, '11111111111',    'ExponentPushToken[B]'),

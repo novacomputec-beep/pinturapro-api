@@ -87,8 +87,14 @@ const { TETO_PUSH_DEMANDA_DIA, sqlAlcance, sqlPushesDeDemandaHoje, sqlMaisPertoN
 // Coordenada vinda do banco (NUMERIC chega como texto) → número ou null.
 const coordenada = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
 const ponto = (linha) => ({ lat: coordenada(linha?.latitude), lng: coordenada(linha?.longitude) })
-const sqlPublicoProfissional = (param) => `u.role = 'prestador' AND (CASE ${param}::text
-           WHEN 'obras'   THEN ${sqlPodeObras('u')}
+// inferidas (lado obra; utils/especialidadesInferidas): { pSlugs, pSomente } — placeholders de um
+// text[] com as especialidades inferidas da obra e de um boolean. Quem tem alguma delas em
+// especialidades é ACRESCENTADO ao público genérico (pode_obras); com pSomente true sai SÓ quem
+// não é do público genérico (reanúncio aos recém-casados). NULL no text[] = público de sempre.
+const sqlPublicoProfissional = (param, inferidas = null) => `u.role = 'prestador' AND (CASE ${param}::text
+           WHEN 'obras'   THEN ${inferidas
+             ? `((${sqlPodeObras('u')} AND NOT ${inferidas.pSomente}::boolean) OR COALESCE(u.especialidades && ${inferidas.pSlugs}::text[], false))`
+             : sqlPodeObras('u')}
            WHEN 'reparos' THEN ${sqlPodeServicos('u')}
            -- 'todos': qualquer profissional (pintor ou reparador), seja qual for a especialidade —
            -- só o aviso "fora da sua área" usa (ver foraDaArea em broadcastPaginado).
@@ -436,7 +442,9 @@ const sqlSemManifestacao = (interesse, param) => (interesse
 const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rotulo, categoria = null, entrega, excluirManifestados = null, demanda = null,
                                    foraDasCategorias = null, semIndicacaoRecente = false, excluirUsuarioId = null, aposPagina = null,
                                    excluirCategorias = null, excluirJaAvisados = null, foraDaArea = null,
-                                   porDistancia = null, tetoDiario = null }) => {
+                                   porDistancia = null, tetoDiario = null, inferidas = null }) => {
+  // inferidas { slugs, somente } (obra nova / reanúncio aos recém-casados): acrescenta ao público
+  // 'obras' quem tem alguma das especialidades inferidas da obra (utils/especialidadesInferidas).
   // porDistancia { lat, lng } (demanda NOVA, lembrete, reanúncio e oferta aumentada): além da MESMA CIDADE (que
   //   recebe sempre), alcança quem está a até min(raio escolhido, 50 km) da demanda.
   // tetoDiario { tabela, demandaId, lat, lng, lote, resumo } (demanda nova, "fora da área",
@@ -513,6 +521,11 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
       sqlAcimaDoTeto = `(${sqlPushesDeDemandaHoje('u.id')}
           + ${sqlMaisPertoNoLote({ pLats: `$${n - 3}`, pLngs: `$${n - 2}`, pLat: `$${n - 1}`, pLng: `$${n}` })}) >= ${TETO_PUSH_DEMANDA_DIA}`
     }
+    let sqlPublico = sqlPublicoProfissional('$1')
+    if (inferidas && Array.isArray(inferidas.slugs) && inferidas.slugs.length > 0) {
+      params.push(inferidas.slugs, inferidas.somente === true)
+      sqlPublico = sqlPublicoProfissional('$1', { pSlugs: `$${params.length - 1}`, pSomente: `$${params.length}` })
+    }
     if (excluirJaAvisados) {
       params.push(excluirJaAvisados.tipo, excluirJaAvisados.demandaId)
       filtrosOpcionais += `\n         AND NOT EXISTS (SELECT 1 FROM push_entregas pe WHERE pe.tipo = $${params.length - 1} AND pe.demanda_id = $${params.length}::uuid AND ${sqlProfissionalDaPessoa('pe.usuario_id', 'u.id')})`
@@ -525,7 +538,7 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
        SELECT DISTINCT ON (${SQL_PESSOA_DO_PUBLICO}) u.id, u.push_token, ${sqlAcimaDoTeto} AS acima_do_teto
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
-       WHERE ${sqlPublicoProfissional('$1')}
+       WHERE ${sqlPublico}
          AND ${SQL_ASSINATURA_ATIVA}
          AND u.push_token IS NOT NULL
          -- Suspenso por faltas não recebe isca de trabalho novo — mesmo predicado de QUERY do
@@ -600,7 +613,7 @@ const mensagemNovoReparo = (reparo, reparoId) => {
 const notificarPintoresSobreNovaObra = async (obraId, { lote = [] } = {}) => {
   try {
     const obraResult = await pool.query(
-      `SELECT titulo, cidade, uf, categoria, latitude, longitude FROM obras WHERE id = $1`,
+      `SELECT titulo, cidade, uf, categoria, latitude, longitude, especialidades_inferidas FROM obras WHERE id = $1`,
       [obraId]
     )
     if (obraResult.rows.length === 0) return
@@ -631,6 +644,8 @@ const notificarPintoresSobreNovaObra = async (obraId, { lote = [] } = {}) => {
       demanda: { tabela: 'obras', id: obraId },
       porDistancia: ponto(obra),
       tetoDiario: { tabela: 'obras', demandaId: obraId, ...ponto(obra), lote },
+      // ESPECIALIDADES INFERIDAS (10/11/2026): quem tem alguma delas é acrescentado ao público.
+      inferidas: { slugs: obra.especialidades_inferidas || [], somente: false },
     })
   } catch (err) {
     // Loga E propaga: o claim de push_novo_enviado_em (dispararPushNovoComClaim) só grava
@@ -931,6 +946,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     // `interessados` só no lembrete (lado.interesse): é o que escolhe o texto do corpo.
     const dem = await client.query(
       `SELECT d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor, d.codigo_publico, d.latitude, d.longitude
+              ${tabela === 'obras' ? ', d.especialidades_inferidas' : ', NULL::text[] AS especialidades_inferidas'}
               ${lado.comCategoria ? ', d.categorias' : ''}
               ${lado.interesse ? `, (SELECT count(*)::int FROM ${lado.interesse.tabela} x WHERE x.${lado.interesse.coluna} = d.id) AS interessados` : ''}
          FROM ${tabela} d WHERE d.id = $1`, [demandaId])
@@ -973,6 +989,14 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     // reanúncio) segue o alcance do push: mesma cidade OU até min(raio, 50 km).
     paramsEmail.push(coordenada(demanda.latitude), coordenada(demanda.longitude))
     const sqlLugarEmail = sqlAlcance({ pLat: '$10', pLng: '$11', sqlMesmaCidade: SQL_MESMA_CIDADE_EMAIL })
+    // Especialidades inferidas da obra ($12) acrescentam ao público 'obras' quem as tem; com
+    // lado.inferidasSomente ($13) só eles (reanúncio aos recém-casados). Lado serviço: NULL = nada muda.
+    const inferidasEmail = Array.isArray(demanda.especialidades_inferidas) && demanda.especialidades_inferidas.length > 0 ? demanda.especialidades_inferidas : null
+    let sqlPublicoEmail = sqlPublicoProfissional('$1')
+    if (inferidasEmail) { // parâmetros só quando a consulta os cita (o pg recusa parâmetro sobrando)
+      paramsEmail.push(inferidasEmail, lado.inferidasSomente === true)
+      sqlPublicoEmail = sqlPublicoProfissional('$1', { pSlugs: '$12', pSomente: '$13' })
+    }
     // Como no push: subconsulta = elegíveis, UMA linha por pessoa (DISTINCT ON).
     // Elegível = quem AINDA NÃO recebeu este e-mail (mesmo tipo, mesma demanda, por pessoa): é o
     // que permite reenviar "o que faltou" no dia seguinte sem gastar o corte com quem já recebeu.
@@ -983,7 +1007,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
        SELECT DISTINCT ON (${SQL_PESSOA_DO_PUBLICO}) u.id, u.nome, u.email, u.push_token
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
-       WHERE ${sqlPublicoProfissional('$1')}
+       WHERE ${sqlPublicoEmail}
          AND ${SQL_ASSINATURA_ATIVA}
          AND (NOT $6::boolean OR u.push_token IS NULL)
          AND NULLIF(btrim(u.email), '') IS NOT NULL
@@ -3880,6 +3904,8 @@ module.exports = {
   sqlCasaCategorias,
   enviarPushNovoPendente,
   lembrarDemandasSemResposta,
+  // Reanúncio pelas especialidades inferidas (services/obrasInferidasService).
+  mensagemNovaObra, ponto,
   listarCandidatosLembrete,
   sqlClaimLembrete,
   LADOS_LEMBRETE,

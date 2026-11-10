@@ -109,6 +109,8 @@ const { handlers: mensagensProntasHandlers } = require('../services/mensagensPro
 // bloqueia pedidos novos por 7 dias — POST /obras/dono e /reparos/dono) e a lista do painel.
 const { migrarResponsabilidade, sqlCompromissosNaoCumpridos90d, sqlCumpriuTodos, sqlClienteNaoRespondeu90d } = require('../utils/responsabilidade')
 const { bloqueioDePedidos, corpoPedidosBloqueados, listarEventosAdmin } = require('../services/responsabilidadeService')
+// Especialidades inferidas das obras (utils/especialidadesInferidas): coluna, inferência na criação.
+const { migrarEspecialidadesInferidas, gravarEspecialidadesInferidas } = require('../utils/especialidadesInferidas')
 // Limite por CONTA nas tentativas de DELETE /conta/excluir (tabela tentativas_auth, vale entre réplicas).
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { enviarEmail } = require('../services/emailService')
@@ -732,6 +734,8 @@ const migracaoPronta = (async () => {
     // Responsabilidade pós-match: eventos_responsabilidade, crédito de assinatura e o claim do
     // aviso final ao dono (utils/responsabilidade).
     await migrarResponsabilidade(client)
+    // obras.especialidades_inferidas (slugs de ofício deduzidos do título + descrição) + índice GIN.
+    await migrarEspecialidadesInferidas(client)
     // Avisos ao PROFISSIONAL casado (alertaService.avisarMatchFeito / lembrarPrazoChegada):
     // aviso_match_enviado_em = push "Match feito!" logo após o match; lembrete_chegada_enviado_em
     // = lembrete antes do prazo de chegada. Cada um é um claim atômico (UPDATE ... WHERE IS NULL
@@ -2951,6 +2955,10 @@ router.post('/obras/dono', autenticar, exigirNaoSuspenso, async (req, res) => {
       [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao, prazoModo, prazoZona]
     )
     let obra = result.rows[0]
+    // Especialidades inferidas do título + descrição (utils/especialidadesInferidas): gravadas já na
+    // criação, antes da publicação — é o que acrescenta encanador/eletricista/… ao aviso de obra nova
+    // e mostra a obra no feed deles.
+    obra.especialidades_inferidas = await gravarEspecialidadesInferidas(pool, obra.id, obra)
     // Aprovação automática de obras (flag global em configuracoes, default 'false' = OFF).
     // Ligada, publica na hora pela MESMA função da rota de aprovação do admin — mesmo UPDATE,
     // mesmo reinício de relógio, mesmos avisos. Responde com a linha já publicada para o app
