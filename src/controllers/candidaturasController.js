@@ -11,6 +11,8 @@ const { SQL_ZERAR_AGENDA } = require('../utils/agendamento')
 const { mascararLista } = require('../utils/tentativasContato')
 // Selo "bem avaliado" (3× 5★) nos candidatos que o dono vê (utils/etiquetasAvaliacao).
 const { sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
+// compromissos_nao_cumpridos_90d / cumpriu_todos do candidato (utils/responsabilidade), como em GET /obras/:id.
+const { sqlCompromissosNaoCumpridos90d, sqlCumpriuTodos } = require('../utils/responsabilidade')
 
 const minhas = async (req, res) => {
   try {
@@ -91,7 +93,9 @@ const porObra = async (req, res) => {
               u.cidade, u.anos_experiencia, u.tamanho_equipe, u.especialidades, u.embaixador,
               (SELECT COUNT(*)::int FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_total,
               (SELECT COALESCE(ROUND(AVG(a.estrelas)::numeric, 1), 0) FROM avaliacoes a WHERE a.avaliado_id = u.id) AS avaliacoes_media,
-              ${sqlSeloBemAvaliado('u.id')} AS selo_bem_avaliado
+              ${sqlSeloBemAvaliado('u.id')} AS selo_bem_avaliado,
+              ${sqlCompromissosNaoCumpridos90d('u.id')} AS compromissos_nao_cumpridos_90d,
+              ${sqlCumpriuTodos('u.id')} AS cumpriu_todos
        FROM candidaturas c
        JOIN usuarios u ON c.usuario_id = u.id
        WHERE c.obra_id = $1

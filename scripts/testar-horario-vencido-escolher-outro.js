@@ -5,7 +5,7 @@
 //       avisa o profissional por push + e-mail e os lembretes "Agende" recomeçam — o mesmo para a
 //       contraproposta do dono que o profissional deixou vencer;
 //   (2) ESCOLHER OUTRO — pode_escolher_outro (detalhe do dono) fica true com 2 lembretes "Agende"
-//       seguidos sem proposta; POST /:tabela/dono/:id/escolher-outro desfaz o match SEM falta,
+//       seguidos sem proposta; POST /:tabela/dono/:id/escolher-outro desfaz o match (com falta desde 10/11),
 //       reabre com candidaturas/interesses/perguntas intactos, bloqueia o profissional nesta
 //       demanda e avisa "O cliente escolheu outro profissional"; 409 quando não pode.
 // SQL REAL num Postgres em memória (PGlite); rotas reais de proposta de horário; Expo/Brevo falsos.
@@ -99,7 +99,7 @@ const main = async () => {
       lembrete_agendar_offsets int[] NOT NULL DEFAULT '{}', lembrete_agendar_ultimo_em timestamptz, lembrete_agendar_dono_em timestamptz, lembrete_agendar_ciclo int DEFAULT 0,
       lembrete_agendar_enviados int NOT NULL DEFAULT 0, desfazer_aviso_em timestamptz,
       lembrete_agendar_sem_proposta int NOT NULL DEFAULT 0, horario_vencido_em timestamptz, horarios_vencidos int NOT NULL DEFAULT 0,
-      chegada_proposta_em timestamptz, lembrete_resposta_1h_em timestamptz, lembrete_resposta_antes_em timestamptz, lembrete_resposta_ultimo_em timestamptz,
+      chegada_proposta_em timestamptz, lembrete_resposta_1h_em timestamptz, lembrete_resposta_antes_em timestamptz, lembrete_resposta_ultimo_em timestamptz, aviso_resposta_final_em timestamptz,
       sugestoes_horario_dono int DEFAULT 0, sugestoes_horario_profissional int DEFAULT 0, prazo_chegada_extra_em timestamptz, aviso_atraso_enviado_em timestamptz,
       pedido_atraso_minutos int, pedido_atraso_motivo text, pedido_atraso_em timestamptz, pedido_atraso_status text, pedido_atraso_respondido_em timestamptz,
       pedidos_atraso_usados int DEFAULT 0, cancelamento_pedido_por uuid, cancelamento_pedido_motivo text, cancelamento_pedido_detalhe text,
@@ -118,6 +118,9 @@ const main = async () => {
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     SET search_path = public, pg_catalog;
   `)
+  await db.exec(`CREATE TABLE IF NOT EXISTS assinaturas (usuario_id uuid, status text, tipo text, plano text, proximo_vencimento timestamptz, atualizado_em timestamptz)`)
+  // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
   await db.query(`INSERT INTO usuarios (id, nome, email, push_token, role, tipo_dono, tipo_prestador, cpf_cnpj) VALUES
     ($1, 'Maria', 'maria@x.invalid', $7, 'dono_obra', 'reparo', NULL, '111'), ($2, 'Alex Silva', 'alex@x.invalid', $8, 'prestador', NULL, 'reparador', '222'),
     ($3, 'Ana', 'ana@x.invalid', $9, 'prestador', NULL, 'reparador', '333'), ($4, 'Beto', 'beto@x.invalid', NULL, 'prestador', NULL, 'reparador', '444'),
@@ -180,7 +183,7 @@ const main = async () => {
      'registro do vencimento (horario_vencido_em, horarios_vencidos = 1); lembretes de resposta do dono zerados')
   ok(iso(l.lembrete_agendar_ultimo_em) === emMin(151) && igualArr(l.lembrete_agendar_offsets, []) && l.lembrete_agendar_sem_proposta === 0 && l.sugestoes_horario_profissional === 1,
      'lembretes "Agende" recomeçam (último = agora, fixos zerados); contador segue 0; a sugestão vencida continua contando no teto', { ultimo: iso(l.lembrete_agendar_ultimo_em), sugestoes: l.sugestoes_horario_profissional })
-  const pa = pushesDe('alex').filter(p => p.data?.reparo_id === D(1))
+  const pa = pushesDe('alex').filter(p => p.data?.reparo_id === D(1) && !p.data?.compensacao) // o push de compensação (responsabilidade) sai à parte
   ok(pa.length === 1 && pa[0].title === A.TITULO_HORARIO_VENCIDO && pa[0].body === 'Proponha um novo horário para "Trocar chuveiro".' && pa[0].data.tipo === 'chegada_prevista_recusada' && pa[0].data.reparo_id === D(1) && pa[0].data.horario_vencido === true,
      'push ao profissional: "O horário que você propôs venceu sem resposta" + proponha um novo horário; toque abre o detalhe', pa[0] && { title: pa[0].title, body: pa[0].body, data: pa[0].data })
   ok(emails.some(e => e.para === 'alex@x.invalid' && e.assunto === A.TITULO_HORARIO_VENCIDO), 'e-mail ao profissional (push + e-mail)', emails.map(e => [e.para, e.assunto]))
@@ -219,7 +222,7 @@ const main = async () => {
      'demais interesses INTACTOS: rebaixados pelo match voltam ao status que tinham; recusa explícita do dono fica', { ana: props[ANA].status, beto: props[BETO].status, caio: props[CAIO].status })
   const perguntas = (await db.query(`SELECT pergunta, resposta FROM perguntas_demanda WHERE demanda_id = $1 ORDER BY pergunta`, [D(1)])).rows
   ok(perguntas.length === 2 && perguntas.find(p => p.pergunta === 'Tem material?').resposta === 'Tenho', 'perguntas e respostas intactas', perguntas)
-  ok((await db.query(`SELECT count(*)::int AS n FROM faltas_profissional`)).rows[0].n === 0, 'NENHUMA falta registrada (sem penalidade)')
+  ok((await db.query(`SELECT count(*)::int AS n FROM faltas_profissional WHERE usuario_id = $1 AND demanda_id = $2`, [PROF, D(1)])).rows[0].n === 1, '1 falta registrada (responsabilidade, 10/11/2026: escolher outro conta falta)')
   ok(pushesDe('alex').length === 1 && pushesDe('alex')[0].title === 'O cliente escolheu outro profissional' && pushesDe('alex')[0].data.reparo_id === D(1) && pushesDe('alex')[0].data.motivo === 'escolheu_outro',
      'push ao profissional: "O cliente escolheu outro profissional"', pushesDe('alex')[0] && { title: pushesDe('alex')[0].title, body: pushesDe('alex')[0].body })
   ok(pushesDe('ana').length === 1 && /reabriu/.test(pushesDe('ana')[0].title) && emails.some(e => e.para === 'beto@x.invalid') && pushesDe('maria').length === 1 && /reaberto/i.test(pushesDe('maria')[0].title),
@@ -236,8 +239,8 @@ const main = async () => {
   const lo2 = await linha('obras', D(2))
   const cand = Object.fromEntries((await db.query(`SELECT usuario_id, status, cancelado_motivo FROM candidaturas WHERE obra_id = $1`, [D(2)])).rows.map(p => [p.usuario_id, p]))
   ok(r.status === 200 && lo2.match_usuario_id === null && lo2.prestadores_bloqueados.includes(PROF) && cand[PROF].cancelado_motivo === 'escolheu_outro' && cand[ANA].status === 'pendente'
-     && pushesDe('alex')[0]?.data.obra_id === D(2) && (await db.query(`SELECT count(*)::int AS n FROM faltas_profissional`)).rows[0].n === 0,
-     'obra: escolher-outro desfaz sem falta, bloqueia, restaura candidaturas, push com obra_id', { status: r.status })
+     && pushesDe('alex')[0]?.data.obra_id === D(2) && (await db.query(`SELECT count(*)::int AS n FROM faltas_profissional WHERE usuario_id = $1`, [PROF])).rows[0].n === 2,
+     'obra: escolher-outro desfaz (com falta), bloqueia, restaura candidaturas, push com obra_id', { status: r.status })
   // o desfazer clássico (75% do prazo) segue registrando falta — não foi alterado
   await db.query(`UPDATE obras SET match_usuario_id = $2, match_feito_em = now() - INTERVAL '9 days', expira_em = now() + INTERVAL '1 day', prestadores_bloqueados = NULL, ${SQL_ZERAR_AGENDA} WHERE id = $1`, [D(2), OUTRO])
   await db.query(`UPDATE candidaturas SET status = 'aceito', cancelado_motivo = NULL, cancelado_por = NULL, cancelado_em = NULL WHERE obra_id = $1 AND usuario_id = $2`, [D(2), PROF])

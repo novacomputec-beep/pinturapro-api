@@ -77,7 +77,7 @@ const SQL_ZERAR_AGENDA = `chegada_proposta_por = NULL, chegada_pendente_rodada =
               a_caminho_em = NULL, lembrete_agendar_offsets = '{}',
               lembrete_agendar_ultimo_em = NULL, lembrete_agendar_dono_em = NULL,
               chegada_proposta_em = NULL, lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL,
-              lembrete_resposta_ultimo_em = NULL,
+              lembrete_resposta_ultimo_em = NULL, aviso_resposta_final_em = NULL,
               sugestoes_horario_dono = 0, sugestoes_horario_profissional = 0,
               prazo_chegada_extra_em = NULL, aviso_atraso_enviado_em = NULL,
               pedido_atraso_minutos = NULL, pedido_atraso_motivo = NULL, pedido_atraso_em = NULL,

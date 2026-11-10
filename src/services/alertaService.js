@@ -2406,6 +2406,11 @@ const lembrarAgendamento = semSobreposicao('lembrarAgendamento', async () => {
 // Entrega por entregarAoProfissional: push com data { tipo, reparo_id | obra_id } (o toque abre
 // o detalhe, como os outros pushes do match); sem token, o e-mail de reserva.
 const TITULO_AGENDAR = '📅 Agende seu atendimento'
+// 1º lembrete de uma sequência sem proposta (lembrete_agendar_sem_proposta = 1 depois do claim —
+// zera a cada proposta, então o aviso volta a sair quando uma nova sequência começa): avisa que
+// desistir agora ("Não vou conseguir", cancelamentoMatchService 'livre') é sem penalidade e que
+// ignorar vira falta (utils/responsabilidade: compromisso_nao_cumprido + falta no un-match).
+const CORPO_AGENDAR_PRIMEIRO = "Marque o horário ou toque em 'Não vou conseguir' — sem penalidade. Se ignorar, conta como falta."
 const CORPO_AGENDAR = {
   reparoCurto: 'Você ainda não agendou o horário do serviço conquistado',
   reparo:      'Você ainda não agendou o dia e o horário do serviço conquistado',
@@ -2467,9 +2472,12 @@ const sqlClaimAgendar = (lado, conjunto, offsets) => `
          AND d.match_feito_em <= s.prazo - s.off * INTERVAL '1 minute'
          AND NOT (d.lembrete_agendar_offsets @> ARRAY[s.off])
          AND ${SQL_BASE_AGENDAR}
-   RETURNING d.id, d.titulo, d.match_usuario_id, s.off, s.curto, u.push_token, u.email, u.nome`
-const corpoAgendar = (lado, d) =>
-  lado.tabela === 'obras' ? CORPO_AGENDAR.obra : (d.curto ? CORPO_AGENDAR.reparoCurto : CORPO_AGENDAR.reparo)
+   RETURNING d.id, d.titulo, d.match_usuario_id, s.off, s.curto, u.push_token, u.email, u.nome,
+             d.lembrete_agendar_sem_proposta AS sem_proposta`
+const corpoAgendar = (lado, d) => {
+  if (Number(d.sem_proposta) === 1) return CORPO_AGENDAR_PRIMEIRO
+  return lado.tabela === 'obras' ? CORPO_AGENDAR.obra : (d.curto ? CORPO_AGENDAR.reparoCurto : CORPO_AGENDAR.reparo)
+}
 const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', async () => {
   for (const lado of Object.values(LADOS_MATCH)) {
     for (const [conjunto, offsets] of Object.entries(OFFSETS_AGENDAR)) {
@@ -2509,6 +2517,11 @@ const lembrarAgendarAtendimento = semSobreposicao('lembrarAgendarAtendimento', a
 // lembretes sem proposta NÃO é mexido (ele propôs; zerou na proposta). Claim atômico (UPDATE …
 // WHERE … RETURNING). Toque: 'chegada_prevista_recusada' + id — o app abre o detalhe nos dois
 // lados (desde 08/2026) e é lá que ele propõe outro horário.
+// RESPONSABILIDADE (utils/responsabilidade, 10/11/2026): quando a proposta vencida era do
+// PROFISSIONAL, o DONO ganha um evento cliente_nao_respondeu (2º em 90 dias bloqueia pedidos
+// novos por 7 dias) e o profissional, 7 dias de assinatura (responsabilidadeService). A
+// contraproposta do dono vencida não marca ninguém. aviso_resposta_final_em (aviso final ao
+// dono) zera junto dos lembretes de resposta.
 const TITULO_HORARIO_VENCIDO = '⏰ O horário que você propôs venceu sem resposta'
 const TITULO_CONTRAPROPOSTA_VENCIDA = '⏰ O horário sugerido pelo cliente venceu sem resposta'
 const corpoHorarioVencido = (d) => `Proponha um novo horário para "${d.titulo}".`
@@ -2520,6 +2533,7 @@ const expirarPropostasDeHorario = semSobreposicao('expirarPropostasDeHorario', a
             SET chegada_pendente_em = NULL, chegada_pendente_janela = NULL,
                 chegada_proposta_por = NULL, chegada_proposta_em = NULL,
                 lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL, lembrete_resposta_ultimo_em = NULL,
+                aviso_resposta_final_em = NULL,
                 lembrete_agendar_ultimo_em = NOW(), lembrete_agendar_offsets = '{}',
                 horario_vencido_em = NOW(), horarios_vencidos = d.horarios_vencidos + 1
            FROM usuarios u, ${lado.tabela} antes
@@ -2528,7 +2542,7 @@ const expirarPropostasDeHorario = semSobreposicao('expirarPropostasDeHorario', a
             AND d.chegada_pendente_em IS NOT NULL AND d.chegada_pendente_em <= NOW()
             AND d.chegada_prevista_em IS NULL AND d.a_caminho_em IS NULL
             AND d.chegada_declarada_em IS NULL AND d.chegada_confirmada_em IS NULL
-      RETURNING d.id, d.titulo, d.match_usuario_id, d.horarios_vencidos, u.push_token, u.email, u.nome,
+      RETURNING d.id, d.titulo, d.match_usuario_id, d.criado_por, d.horarios_vencidos, u.push_token, u.email, u.nome,
                 (antes.chegada_proposta_por IS NOT NULL AND antes.chegada_proposta_por <> d.match_usuario_id) AS era_do_dono`
       )
       for (const d of claim.rows) {
@@ -2542,6 +2556,12 @@ const expirarPropostasDeHorario = semSobreposicao('expirarPropostasDeHorario', a
           console.log(`[HorarioVencido] ${lado.tabela} ${d.id}: ${d.era_do_dono ? 'contraproposta do dono' : 'proposta'} nº ${d.horarios_vencidos} venceu sem resposta → profissional ${d.match_usuario_id} via ${via}`)
         } catch (err) {
           console.error(`[HorarioVencido] aviso ${lado.tabela} ${d.id}:`, err.message)
+        }
+        if (!d.era_do_dono) {
+          // require tardio: responsabilidadeService depende deste módulo.
+          await require('./responsabilidadeService').registrarClienteNaoRespondeu({
+            tabela: lado.tabela, demandaId: d.id, donoId: d.criado_por, profissionalId: d.match_usuario_id, titulo: d.titulo,
+          })
         }
       }
     } catch (err) {
@@ -2595,6 +2615,7 @@ const sqlClaimRepetirAgendar = (lado) => `
    RETURNING d.id, d.titulo, d.match_usuario_id, d.criado_por, d.lembrete_agendar_ciclo AS ciclo,
              ${SQL_INTERVALO_RESTANTE_AGENDAR}::text AS proximo_intervalo,
              (d.lembrete_agendar_dono_em = NOW()) AS avisar_dono, ${sqlReparoCurto(lado)} AS curto,
+             d.lembrete_agendar_sem_proposta AS sem_proposta,
              p.push_token, p.email, p.nome,
              o.push_token AS dono_push_token, o.email AS dono_email, o.nome AS dono_nome`
 // Aviso ao dono (do 2º ciclo em diante). O dono NUNCA propõe o primeiro horário — o profissional
@@ -3889,6 +3910,7 @@ module.exports = {
   expirarPropostasDeHorario,
   TITULO_HORARIO_VENCIDO,
   TITULO_CONTRAPROPOSTA_VENCIDA,
+  CORPO_AGENDAR_PRIMEIRO,
   entregarLembrete,
   semPushAtivo,
   LEMBRETE_EMAIL_SEM_PUSH_TETO_DIA,

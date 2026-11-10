@@ -35,13 +35,19 @@
 // 'escolher_outro'), POST /:tabela/dono/:id/escolher-outro): libera quando o escolhido deixou
 // LEMBRETES_PARA_ESCOLHER_OUTRO (2) lembretes "Agende" SEGUIDOS sem propor horário
 // (lembrete_agendar_sem_proposta, contado em alertaService e zerado na proposta), sem esperar os
-// 75% do prazo; sai em GET /:id como pode_escolher_outro (só dono). Diferenças: NENHUMA falta
-// para ninguém (nem suspensão), motivo 'escolheu_outro' na proposta cancelada (também fora da
-// contagem de cancelamentos frequentes) e o aviso ao profissional "O cliente escolheu outro
-// profissional". O resto é igual: match zerado, demanda de volta ao feed com candidaturas,
-// interesses, perguntas e respostas intactos, profissional bloqueado nesta demanda.
-// 409 ESCOLHER_OUTRO_INDISPONIVEL quando pode_escolher_outro é false.
+// 75% do prazo; sai em GET /:id como pode_escolher_outro (só dono). Diferenças: motivo
+// 'escolheu_outro' na proposta cancelada (também fora da contagem de cancelamentos frequentes) e
+// o aviso ao profissional "O cliente escolheu outro profissional". O resto é igual: match zerado,
+// demanda de volta ao feed com candidaturas, interesses, perguntas e respostas intactos,
+// profissional bloqueado nesta demanda. 409 ESCOLHER_OUTRO_INDISPONIVEL quando pode_escolher_outro é false.
+//
+// RESPONSABILIDADE (dono, 10/11/2026 — utils/responsabilidade): nos DOIS modos o profissional
+// que ignorou os lembretes "Agende" leva a falta de sempre (faltas_profissional + suspensão por
+// faltas) E um evento compromisso_nao_cumprido (contado por pessoa, 90 dias; sai ao dono nas
+// candidaturas/interesses como compromissos_nao_cumpridos_90d / cumpriu_todos). O 1º lembrete
+// "Agende" já avisa: desistir pelo "Não vou conseguir" antes do horário é sem penalidade.
 const { pool } = require('../utils/supabase')
+const { registrarCompromissoNaoCumprido } = require('./responsabilidadeService')
 const { formatarDataHoraSP } = require('../utils/agendamento')
 const { SQL_LIMPAR_MATCH } = require('./cancelamentoMatchService')
 const { entregarPushEEmail, inserirFaltaUnica, avaliarSuspensaoPorFaltas, MOTIVO_FALTA_SEM_HORARIO, semSobreposicao, contatoDaPessoa } = require('./alertaService')
@@ -181,8 +187,10 @@ const handler = (tabela, modo = 'desfazer') => {
           WHERE ${lado.proposta.coluna} = $1 AND usuario_id <> $2 AND status = ANY($3::text[])`,
         [d.id, profissionalId, STATUS_VALENDO]
       )).rows.map(x => x.usuario_id)
-      // Falta SÓ no desfazer; "escolher outro" não penaliza ninguém.
-      if (!escolherOutro) await inserirFaltaUnica(client, lado.tabela, d.id, profissionalId, MOTIVO_FALTA) // única por (profissional, demanda)
+      // Falta nos dois modos (única por profissional × demanda) + evento compromisso_nao_cumprido
+      // (idempotente), na MESMA transação do un-match.
+      await inserirFaltaUnica(client, lado.tabela, d.id, profissionalId, MOTIVO_FALTA)
+      await registrarCompromissoNaoCumprido(client, { tabela: lado.tabela, demandaId: d.id, profissionalId, donoId: d.criado_por, motivo })
       await client.query('COMMIT')
     } catch (err) {
       if (client) { try { await client.query('ROLLBACK') } catch {} }
@@ -191,20 +199,20 @@ const handler = (tabela, modo = 'desfazer') => {
     } finally {
       if (client) client.release()
     }
-    console.log(`[${rotuloLog}] ${lado.tipo} ${d.id}: dono ${req.usuario.id} desfez a escolha de ${profissionalId} (${escolherOutro ? 'sem falta' : 'falta registrada'}; ${interessados.length} interessado(s) seguem valendo)`)
+    console.log(`[${rotuloLog}] ${lado.tipo} ${d.id}: dono ${req.usuario.id} desfez a escolha de ${profissionalId} (falta + compromisso_nao_cumprido registrados; ${interessados.length} interessado(s) seguem valendo)`)
     res.json({ mensagem: `Escolha desfeita. ${lado.artigo} voltou ao feed.`, profissional_id: profissionalId, interessados_avisados: interessados.length, modo })
 
     // Fora da transação e depois da resposta. Ordem: suspensão (pode mandar "Conta suspensa"),
     // profissional, interessados, dono. ator_id só no aviso ao profissional e aos interessados
     // (o dono é o autor e PRECISA receber o dele).
     ;(async () => {
-      if (!escolherOutro) await avaliarSuspensaoPorFaltas(profissionalId)
+      await avaliarSuspensaoPorFaltas(profissionalId)
       const [prof] = await contatos([profissionalId])
       if (prof) {
         await avisar(prof, escolherOutro ? {
           ator_id: req.usuario.id,
           titulo: 'O cliente escolheu outro profissional',
-          corpo: `"${d.titulo}": o cliente escolheu outro profissional porque o horário não foi marcado. Sem falta para você.`,
+          corpo: `"${d.titulo}": o cliente escolheu outro profissional porque o horário não foi marcado. Isso contou como 1 falta.`,
           data: { tipo: lado.tipoPushProfissional, [lado.chave]: d.id, motivo: MOTIVO_ESCOLHEU_OUTRO },
           rotulo: `escolheu outro ${lado.tipo} ${d.id} profissional`,
         } : {

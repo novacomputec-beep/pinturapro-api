@@ -85,7 +85,7 @@ const main = async () => {
       lembrete_agenda_dono_2h_em timestamptz, vigia_comparecimento_em timestamptz, comparecimento_resposta text, comparecimento_respondido_em timestamptz,
       lembrete_agendar_offsets int[] NOT NULL DEFAULT '{}', lembrete_agendar_ultimo_em timestamptz, lembrete_agendar_dono_em timestamptz, lembrete_agendar_ciclo int DEFAULT 0,
       lembrete_agendar_enviados int NOT NULL DEFAULT 0, lembrete_agendar_sem_proposta int NOT NULL DEFAULT 0, horario_vencido_em timestamptz, horarios_vencidos int NOT NULL DEFAULT 0, desfazer_aviso_em timestamptz, chegada_proposta_em timestamptz, lembrete_resposta_1h_em timestamptz,
-      lembrete_resposta_antes_em timestamptz, lembrete_resposta_ultimo_em timestamptz, sugestoes_horario_dono int DEFAULT 0, sugestoes_horario_profissional int DEFAULT 0,
+      lembrete_resposta_antes_em timestamptz, lembrete_resposta_ultimo_em timestamptz, aviso_resposta_final_em timestamptz, sugestoes_horario_dono int DEFAULT 0, sugestoes_horario_profissional int DEFAULT 0,
       prazo_chegada_extra_em timestamptz, aviso_atraso_enviado_em timestamptz, pedido_atraso_minutos int, pedido_atraso_motivo text, pedido_atraso_em timestamptz,
       pedido_atraso_status text, pedido_atraso_respondido_em timestamptz, pedidos_atraso_usados int DEFAULT 0, cancelamento_pedido_por uuid, cancelamento_pedido_motivo text,
       cancelamento_pedido_detalhe text, cancelamento_pedido_em timestamptz, cancelamento_pedido_expira_em timestamptz, prestadores_bloqueados uuid[],
@@ -119,6 +119,9 @@ const main = async () => {
     CREATE TABLE tentativas_contato (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), usuario_id uuid, criado_em timestamptz DEFAULT now());
     SET search_path = public, pg_catalog;
   `)
+  await db.exec(`CREATE TABLE IF NOT EXISTS assinaturas (usuario_id uuid, status text, tipo text, plano text, proximo_vencimento timestamptz, atualizado_em timestamptz)`)
+  // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
   await db.query(`INSERT INTO usuarios (id, nome, email, role, tipo_dono, tipo_prestador, cpf_cnpj, push_token) VALUES
     ($1, 'Pessoa (obra)',   'pessoa@x.invalid', 'dono_obra', 'pintura', NULL, '111.111.111-11', NULL),
     ($2, 'Pessoa (reparo)', 'pessoa@x.invalid', 'dono_obra', 'reparo',  NULL, '11111111111',    'ExponentPushToken[B]'),
