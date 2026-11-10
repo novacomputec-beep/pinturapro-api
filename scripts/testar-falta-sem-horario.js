@@ -69,7 +69,7 @@ const main = async () => {
       vigia_comparecimento_em timestamptz, comparecimento_resposta text, comparecimento_respondido_em timestamptz,
       lembrete_agendar_offsets int[] DEFAULT '{}', lembrete_agendar_ultimo_em timestamptz, lembrete_agendar_dono_em timestamptz,
       lembrete_agendar_enviados int DEFAULT 0, lembrete_agendar_sem_proposta int NOT NULL DEFAULT 0, horario_vencido_em timestamptz, horarios_vencidos int NOT NULL DEFAULT 0, desfazer_aviso_em timestamptz,
-      chegada_proposta_em timestamptz, lembrete_resposta_1h_em timestamptz, lembrete_resposta_antes_em timestamptz, lembrete_resposta_ultimo_em timestamptz,
+      chegada_proposta_em timestamptz, lembrete_resposta_1h_em timestamptz, lembrete_resposta_antes_em timestamptz, lembrete_resposta_ultimo_em timestamptz, aviso_resposta_final_em timestamptz,
       sugestoes_horario_dono int DEFAULT 0, sugestoes_horario_profissional int DEFAULT 0, prazo_chegada_extra_em timestamptz,
       pedido_atraso_minutos int, pedido_atraso_motivo text, pedido_atraso_em timestamptz, pedido_atraso_status text, pedido_atraso_respondido_em timestamptz,
       pedidos_atraso_usados int DEFAULT 0, prestadores_bloqueados uuid[]`
@@ -83,6 +83,9 @@ const main = async () => {
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     SET search_path = public, pg_catalog;
   `)
+  await db.exec(`CREATE TABLE IF NOT EXISTS assinaturas (usuario_id uuid, status text, tipo text, plano text, proximo_vencimento timestamptz, atualizado_em timestamptz)`)
+  // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
   await db.query(`INSERT INTO usuarios (id, nome, email, push_token) VALUES
     ($1, 'Dono', 'dono@x.invalid', 'ExponentPushToken[dono]'), ($2, 'Prof', 'prof@x.invalid', 'ExponentPushToken[prof]'), ($3, 'Outro Prof', 'outro@x.invalid', 'ExponentPushToken[outro]')`,
     [U(99), U(1), U(2)])

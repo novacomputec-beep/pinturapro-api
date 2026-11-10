@@ -13,6 +13,8 @@ const { sqlNaoDemandaPropria } = require('../utils/demandaPropria')
 // Lista negra / bloqueio do dono / recusa por PESSOA no feed (Fase 2b — contas 'prestador' do mesmo CPF).
 const { sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa } = require('../utils/tipoConta')
 const { mascararLista } = require('../utils/tentativasContato')
+// Marca do dono no card (utils/responsabilidade): propostas de horário que ele deixou vencer em 90 dias.
+const { sqlClienteNaoRespondeu90d } = require('../utils/responsabilidade')
 
 const listar = async (req, res) => {
   try {
@@ -24,6 +26,7 @@ const listar = async (req, res) => {
              o.latitude, o.longitude, o.coordenadas_origem,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status, o.horas_para_expirar, o.prazo_modo, o.criado_em, o.ultima_extensao_horas,
              ${sqlTotalExtensaoObra('o.')} AS total_extensao_horas,
+             ${sqlClienteNaoRespondeu90d('o.criado_por')} AS cliente_nao_respondeu_90d,
              0 as distancia_metros,
              (SELECT COUNT(*) FROM midias WHERE obra_id = o.id) as total_midias,
              (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,

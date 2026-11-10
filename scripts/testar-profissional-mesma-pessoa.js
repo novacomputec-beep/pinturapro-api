@@ -203,6 +203,8 @@ const main = async () => {
     INSERT INTO configuracoes (chave, valor) VALUES ('grupos_relacionados_ativo', 'true'), ('multiplas_contas', 'true');
     SET search_path = public, pg_catalog;
   `)
+  // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
   for (const [nome, c] of Object.entries(C)) {
     const role = c.role || 'prestador'
     await db.query(

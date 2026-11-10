@@ -103,6 +103,12 @@ const { migrarAvisosPorDistancia, registrarRaioEscolhido } = require('../utils/a
 // Mensagens prontas (frases do catálogo entre o dono e o profissional escolhido): migração e rotas.
 const { migrarMensagensProntas } = require('../utils/mensagensProntas')
 const { handlers: mensagensProntasHandlers } = require('../services/mensagensProntasService')
+// Responsabilidade pós-match (utils/responsabilidade + services/responsabilidadeService): eventos
+// por pessoa (90 dias) — compromisso_nao_cumprido do profissional (sai nas candidaturas/interesses
+// ao dono), cliente_nao_respondeu do dono (sai aos profissionais em feed/detalhe; 2º em 90 dias
+// bloqueia pedidos novos por 7 dias — POST /obras/dono e /reparos/dono) e a lista do painel.
+const { migrarResponsabilidade, sqlCompromissosNaoCumpridos90d, sqlCumpriuTodos, sqlClienteNaoRespondeu90d } = require('../utils/responsabilidade')
+const { bloqueioDePedidos, corpoPedidosBloqueados, listarEventosAdmin } = require('../services/responsabilidadeService')
 // Limite por CONTA nas tentativas de DELETE /conta/excluir (tabela tentativas_auth, vale entre réplicas).
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { enviarEmail } = require('../services/emailService')
@@ -723,6 +729,9 @@ const migracaoPronta = (async () => {
     await migrarAvisosPorDistancia(client)
     // Mensagens prontas entre o dono e o profissional escolhido (utils/mensagensProntas).
     await migrarMensagensProntas(client)
+    // Responsabilidade pós-match: eventos_responsabilidade, crédito de assinatura e o claim do
+    // aviso final ao dono (utils/responsabilidade).
+    await migrarResponsabilidade(client)
     // Avisos ao PROFISSIONAL casado (alertaService.avisarMatchFeito / lembrarPrazoChegada):
     // aviso_match_enviado_em = push "Match feito!" logo após o match; lembrete_chegada_enviado_em
     // = lembrete antes do prazo de chegada. Cada um é um claim atômico (UPDATE ... WHERE IS NULL
@@ -2897,6 +2906,10 @@ router.post('/obras/dono', autenticar, exigirNaoSuspenso, async (req, res) => {
     const valorObra = validarValorDemanda(req.body.valor)
     if (valorObra.erro) return res.status(400).json(valorObra)
     const valor = valorObra.valor
+    // Bloqueio de pedidos novos (utils/responsabilidade): 2 propostas de horário de profissional
+    // vencidas sem resposta em 90 dias (pessoa) → 7 dias sem criar demanda. As abertas seguem.
+    const bloqueioObra = await bloqueioDePedidos(req.usuario.id)
+    if (bloqueioObra) return res.status(409).json(corpoPedidosBloqueados(bloqueioObra))
     // Antes de qualquer trabalho (geocoding, ufDeCidade): recusar cedo não gasta rede à toa.
     const limiteObras = await limiteDemandasAtingido('obras', req.usuario.id, client_request_id)
     if (limiteObras.atingido) {
@@ -3784,6 +3797,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         ${sqlDesfazerLiberadoEm('o.')} AS desfazer_liberado_em,
         -- pode_escolher_outro: 2 lembretes "Agende" seguidos sem proposta (desfazerEscolhaService); só dono.
         ${sqlPodeEscolherOutro('o.')} AS pode_escolher_outro,
+        -- cliente_nao_respondeu_90d: propostas de horário de profissional que o dono (pessoa) deixou
+        -- vencer sem resposta nos últimos 90 dias (utils/responsabilidade) — sai a qualquer leitor.
+        ${sqlClienteNaoRespondeu90d('o.criado_por')} AS cliente_nao_respondeu_90d,
         -- Lembretes "Agende seu atendimento" deste match: quantos já saíram ao profissional e
         -- quando sai o próximo (alertaService.sqlProximoLembreteAgendar); só para o dono.
         ${sqlProximoLembreteAgendar('obras', 'o.')} AS proximo_lembrete_agendar_em,
@@ -3844,6 +3860,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         `SELECT c.id, c.status, c.valor_proposto, c.valor_contraproposta, c.mensagem,
                 u.nome, u.cidade, u.bairro, u.foto_url, c.usuario_id,
                 u.anos_experiencia, u.especialidades, u.tamanho_equipe, u.embaixador,
+                ${sqlCompromissosNaoCumpridos90d('c.usuario_id')} AS compromissos_nao_cumpridos_90d,
+                ${sqlCumpriuTodos('c.usuario_id')} AS cumpriu_todos,
                 CASE WHEN c.usuario_id = $2 THEN u.logradouro ELSE NULL END as logradouro,
                 CASE WHEN c.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
                 CASE WHEN c.usuario_id = $2 AND $3::boolean THEN u.telefone ELSE NULL END as telefone,
@@ -4605,6 +4623,9 @@ router.post('/reparos/dono', autenticar, exigirNaoSuspenso, async (req, res) => 
     const categoriaPrincipal = listaCategorias[0]
     // Mesmo teto do POST /obras/dono e sobre a MESMA contagem (obras + reparos): o limite é por
     // dono, não por tipo de demanda, senão 2 obras + 2 reparos passariam.
+    // Mesmo bloqueio de pedidos novos do POST /obras/dono (utils/responsabilidade).
+    const bloqueioReparo = await bloqueioDePedidos(req.usuario.id)
+    if (bloqueioReparo) return res.status(409).json(corpoPedidosBloqueados(bloqueioReparo))
     const limiteReparos = await limiteDemandasAtingido('reparos', req.usuario.id, client_request_id)
     if (limiteReparos.atingido) {
       return res.status(409).json(erroLimiteDemandas(limiteReparos.limite))
@@ -5217,6 +5238,8 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPod
              -- criado_em e descricao saíam para todo reparador assinante sem nada no app lê-los.
              r.status, r.expira_em, r.prazo_atendimento_horas,
              ${sqlTotalExtensaoReparo('r.')} AS total_extensao_horas,
+             -- Marca do dono (utils/responsabilidade): propostas de horário que ele deixou vencer em 90 dias.
+             ${sqlClienteNaoRespondeu90d('r.criado_por')} AS cliente_nao_respondeu_90d,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM reparos r
@@ -6010,6 +6033,7 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
            chegada_proposta_por = $3::uuid,
            chegada_proposta_em = NOW(),
            lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL, lembrete_resposta_ultimo_em = NULL,
+           aviso_resposta_final_em = NULL,
            chegada_pendente_rodada = d.chegada_pendente_rodada + 1,
            sugestoes_horario_profissional = d.sugestoes_horario_profissional + 1,
            lembrete_agendar_sem_proposta = 0
@@ -6392,6 +6416,7 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
            chegada_proposta_por = $2::uuid,
            chegada_proposta_em = NOW(),
            lembrete_resposta_1h_em = NULL, lembrete_resposta_antes_em = NULL, lembrete_resposta_ultimo_em = NULL,
+           aviso_resposta_final_em = NULL,
            chegada_pendente_rodada = chegada_pendente_rodada + 1,
            ${colSugestoes} = ${colSugestoes} + 1
          ${guard} AND ${colSugestoes} < $5::int
@@ -6593,6 +6618,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
               ${sqlDesfazerLiberadoEm()} AS desfazer_liberado_em,
               -- pode_escolher_outro: 2 lembretes "Agende" seguidos sem proposta (desfazerEscolhaService); só dono.
               ${sqlPodeEscolherOutro()} AS pode_escolher_outro,
+              -- cliente_nao_respondeu_90d: mesma marca do dono do GET /obras/:id (utils/responsabilidade).
+              ${sqlClienteNaoRespondeu90d('reparos.criado_por')} AS cliente_nao_respondeu_90d,
               -- Lembretes "Agende seu atendimento" deste match: quando sai o próximo ao
               -- profissional (alertaService.sqlProximoLembreteAgendar); só para o dono.
               ${sqlProximoLembreteAgendar('reparos', 'reparos.')} AS proximo_lembrete_agendar_em
@@ -6644,6 +6671,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
         `SELECT ir.id, ir.usuario_id, ir.status, ir.mensagem, ir.criado_em,
                 ir.valor_proposto, ir.valor_contraproposta, ir.rodada,
                 u.nome, u.cidade, u.bairro, u.foto_url, u.anos_experiencia, u.especialidades, u.tamanho_equipe, u.embaixador,
+                ${sqlCompromissosNaoCumpridos90d('ir.usuario_id')} AS compromissos_nao_cumpridos_90d,
+                ${sqlCumpriuTodos('ir.usuario_id')} AS cumpriu_todos,
                 CASE WHEN ir.usuario_id = $2 THEN u.logradouro ELSE NULL END as logradouro,
                 CASE WHEN ir.usuario_id = $2 THEN u.numero ELSE NULL END as numero,
                 CASE WHEN ir.usuario_id = $2 AND $3::boolean THEN u.telefone ELSE NULL END as telefone,
@@ -9242,6 +9271,10 @@ router.post('/admin/limpar-usuarios', autenticar, exigirSuperAdmin, async (req, 
 // faltas_validas = as que ainda contam (não perdoadas, dentro da janela); faltas_total inclui
 // perdoadas e antigas, para o admin ver o histórico completo antes de decidir. limite e janela
 // saem na resposta para a tela exibir "3 de 3 em 90 dias" sem hardcodar a regra no app.
+// Painel — eventos de responsabilidade pós-match (services/responsabilidadeService):
+// ?tipo=compromisso_nao_cumprido|cliente_nao_respondeu &usuario_id= &page= &limit=.
+router.get('/admin/eventos-responsabilidade', autenticar, exigirAdmin, listarEventosAdmin)
+
 router.get('/admin/suspensos', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { page, limit, offset } = paginacaoAdmin(req.query)

@@ -39,6 +39,7 @@ const { verificarEscolhaPendente } = require('./src/services/escolhaPendenteServ
 // "Você já pode escolher outro profissional": ao dono quando o desfazer escolha libera (≤ 25% do
 // intervalo match→prazo restando, sem horário proposto). Cadência dos cronômetros.
 const { avisarDesfazerLiberado } = require('./src/services/desfazerEscolhaService')
+const { avisarRespostaFinalDono, aplicarCreditosPendentes } = require('./src/services/responsabilidadeService')
 // Resumo do dia ao admin às 18:00 SP (push + e-mail com o link da aba Canal do WhatsApp).
 const { enviarResumoDiaAdmin } = require('./src/services/resumoDiaAdminService')
 // Mesmo caminho de e-mail do reset/link de assinatura (SMTP/nodemailer do authController).
@@ -838,6 +839,9 @@ const iniciarAgendador = () => {
   // Proposta de horário do profissional que venceu sem resposta do dono: volta a "aguardando
   // horário", avisa o profissional (push + e-mail) e os lembretes "Agende" recomeçam.
   setInterval(() => { expirarPropostasDeHorario() }, INTERVALO_CRONOMETRO)
+  // Aviso final ao DONO 1h antes da proposta do profissional vencer: "Responda ou cancele o
+  // pedido — se ignorar, sua conta fica marcada" (push + e-mail, uma vez por proposta).
+  setInterval(() => { avisarRespostaFinalDono() }, INTERVALO_CRONOMETRO)
   // Ao DONO, proposta do profissional pendente: o mesmo aviso REPETIDO (push + e-mail) 30 min
   // após a proposta e depois pelo tempo restante até o horário proposto (12h/6h/2h/30 min),
   // silêncio 22–07 (SP), até ele responder ou o horário passar.
@@ -893,6 +897,9 @@ const iniciarAgendador = () => {
   // Push-resumo "Mais N pedidos perto de você hoje": o que passou do teto diário de 15 pushes de
   // demanda por pessoa — no máximo um por dia, só entre 08h e 20h de São Paulo.
   setInterval(() => { enviarResumosAcimaDoTeto() }, INTERVALO_LEMBRETE)
+  // Crédito de compensação guardado (7 dias por cliente que não respondeu) de quem passou a ter
+  // assinatura paga e ativa: vira dias de vencimento, sem cobrança (utils/responsabilidade).
+  setInterval(() => { aplicarCreditosPendentes() }, INTERVALO_LEMBRETE)
   // Lembretes ao dono (30 min / 2h) da solicitação de encerramento pendente do profissional.
   setInterval(() => { lembrarConfirmacaoEncerramento() }, INTERVALO_LEMBRETE)
   // "Ainda trabalhando?" ao profissional com chegada confirmada e sem pedido de conclusão de
