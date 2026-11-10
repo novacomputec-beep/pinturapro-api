@@ -60,7 +60,7 @@ const main = async () => {
       tipo_dono text, pix_reembolso text, referencias jsonb, verificacao_doc_frente_url text, verificacao_doc_verso_url text,
       verificacao_selfie_url text, verificacao_status text DEFAULT 'nao_solicitada', rg text, rg_orgao text, rg_estado text,
       tipo_prestador text, cep text, latitude numeric, longitude numeric, logradouro text, numero text, complemento text, bairro text,
-      foto_url text, codigo_indicacao text, token_version int NOT NULL DEFAULT 1, boas_vindas_exibida boolean DEFAULT false,
+      foto_url text, codigo_indicacao text, indicado_por uuid, token_version int NOT NULL DEFAULT 1, boas_vindas_exibida boolean DEFAULT false,
       aceita_promocoes boolean, aprovado_automaticamente boolean, criado_em timestamptz DEFAULT now());
     ALTER TABLE usuarios ADD COLUMN avisos_todas_areas boolean NOT NULL DEFAULT true; -- preferência do aviso "fora da sua área" (migração de boot)
     CREATE TABLE assinaturas (usuario_id uuid, plano text, valor_mensal numeric, status text, tipo text, proximo_vencimento timestamptz, criado_em timestamptz DEFAULT now());
@@ -78,15 +78,18 @@ const main = async () => {
   await db.query(`INSERT INTO usuarios (id, nome, email, telefone, senha_hash, cidade, uf, cpf_cnpj, role, tipo_dono, bairro, cep, criado_em)
                   VALUES ($1, 'Ana Dona', 'ana@x.invalid', '34999990000', '$2b$10$hashdaana', 'Uberlândia', 'MG', '111.111.111-11', 'dono_obra', 'reparo', 'Centro', '38400000', '2026-01-01')`, [U(1)])
   await db.query(`INSERT INTO usuarios (id, nome, email, telefone, senha_hash, cidade, uf, cpf_cnpj, role, tipo_prestador, especialidades,
-                  verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url, verificacao_status, rg, anos_experiencia, tamanho_equipe)
+                  verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url, verificacao_status, rg, anos_experiencia, tamanho_equipe, codigo_indicacao)
                   VALUES ($1, 'Beto Pintor', 'beto@x.invalid', '34988880000', '$2b$10$hashdobeto', 'Araguari', 'MG', '22222222222', 'prestador', 'pintor', '{pintor}',
-                  'https://f', 'https://v', 'https://s', 'pendente', 'MG123', 7, 3)`, [U(2)])
+                  'https://f', 'https://v', 'https://s', 'pendente', 'MG123', 7, 3, 'BET777')`, [U(2)])
   await db.query(`INSERT INTO assinaturas VALUES ($1, 'anual', 999, 'ativa', NULL, '2027-06-30T00:00:00Z')`, [U(2)])
   await db.query(`INSERT INTO usuarios (id, nome, email, telefone, senha_hash, cidade, uf, cpf_cnpj, role, tipo_prestador, especialidades,
-                  verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url, verificacao_status)
+                  verificacao_doc_frente_url, verificacao_doc_verso_url, verificacao_selfie_url, verificacao_status, codigo_indicacao)
                   VALUES ($1, 'Dalva Pintora', 'dalva@x.invalid', '34977770000', '$2b$10$hashdadalva', 'Uberaba', 'MG', '33333333333', 'prestador', 'pintor', '{pintor}',
-                  'https://f', 'https://v', 'https://s', 'aprovado')`, [U(3)])
+                  'https://f', 'https://v', 'https://s', 'aprovado', 'DAV777')`, [U(3)])
   await db.query(`INSERT INTO assinaturas VALUES ($1, 'mensal', 99.90, 'ativa', NULL, '2026-12-01T00:00:00Z')`, [U(3)])
+  // Edu: dono de reparo com endereço parcial (cep/bairro) — o app manda os campos do cadastro profissional.
+  await db.query(`INSERT INTO usuarios (id, nome, email, telefone, senha_hash, cidade, uf, cpf_cnpj, role, tipo_dono, bairro, cep)
+                  VALUES ($1, 'Edu Dono', 'edu@x.invalid', '34966660000', '$2b$10$hashdoedu', 'Uberlândia', 'MG', '44444444444', 'dono_obra', 'reparo', 'Centro', '38400000')`, [U(4)])
 
   // ---- POST /auth/contas/:tipo
   let r = await criar(U(1), 'gerente')
@@ -135,19 +138,41 @@ const main = async () => {
   ok((await db.query(`SELECT count(*)::int n FROM usuarios WHERE email = 'ana@x.invalid'`)).rows[0].n === 4, 'e-mail da Ana com exatamente 4 contas')
 
   // Beto (pintor pendente, assinatura ativa anual) → 'prestador' (alias): docs copiados, pendente, assinatura HERDADA ativa
-  r = await criar(U(2), 'prestador', { especialidades: ['hidraulica'] })
+  // Corpo com campos do cadastro: tamanho_equipe enviado vence a cópia; rg '' e anos_experiencia
+  // ausente caem na origem; o PRÓPRIO código de indicação é ignorado (indicado_por NULL).
+  r = await criar(U(2), 'prestador', { especialidades: ['hidraulica'], tamanho_equipe: 5, rg: '', codigo_indicacao: 'bet777' })
   ok(r.status === 201 && r.body.conta.tipo === 'reparador' && r.body.aprovada === false && r.body.assinatura_herdada === true, "pintor pendente → 'prestador': 201, não aprovada, assinatura herdada", { conta: r.body.conta.tipo })
-  const repBeto = (await db.query(`SELECT verificacao_status, verificacao_doc_frente_url, rg, anos_experiencia, tamanho_equipe FROM usuarios WHERE id = $1`, [r.body.conta.id])).rows[0]
-  ok(repBeto.verificacao_status === 'pendente' && repBeto.verificacao_doc_frente_url === 'https://f' && repBeto.rg === 'MG123' && repBeto.anos_experiencia === 7, 'docs, RG, experiência copiados; status pendente')
+  const repBeto = (await db.query(`SELECT verificacao_status, verificacao_doc_frente_url, rg, anos_experiencia, tamanho_equipe, indicado_por FROM usuarios WHERE id = $1`, [r.body.conta.id])).rows[0]
+  ok(repBeto.verificacao_status === 'pendente' && repBeto.verificacao_doc_frente_url === 'https://f' && repBeto.rg === 'MG123' && repBeto.anos_experiencia === 7, 'docs, RG (corpo \'\' → cópia), experiência (ausente → cópia) copiados; status pendente', repBeto)
+  ok(repBeto.tamanho_equipe === 5 && repBeto.indicado_por === null, 'tamanho_equipe do corpo vence a cópia (3 → 5); código de indicação PRÓPRIO ignorado', { equipe: repBeto.tamanho_equipe, indicado_por: repBeto.indicado_por })
   ass = (await db.query(`SELECT * FROM assinaturas WHERE usuario_id = $1`, [r.body.conta.id])).rows[0]
   ok(ass.status === 'ativa' && ass.plano === 'anual' && Number(ass.valor_mensal) === 999 && new Date(ass.proximo_vencimento).toISOString() === '2027-06-30T00:00:00.000Z', 'herdou ativa/anual/999 com o MESMO vencimento', { status: ass.status, venc: ass.proximo_vencimento })
   ok(r.body.assinatura?.status === 'ativa', 'payload.assinatura já reflete a herdada (app não cai no paywall)', r.body.assinatura)
 
   // Dalva (pintora APROVADA) → reparador: aprovada na hora SEM aprovarPrestador (vencimento herdado intocado)
-  r = await criar(U(3), 'reparador', { especialidades: ['faxina'] })
+  r = await criar(U(3), 'reparador', { especialidades: ['faxina'], codigo_indicacao: 'nope' })
   ok(r.status === 201 && r.body.aprovada === true && r.body.assinatura_herdada === true && r.body.usuario.verificacao_status === 'aprovado', 'pintora aprovada → reparador: aprovada, herdada', { aprovada: r.body.aprovada, vs: r.body.usuario.verificacao_status })
-  const repDalva = (await db.query(`SELECT u.verificacao_status, a.status, a.proximo_vencimento FROM usuarios u JOIN assinaturas a ON a.usuario_id = u.id WHERE u.id = $1`, [r.body.conta.id])).rows[0]
+  const repDalva = (await db.query(`SELECT u.verificacao_status, u.indicado_por, a.status, a.proximo_vencimento FROM usuarios u JOIN assinaturas a ON a.usuario_id = u.id WHERE u.id = $1`, [r.body.conta.id])).rows[0]
   ok(repDalva.verificacao_status === 'aprovado' && repDalva.status === 'ativa' && new Date(repDalva.proximo_vencimento).toISOString() === '2026-12-01T00:00:00.000Z', 'verificação aprovada no banco; vencimento 2026-12-01 NÃO estendido (aprovarPrestador não rodou)', repDalva)
+  ok(repDalva.indicado_por === null, "código de indicação malformado ('nope') ignorado em silêncio: 201 e indicado_por NULL")
+
+  // Edu (dono, endereço parcial) → reparador com TODOS os campos do cadastro profissional no corpo:
+  // gravados como o cadastro grava, com precedência sobre a cópia (cep/bairro da origem substituídos);
+  // código da Dalva (outra pessoa) → indicado_por = Dalva.
+  r = await criar(U(4), 'reparador', { especialidades: ['eletrica'], anos_experiencia: 12, tamanho_equipe: 4, cep: '38401-000', latitude: -18.91, longitude: -48.27,
+                                       logradouro: 'Rua das Acácias', numero: '10', complemento: 'casa 2', bairro: 'Santa Mônica', rg: 'MG999', rg_orgao: 'SSP', rg_estado: 'MG', codigo_indicacao: ' dav777 ' })
+  ok(r.status === 201 && r.body.conta.tipo === 'reparador', 'dono → reparador com campos do cadastro profissional: 201', r.body.conta || r.body)
+  const repEdu = (await db.query(`SELECT anos_experiencia, tamanho_equipe, cep, latitude, longitude, logradouro, numero, complemento, bairro, rg, rg_orgao, rg_estado, indicado_por, codigo_indicacao, nome, cidade, telefone FROM usuarios WHERE id = $1`, [r.body.conta.id])).rows[0]
+  ok(repEdu.anos_experiencia === 12 && repEdu.tamanho_equipe === 4 && repEdu.cep === '38401-000' && Number(repEdu.latitude) === -18.91 && Number(repEdu.longitude) === -48.27
+     && repEdu.logradouro === 'Rua das Acácias' && repEdu.numero === '10' && repEdu.complemento === 'casa 2' && repEdu.bairro === 'Santa Mônica',
+     'experiência, equipe, cep, coordenadas e endereço do corpo gravados (cep/bairro do corpo VENCEM a cópia 38400000/Centro)', repEdu)
+  ok(repEdu.rg === 'MG999' && repEdu.rg_orgao === 'SSP' && repEdu.rg_estado === 'MG', 'RG/órgão/UF do corpo gravados (origem não tinha RG)', { rg: repEdu.rg, orgao: repEdu.rg_orgao, uf: repEdu.rg_estado })
+  ok(repEdu.indicado_por === U(3) && !!repEdu.codigo_indicacao && repEdu.codigo_indicacao !== 'DAV777', "' dav777 ' normalizado → indicado_por = Dalva; conta nova ganha código PRÓPRIO", { indicado_por: repEdu.indicado_por, codigo: repEdu.codigo_indicacao })
+  ok(repEdu.nome === 'Edu Dono' && repEdu.cidade === 'Uberlândia' && repEdu.telefone === '34966660000', 'nome/cidade/telefone continuam copiados da origem')
+  // Dono novo: campos de perfil aceitos igual, mas código de indicação só vale para profissional.
+  r = await criar(U(4), 'dono_obra', { codigo_indicacao: 'DAV777', anos_experiencia: 3 })
+  const donoEdu = r.status === 201 ? (await db.query(`SELECT indicado_por, anos_experiencia, cep FROM usuarios WHERE id = $1`, [r.body.conta.id])).rows[0] : null
+  ok(r.status === 201 && donoEdu.indicado_por === null && donoEdu.anos_experiencia === 3 && donoEdu.cep === '38400000', 'dono_obra vinculado: código de indicação ignorado (não é profissional); experiência do corpo gravada; cep copiado', donoEdu || r.body)
 
   // CPF em OUTRO e-mail → cpf_duplicado
   await db.query(`INSERT INTO usuarios (nome, email, senha_hash, cpf_cnpj, role, tipo_dono) VALUES ('Clone', 'clone@x.invalid', 'h', '22222222222', 'dono_obra', 'reparo')`)
