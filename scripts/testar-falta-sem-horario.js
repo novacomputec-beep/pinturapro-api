@@ -86,9 +86,12 @@ const main = async () => {
   await db.exec(`CREATE TABLE IF NOT EXISTS assinaturas (usuario_id uuid, status text, tipo text, plano text, proximo_vencimento timestamptz, atualizado_em timestamptz)`)
   // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
+  // Reabertura pelo cronômetro (aviso_reabertura_em, status_antes_match) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/reaberturaMatch')).migrarReaberturaMatch(db)
   await db.query(`INSERT INTO usuarios (id, nome, email, push_token) VALUES
-    ($1, 'Dono', 'dono@x.invalid', 'ExponentPushToken[dono]'), ($2, 'Prof', 'prof@x.invalid', 'ExponentPushToken[prof]'), ($3, 'Outro Prof', 'outro@x.invalid', 'ExponentPushToken[outro]')`,
-    [U(99), U(1), U(2)])
+    ($1, 'Dono', 'dono@x.invalid', 'ExponentPushToken[dono]'), ($2, 'Prof', 'prof@x.invalid', 'ExponentPushToken[prof]'), ($3, 'Outro Prof', 'outro@x.invalid', 'ExponentPushToken[outro]'),
+    ($4, 'Concorrente', 'conc@x.invalid', 'ExponentPushToken[conc]'), ($5, 'Recusado', 'rec@x.invalid', 'ExponentPushToken[rec]')`,
+    [U(99), U(1), U(2), U(3), U(4)])
   await fixarAgora(0)
   // Todas casadas há 10h e com prazo vencido há 20 min (tolerância de 15 min já passou).
   const inserir = (tabela, n, titulo, extra = '') => db.query(
@@ -109,8 +112,19 @@ const main = async () => {
   await inserir('obras',   5, 'O2 horário valendo');         await proposta('obras', 5, U(2))
   await db.query(`UPDATE obras SET match_usuario_id = $2, chegada_prevista_em = now() - INTERVAL '20 minutes', chegada_janela = 'manha' WHERE id = $1`, [D(5), U(2)])
   await inserir('obras',   6, 'O3 sem proposta');            await proposta('obras', 6, U(1))
+  // Concorrentes: rebaixados PELO MATCH (status_antes_match preenchido, como rejeitarConcorrentes grava)
+  // em R1 e O3 (sem horário → voltam a valer) e em O2 (horário valendo → fora do escopo, ficam recusados);
+  // 'Recusado' foi recusado explicitamente pelo dono em R1 (sem marcador → fica recusado).
+  const rebaixado = (tabela, n, usuario, antes) =>
+    db.query(`INSERT INTO ${tabela === 'reparos' ? 'interesse_reparos' : 'candidaturas'} (${tabela === 'reparos' ? 'reparo_id' : 'obra_id'}, usuario_id, status, status_antes_match) VALUES ($1, $2, 'recusado', $3)`, [D(n), usuario, antes])
+  await rebaixado('reparos', 1, U(3), 'pendente')
+  await rebaixado('reparos', 1, U(4), null)
+  await rebaixado('obras', 6, U(3), 'contraproposta_dono')
+  await rebaixado('obras', 5, U(3), 'pendente')
 
   const A = require(path.join(REPO, 'src/services/alertaService'))
+  const eventos = async (u) => (await db.query(`SELECT tabela, demanda_id, motivo, outro_usuario_id FROM eventos_responsabilidade WHERE usuario_id = $1 AND tipo_evento = 'compromisso_nao_cumprido' ORDER BY tabela, demanda_id`, [u])).rows
+  const statusProposta = async (tabela, n, u) => (await db.query(`SELECT status, status_antes_match FROM ${tabela === 'reparos' ? 'interesse_reparos' : 'candidaturas'} WHERE ${tabela === 'reparos' ? 'reparo_id' : 'obra_id'} = $1 AND usuario_id = $2`, [D(n), u])).rows[0]
   const faltas = async (u) => (await db.query(`SELECT tabela, demanda_id, motivo FROM faltas_profissional WHERE usuario_id = $1 ORDER BY criado_em, tabela, demanda_id`, [u])).rows
   const linha = async (t, n) => (await db.query(`SELECT * FROM ${t} WHERE id = $1`, [D(n)])).rows[0]
   const pushesDe = (token) => pushes.filter(p => p.to === `ExponentPushToken[${token}]`)
@@ -132,13 +146,32 @@ const main = async () => {
   ok((await faltas(U(1))).every(x => x.demanda_id !== D(4)) && (await linha('reparos', 4)).match_usuario_id === U(1), 'R3 cancelado: cron não toca, sem falta', (await linha('reparos', 4)).status)
   let d = await linha('reparos', 1)
   ok(d.match_usuario_id === null && d.status === 'aberta' && new RealDate(d.expira_em) > new RealDate(relogio) && d.prestadores_bloqueados?.[0] === U(1), 'R1: match desfeito, de volta ao feed, profissional bloqueado nesta demanda', { expira: d.expira_em })
-  ok((await db.query(`SELECT status FROM interesse_reparos WHERE reparo_id = $1`, [D(1)])).rows[0].status === 'expirado', "R1: interesse 'expirado'")
+  ok((await statusProposta('reparos', 1, U(1))).status === 'expirado', "R1: interesse do profissional 'expirado'")
   const pProf = pushesDe('prof')
   const faltaR1 = pProf.find(p => p.data.reparo_id === D(1))
   ok(faltaR1 && faltaR1.title === 'Você recebeu 1 falta' && faltaR1.body === 'O prazo de "R1 sem proposta" venceu sem você marcar dia e horário. Com 3 faltas em 90 dias, a conta é suspensa.' && faltaR1.data.tipo === 'match_expirado',
      'R1: push "Você recebeu 1 falta" ao profissional (texto aprovado)', faltaR1 && { title: faltaR1.title, body: faltaR1.body })
   ok(!pProf.some(p => p.data.reparo_id === D(1) && p.title === '⏰ Prazo expirado!'), 'R1: profissional NÃO recebe o "Prazo expirado" genérico (um push por fato)')
-  ok(pushesDe('dono').some(p => p.data.reparo_id === D(1) && p.title === '⏰ Prazo expirado!'), 'R1: dono recebe "Prazo expirado"')
+  const donoR1 = pushesDe('dono').find(p => p.data.reparo_id === D(1))
+  ok(donoR1 && donoR1.title === '⏰ O profissional não marcou horário' && donoR1.body === 'Escolha outro interessado ou defina uma nova data para "R1 sem proposta".' && donoR1.data.tipo === 'match_expirado',
+     'R1: dono recebe "O profissional não marcou horário" (texto aprovado, tipo match_expirado)', donoR1 && { title: donoR1.title, body: donoR1.body })
+  ok(!pushesDe('dono').some(p => p.data.reparo_id === D(1) && p.title === '⏰ Prazo expirado!'), 'R1: dono NÃO recebe mais o "Prazo expirado" genérico')
+  ok(emails.some(e => e.para === 'dono@x.invalid' && e.assunto === '⏰ O profissional não marcou horário'), 'R1: e-mail ao dono com o mesmo título')
+  // Evento compromisso_nao_cumprido (igual ao "escolher outro"): R1 e R2, motivo prazo_vencido_sem_horario, outro = dono.
+  let ev = await eventos(U(1))
+  ok(ev.length === 2 && ev.every(x => x.motivo === 'prazo_vencido_sem_horario' && x.outro_usuario_id === U(99) && x.tabela === 'reparos') && ev.map(x => x.demanda_id).sort().join() === [D(1), D(3)].sort().join(),
+     'R1 e R2: evento compromisso_nao_cumprido gravado (motivo prazo_vencido_sem_horario, outro_usuario_id = dono)', ev)
+  // Concorrentes de R1: rebaixado pelo match volta a 'pendente'; recusado explicitamente fica recusado.
+  ok((await statusProposta('reparos', 1, U(3))).status === 'pendente' && (await statusProposta('reparos', 1, U(3))).status_antes_match === null, "R1: concorrente rebaixado PELO MATCH volta a 'pendente' (status_antes_match limpo)")
+  ok((await statusProposta('reparos', 1, U(4))).status === 'recusado', 'R1: recusado explicitamente pelo dono continua recusado')
+  const pConc = pushesDe('conc').find(p => p.data.reparo_id === D(1))
+  ok(pConc && pConc.title === '🔄 Pedido disponível de novo' && pConc.body === 'A demanda "R1 sem proposta" voltou a ficar disponível — o cliente pode escolher você.' && pConc.data.tipo === 'novo_reparo' && pConc.data.reaberta === true,
+     'R1: concorrente recebe push "disponível de novo" (texto aprovado, toque novo_reparo + reaberta)', pConc && { title: pConc.title, body: pConc.body, tipo: pConc.data.tipo })
+  ok(emails.some(e => e.para === 'conc@x.invalid' && e.assunto === '🔄 Pedido disponível de novo'), 'R1: e-mail ao concorrente')
+  ok(!pushesDe('rec').length, 'R1: quem o dono recusou explicitamente NÃO é avisado')
+  ok((await linha('reparos', 1)).aviso_reabertura_em === null, 'R1: claim aviso_reabertura_em limpo após o aviso')
+  const chavesConc = (await db.query(`SELECT tipo FROM email_alertas WHERE demanda_id = $1 AND usuario_id = $2`, [D(1), U(3)])).rows.map(x => x.tipo)
+  ok(chavesConc.length === 1 && chavesConc[0].startsWith('aviso:novo_reparo#'), "R1: e-mail do concorrente na reserva crítica ('aviso:'), um por reabertura", chavesConc)
   ok(emails.some(e => e.para === 'prof@x.invalid' && e.assunto === 'Você recebeu 1 falta'), 'R1: e-mail "Você recebeu 1 falta" ao profissional', emails.map(e => [e.para, e.assunto]))
   const chaves = (await db.query(`SELECT tipo FROM email_alertas WHERE demanda_id = $1 AND usuario_id = $2`, [D(1), U(1)])).rows.map(x => x.tipo)
   ok(chaves.length === 1 && chaves[0].startsWith('aviso:match_expirado#'), "R1: e-mail na cota crítica ('aviso:')", chaves)
@@ -150,20 +183,38 @@ const main = async () => {
   await db.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE reparo_id = $1`, [D(1)])
   await A.verificarCronometroReparos()
   ok((await faltas(U(1))).filter(x => x.demanda_id === D(1)).length === 1, 'idempotente: 2ª expiração da mesma demanda NÃO soma falta')
+  ok((await eventos(U(1))).filter(x => x.demanda_id === D(1)).length === 1, 'idempotente: 2ª expiração NÃO soma evento compromisso_nao_cumprido')
   ok(!pushesDe('prof').some(p => p.title === 'Você recebeu 1 falta') && (await linha('reparos', 1)).match_usuario_id === null, 'idempotente: sem 2º aviso de falta; match desfeito mesmo assim')
   await A.verificarCronometroReparos()
   ok((await faltas(U(1))).length === 2, 'rodar o cron de novo sem candidatos: nada muda')
 
-  // ---- 2) cron de obras
+  // ---- 2) cron de obras — às 23:30 de São Paulo (silêncio noturno): o aviso de reabertura fica devido.
   limpar()
+  await fixarAgora(13.5 * 60)
   await A.verificarCronometroObras()
   f = await faltas(U(1))
   ok(f.filter(x => x.demanda_id === D(2)).length === 0, 'O1 (prof propôs, dono calado): ISENTO, sem falta')
+  ok((await eventos(U(1))).every(x => x.demanda_id !== D(2)), 'O1: isento também do evento compromisso_nao_cumprido')
   d = await linha('obras', 2)
   ok(d.match_usuario_id === null && (d.prestadores_bloqueados === null || d.prestadores_bloqueados.length === 0), 'O1: match desfeito sem bloqueio', d.prestadores_bloqueados)
   ok(pushesDe('prof').some(p => p.data.obra_id === D(2) && p.title === '⏰ Prazo expirado!') && !pushesDe('prof').some(p => p.data.obra_id === D(2) && p.title === 'Você recebeu 1 falta'), 'O1: profissional recebe só o "Prazo expirado" genérico')
+  ok(pushesDe('dono').some(p => p.data.obra_id === D(2) && p.title === '⏰ Prazo expirado!'), 'O1: dono segue com "Prazo expirado" (o profissional tinha proposto horário)')
   ok(f.filter(x => x.demanda_id === D(6) && x.motivo === 'não marcou horário').length === 1, 'O3 (nunca propôs): falta "não marcou horário"')
+  ok((await eventos(U(1))).some(x => x.demanda_id === D(6) && x.tabela === 'obras' && x.motivo === 'prazo_vencido_sem_horario'), 'O3: evento compromisso_nao_cumprido (obras)')
   ok(pushesDe('prof').some(p => p.data.obra_id === D(6) && p.title === 'Você recebeu 1 falta'), 'O3: aviso de falta')
+  ok(pushesDe('dono').some(p => p.data.obra_id === D(6) && p.title === '⏰ O profissional não marcou horário'), 'O3: dono recebe "não marcou horário" (sem silêncio: é evento crítico)')
+  ok((await statusProposta('obras', 6, U(3))).status === 'contraproposta_dono', "O3: concorrente volta a 'contraproposta_dono' (status que tinha antes do match)")
+  ok(!pushesDe('conc').some(p => p.data.obra_id === D(6)) && (await linha('obras', 6)).aviso_reabertura_em !== null, 'O3 às 23:30 SP: aviso de reabertura ADIADO (claim devido, nenhum push ao concorrente)')
+  ok((await statusProposta('obras', 5, U(3))).status === 'recusado' && (await linha('obras', 5)).aviso_reabertura_em === null, 'O2 (horário valendo, não chegou): concorrente NÃO é restaurado nem avisado (fora do escopo)')
+  // 07:30 SP do dia seguinte: o tique do cron entrega o aviso adiado.
+  await fixarAgora(21.5 * 60)
+  await A.avisarReabertura('obras')
+  const pConcO3 = pushesDe('conc').find(p => p.data.obra_id === D(6))
+  ok(pConcO3 && pConcO3.title === '🔄 Pedido disponível de novo' && pConcO3.body === 'A demanda "O3 sem proposta" voltou a ficar disponível — o cliente pode escolher você.' && pConcO3.data.tipo === 'nova_obra',
+     'O3 às 07:30 SP: concorrente avisado (toque nova_obra)', pConcO3 && { title: pConcO3.title, tipo: pConcO3.data.tipo })
+  ok((await linha('obras', 6)).aviso_reabertura_em === null && emails.some(e => e.para === 'conc@x.invalid' && e.assunto === '🔄 Pedido disponível de novo'), 'O3: claim limpo + e-mail ao concorrente')
+  await A.avisarReabertura('obras')
+  ok(pushesDe('conc').filter(p => p.data.obra_id === D(6)).length === 1, 'O3: rodar de novo não repete o aviso')
   const f2 = await faltas(U(2))
   ok(f2.length === 1 && f2[0].demanda_id === D(5) && f2[0].motivo === null, 'O2 (horário valendo, não chegou): falta de não comparecimento (sem motivo), como sempre', f2)
   ok(pushesDe('outro').some(p => p.data.obra_id === D(5) && p.title === '⏰ Prazo expirado!') && !pushesDe('outro').some(p => p.title === 'Você recebeu 1 falta'), 'O2: aviso genérico, sem o de "não marcou horário"')

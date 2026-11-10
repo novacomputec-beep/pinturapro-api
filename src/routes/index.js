@@ -1754,6 +1754,8 @@ const migracaoPronta = (async () => {
       // explícita do dono antes do match não tem marcador e fica recusada.
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS status_antes_match TEXT`)
     }
+    // Reabertura pelo cronômetro (utils/reaberturaMatch): aviso_reabertura_em em obras/reparos.
+    await require('../utils/reaberturaMatch').migrarReaberturaMatch(client)
     // Indicações (utils/indicacoes): código único de 6 caracteres por profissional, quem o
     // indicou, e os dois agregados por indicador (meses de bônus com teto, embaixador).
     // Colunas ADD IF NOT EXISTS; a função é CREATE OR REPLACE; o backfill só toca prestador
