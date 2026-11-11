@@ -59,10 +59,16 @@ const { registrarTickets, registrarRecibos } = require('../utils/pushRecibos')
 // 'outros' chegar aqui quando ele é a ÚNICA categoria da demanda. Cada usuário sai UMA vez da
 // consulta (é uma linha por u.id), então ninguém é avisado duas vezes por evento.
 // Casamento especialidades × lista de slugs (publicoDemanda, utils/gruposCategorias): NULL = sem
-// filtro (todo elegível da cidade); lista = quem tem ao menos um dos slugs — inclusive 'outros',
-// que aqui é um slug como outro qualquer (quem marcou "Outros" no perfil).
+// filtro (todo elegível da cidade); lista = quem tem ao menos um dos slugs.
+// "FAZ-TUDO" (dono, 11/11/2026): quem marcou 'outros' em especialidades entra no público de TODA
+// demanda aberta — obras e reparos, qualquer categoria, com ou sem capacidade de obras — nos dois
+// canais e em tudo o que passa por broadcastPaginado / reivindicarEmailsNovaDemanda (demanda nova,
+// rede de segurança, lembrete, reanúncio, oferta aumentada). Alcance, teto diário + resumo, horário
+// de silêncio, exclusão do criador e bloqueios continuam valendo: isto só abre a porta da
+// CATEGORIA e da CAPACIDADE. `alias` = alias de usuarios (u / nat).
+const sqlFazTudo = (alias = 'u') => `('outros' = ANY(COALESCE(${alias}.especialidades, '{}'::text[])))`
 const sqlCasaCategorias = (param) =>
-  `(${param}::text[] IS NULL OR u.especialidades && ${param}::text[])`
+  `(${param}::text[] IS NULL OR u.especialidades && ${param}::text[] OR ${sqlFazTudo('u')})`
 
 // PÚBLICO PROFISSIONAL de uma demanda, por LADO — o ÚNICO lugar do predicado de role/tipo. As
 // duas consultas de público (push em broadcastPaginado, e-mail em reivindicarEmailsNovaDemanda)
@@ -95,11 +101,14 @@ const ponto = (linha) => ({ lat: coordenada(linha?.latitude), lng: coordenada(li
 // text[] com as especialidades inferidas da obra e de um boolean. Quem tem alguma delas em
 // especialidades é ACRESCENTADO ao público genérico (pode_obras); com pSomente true sai SÓ quem
 // não é do público genérico (reanúncio aos recém-casados). NULL no text[] = público de sempre.
+// Faz-tudo ('outros' em especialidades, sqlFazTudo) entra no público GENÉRICO dos dois lados: sem
+// exigir pode_obras na obra nem pode_servicos no serviço. Por ser público genérico, com pSomente
+// (reanúncio só aos acrescentados pela inferência) ele fica de fora como os demais — já foi avisado.
 const sqlPublicoProfissional = (param, inferidas = null) => `u.role = 'prestador' AND (CASE ${param}::text
            WHEN 'obras'   THEN ${inferidas
-             ? `((${sqlPodeObras('u')} AND NOT ${inferidas.pSomente}::boolean) OR COALESCE(u.especialidades && ${inferidas.pSlugs}::text[], false))`
-             : sqlPodeObras('u')}
-           WHEN 'reparos' THEN ${sqlPodeServicos('u')}
+             ? `(((${sqlPodeObras('u')} OR ${sqlFazTudo('u')}) AND NOT ${inferidas.pSomente}::boolean) OR COALESCE(u.especialidades && ${inferidas.pSlugs}::text[], false))`
+             : `(${sqlPodeObras('u')} OR ${sqlFazTudo('u')})`}
+           WHEN 'reparos' THEN (${sqlPodeServicos('u')} OR ${sqlFazTudo('u')})
            -- 'todos': qualquer profissional (pintor ou reparador), seja qual for a especialidade —
            -- só o aviso "fora da sua área" usa (ver foraDaArea em broadcastPaginado).
            WHEN 'todos'   THEN COALESCE(u.tipo_prestador IN ('pintor', 'reparador'), false)
@@ -388,7 +397,9 @@ const SQL_SEM_INDICACAO_RECENTE = `NOT EXISTS (SELECT 1 FROM usuarios ind
 //   - COM 'outros' (sozinho ou não): TODO reparador elegível da cidade, sem olhar especialidade
 //     (decisão do dono, 01/11/2026 — o e-mail é que fica restrito, ver reivindicarEmailsNovaDemanda);
 //   - sem 'outros': quem tem esse slug no array OU, com grupos_relacionados_ativo ligada,
-//     qualquer slug do mesmo grupo (expandirCategoria, utils/gruposCategorias).
+//     qualquer slug do mesmo grupo (expandirCategoria, utils/gruposCategorias);
+//   - e SEMPRE o faz-tudo — quem marcou 'outros' em especialidades (sqlFazTudo), em qualquer lado
+//     e categoria, sem exigir a capacidade do lado (dono, 11/11/2026).
 // Registro por destinatário em push_entregas (routes/index.js, migração). Um statement por
 // página. ON CONFLICT: a linha já existe quando é RE-tentativa (rede de segurança) ou quando o
 // claim da demanda deu ROLLBACK e o broadcast inteiro rodou de novo — nos dois casos o
@@ -465,8 +476,10 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
   // Lista de slugs a casar (categoria + grupo, ou só ela; null no lado obra), resolvida UMA vez
   // por broadcast — a chave de config é lida aqui, não a cada página.
   const { push: categorias } = foraDasCategorias ? { push: foraDasCategorias } : await publicoDemanda(categoria)
+  // foraDasCategorias (categorias ACRESCENTADAS ao reparo): só quem NÃO estava no público antigo —
+  // o faz-tudo estava (recebe tudo), então também fica de fora.
   const sqlCategorias = foraDasCategorias
-    ? `NOT COALESCE(u.especialidades && $6::text[], false)`
+    ? `NOT (COALESCE(u.especialidades && $6::text[], false) OR ${sqlFazTudo('u')})`
     : sqlCasaCategorias('$6')
   let cursor = null
   for (;;) {
@@ -493,10 +506,13 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
     }
     if (excluirCategorias) {
       params.push(excluirCategorias)
-      filtrosOpcionais += `\n         AND NOT COALESCE(u.especialidades && $${params.length}::text[], false)`
+      // Quem casava com o público antigo (inclusive o faz-tudo) já recebeu — não entra de novo.
+      filtrosOpcionais += `\n         AND NOT (COALESCE(u.especialidades && $${params.length}::text[], false) OR ${sqlFazTudo('u')})`
     }
     if (foraDaArea) {
       if (!['obras', 'reparos'].includes(foraDaArea.publico)) throw new Error(`broadcast ${rotulo}: foraDaArea.publico inválido`)
+      // Público normal da demanda = capacidade do lado OU faz-tudo; categoria casando OU faz-tudo —
+      // a pessoa com 'outros' já está no público normal de toda demanda, então não é "fora da área".
       const sqlPublicoNormal = foraDaArea.publico === 'obras' ? sqlPodeObras('nat') : sqlPodeServicos('nat')
       params.push(foraDaArea.categorias ?? null)
       const pCat = `$${params.length}`
@@ -505,8 +521,8 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
       filtrosOpcionais += `
          AND u.avisos_todas_areas IS TRUE
          AND NOT EXISTS (SELECT 1 FROM usuarios nat
-                          WHERE ${sqlProfissionalDaPessoa('nat.id', 'u.id')} AND ${sqlPublicoNormal}
-                            AND (${pCat}::text[] IS NULL OR nat.especialidades && ${pCat}::text[]))
+                          WHERE ${sqlProfissionalDaPessoa('nat.id', 'u.id')} AND (${sqlPublicoNormal} OR ${sqlFazTudo('nat')})
+                            AND (${pCat}::text[] IS NULL OR nat.especialidades && ${pCat}::text[] OR ${sqlFazTudo('nat')}))
          AND ${sqlAbaixoDoLimiteForaDaArea(pLim)}`
       if (demanda) {
         params.push(demanda.id)
@@ -980,7 +996,8 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     // Lista `email` de publicoDemanda (utils/gruposCategorias): categorias + grupos; com 'outros'
     // entre elas, só os grupos das OUTRAS categorias ou, 'outros' sozinho, só quem marcou
     // 'outros' — o push é que vai a todos. null no lado obra (obras.categoria não é ofício e as
-    // especialidades de obra não têm 'outros', então o lado obra segue sem filtro).
+    // especialidades de obra não têm 'outros', então o lado obra segue sem filtro). O faz-tudo
+    // ('outros' no perfil) entra em qualquer lista via sqlCasaCategorias / sqlPublicoProfissional.
     const { email: categorias } = await publicoDemanda(lado.comCategoria ? categoriasDoReparo(demanda) : null, client)
 
     // Elegíveis (espelho de broadcastPaginado, sem exigir token e exigindo e-mail). Com
@@ -1036,7 +1053,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
                   AND ea.created_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')))
          -- Categorias ADICIONADAS ($8, lado.excluirCategorias): só quem NÃO casava com o público
          -- antigo — o UNIQUE de email_alertas já barra quem recebeu o e-mail original.
-         AND ($8::text[] IS NULL OR NOT COALESCE(u.especialidades && $8::text[], false))
+         AND ($8::text[] IS NULL OR NOT (COALESCE(u.especialidades && $8::text[], false) OR ${sqlFazTudo('u')}))
        ORDER BY ${sqlOrdemDaPessoa('$1')}
        ) x
        ORDER BY (x.push_token IS NULL) DESC, x.id`,
@@ -4005,6 +4022,7 @@ module.exports = {
   EMAIL_ALERTAS_RESERVA_CRITICOS,
   EMAIL_ALERTAS_TETO_DEMANDA,
   sqlCasaCategorias,
+  sqlFazTudo,
   enviarPushNovoPendente,
   lembrarDemandasSemResposta,
   // Reanúncio pelas especialidades inferidas (services/obrasInferidasService).
