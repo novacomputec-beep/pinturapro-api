@@ -100,6 +100,8 @@ const { migrarAvisosForaDaArea, lerLimiteAvisosForaDaArea, gravarLimiteAvisosFor
 const { validarValorDemanda, MENSAGEM_VALOR_OBRIGATORIO } = require('../utils/valorDemanda')
 // Aviso de demanda nova por distância: migração de boot e o raio que o app manda no feed (só registro).
 const { migrarAvisosPorDistancia, registrarRaioEscolhido } = require('../utils/avisosPorDistancia')
+// GET /prestador/oportunidades-resumo: contagem de demandas abertas ao alcance do profissional.
+const { oportunidadesResumo } = require('../utils/oportunidadesResumo')
 // Mensagens prontas (frases do catálogo entre o dono e o profissional escolhido): migração e rotas.
 const { migrarMensagensProntas } = require('../utils/mensagensProntas')
 const { handlers: mensagensProntasHandlers } = require('../services/mensagensProntasService')
@@ -3810,6 +3812,9 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         -- cliente_nao_respondeu_90d: propostas de horário de profissional que o dono (pessoa) deixou
         -- vencer sem resposta nos últimos 90 dias (utils/responsabilidade) — sai a qualquer leitor.
         ${sqlClienteNaoRespondeu90d('o.criado_por')} AS cliente_nao_respondeu_90d,
+        -- especialidades_inferidas (slugs de ofício do título + descrição) nunca NULL no payload —
+        -- repete a coluna de o.* já coalescida (a última de mesmo nome vence na linha do pg).
+        COALESCE(o.especialidades_inferidas, '{}'::text[]) AS especialidades_inferidas,
         -- Lembretes "Agende seu atendimento" deste match: quantos já saíram ao profissional e
         -- quando sai o próximo (alertaService.sqlProximoLembreteAgendar); só para o dono.
         ${sqlProximoLembreteAgendar('obras', 'o.')} AS proximo_lembrete_agendar_em,
@@ -5223,6 +5228,19 @@ router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
   } catch (err) {
     console.error('[reparos/meus-contratos-dono]', err.message)
     res.status(500).json({ erro: 'Erro ao buscar contratos finalizados' })
+  }
+})
+
+// Resumo de oportunidades do profissional logado (dono, 11/11/2026): { abertos_perto,
+// na_especialidade } — obras + reparos abertos ao alcance (mesma cidade OU até min(raio, 50 km),
+// a regra do aviso de demanda nova) e, dessas, as que a pessoa pode atender. Só leitura; sem
+// gate de assinatura (é um número para o app convidar a assinar/abrir o feed), mas só prestador.
+router.get('/prestador/oportunidades-resumo', autenticar, exigirPrestador, async (req, res) => {
+  try {
+    res.json(await oportunidadesResumo(pool, req.usuario.id))
+  } catch (err) {
+    console.error('[prestador/oportunidades-resumo]', err.message)
+    res.status(500).json({ erro: 'Erro ao resumir oportunidades' })
   }
 })
 

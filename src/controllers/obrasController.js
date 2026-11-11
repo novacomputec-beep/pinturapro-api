@@ -29,6 +29,9 @@ const listar = async (req, res) => {
       SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.estado, o.bairro, o.uf,
              o.latitude, o.longitude, o.coordenadas_origem,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status, o.horas_para_expirar, o.prazo_modo, o.criado_em, o.ultima_extensao_horas,
+             -- Slugs de ofício deduzidos do título + descrição (utils/especialidadesInferidas), para o
+             -- card dizer ao profissional por que a obra apareceu para ele (11/11/2026). Nunca NULL.
+             COALESCE(o.especialidades_inferidas, '{}'::text[]) AS especialidades_inferidas,
              ${sqlTotalExtensaoObra('o.')} AS total_extensao_horas,
              ${sqlClienteNaoRespondeu90d('o.criado_por')} AS cliente_nao_respondeu_90d,
              0 as distancia_metros,

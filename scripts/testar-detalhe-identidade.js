@@ -127,6 +127,8 @@ const main = async () => {
   `)
 
   // O que o detalhe lê além do esquema acima.
+  // obras.especialidades_inferidas (GET /obras/:id devolve a lista, 11/11/2026) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(db)
   await db.exec(`
     CREATE TABLE assinaturas (usuario_id uuid, plano text, valor_mensal numeric, status text, tipo text, proximo_vencimento timestamptz, criado_em timestamptz DEFAULT now());
     ALTER TABLE usuarios ADD COLUMN anos_experiencia int, ADD COLUMN tamanho_equipe int, ADD COLUMN embaixador boolean DEFAULT false;

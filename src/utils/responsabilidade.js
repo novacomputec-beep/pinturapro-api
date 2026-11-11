@@ -24,6 +24,9 @@
 // varredura (aplicarCreditosPendentes), que também cobre quem só começa a pagar depois (fim da
 // janela de lançamento, pagamento, aprovação). Mesmo desenho de meses_bonus_indicacao.
 //
+// REDENÇÃO (11/11/2026): as marcas de leitura param de contar um evento depois de 2 demandas
+// seguidas concluídas sem o mesmo problema (ver sqlRedimido); o bloqueio de 7 dias não.
+//
 // Módulo inerte fora de migrarResponsabilidade: constantes e expressões SQL.
 const { sqlContasDaPessoa, sqlContasProfissionaisDaPessoa } = require('./tipoConta')
 
@@ -38,11 +41,53 @@ const AVISO_FINAL_ANTES_MIN = 60
 
 const sqlJanela = (col = 'criado_em') => `${col} > NOW() - INTERVAL '${JANELA_DIAS} days'`
 
-// Eventos do PROFISSIONAL (pessoa de exprUsuarioId, contas 'prestador') na janela.
-const sqlCompromissosNaoCumpridos90d = (exprUsuarioId) =>
-  `(SELECT COUNT(*)::int FROM eventos_responsabilidade ev
+// REDENÇÃO (dono, 11/11/2026): o evento deixa de contar nas MARCAS (compromissos_nao_cumpridos_90d,
+// cumpriu_todos, cliente_nao_respondeu_90d) quando a pessoa completou CONCLUSOES_PARA_REDENCAO
+// demandas SEGUIDAS, depois dele, sem o mesmo problema — ou passados os 90 dias, o que vier
+// antes. "Seguidas" = duas conclusões limpas sem outro evento do mesmo tipo entre elas.
+//   profissional: match posterior ao evento (match_feito_em), com horário marcado
+//                 (chegada_prevista_em) e serviço encerrado (status 'encerrada');
+//   dono:         demanda criada depois do evento em que toda proposta de horário do profissional
+//                 foi respondida — chegou a horário aceito (chegada_prevista_em) ou foi encerrada —
+//                 e sem evento cliente_nao_respondeu nela.
+// O bloqueio de 7 dias (responsabilidadeService.registrarClienteNaoRespondeu) NÃO usa isto:
+// conta os 90 dias cheios, como antes.
+const CONCLUSOES_PARA_REDENCAO = 2
+// Conclusões limpas da pessoa: (inicio = quando a demanda "começou" para ela, t = quando concluiu).
+const sqlConclusoesProfissional = (contas) => `
+      SELECT COALESCE(c.match_feito_em, c.encerrado_em) AS inicio, COALESCE(c.encerrado_em, c.match_feito_em) AS t FROM (
+        SELECT o.match_feito_em, o.encerrado_em FROM obras o
+         WHERE o.status = 'encerrada' AND o.chegada_prevista_em IS NOT NULL AND o.match_usuario_id IN (${contas})
+        UNION ALL
+        SELECT r.match_feito_em, r.encerrado_em FROM reparos r
+         WHERE r.status = 'encerrada' AND r.chegada_prevista_em IS NOT NULL AND r.match_usuario_id IN (${contas})) c`
+const sqlConclusoesDono = (contas) => `
+      SELECT c.criado_em AS inicio, COALESCE(c.encerrado_em, c.chegada_prevista_em) AS t FROM (
+        SELECT 'obras' AS tabela, o.id, o.criado_em, o.encerrado_em, o.chegada_prevista_em FROM obras o
+         WHERE o.criado_por IN (${contas}) AND (o.status = 'encerrada' OR o.chegada_prevista_em IS NOT NULL)
+        UNION ALL
+        SELECT 'reparos', r.id, r.criado_em, r.encerrado_em, r.chegada_prevista_em FROM reparos r
+         WHERE r.criado_por IN (${contas}) AND (r.status = 'encerrada' OR r.chegada_prevista_em IS NOT NULL)) c
+       WHERE NOT EXISTS (SELECT 1 FROM eventos_responsabilidade ex
+                          WHERE ex.tipo_evento = 'cliente_nao_respondeu' AND ex.tabela = c.tabela AND ex.demanda_id = c.id
+                            AND ex.usuario_id IN (${contas}))`
+// Predicado "o evento `ev` foi redimido": existem duas conclusões limpas c1 < c2, ambas iniciadas
+// depois do evento, sem outro evento do mesmo tipo da pessoa entre c1.t e c2.t.
+const sqlRedimido = (tipo, contas, sqlConclusoes) => `EXISTS (
+      SELECT 1 FROM (${sqlConclusoes}) c1 JOIN (${sqlConclusoes}) c2 ON c2.t > c1.t
+       WHERE c1.inicio > ev.criado_em AND c2.inicio > ev.criado_em
+         AND NOT EXISTS (SELECT 1 FROM eventos_responsabilidade e2
+                          WHERE e2.tipo_evento = '${tipo}' AND e2.usuario_id IN (${contas})
+                            AND e2.criado_em > c1.t AND e2.criado_em < c2.t))`
+
+// Eventos do PROFISSIONAL (pessoa de exprUsuarioId, contas 'prestador') na janela e não redimidos.
+const sqlCompromissosNaoCumpridos90d = (exprUsuarioId) => {
+  const contas = sqlContasProfissionaisDaPessoa(exprUsuarioId)
+  return `(SELECT COUNT(*)::int FROM eventos_responsabilidade ev
      WHERE ev.tipo_evento = 'compromisso_nao_cumprido' AND ${sqlJanela('ev.criado_em')}
-       AND ev.usuario_id IN (${sqlContasProfissionaisDaPessoa(exprUsuarioId)}))`
+       AND ev.usuario_id IN (${contas})
+       AND NOT ${sqlRedimido('compromisso_nao_cumprido', contas, sqlConclusoesProfissional(contas))})`
+}
 // Serviços ENCERRADOS com este profissional (qualquer conta profissional da pessoa), obras + reparos.
 const sqlServicosEncerrados = (exprUsuarioId) =>
   `((SELECT COUNT(*) FROM obras eo WHERE eo.status = 'encerrada' AND eo.match_usuario_id IN (${sqlContasProfissionaisDaPessoa(exprUsuarioId)}))
@@ -51,11 +96,14 @@ const sqlServicosEncerrados = (exprUsuarioId) =>
 const sqlCumpriuTodos = (exprUsuarioId) =>
   `(${sqlServicosEncerrados(exprUsuarioId)} > 0 AND ${sqlCompromissosNaoCumpridos90d(exprUsuarioId)} = 0)`
 
-// Eventos do DONO (pessoa de exprCriadoPor, contas contratantes) na janela.
-const sqlClienteNaoRespondeu90d = (exprCriadoPor) =>
-  `(SELECT COUNT(*)::int FROM eventos_responsabilidade ev
+// Eventos do DONO (pessoa de exprCriadoPor, contas contratantes) na janela e não redimidos.
+const sqlClienteNaoRespondeu90d = (exprCriadoPor) => {
+  const contas = sqlContasDaPessoa(exprCriadoPor)
+  return `(SELECT COUNT(*)::int FROM eventos_responsabilidade ev
      WHERE ev.tipo_evento = 'cliente_nao_respondeu' AND ${sqlJanela('ev.criado_em')}
-       AND ev.usuario_id IN (${sqlContasDaPessoa(exprCriadoPor)}))`
+       AND ev.usuario_id IN (${contas})
+       AND NOT ${sqlRedimido('cliente_nao_respondeu', contas, sqlConclusoesDono(contas))})`
+}
 // Fim do bloqueio de pedidos novos da pessoa do dono, ou NULL quando não está bloqueada.
 const sqlPedidosLiberadoEm = (exprUsuarioId) =>
   `(SELECT MAX(ev.bloqueio_ate) FROM eventos_responsabilidade ev
@@ -119,7 +167,7 @@ const migrarResponsabilidade = async (client) => {
 
 module.exports = {
   JANELA_DIAS, EVENTOS_PARA_BLOQUEIO, BLOQUEIO_PEDIDOS_DIAS, CREDITO_DIAS_COMPENSACAO, TIPOS_EVENTO,
-  MOTIVO_PROPOSTA_VENCIDA, AVISO_FINAL_ANTES_MIN,
+  MOTIVO_PROPOSTA_VENCIDA, AVISO_FINAL_ANTES_MIN, CONCLUSOES_PARA_REDENCAO,
   sqlCompromissosNaoCumpridos90d, sqlCumpriuTodos, sqlClienteNaoRespondeu90d, sqlPedidosLiberadoEm,
   SQL_ASSINATURA_PAGA_ATIVA, sqlAplicarCreditoPendente, migrarResponsabilidade,
 }
