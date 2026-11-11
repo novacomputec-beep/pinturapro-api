@@ -31,6 +31,8 @@ const { pool } = require('../utils/supabase')
 const { SQL_ZERAR_AGENDA, formatarDataHoraSP } = require('../utils/agendamento')
 const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunciarDemanda, contatoDaPessoa } = require('./alertaService')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
+const { STATUS_VALENDO } = require('../utils/reaberturaMatch')
+const { MARCA } = require('../utils/marca')
 
 const MOTIVOS = ['imprevisto', 'nao_preciso', 'nao_consigo_horario', 'outro']
 const ROTULO_MOTIVO = {
@@ -265,6 +267,81 @@ const executar = async ({ lado, d, canceladoPor, atorId = canceladoPor, motivo, 
   return { ok: true, encerrada: encerrar }
 }
 
+// ---------- exclusão de conta do profissional casado (dono, 11/11/2026) ----------
+// A conta do profissional ESCOLHIDO está sendo excluída (DELETE /conta/excluir, DELETE /usuarios/:id).
+// Antes da cascata apagar as linhas dele, cada obra/reparo ABERTO em que ele é o match é desfeito
+// como uma desistência do profissional: match/agendamento/chegada zerados (SQL_LIMPAR_MATCH), prazo
+// com o piso de 1h, demanda segue 'aberta', propostas rebaixadas PELO MATCH voltam ao status de
+// antes (status_antes_match), a proposta dele vira 'cancelado' (motivo 'conta_excluida') — a cascata
+// a apaga em seguida. SEM falta, SEM bloqueio, SEM contar em cancelamentos frequentes: a conta deixa
+// de existir. Roda DENTRO da transação da exclusão (`client`) e devolve os efeitos a disparar DEPOIS
+// do COMMIT (avisarMatchesDesfeitosPorExclusao): dono (push + e-mail), interessados que voltaram a
+// valer ("reabriu") e o reanúncio aos profissionais que ainda não se manifestaram.
+const MOTIVO_CONTA_EXCLUIDA = 'conta_excluida'
+const desfazerMatchesPorExclusao = async (client, profissionalId) => {
+  const efeitos = []
+  for (const lado of Object.values(LADOS)) {
+    const abertas = await client.query(
+      `SELECT id, titulo, criado_por FROM ${lado.tabela}
+        WHERE match_usuario_id = $1 AND status = 'aberta' ORDER BY id FOR UPDATE`,
+      [profissionalId]
+    )
+    for (const d of abertas.rows) {
+      await client.query(
+        `UPDATE ${lado.tabela} SET ${SQL_LIMPAR_MATCH},
+                expira_em = GREATEST(expira_em, NOW() + INTERVAL '${PISO_PRAZO_RESTANTE}')
+          WHERE id = $1 AND match_usuario_id = $2`,
+        [d.id, profissionalId]
+      )
+      await client.query(
+        `UPDATE ${lado.proposta.tabela}
+            SET status = 'cancelado', cancelado_por = $2, cancelado_motivo = $3, cancelado_detalhe = NULL,
+                cancelado_em = NOW(), cancelado_acordo = false, status_antes_match = NULL
+          WHERE ${lado.proposta.coluna} = $1 AND usuario_id = $2 AND status = 'aceito'`,
+        [d.id, profissionalId, MOTIVO_CONTA_EXCLUIDA]
+      )
+      await client.query(
+        `UPDATE ${lado.proposta.tabela}
+            SET status = status_antes_match, status_antes_match = NULL
+          WHERE ${lado.proposta.coluna} = $1 AND usuario_id <> $2 AND status = 'recusado' AND status_antes_match IS NOT NULL`,
+        [d.id, profissionalId]
+      )
+      const interessados = (await client.query(
+        `SELECT DISTINCT usuario_id FROM ${lado.proposta.tabela}
+          WHERE ${lado.proposta.coluna} = $1 AND usuario_id <> $2 AND status = ANY($3::text[])`,
+        [d.id, profissionalId, STATUS_VALENDO]
+      )).rows.map(x => x.usuario_id)
+      efeitos.push({ lado, d, interessados })
+      console.log(`[CancelarMatch] ${lado.tipo} ${d.id}: match de ${profissionalId} desfeito por exclusão da conta (${interessados.length} interessado(s) voltam a valer)`)
+    }
+  }
+  return efeitos
+}
+// Depois do COMMIT. Nunca lança (a exclusão já aconteceu).
+const avisarMatchesDesfeitosPorExclusao = async (efeitos) => {
+  for (const { lado, d, interessados } of efeitos) {
+    try {
+      await avisar(d.criado_por, {
+        titulo: `O profissional escolhido saiu do ${MARCA}`,
+        corpo: `O profissional escolhido saiu do ${MARCA} — escolha outro interessado para "${d.titulo}".`,
+        data: { tipo: 'match_cancelado', [lado.chave]: d.id, motivo: MOTIVO_CONTA_EXCLUIDA, por: 'profissional', acordo: false },
+        rotulo: `conta excluída ${lado.tipo} ${d.id} dono`,
+      })
+      for (const u of interessados) {
+        await avisar(u, {
+          titulo: `O pedido "${d.titulo}" reabriu`,
+          corpo: `O profissional escolhido saiu do ${MARCA}. Seu interesse continua valendo e o cliente vai escolher de novo. Ainda não há escolhido.`,
+          data: { tipo: lado.tipo === 'obra' ? 'nova_obra' : 'novo_reparo', [lado.chave]: d.id, reaberta: true },
+          rotulo: `conta excluída ${lado.tipo} ${d.id} interessado`,
+        })
+      }
+      await reanunciarDemanda(lado.tabela, d.id).catch(() => {})
+    } catch (err) {
+      console.error(`[CancelarMatch] avisos da exclusão (${lado.tipo} ${d.id}):`, err.message)
+    }
+  }
+}
+
 // ---------- handlers ----------
 const handlers = (tabela) => {
   const lado = LADOS[tabela]
@@ -470,4 +547,5 @@ module.exports = {
   MOTIVOS, ROTULO_MOTIVO, ANTECEDENCIA_LIVRE_HORAS, ANTECEDENCIA_LIVRE_FAIXA_CURTA_HORAS, FAIXA_CURTA_HORAS,
   ACORDO_VALIDADE_HORAS, JANELA_CANCELAMENTOS_DIAS, AVISO_CANCELAMENTOS_N, SQL_LIMPAR_MATCH,
   classificar, pedidoCancelamento, handlers, expirarPedidosCancelamento, cancelarPorAdmin,
+  MOTIVO_CONTA_EXCLUIDA, desfazerMatchesPorExclusao, avisarMatchesDesfeitosPorExclusao,
 }

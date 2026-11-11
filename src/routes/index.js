@@ -29,7 +29,10 @@ const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaCon
         JANELA_PENALIDADE_DIAS, AVISOS_ANTES_DE_SUSPENDER, DIAS_SUSPENSAO_CONTATO } = require('../utils/tentativasContato')
 // Cancelamento justo de match pelas partes (antecedência, acordo mútuo, falta no tardio) —
 // substitui o uso de POST /:id/expirar-match por dono/profissional.
-const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQL_LIMPAR_MATCH } = require('../services/cancelamentoMatchService')
+const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQL_LIMPAR_MATCH,
+        desfazerMatchesPorExclusao, avisarMatchesDesfeitosPorExclusao } = require('../services/cancelamentoMatchService')
+// Exclusão de conta: registro em contas_excluidas (utils/contasExcluidas).
+const { migrarContasExcluidas, registrarContaExcluida } = require('../utils/contasExcluidas')
 const { handler: desfazerEscolhaHandler, sqlDesfazerLiberadoEm, sqlPodeEscolherOutro } = require('../services/desfazerEscolhaService')
 // Tolerância de chegada (15 min) e pedido de atraso (15/30/60 min, 2 por match, auto-aceite em
 // 10 min). Os endpoints antigos pedir-tempo/perguntar-tempo/informar-tempo/responder-tempo caem
@@ -742,6 +745,8 @@ const migracaoPronta = (async () => {
     await migrarResponsabilidade(client)
     // obras.especialidades_inferidas (slugs de ofício deduzidos do título + descrição) + índice GIN.
     await migrarEspecialidadesInferidas(client)
+    // Registro das contas excluídas (utils/contasExcluidas): id, nome, cpf_hash, role, excluido_em, por.
+    await migrarContasExcluidas(client)
     // Avisos ao PROFISSIONAL casado (alertaService.avisarMatchFeito / lembrarPrazoChegada):
     // aviso_match_enviado_em = push "Match feito!" logo após o match; lembrete_chegada_enviado_em
     // = lembrete antes do prazo de chegada. Cada um é um claim atômico (UPDATE ... WHERE IS NULL
@@ -2404,11 +2409,16 @@ router.delete('/usuarios/:id', autenticar, exigirSuperAdmin, async (req, res) =>
     const { id } = req.params
     if (id === req.usuario.id) return res.status(400).json({ erro: 'Não é possível excluir sua própria conta' })
 
-    const usuario = await client.query('SELECT id, role FROM usuarios WHERE id = $1', [id])
+    const usuario = await client.query('SELECT id, nome, role, cpf_cnpj FROM usuarios WHERE id = $1', [id])
     if (usuario.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
     if (usuario.rows[0].role === 'admin') return res.status(400).json({ erro: 'Não é possível excluir um administrador' })
 
     await client.query('BEGIN')
+
+    // Profissional ESCOLHIDO em demanda aberta: desfaz o match como desistência (sem falta), devolve os
+    // outros interessados e registra a conta em contas_excluidas — ANTES da cascata (cancelamentoMatchService).
+    const efeitos = await desfazerMatchesPorExclusao(client, id)
+    await registrarContaExcluida(client, usuario.rows[0], req.usuario.id)
 
     // Contratos ANTES de candidaturas/interesse_reparos/obras/reparos (ver comentário
     // em SQL_DELETE_CONTRATOS_DO_USUARIO): evita contratos órfãos no fluxo reparo.
@@ -2495,6 +2505,8 @@ router.delete('/usuarios/:id', autenticar, exigirSuperAdmin, async (req, res) =>
     await client.query('COMMIT')
 
     invalidarCachesUsuario(id)
+    // Dono (push + e-mail), interessados que voltaram a valer e reanúncio — depois do COMMIT.
+    if (efeitos.length > 0) avisarMatchesDesfeitosPorExclusao(efeitos).catch(() => {})
 
     res.json({ mensagem: 'Usuário excluído com sucesso' })
   } catch (err) {
@@ -2615,7 +2627,7 @@ const excluirContaNoBanco = async (client, id) => {
 // ao painel) e a conta admin/aprovador que exclui a si mesma apaga só a própria linha.
 // FOR UPDATE em ordem de id: duas exclusões simultâneas da mesma pessoa não se cruzam.
 const SQL_CONTAS_DA_EXCLUSAO = `
-  SELECT u.id, u.nome, u.email, u.role FROM usuarios u
+  SELECT u.id, u.nome, u.email, u.role, u.cpf_cnpj FROM usuarios u
    WHERE u.id = $1::uuid
       OR (u.role NOT IN ('admin', 'aprovador')
           AND ${sqlCpfNormalizado('u.cpf_cnpj')} = (
@@ -2672,11 +2684,21 @@ router.delete('/conta/excluir', autenticar, async (req, res) => {
     await client.query('BEGIN')
     emTransacao = true
     const contas = (await client.query(SQL_CONTAS_DA_EXCLUSAO, [usuario.id])).rows
-    for (const conta of contas) await excluirContaNoBanco(client, conta.id)
+    // Por conta: matches abertos em que ela é a escolhida são desfeitos como desistência (sem falta;
+    // cancelamentoMatchService.desfazerMatchesPorExclusao), a conta entra em contas_excluidas e só
+    // então a cascata de sempre roda. Tudo na MESMA transação.
+    const efeitos = []
+    for (const conta of contas) {
+      efeitos.push(...await desfazerMatchesPorExclusao(client, conta.id))
+      await registrarContaExcluida(client, conta, 'usuario')
+      await excluirContaNoBanco(client, conta.id)
+    }
     await client.query('COMMIT')
     emTransacao = false
 
     for (const conta of contas) invalidarCachesUsuario(conta.id)
+    // Dono (push + e-mail), interessados que voltaram a valer e reanúncio — depois do COMMIT.
+    if (efeitos.length > 0) avisarMatchesDesfeitosPorExclusao(efeitos).catch(() => {})
     // Contas excluídas não tentam de novo: some com os contadores delas (mantém a tabela pequena).
     for (const conta of contas) limparTentativas('excluir_conta', String(conta.id)).catch(() => {})
     console.log(`[ExcluirConta] ${usuario.id}: ${contas.length} conta(s) da pessoa excluída(s) (${contas.map(c => c.role).join(', ')}) — confirmação por ${confirmou ? 'palavra' : 'senha'}`)
