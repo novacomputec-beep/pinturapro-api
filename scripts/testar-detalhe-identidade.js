@@ -136,6 +136,8 @@ const main = async () => {
   `)
   // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
+  // Retrato da desistência por exclusão de conta (utils/desistencias) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/desistencias')).migrarDesistencias(db)
   await db.query(`INSERT INTO usuarios (id, nome, email, role, tipo_dono, tipo_prestador, cpf_cnpj, especialidades, verificacao_status) VALUES
     ($1, 'Dona (conta obra)',    'dona@x.invalid',   'dono_obra', 'pintura', NULL, '111.111.111-11', NULL, 'aprovado'),
     ($2, 'Dona (conta serviço)', 'dona@x.invalid',   'dono_obra', 'reparo',  NULL, '11111111111',    NULL, 'aprovado'),

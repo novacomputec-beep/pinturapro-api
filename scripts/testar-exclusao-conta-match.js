@@ -137,6 +137,7 @@ const main = async () => {
   await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(cliente)
   await CE.migrarContasExcluidas(cliente)
   await CE.migrarContasExcluidas(cliente)
+  await require(path.join(REPO, 'src/utils/desistencias')).migrarDesistencias(cliente)
   ok(true, 'migração contas_excluidas idempotente (2x)')
   const usr = (id, nome, role, extra = {}) => db.query(
     `INSERT INTO usuarios (id, nome, email, role, tipo_dono, tipo_prestador, cpf_cnpj, push_token, cidade, uf, especialidades, senha_hash)
@@ -207,6 +208,22 @@ const main = async () => {
   ok(ce.length === 2 && ce.every(c => c.por === 'usuario') && ce[0].cpf_hash === ce[1].cpf_hash && ce[0].cpf_hash === CE.hashCpf('222.222.222-22') && ce.map(c => c.role).join() === 'prestador,prestador',
      'contas_excluidas: as 2 contas, por = usuario, mesmo cpf_hash (sha256 dos dígitos), nunca o CPF', ce.map(c => ({ nome: c.nome, por: c.por })))
   ok((await db.query(`SELECT count(*)::int AS n FROM usuarios WHERE id = ANY($1::uuid[])`, [[PRO, PRO_IRMA]])).rows[0].n === 0, 'as contas de fato sumiram')
+  // Retrato da desistência (sobrevive à cascata) → folha do dono no detalhe e desistencia_recente em /minhas.
+  const snaps = (await db.query(`SELECT tabela, demanda_id, usuario_id, nome_curto, foto_url, genero, motivo FROM desistencias ORDER BY tabela`)).rows
+  ok(snaps.length === 2 && snaps.find(s => s.tabela === 'reparos')?.nome_curto === 'Alex R.' && snaps.find(s => s.tabela === 'reparos')?.usuario_id === PRO
+     && snaps.find(s => s.tabela === 'obras')?.nome_curto === 'Alex P.' && snaps.find(s => s.tabela === 'obras')?.usuario_id === PRO_IRMA && snaps.every(s => s.motivo === 'conta_excluida' && s.genero === null),
+     'desistencias: um retrato por demanda desfeita (reparo: "Alex R.", obra: "Alex P."), motivo conta_excluida, usuario_id guardado como id simples', snaps.map(s => `${s.tabela}:${s.nome_curto}`))
+  let det = await quieto(() => rodar('get', '/reparos/:id', DONO, { params: { id: R1 } }))
+  ok(det.status === 200 && Array.isArray(det.body.desistencias) && det.body.desistencias.length === 1 && det.body.desistencias[0].nome === 'Alex' && det.body.desistencias[0].motivo === 'conta_excluida'
+     && det.body.desistencias[0].motivo_texto === 'O profissional excluiu a conta e não vai mais fazer o serviço.' && det.body.desistencias[0].usuario_id === PRO,
+     'GET /reparos/:id (dono): desistencias traz o retrato com o rótulo de conta excluída', det.body.desistencias)
+  ok(det.body.interessados_ativos === 2, 'GET /reparos/:id: interessados_ativos = I1 + I2 restaurados', det.body.interessados_ativos)
+  const minhas = await quieto(() => rodar('get', '/reparos/minhas', DONO))
+  const m1 = (minhas.body.reparos || []).find(x => x.id === R1)
+  ok(minhas.status === 200 && m1?.desistencia_recente?.nome === 'Alex' && m1.desistencia_recente.motivo_texto === 'O profissional excluiu a conta e não vai mais fazer o serviço.',
+     'GET /reparos/minhas: desistencia_recente do reparo sem match vem do retrato', m1?.desistencia_recente)
+  det = await quieto(() => rodar('get', '/obras/:id', DONO, { params: { id: O1 } }))
+  ok(det.status === 200 && det.body.desistencias?.length === 1 && det.body.desistencias[0].nome === 'Alex' && det.body.desistencias[0].motivo === 'conta_excluida', 'GET /obras/:id (dono): idem na obra', det.body.desistencias)
 
   // ═══ 2. Admin exclui Beto, agora escolhido na obra ═════════════════════════════════════════
   await db.query(`UPDATE candidaturas SET status = 'aceito' WHERE obra_id = $1 AND usuario_id = $2`, [O1, PRO2])

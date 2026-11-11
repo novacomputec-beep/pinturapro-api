@@ -124,6 +124,8 @@ const main = async () => {
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
   // obras.especialidades_inferidas (capacidadesDaPessoa / feed / aviso de obra nova leem a coluna) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(db)
+  // Retrato da desistência por exclusão de conta (utils/desistencias) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/desistencias')).migrarDesistencias(db)
   await db.query(`INSERT INTO usuarios (id, nome, email, role, tipo_dono, tipo_prestador, cpf_cnpj, push_token) VALUES
     ($1, 'Pessoa (obra)',   'pessoa@x.invalid', 'dono_obra', 'pintura', NULL, '111.111.111-11', NULL),
     ($2, 'Pessoa (reparo)', 'pessoa@x.invalid', 'dono_obra', 'reparo',  NULL, '11111111111',    'ExponentPushToken[B]'),
