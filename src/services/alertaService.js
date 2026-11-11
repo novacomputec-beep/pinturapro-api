@@ -43,7 +43,7 @@ const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZE
 // Reabertura pelo cronômetro quando o profissional nunca marcou horário (utils/reaberturaMatch):
 // propostas rebaixadas pelo match voltam a valer, dono recebe "não marcou horário", interessados
 // recebem "disponível de novo" (fora do silêncio noturno, claim aviso_reabertura_em).
-const { STATUS_VALENDO: STATUS_VALENDO_REABERTURA, LADOS: LADOS_REABERTURA, TITULO_REABERTA, corpoReaberta, TITULO_DONO_SEM_HORARIO, corpoDonoSemHorario } = require('../utils/reaberturaMatch')
+const { STATUS_VALENDO: STATUS_VALENDO_REABERTURA, LADOS: LADOS_REABERTURA, TITULO_REABERTA, corpoReaberta, TITULO_DONO_SEM_HORARIO, corpoDonoSemHorario, sqlRestaurarPropostas } = require('../utils/reaberturaMatch')
 // Grupos de categorias relacionadas (lado reparo): a categoria da demanda vira a lista de slugs
 // do seu grupo (chave grupos_relacionados_ativo) antes do casamento com especialidades, nos DOIS
 // públicos (broadcastPaginado e reivindicarEmailsNovaDemanda). utils/gruposCategorias só importa
@@ -3565,15 +3565,11 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
              AND alvo.reparo_id IN (SELECT id FROM desfeitos)
           RETURNING ir.id
         ), restauradas AS (
-          -- Sem horário marcado: concorrentes rebaixados PELO MATCH (status_antes_match) voltam
-          -- ao status que tinham — o dono tem a quem "escolher outro". Recusa explícita do dono
-          -- (sem marcador) fica recusada. Linhas distintas da CTE acima (lá só o 'aceito').
-          UPDATE interesse_reparos ir SET status = ir.status_antes_match, status_antes_match = NULL
-            FROM unnest($1::uuid[], $2::uuid[]) AS alvo(reparo_id, usuario_id)
-           WHERE ir.reparo_id = alvo.reparo_id AND ir.usuario_id <> alvo.usuario_id
-             AND ir.status = 'recusado' AND ir.status_antes_match IS NOT NULL
-             AND alvo.reparo_id = ANY($3::uuid[]) AND alvo.reparo_id IN (SELECT id FROM desfeitos)
-          RETURNING ir.id
+          -- TODO reparo que volta ao feed (com ou sem horário marcado — regra única de 11/11/2026,
+          -- utils/reaberturaMatch): concorrentes rebaixados PELO MATCH voltam ao status que tinham;
+          -- recusa explícita do dono (sem marcador) fica recusada. Antes só o "sem horário" restaurava.
+          ${sqlRestaurarPropostas('reparos', { em: 'SELECT id FROM desfeitos' })}
+          RETURNING rp.id
         )
         SELECT id FROM desfeitos
       `, [candidatos.rows.map(c => c.id), candidatos.rows.map(c => c.match_usuario_id), semHorarioIds])
@@ -3727,12 +3723,10 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
              AND alvo.obra_id IN (SELECT id FROM desfeitos)
           RETURNING c.id
         ), restauradas AS (
-          UPDATE candidaturas c SET status = c.status_antes_match, status_antes_match = NULL
-            FROM unnest($1::uuid[], $2::uuid[]) AS alvo(obra_id, usuario_id)
-           WHERE c.obra_id = alvo.obra_id AND c.usuario_id <> alvo.usuario_id
-             AND c.status = 'recusado' AND c.status_antes_match IS NOT NULL
-             AND alvo.obra_id = ANY($3::uuid[]) AND alvo.obra_id IN (SELECT id FROM desfeitos)
-          RETURNING c.id
+          -- Toda obra que volta ao feed restaura as candidaturas rebaixadas pelo match (regra única,
+          -- utils/reaberturaMatch); antes só o "sem horário" restaurava.
+          ${sqlRestaurarPropostas('obras', { em: 'SELECT id FROM desfeitos' })}
+          RETURNING rp.id
         )
         SELECT id FROM desfeitos
       `, [candidatos.rows.map(c => c.id), candidatos.rows.map(c => c.match_usuario_id), semHorarioIds])
