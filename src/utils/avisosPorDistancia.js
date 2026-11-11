@@ -22,9 +22,10 @@ const { sqlProfissionalDaPessoa } = require('./tipoConta')
 // 2. TETO — no máximo 15 pushes de demanda por PESSOA por dia de São Paulo, somando demanda nova,
 //    "fora da sua área", lembrete, reanúncio e oferta aumentada. Demanda NOVA (e "fora da área")
 //    que passa do teto NÃO vira push: fica em avisos_acima_do_teto e sai, no máximo UMA vez por dia
-//    e só entre 08h e 20h, num push-resumo "Mais N pedidos perto de você hoje". Lembrete, reanúncio
-//    e oferta aumentada acima do teto simplesmente não saem (não são pedido NOVO para entrar no
-//    "Mais N"). O e-mail não é afetado (tem o teto dele).
+//    e só entre 08h e 20h, num push-resumo "Mais N pedidos perto de você hoje". O lembrete "ainda
+//    aberto" acima do teto também entra no resumo (coluna lembrete = true → "Mais N pedidos perto
+//    de você ainda esperam profissional", 10/11/2026); reanúncio e oferta aumentada acima do teto
+//    simplesmente não saem. O e-mail não é afetado (tem o teto dele).
 //    Quando várias demandas saem JUNTAS (rede de segurança, fila da manhã do "fora da área", tique
 //    dos lembretes), o que resta do teto vai às mais PRÓXIMAS de cada profissional (sqlMaisPertoNoLote).
 const RAIO_MAX_KM = 50
@@ -43,6 +44,9 @@ const migrarAvisosPorDistancia = async (client) => {
       resumo_em  TIMESTAMPTZ,
       PRIMARY KEY (tabela, demanda_id, usuario_id)
     )`)
+  // lembrete = true: o que ficou de fora foi um lembrete "ainda aberto" (não um pedido novo) — muda
+  // o texto do push-resumo (decisão do dono, 10/11/2026).
+  await client.query(`ALTER TABLE avisos_acima_do_teto ADD COLUMN IF NOT EXISTS lembrete BOOLEAN NOT NULL DEFAULT false`)
   await client.query(`CREATE INDEX IF NOT EXISTS avisos_acima_do_teto_usuario_idx ON avisos_acima_do_teto (usuario_id, criado_em)`)
   await client.query(`CREATE INDEX IF NOT EXISTS avisos_acima_do_teto_pendente_idx ON avisos_acima_do_teto (criado_em) WHERE resumo_em IS NULL`)
   // Lembrete "ainda aberto", reanúncio e oferta aumentada não gravam push_entregas (uma demanda
@@ -137,14 +141,18 @@ const sqlMaisPertoNoLote = ({ pLats, pLngs, pLat, pLng, alias = 'u' }) => `(
                  < ${sqlKm(`${alias}.latitude`, `${alias}.longitude`, pLat, pLng)})`
 
 // Registra quem ficou ACIMA do teto nesta demanda (contas representantes da pessoa) — a base do
-// push-resumo. Repetição (retry do envio) não duplica.
-const registrarAcimaDoTeto = async (tabela, demandaId, usuarioIds, db = pool) => {
+// push-resumo. Repetição (retry do envio) não duplica. { lembrete: true } = o que ficou de fora foi
+// um lembrete "ainda aberto": se a demanda já entrou num resumo anterior da pessoa, a linha é
+// REARMADA (criado_em = NOW(), resumo_em = NULL) para entrar no próximo resumo; pendente, fica como está.
+const registrarAcimaDoTeto = async (tabela, demandaId, usuarioIds, db = pool, { lembrete = false } = {}) => {
   if (!usuarioIds || usuarioIds.length === 0) return 0
   await db.query(
-    `INSERT INTO avisos_acima_do_teto (tabela, demanda_id, usuario_id)
-     SELECT $1, $2::uuid, x FROM unnest($3::uuid[]) AS x
-     ON CONFLICT (tabela, demanda_id, usuario_id) DO NOTHING`,
-    [tabela, demandaId, usuarioIds])
+    `INSERT INTO avisos_acima_do_teto (tabela, demanda_id, usuario_id, lembrete)
+     SELECT $1, $2::uuid, x, $4::boolean FROM unnest($3::uuid[]) AS x
+     ON CONFLICT (tabela, demanda_id, usuario_id) DO UPDATE
+       SET criado_em = NOW(), resumo_em = NULL, lembrete = EXCLUDED.lembrete
+     WHERE avisos_acima_do_teto.resumo_em IS NOT NULL AND EXCLUDED.lembrete`,
+    [tabela, demandaId, usuarioIds, lembrete === true])
   return usuarioIds.length
 }
 const limparAcimaDoTetoAntigos = async (db = pool) => {
