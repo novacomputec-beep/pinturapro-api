@@ -29,7 +29,7 @@ const origLoad = Module._load
 Module._load = function (request) {
   if (/(^|[\\/])supabase$/.test(request)) return { pool: shim }
   if (/services[\\/]emailService$/.test(request)) return { enviarEmail: async (m) => { emails.push(m) } }
-  if (/brevoService$/.test(request)) return { enviarEmail: async () => {}, enviarEmailComAnexo: async () => {} }
+  if (/brevoService$/.test(request)) return { enviarEmail: async (m) => { emails.push(m) }, enviarEmailComAnexo: async () => {} }
   return origLoad.apply(this, arguments)
 }
 process.on('unhandledRejection', (e) => { if (!/sem banco/.test(String(e?.message))) { console.error('unhandled', e); process.exit(1) } })
@@ -76,16 +76,30 @@ const L1 = U(18), L2 = U(19) // limite de tentativas: duas contas de pessoas dif
 const main = async () => {
   db = new PGlite()
   const hashAntigo = await bcrypt.hash('segredo123', 4)
+  // Colunas que a exclusão passou a tocar (11/11/2026): o match aberto do profissional excluído é desfeito
+  // como desistência (cancelamentoMatchService.SQL_LIMPAR_MATCH) e a proposta dele vira 'cancelado'.
+  const colsMatch = `status text DEFAULT 'aberta', expira_em timestamptz DEFAULT now() + INTERVAL '2 days', a_caminho_em timestamptz,
+      pedido_tempo_status text, pedido_tempo_motivo text, pedido_tempo_minutos int, chegada_janela text, chegada_prevista_em timestamptz,
+      chegada_declarada_por uuid, chegada_declarada_em timestamptz, chegada_pendente_janela text, chegada_pendente_em timestamptz, chegada_recusada_em timestamptz,
+      chegada_confirmada_em timestamptz, aviso_match_enviado_em timestamptz, lembrete_chegada_enviado_em timestamptz, chegada_proposta_por uuid, chegada_pendente_rodada int DEFAULT 0,
+      lembrete_agendar_enviados int DEFAULT 0, desfazer_aviso_em timestamptz, lembrete_agendar_sem_proposta int DEFAULT 0, horario_vencido_em timestamptz, horarios_vencidos int DEFAULT 0,
+      lembrete_agenda_vespera_em timestamptz, lembrete_agenda_2h_em timestamptz, lembrete_agenda_hora_em timestamptz, lembrete_agenda_dono_vespera_em timestamptz, lembrete_agenda_dono_2h_em timestamptz,
+      vigia_comparecimento_em timestamptz, comparecimento_resposta text, comparecimento_respondido_em timestamptz, lembrete_agendar_offsets int[] DEFAULT '{}', lembrete_agendar_ultimo_em timestamptz,
+      lembrete_agendar_dono_em timestamptz, chegada_proposta_em timestamptz, lembrete_resposta_1h_em timestamptz, lembrete_resposta_antes_em timestamptz, lembrete_resposta_ultimo_em timestamptz,
+      aviso_resposta_final_em timestamptz, sugestoes_horario_dono int DEFAULT 0, sugestoes_horario_profissional int DEFAULT 0, prazo_chegada_extra_em timestamptz, aviso_atraso_enviado_em timestamptz,
+      pedido_atraso_minutos int, pedido_atraso_motivo text, pedido_atraso_em timestamptz, pedido_atraso_status text, pedido_atraso_respondido_em timestamptz, pedidos_atraso_usados int DEFAULT 0,
+      cancelamento_pedido_por uuid, cancelamento_pedido_motivo text, cancelamento_pedido_detalhe text, cancelamento_pedido_em timestamptz, cancelamento_pedido_expira_em timestamptz`
+  const colsProposta = `status_antes_match text, cancelado_por uuid, cancelado_motivo text, cancelado_detalhe text, cancelado_em timestamptz, cancelado_acordo boolean DEFAULT false`
   await db.exec(`
     CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, role text, tipo_dono text, tipo_prestador text, cpf_cnpj text, senha_hash text, ativo boolean DEFAULT true,
       push_token text, google_sub text, suspenso_em timestamptz, suspenso_motivo text, token_version int NOT NULL DEFAULT 1, especialidades text[],
       foto_url text, verificacao_doc_frente_url text, verificacao_doc_verso_url text, verificacao_selfie_url text);
     CREATE TABLE obras (id uuid PRIMARY KEY, titulo text, criado_por uuid REFERENCES usuarios(id), match_usuario_id uuid REFERENCES usuarios(id), match_feito_em timestamptz,
-      encerramento_solicitado_por uuid REFERENCES usuarios(id), encerramento_solicitado_em timestamptz);
+      encerramento_solicitado_por uuid REFERENCES usuarios(id), encerramento_solicitado_em timestamptz, ${colsMatch});
     CREATE TABLE reparos (id uuid PRIMARY KEY, titulo text, criado_por uuid REFERENCES usuarios(id), match_usuario_id uuid REFERENCES usuarios(id), match_feito_em timestamptz,
-      encerramento_solicitado_por uuid REFERENCES usuarios(id), encerramento_solicitado_em timestamptz);
-    CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid REFERENCES obras(id), usuario_id uuid REFERENCES usuarios(id), status text DEFAULT 'pendente');
-    CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid REFERENCES reparos(id), usuario_id uuid REFERENCES usuarios(id), status text DEFAULT 'pendente');
+      encerramento_solicitado_por uuid REFERENCES usuarios(id), encerramento_solicitado_em timestamptz, ${colsMatch});
+    CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid REFERENCES obras(id), usuario_id uuid REFERENCES usuarios(id), status text DEFAULT 'pendente', ${colsProposta});
+    CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid REFERENCES reparos(id), usuario_id uuid REFERENCES usuarios(id), status text DEFAULT 'pendente', ${colsProposta});
     CREATE TABLE contratos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), candidatura_id uuid REFERENCES candidaturas(id), interesse_id uuid REFERENCES interesse_reparos(id));
     CREATE TABLE mensagens (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid REFERENCES obras(id), autor_id uuid REFERENCES usuarios(id), conteudo text);
     CREATE TABLE midias (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid REFERENCES obras(id), url text, tipo text, ordem int);
@@ -98,7 +112,10 @@ const main = async () => {
     CREATE TABLE avaliacoes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), avaliador_id uuid REFERENCES usuarios(id) ON DELETE CASCADE, avaliado_id uuid REFERENCES usuarios(id) ON DELETE CASCADE, estrelas int);
     CREATE TABLE trava_teste (usuario_id uuid REFERENCES usuarios(id));
     CREATE TABLE tentativas_auth (acao text NOT NULL, identificador text NOT NULL, tentativas int NOT NULL DEFAULT 0, janela_em timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (acao, identificador));
+    CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
   `)
+  // contas_excluidas — a mesma migração de boot (utils/contasExcluidas).
+  await require(path.join(REPO, 'src/utils/contasExcluidas')).migrarContasExcluidas({ query: (s, p) => db.query(s, p) })
   const usr = (id, nome, email, role, extra = {}) => db.query(
     `INSERT INTO usuarios (id, nome, email, role, tipo_dono, tipo_prestador, cpf_cnpj, senha_hash, push_token, google_sub, foto_url, verificacao_doc_frente_url, verificacao_selfie_url)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
@@ -185,7 +202,14 @@ const main = async () => {
   const orfas = (await db.query(`SELECT url FROM midias_orfas ORDER BY url`)).rows.map(x => x.url)
   ok(orfas.length === 10 && orfas.includes('https://cdn.invalid/obra1.jpg') && orfas.includes('https://cdn.invalid/reparo2.mp4') && orfas.includes('https://cdn.invalid/selfie-04.jpg') && orfas.includes('https://cdn.invalid/foto-01.jpg'),
      'arquivos na fila de exclusão: mídias das demandas + foto das 4 contas + documento e selfie dos 2 perfis profissionais', orfas.length)
-  ok(emails.length === 1 && emails[0].para === 'pessoa@x.invalid', 'UM e-mail de confirmação (as 4 contas dividem o endereço)', emails.map(e => e.para))
+  const confirmacoes = emails.filter(e => /excluída/.test(e.assunto || ''))
+  ok(confirmacoes.length === 1 && confirmacoes[0].para === 'pessoa@x.invalid', 'UM e-mail de confirmação (as 4 contas dividem o endereço)', emails.map(e => e.para))
+  // 11/11/2026: o match aberto do pintor da pessoa foi desfeito como desistência → o dono do terceiro é avisado
+  // (e-mail de reserva/junto do push) e as 4 contas entram em contas_excluidas com por = 'usuario'.
+  ok(emails.some(e => e.para === 'xd@x.invalid' && /saiu do/.test(e.assunto || e.html || '')), 'dono da obra do terceiro avisado: "O profissional escolhido saiu do…"', emails.map(e => `${e.para}: ${e.assunto}`))
+  const ce = (await db.query(`SELECT id, role, por, cpf_hash IS NOT NULL AS tem_hash FROM contas_excluidas ORDER BY id`)).rows
+  ok(ce.length === 4 && ce.every(c => c.por === 'usuario' && c.tem_hash) && new Set(ce.map(c => c.id)).size === 4 && (await db.query(`SELECT count(DISTINCT cpf_hash)::int AS n FROM contas_excluidas`)).rows[0].n === 1,
+     'contas_excluidas: 4 linhas (uma por conta), por = usuario, MESMO cpf_hash para as 4 (CPF com e sem máscara)', ce.map(c => c.role))
   silenciar(true)
   const depois = await rodar('get', '/auth/contas', PA, {})
   silenciar(false)
