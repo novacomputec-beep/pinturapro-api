@@ -35,7 +35,7 @@ const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQ
 const { sqlRestaurarPropostas } = require('../utils/reaberturaMatch')
 // Exclusão de conta: registro em contas_excluidas (utils/contasExcluidas).
 const { migrarContasExcluidas, registrarContaExcluida } = require('../utils/contasExcluidas')
-const { handler: desfazerEscolhaHandler, sqlDesfazerLiberadoEm, sqlPodeEscolherOutro } = require('../services/desfazerEscolhaService')
+const { handler: desfazerEscolhaHandler, sqlDesfazerLiberadoEm, sqlPodeEscolherOutro, sqlMotivoEscolherOutro } = require('../services/desfazerEscolhaService')
 // Tolerância de chegada (15 min) e pedido de atraso (15/30/60 min, 2 por match, auto-aceite em
 // 10 min). Os endpoints antigos pedir-tempo/perguntar-tempo/informar-tempo/responder-tempo caem
 // na mesma lógica (handlersLegados). GET /:id expõe camposAtraso.
@@ -538,6 +538,10 @@ const migracaoPronta = (async () => {
       // Claim do aviso ao dono "você já pode escolher outro profissional" quando o desfazer libera
       // (services/desfazerEscolhaService.avisarDesfazerLiberado); zerado em SQL_ZERAR_AGENDA.
       await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS desfazer_aviso_em TIMESTAMPTZ`)
+      // Claim do aviso ao dono "<Nome> desinstalou o app" quando o escolhido tem desinstalado_em e
+      // ainda não há horário combinado (desfazerEscolhaService.avisarDonosProfissionalDesinstalou);
+      // UMA vez por match — zerado em SQL_ZERAR_AGENDA (11/11/2026).
+      await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS aviso_desinstalou_em TIMESTAMPTZ`)
       // "Escolher outro" (dono, 10/11/2026 — desfazerEscolhaService modo 'escolher_outro'): nº de
       // lembretes "Agende" (fixos + repetidos) SEGUIDOS sem o profissional propor horário; zera na
       // proposta (chegada-prevista) e em SQL_ZERAR_AGENDA. Com 2, o dono pode escolher outro sem falta.
@@ -3837,8 +3841,10 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         -- desfazer_liberado_em: a partir de quando o dono pode desfazer a escolha (services/
         -- desfazerEscolhaService); NULL sem match, com horário em negociação ou já a caminho.
         ${sqlDesfazerLiberadoEm('o.')} AS desfazer_liberado_em,
-        -- pode_escolher_outro: 2 lembretes "Agende" seguidos sem proposta (desfazerEscolhaService); só dono.
+        -- pode_escolher_outro: 2 lembretes "Agende" seguidos sem proposta OU escolhido desinstalou o app
+        -- (desfazerEscolhaService); motivo_escolher_outro = 'avisos_ignorados' | 'desinstalou' | NULL. Só dono.
         ${sqlPodeEscolherOutro('o.')} AS pode_escolher_outro,
+        ${sqlMotivoEscolherOutro('o.')} AS motivo_escolher_outro,
         -- cliente_nao_respondeu_90d: propostas de horário de profissional que o dono (pessoa) deixou
         -- vencer sem resposta nos últimos 90 dias (utils/responsabilidade) — sai a qualquer leitor.
         ${sqlClienteNaoRespondeu90d('o.criado_por')} AS cliente_nao_respondeu_90d,
@@ -3972,7 +3978,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     delete obra.proximo_lembrete_agendar_em
     // pode_escolher_outro (POST /obras/dono/:id/escolher-outro): SÓ dono; null para os demais.
     const pode_escolher_outro = ehDono ? obra.pode_escolher_outro === true : null
-    delete obra.pode_escolher_outro
+    const motivo_escolher_outro = ehDono && pode_escolher_outro ? (obra.motivo_escolher_outro || null) : null
+    delete obra.pode_escolher_outro; delete obra.motivo_escolher_outro
     // desistencias (pintores que cancelaram depois de escolhidos, mais recente primeiro) e
     // interessados_ativos (ainda na disputa): SÓ dono (utils/desistencias); null para os demais.
     const desistencias = ehDono ? await listarDesistencias('obras', req.params.id) : null
@@ -3981,7 +3988,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
     // encerramento_automatico_em: quando o cron fecha sozinho a solicitação pendente do pintor
     // (solicitado_em + 2 dias — alertaService.encerramentoAutomaticoEm); null sem solicitação.
-    res.json({ obra, ...(await identidadeNaDemanda(req, obra, ehDono)), midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, desistencias, interessados_ativos, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
+    res.json({ obra, ...(await identidadeNaDemanda(req, obra, ehDono)), midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, pode_escolher_outro, motivo_escolher_outro, desistencias, interessados_ativos, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -6663,8 +6670,10 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
               -- desfazer_liberado_em: a partir de quando o dono pode desfazer a escolha
               -- (services/desfazerEscolhaService); NULL quando não se aplica.
               ${sqlDesfazerLiberadoEm()} AS desfazer_liberado_em,
-              -- pode_escolher_outro: 2 lembretes "Agende" seguidos sem proposta (desfazerEscolhaService); só dono.
+              -- pode_escolher_outro: 2 lembretes "Agende" seguidos sem proposta OU escolhido desinstalou o app
+              -- (desfazerEscolhaService); motivo_escolher_outro = 'avisos_ignorados' | 'desinstalou' | NULL. Só dono.
               ${sqlPodeEscolherOutro()} AS pode_escolher_outro,
+              ${sqlMotivoEscolherOutro()} AS motivo_escolher_outro,
               -- cliente_nao_respondeu_90d: mesma marca do dono do GET /obras/:id (utils/responsabilidade).
               ${sqlClienteNaoRespondeu90d('reparos.criado_por')} AS cliente_nao_respondeu_90d,
               -- Lembretes "Agende seu atendimento" deste match: quando sai o próximo ao
@@ -6784,7 +6793,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     delete reparo.proximo_lembrete_agendar_em
     // pode_escolher_outro (POST /reparos/dono/:id/escolher-outro): SÓ dono; null para os demais.
     const pode_escolher_outro = ehDono ? reparo.pode_escolher_outro === true : null
-    delete reparo.pode_escolher_outro
+    const motivo_escolher_outro = ehDono && pode_escolher_outro ? (reparo.motivo_escolher_outro || null) : null
+    delete reparo.pode_escolher_outro; delete reparo.motivo_escolher_outro
     // desistencias (prestadores que cancelaram depois de escolhidos, mais recente primeiro) e
     // interessados_ativos (ainda na disputa): SÓ dono (utils/desistencias); null para os demais.
     const desistencias = ehDono ? await listarDesistencias('reparos', req.params.id) : null
@@ -6805,6 +6815,9 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       // Lembretes "Agende seu atendimento" já enviados ao prestador deste match e o próximo devido.
       lembretes_agendar_enviados,
       proximo_lembrete_agendar_em,
+      // "Escolher outro" (desfazerEscolhaService): só dono; motivo = 'avisos_ignorados' | 'desinstalou' | null.
+      pode_escolher_outro,
+      motivo_escolher_outro,
       // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
       // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
       ...camposAtraso(reparo),
