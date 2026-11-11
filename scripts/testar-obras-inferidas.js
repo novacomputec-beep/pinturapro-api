@@ -72,7 +72,7 @@ const igual = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const main = async () => {
   db = new PGlite()
   const colsDemanda = `id uuid PRIMARY KEY, titulo text, descricao text, categoria text, cidade text, uf text, bairro text, estado text, criado_por uuid, status text DEFAULT 'aberta',
-      status_aprovacao text DEFAULT 'aprovada', match_usuario_id uuid, expira_em timestamptz, criado_em timestamptz DEFAULT now(), publicado_em timestamptz,
+      status_aprovacao text DEFAULT 'aprovada', match_usuario_id uuid, match_feito_em timestamptz, encerrado_em timestamptz, chegada_prevista_em timestamptz, expira_em timestamptz, criado_em timestamptz DEFAULT now(), publicado_em timestamptz,
       prestadores_bloqueados uuid[], codigo_publico text, push_novo_enviado_em timestamptz, email_novo_pendente_em timestamptz, latitude numeric, longitude numeric,
       coordenadas_origem text, metragem numeric, prazo_execucao_dias int, tags text[], horas_para_expirar numeric, prazo_modo text, ultima_extensao_horas numeric,
       lembretes_enviados int DEFAULT 0, lembrete_enviado_em timestamptz`

@@ -301,6 +301,8 @@ const main = async () => {
   ok(detP.status === 200 && detP.body.reparo?.cliente_nao_respondeu_90d === 2, 'GET /reparos/:id (profissional): cliente_nao_respondeu_90d = 2', { status: detP.status, v: detP.body.reparo?.cliente_nao_respondeu_90d })
   const detO = await quieto(() => chamar(handlerDe('get', '/obras/:id'), CAIO, D(5)))
   ok(detO.status === 200 && detO.body.obra?.cliente_nao_respondeu_90d === 2, 'GET /obras/:id (profissional): cliente_nao_respondeu_90d = 2', { status: detO.status, v: detO.body.obra?.cliente_nao_respondeu_90d })
+  // 11/11/2026: especialidades_inferidas sai no detalhe, sempre array (coluna NULL → []).
+  ok(Array.isArray(detO.body.obra?.especialidades_inferidas), 'GET /obras/:id (profissional): especialidades_inferidas é array (NULL → [])', detO.body.obra?.especialidades_inferidas)
   // Feed de obras: só o público de obras (ou quem casa por especialidade inferida) vê cards — Caio vira pintor.
   await db.query(`UPDATE usuarios SET tipo_prestador = 'pintor' WHERE id = $1`, [CAIO])
   const feedO = await quieto(() => chamar(handlerDe('get', '/obras'), CAIO, undefined, {}, { raio_km: 'estado', uf: 'RJ', page: '1', limit: '20' }))
