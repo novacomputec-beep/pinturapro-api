@@ -84,7 +84,8 @@ const SQL_LIMPAR_CHEGADA = `chegada_janela = NULL, chegada_prevista_em = NULL, c
               chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL, chegada_confirmada_em = NULL,
               aviso_match_enviado_em = NULL, lembrete_chegada_enviado_em = NULL, lembrete_conclusao_em = NULL, ${SQL_ZERAR_AGENDA}`
 const { coordsDeCidade, resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
-const { enviarContratoReparo, enviarContratoObra } = require('../controllers/contratosController')
+// Contrato por e-mail: sai quando o horário é combinado (enviarContratoAoAgendar), não no match.
+const { enviarContratoAoAgendar } = require('../controllers/contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 // Vocabulário de reparos.categoria = a lista de especialidades do reparador: é contra ela que
 // o broadcast de reparo novo casa categoria × especialidades (alertaService). Só POST
@@ -113,6 +114,9 @@ const { migrarResponsabilidade, sqlCompromissosNaoCumpridos90d, sqlCumpriuTodos,
 const { bloqueioDePedidos, corpoPedidosBloqueados, listarEventosAdmin } = require('../services/responsabilidadeService')
 // Especialidades inferidas das obras (utils/especialidadesInferidas): coluna, inferência na criação.
 const { migrarEspecialidadesInferidas, gravarEspecialidadesInferidas } = require('../utils/especialidadesInferidas')
+// Local da demanda ao profissional (utils/privacidadeDemanda): coordenadas arredondadas no feed e
+// no detalhe; endereço/ponto de referência só ao escolhido com horário combinado.
+const { ofuscarCoordenadas, ofuscarCoordenadasLista, aplicarPrivacidadeLocal } = require('../utils/privacidadeDemanda')
 // Limite por CONTA nas tentativas de DELETE /conta/excluir (tabela tentativas_auth, vale entre réplicas).
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { enviarEmail } = require('../services/emailService')
@@ -3906,20 +3910,11 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       if (obra.a_caminho_em) dono_telefone = dono.rows[0]?.telefone || null
     }
 
-    // Aceite do próprio requester. Procura a linha 'aceito' EXPLICITAMENTE em vez de
-    // olhar rows[0]: a query de minha_candidatura não tem ORDER BY/LIMIT, então rows[0]
-    // é arbitrário e poderia ser uma candidatura recusada da mesma obra.
-    const meuAceite = minhaCandidaturaResult.rows.find(c => c.status === 'aceito')
-
-    // Endereço exato e ponto de referência só para dono, pintor do match, pintor com
-    // candidatura aceita ou admin (Finding 3.1). ponto_referencia sai junto porque também
-    // localiza o imóvel ("portão azul ao lado da padaria") — mascarar só o endereço
-    // deixaria a dica de localização vazando para qualquer assinante.
-    // Coordenadas permanecem para o cálculo de distância no cliente.
-    if (!ehDono && obra.match_usuario_id !== req.usuario.id && !meuAceite && req.usuario.role !== 'admin') {
-      delete obra.endereco_obra
-      delete obra.ponto_referencia
-    }
+    // Local exato (endereco_obra, ponto_referencia, coordenadas exatas) só para dono, admin e o
+    // pintor do match DEPOIS do horário combinado (chegada_prevista_em); para os demais — inclusive
+    // o pintor do match antes do horário e o candidato com aceite — endereço/ponto nulos,
+    // coordenadas arredondadas e endereco_liberado:false (utils/privacidadeDemanda).
+    aplicarPrivacidadeLocal(obra, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPintorDoMatch })
 
     // Advisory: quanto o dono pode estender POR REQUISIÇÃO — a janela original da obra
     // (horas_para_expirar, COALESCE 720), com piso de 24h porque o modal manda dias × 24. É o
@@ -4038,11 +4033,8 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
       // Idempotência de retry: já aceita → devolve sucesso sem reprocessar (sem repetir
       // push nem o UPDATE do match). Sem isto o jaAceito abaixo não pega o próprio
       // registro (id != $2). Espelha o guard de .../pintor-responder.
-      // O contrato É rechamado: se já foi enviado, o claim em enviarContratoObra sai cedo
-      // sem e-mail; se o envio anterior falhou, o claim foi liberado e esta é a retentativa.
       if (cand.status === 'aceito') {
-        enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
-        return res.json({ mensagem: 'Candidatura aceita! Contrato enviado por e-mail.' })
+        return res.json({ mensagem: 'Candidatura aceita! O contrato chega por e-mail quando o horário for combinado.' })
       }
       // Guarda de estado (D8): só uma candidatura 'pendente' pode ser aceita. Isto bloqueia
       // o dono aceitar a PRÓPRIA contraproposta ('contraproposta_dono' — é a vez do pintor) e
@@ -4079,11 +4071,10 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
           { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
       }
       avisarMatchFeito('obras', obra_id, cand.usuario_id)
-      enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
       // Recusa os demais candidatos e os notifica (antes ficava só no /match, que hoje sai
       // no early-return). Fire-and-forget: efeito secundário, não bloqueia a resposta.
       rejeitarConcorrentes('obra', obra_id, cand.usuario_id).catch(err => console.error('[obras/responder] rejeitarConcorrentes:', err.message))
-      return res.json({ mensagem: 'Candidatura aceita! Contrato enviado por e-mail.' })
+      return res.json({ mensagem: 'Candidatura aceita! O contrato chega por e-mail quando o horário for combinado.' })
     }
     if (action === 'recusar') {
       // Mesma guarda do lado reparo: recusar uma candidatura 'aceito' (ou o pintor que já é o
@@ -4155,12 +4146,9 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
     if (candidatura.rows.length === 0) return sair('ROLLBACK', 404, { erro: 'Candidatura não encontrada' })
     if (candidatura.rows[0].status !== 'contraproposta_dono') {
       // Idempotência de retry: já aceita → sucesso em vez de 400, espelhando o guard de
-      // .../prestador-responder (que este endpoint não tinha). O contrato é rechamado: se
-      // já foi enviado, o claim em enviarContratoObra sai cedo sem e-mail; se o envio
-      // anterior falhou, o claim foi liberado e esta é a retentativa.
+      // .../prestador-responder (que este endpoint não tinha).
       if (action === 'aceitar' && candidatura.rows[0].status === 'aceito') {
-        enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
-        return sair('ROLLBACK', 200, { mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
+        return sair('ROLLBACK', 200, { mensagem: 'Contraproposta aceita! O contrato chega por e-mail quando o horário for combinado.' })
       }
       return sair('ROLLBACK', 400, { erro: 'Não há contraproposta pendente' })
     }
@@ -4201,10 +4189,9 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
         data: { tipo: 'candidatura_aceita', obra_id }, rotulo: `match dono obras ${obra_id}`,
       })
       avisarMatchFeito('obras', obra_id, req.usuario.id)
-      enviarContratoObra(candidaturaId).catch(err => console.error('Erro ao enviar contrato obra:', err))
       // Recusa os demais candidatos e os notifica (ver POST .../responder).
       rejeitarConcorrentes('obra', obra_id, req.usuario.id).catch(err => console.error('[obras/pintor-responder] rejeitarConcorrentes:', err.message))
-      return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
+      return res.json({ mensagem: 'Contraproposta aceita! O contrato chega por e-mail quando o horário for combinado.' })
     }
     if (action === 'recusar') {
       await client.query(`UPDATE candidaturas SET status = 'recusado' WHERE id = $1`, [candidaturaId])
@@ -4298,7 +4285,6 @@ router.post('/obras/:id/match', autenticar, exigirPodeObrasOuCandidato, async (r
       data: { tipo: 'match_obra', obra_id: req.params.id }, rotulo: `match a caminho obras ${req.params.id}`,
     })
     avisarMatchFeito('obras', req.params.id, req.usuario.id)
-    enviarContratoObra(candidaturaAceita.rows[0].id).catch(err => console.error('Erro ao enviar contrato obra:', err))
     // Recusa os demais candidatos e os notifica — pós-resposta, não bloqueia o cliente
     // (Finding 3.1). Mantido aqui para linhas legadas: obras casadas por /match antes de o
     // aceite passar a criar o match. Os caminhos de aceite chamam a mesma função.
@@ -5151,6 +5137,11 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
       INTERESSE_MORTO.includes(item.status) ||
       REPARO_MORTO.includes(item.reparo_status) ||
       (item.reparo_status === 'aberta' && item.expira_em && new Date(item.expira_em) < agora)
+    // Coordenadas exatas só no reparo em que a pessoa é o match E já há horário combinado
+    // (utils/privacidadeDemanda); nos demais, arredondadas.
+    for (const item of result.rows) {
+      if (!(item.match_da_pessoa && item.chegada_prevista_em)) ofuscarCoordenadas(item)
+    }
     const ativos    = result.rows.filter(item => !eArquivado(item))
     const historico = result.rows.filter(item =>  eArquivado(item))
     res.json({ ativos, historico })
@@ -5354,7 +5345,9 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPod
     const result = await pool.query(query, params)
     // Título mascarado na leitura (linha antiga, gravada antes do filtro de contato) — o mesmo
     // tratamento de GET /reparos/:id. Só o título sai no card do feed.
-    res.json({ reparos: mascararLista(result.rows, ['titulo']), page, limit, filtro: filtroMeta, escopo, ancora })
+    // Coordenadas ARREDONDADAS (utils/privacidadeDemanda): o feed é descoberta — ninguém aqui tem
+    // horário combinado; o filtro por raio acima já rodou nas colunas exatas.
+    res.json({ reparos: ofuscarCoordenadasLista(mascararLista(result.rows, ['titulo'])), page, limit, filtro: filtroMeta, escopo, ancora })
   } catch (err) {
     console.error('Erro ao buscar reparos:', err)
     res.status(500).json({ erro: 'Erro ao buscar serviços' })
@@ -5527,8 +5520,6 @@ router.post('/reparos/:id/match', autenticar, exigirPodeServicosOuInteressado, a
       data: { tipo: 'match_reparo', reparo_id: req.params.id }, rotulo: `match a caminho reparos ${req.params.id}`,
     })
     avisarMatchFeito('reparos', req.params.id, req.usuario.id)
-    // Envia contrato por e-mail para dono e prestador
-    enviarContratoReparo(req.params.id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
     // Recusa os demais interessados e os notifica — pós-resposta, não bloqueia o cliente
     // (Finding 3.1). Mantido aqui para linhas legadas: reparos casados por /match antes de o
     // aceite passar a criar o match. Os caminhos de aceite chamam a mesma função.
@@ -5563,11 +5554,8 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
       // Idempotência de retry: já aceito → devolve sucesso sem reprocessar (sem repetir
       // push nem o UPDATE do match). Sem isto o jaAceito abaixo não pega o próprio
       // registro (id != $2). Espelha o guard de .../prestador-responder.
-      // O contrato É rechamado: se já foi enviado, o claim em enviarContratoReparo sai cedo
-      // sem e-mail; se o envio anterior falhou, o claim foi liberado e esta é a retentativa.
       if (int.status === 'aceito') {
-        enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
-        return res.json({ mensagem: 'Proposta aceita! Contrato enviado por e-mail.' })
+        return res.json({ mensagem: 'Proposta aceita! O contrato chega por e-mail quando o horário for combinado.' })
       }
       // Guarda de estado (D8): só um interesse 'pendente' pode ser aceito — bloqueia aceitar a
       // própria contraproposta do dono, e ressuscitar 'recusado'/'expirado'.
@@ -5602,13 +5590,10 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
           { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
       }
       avisarMatchFeito('reparos', reparo_id, int.usuario_id)
-      // match_usuario_id já foi definido acima, então o contrato pode sair agora — mesmo
-      // ponto do fluxo em que a obra envia o dela (POST .../responder).
-      enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
       // Recusa os demais interessados e os notifica (antes ficava só no /match, que hoje
       // sai no early-return). Fire-and-forget: não bloqueia a resposta.
       rejeitarConcorrentes('reparo', reparo_id, int.usuario_id).catch(err => console.error('[reparos/responder] rejeitarConcorrentes:', err.message))
-      return res.json({ mensagem: 'Proposta aceita! Contrato enviado por e-mail.' })
+      return res.json({ mensagem: 'Proposta aceita! O contrato chega por e-mail quando o horário for combinado.' })
     }
 
     if (action === 'recusar') {
@@ -5683,11 +5668,8 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
     if (interesse.rows.length === 0) return sair('ROLLBACK', 404, { erro: 'Interesse não encontrado' })
     if (interesse.rows[0].status !== 'contraproposta_dono') {
       // Idempotency for accept retries: if already accepted, return success silently.
-      // O contrato é rechamado: se já foi enviado, o claim em enviarContratoReparo sai cedo
-      // sem e-mail; se o envio anterior falhou, o claim foi liberado e esta é a retentativa.
       if (action === 'aceitar' && interesse.rows[0].status === 'aceito') {
-        enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
-        return sair('ROLLBACK', 200, { mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
+        return sair('ROLLBACK', 200, { mensagem: 'Contraproposta aceita! O contrato chega por e-mail quando o horário for combinado.' })
       }
       return sair('ROLLBACK', 400, { erro: 'Não há contraproposta pendente' })
     }
@@ -5727,11 +5709,9 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
         data: { tipo: 'interesse_aceito', reparo_id }, rotulo: `match dono reparos ${reparo_id}`,
       })
       avisarMatchFeito('reparos', reparo_id, req.usuario.id)
-      // match_usuario_id já foi definido acima, então o contrato pode sair agora.
-      enviarContratoReparo(reparo_id).catch(err => console.error('Erro ao enviar contrato reparo:', err))
       // Recusa os demais interessados e os notifica (ver POST .../responder).
       rejeitarConcorrentes('reparo', reparo_id, req.usuario.id).catch(err => console.error('[reparos/prestador-responder] rejeitarConcorrentes:', err.message))
-      return res.json({ mensagem: 'Contraproposta aceita! Contrato enviado por e-mail.' })
+      return res.json({ mensagem: 'Contraproposta aceita! O contrato chega por e-mail quando o horário for combinado.' })
     }
 
     if (action === 'recusar') {
@@ -6190,6 +6170,9 @@ const criarHandlerChegadaPrevista = (tabela) => async (req, res) => {
       const pendente = !!upd.rows[0].chegada_pendente_em
       const dono = await pool.query(`SELECT push_token, email, nome FROM usuarios WHERE id = $1`, [alvo.rows[0].criado_por])
       res.json({ ...upd.rows[0], sugestoes_restantes: sugestoesRestantes(upd.rows[0], false) })
+      // Horário valendo (coube no prazo) = contrato às duas partes (contratosController; uma vez
+      // por match). A janela PENDENTE ainda não é horário combinado: o contrato sai no aceite.
+      if (!pendente) enviarContratoAoAgendar(tabela, req.params.id)
       if (dono.rows[0]) {
         // Dois textos porque são duas perguntas diferentes: um informa, o outro PEDE resposta.
         // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
@@ -6482,6 +6465,8 @@ const criarHandlerChegadaPrevistaResponder = (tabela) => async (req, res) => {
       : { rows: [] }
     const nome = modo === 'contraproposta' ? await primeiroNome(req.usuario.id) : null
     res.json({ ...upd.rows[0], sugestoes_restantes: sugestoesRestantes(upd.rows[0], ehDono) })
+    // Horário combinado = contrato às duas partes (contratosController; uma vez por match).
+    if (modo === 'aceitar') enviarContratoAoAgendar(tabela, req.params.id)
     if (!outro.rows[0]) return
 
     // Push ou, sem token / push falho, e-mail em texto puro (entregarPushOuEmail).
@@ -6731,19 +6716,10 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       if (reparo.a_caminho_em) dono_telefone = dono.rows[0]?.telefone || null
     }
 
-    // Aceite do próprio requester. Procura a linha 'aceito' EXPLICITAMENTE em vez de
-    // olhar rows[0]: a query de meu_interesse não tem ORDER BY/LIMIT, então rows[0]
-    // é arbitrário e poderia ser um interesse recusado do mesmo reparo.
-    const meuAceite = interesse.rows.find(i => i.status === 'aceito')
-
-    // Endereço exato e ponto de referência só para dono, prestador do match, prestador com
-    // interesse aceito ou admin (Finding 3.1). ponto_referencia sai junto pelo mesmo motivo
-    // do lado obra: é dica de localização, não descrição do serviço.
-    // Coordenadas permanecem para o cálculo de distância no cliente.
-    if (!ehDono && reparo.match_usuario_id !== req.usuario.id && !meuAceite && req.usuario.role !== 'admin') {
-      delete reparo.endereco_reparo
-      delete reparo.ponto_referencia
-    }
+    // Local exato (endereco_reparo, ponto_referencia, coordenadas exatas) só para dono, admin e o
+    // prestador do match DEPOIS do horário combinado (chegada_prevista_em); demais leitores recebem
+    // endereço/ponto nulos, coordenadas arredondadas e endereco_liberado:false (utils/privacidadeDemanda).
+    aplicarPrivacidadeLocal(reparo, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPrestadorDoMatch })
 
     // Advisory: quanto o dono pode estender POR REQUISIÇÃO — a janela original do reparo
     // (prazo_atendimento_horas, COALESCE 720), o MESMO número que POST /reparos/:id/estender

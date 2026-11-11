@@ -449,4 +449,32 @@ const enviarContratoObra = async (candidaturaId) => {
   }
 }
 
-module.exports = { enviarContratoReparo, enviarContratoObra }
+// Momento do contrato (dono, 11/11/2026): o e-mail às duas partes sai quando o HORÁRIO é
+// combinado (chegada_prevista_em gravado) — não mais no match. É a mesma hora em que o endereço
+// exato chega ao profissional (utils/privacidadeDemanda), e o contrato imprime esse endereço.
+// Chamado pelos dois caminhos que gravam chegada_prevista_em (janela dentro do prazo em
+// POST /:tabela/:id/chegada-prevista e 'aceitar' em .../chegada-prevista/responder). UMA vez por
+// match: o claim em `contratos` (interesse_id / candidatura_id) segura reagendamentos, remarcações
+// e cliques repetidos; match novo (outro interesse/candidatura) ganha contrato novo.
+// Fire-and-forget: nunca lança — o agendamento já foi respondido quando isto roda.
+const enviarContratoAoAgendar = async (tabela, demandaId) => {
+  try {
+    if (tabela === 'reparos') return await enviarContratoReparo(demandaId)
+    if (tabela !== 'obras') return
+    const cand = await pool.query(
+      `SELECT c.id FROM candidaturas c JOIN obras o ON o.id = c.obra_id
+        WHERE c.obra_id = $1 AND c.usuario_id = o.match_usuario_id AND c.status = 'aceito'
+        ORDER BY c.criado_em DESC LIMIT 1`,
+      [demandaId]
+    )
+    if (cand.rows.length === 0) {
+      console.error(`[Contrato] Obra ${demandaId} — sem candidatura aceita do match, e-mail NÃO enviado`)
+      return
+    }
+    await enviarContratoObra(cand.rows[0].id)
+  } catch (err) {
+    console.error(`[Contrato] ${tabela} ${demandaId} — falha ao enviar no agendamento:`, err.message)
+  }
+}
+
+module.exports = { enviarContratoReparo, enviarContratoObra, enviarContratoAoAgendar }

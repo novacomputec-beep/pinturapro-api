@@ -2,7 +2,6 @@ const { pool } = require('../utils/supabase')
 // Posse da obra por PESSOA (mesmo CPF, qualquer conta contratante) — utils/tipoConta.
 // sqlProfissionalDaPessoa: o espelho do lado profissional (Fase 2b) — contas 'prestador' do mesmo CPF.
 const { ehMesmaPessoa, sqlProfissionalDaPessoa } = require('../utils/tipoConta')
-const { enviarContratoObra } = require('./contratosController')
 const { rejeitarConcorrentes } = require('../utils/rejeitarConcorrentes')
 const { enviarPushNotificacao, avisarMatchFeito, avisarUsuario } = require('../services/alertaService')
 // Colunas do agendamento zeradas junto com as chegada_* no match (mesma lista de routes/index.js).
@@ -233,11 +232,7 @@ const aprovar = async (req, res) => {
         { tipo: 'candidatura_aceita', obra_id: result.rows[0].obra_id }).catch(() => {})
     }
     avisarMatchFeito('obras', result.rows[0].obra_id, result.rows[0].usuario_id)
-
-    // Envia contrato por e-mail de forma assíncrona sem bloquear a resposta
-    enviarContratoObra(id).catch(err =>
-      console.error('Erro ao enviar contrato de obra:', err)
-    )
+    // Contrato por e-mail: sai quando o horário é combinado (contratosController.enviarContratoAoAgendar).
 
     // Recusa os demais candidatos e os notifica (antes só o /match fazia isso, e hoje ele
     // sai no early-return idempotente). Este endpoint nunca enviou push nenhum; agora ao
