@@ -337,10 +337,13 @@ const main = async () => {
     `INSERT INTO reparos (id, titulo, categoria, categorias, cidade, uf, bairro, criado_por, valor_estimado, prazo_atendimento_horas, expira_em, criado_em, push_novo_enviado_em, latitude, longitude)
      VALUES ($1::uuid, $2, 'eletrica', '{eletrica}', 'Lagoa Formosa', 'MG', 'Centro', $3::uuid, 150, 72, now() + INTERVAL '47 hours', now() - INTERVAL '25 hours', now() - INTERVAL '25 hours', $4, $5)`, [id, titulo, DONO, LF[0], LF[1]])
   const lembrar = async () => { silenciar(true); pushes.length = 0; await alerta.lembrarDemandasSemResposta(); await assentar(); silenciar(false); return pushes.filter(p => p.data?.lembrete) }
+  // As obras publicadas ontem (seções 1–6) têm o lembrete DIÁRIO devido agora (regra de 10/11/2026:
+  // um por dia a vida toda) — consome essas fatias antes, para medir só o serviço D(30).
+  await lembrar()
   await reparoAntigo(D(30), 'Chuveiro queimado')
   const antesRele = await usadosHoje(P.RELE)
-  let lem = await lembrar()
-  ok(igual(quem(lem), ['RELE']) && lem[0].data.reparo_id === D(30), 'LEMBRETE do serviço em Lagoa Formosa: chega ao reparador de elétrica de Patos (25 km) — antes, ninguém', quem(lem))
+  let lem = (await lembrar()).filter(p => p.data.reparo_id === D(30))
+  ok(igual(quem(lem), ['RELE']), 'LEMBRETE do serviço em Lagoa Formosa: chega ao reparador de elétrica de Patos (25 km) — antes, ninguém', quem(lem))
   ok(await usadosHoje(P.RELE) === antesRele + 1, 'lembrete enviado CONTA no teto diário', { antes: antesRele, depois: await usadosHoje(P.RELE) })
 
   // ═══ 9. OFERTA AUMENTADA: mesmo alcance e conta no teto ════════════════════════════════════
@@ -360,8 +363,24 @@ const main = async () => {
   ofe = await oferta(alerta.notificarOfertaAumentadaReparo, D(30))
   ok(ofe.length === 0, 'oferta aumentada do serviço com RELE no teto (15): não sai', quem(ofe))
   await reparoAntigo(D(31), 'Tomada sem energia')
-  lem = await lembrar()
-  ok(lem.length === 0 && (await acimaDoTeto(D(31))).length === 0, 'lembrete com a pessoa no teto (15): não sai e não entra no resumo', { pushes: quem(lem), acima: await acimaDoTeto(D(31)) })
+  lem = (await lembrar()).filter(p => p.data.reparo_id === D(31))
+  ok(lem.length === 0 && igual(await acimaDoTeto(D(31)), ['RELE']), 'lembrete com a pessoa no teto (15): não sai como push próprio, mas ENTRA no resumo', { pushes: quem(lem), acima: await acimaDoTeto(D(31)) })
+  ok((await db.query(`SELECT lembrete FROM avisos_acima_do_teto WHERE demanda_id = $1 AND usuario_id = $2`, [D(31), P.RELE.id])).rows[0]?.lembrete === true,
+     'a linha do resumo fica marcada como lembrete')
+  // RELE não recebeu resumo hoje; 60 min depois o resumo sai com o texto de lembrete
+  await fixarAgora('2026-11-11T16:05:00Z') // quarta 13:05
+  res = await rodarResumo()
+  const doRele = res.find(p => p.to === tok(P.RELE.id))
+  ok(doRele && doRele.title === 'Mais 1 pedido perto de você ainda espera profissional' && doRele.body === 'Toque para ver.' && doRele.data.lembrete === true && doRele.data.tipo === 'novo_reparo',
+     'resumo só de lembrete: "Mais 1 pedido perto de você ainda espera profissional" / "Toque para ver."', doRele && { titulo: doRele.title, corpo: doRele.body, data: doRele.data })
+  ok(alerta.mensagemResumoTeto(3, false, true).titulo === 'Mais 3 pedidos perto de você ainda esperam profissional'
+     && alerta.mensagemResumoTeto(2, true, false).titulo === 'Mais 2 pedidos perto de você hoje',
+     'texto do resumo: plural com lembrete; sem lembrete continua "hoje"')
+  // resumo já enviado hoje e a demanda lembra de novo acima do teto → a linha é REARMADA para o próximo resumo
+  await db.query(`UPDATE reparos SET lembrete_enviado_em = now() - INTERVAL '25 hours', criado_em = criado_em - INTERVAL '1 day', push_novo_enviado_em = push_novo_enviado_em - INTERVAL '1 day', expira_em = expira_em + INTERVAL '1 day' WHERE id = $1`, [D(31)])
+  lem = (await lembrar()).filter(p => p.data.reparo_id === D(31))
+  const rearmada =(await db.query(`SELECT resumo_em IS NULL AS pendente, lembrete FROM avisos_acima_do_teto WHERE demanda_id = $1 AND usuario_id = $2`, [D(31), P.RELE.id])).rows[0]
+  ok(lem.length === 0 && rearmada?.pendente === true && rearmada?.lembrete === true, 'lembrete seguinte acima do teto, já resumido hoje: a linha volta a pendente para o próximo resumo', rearmada)
 
   const inesperados = erros.filter(e => !/sem banco|PAGBANK|migration/i.test(e))
   ok(inesperados.length === 0, 'nenhum erro logado', inesperados.slice(0, 4))

@@ -451,10 +451,11 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
   // 'obras' quem tem alguma das especialidades inferidas da obra (utils/especialidadesInferidas).
   // porDistancia { lat, lng } (demanda NOVA, lembrete, reanúncio e oferta aumentada): além da MESMA CIDADE (que
   //   recebe sempre), alcança quem está a até min(raio escolhido, 50 km) da demanda.
-  // tetoDiario { tabela, demandaId, lat, lng, lote, resumo } (demanda nova, "fora da área",
+  // tetoDiario { tabela, demandaId, lat, lng, lote, resumo, lembrete } (demanda nova, "fora da área",
   //   lembrete e reanúncio): quem já recebeu TETO_PUSH_DEMANDA_DIA pushes de demanda hoje NÃO
   //   recebe este. Com resumo !== false fica registrado em avisos_acima_do_teto para o
-  //   push-resumo (lembrete, reanúncio e oferta aumentada passam resumo: false — não são pedido NOVO). `lote` =
+  //   push-resumo (reanúncio e oferta aumentada passam resumo: false — não são pedido NOVO; o
+  //   lembrete "ainda aberto" passa lembrete: true, que muda o texto do resumo). `lote` =
   //   [{ lat, lng }] das demandas que saem JUNTO com esta e ainda não foram processadas: as mais
   //   próximas do profissional têm preferência no que resta do teto.
   const total = { elegiveis: 0, invalidos: 0, enviados: 0, falhos: 0, paginas: 0, acimaDoTeto: 0 }
@@ -573,7 +574,7 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
     if (entrega) await registrarEntregas(entrega.tipo, entrega.demandaId, resultados)
     if (aposPagina) await aposPagina(resultados)
     if (acima.length > 0 && tetoDiario) {
-      if (tetoDiario.resumo !== false) await registrarAcimaDoTeto(tetoDiario.tabela, tetoDiario.demandaId, acima.map(r => r.id))
+      if (tetoDiario.resumo !== false) await registrarAcimaDoTeto(tetoDiario.tabela, tetoDiario.demandaId, acima.map(r => r.id), pool, { lembrete: tetoDiario.lembrete === true })
       total.acimaDoTeto += acima.length
     }
     const s = contarResultados(resultados)
@@ -1164,35 +1165,38 @@ const enviarEmailsPendentesNovaDemanda = async () => {
 //
 // CADÊNCIA pela janela original W da demanda (horas_para_expirar / prazo_atendimento_horas;
 // se NULL, expira_em − âncora), contada desde a MESMA âncora de publicação de sempre (obras
-// COALESCE(publicado_em, criado_em), reparos criado_em — convenção de enviarPushNovoPendente):
-//   W ≤ 24h          fase 'unica'   → UM lembrete em W/2 (1h→30min … 24h→12h), a qualquer hora.
-//   24h < W ≤ 168h   fase 'diaria'  → um por dia: fatias de 24h desde a âncora (k = 1, 2, …).
-//   W > 168h         fase 'semanal' → um por semana (fatias de 7 dias desde a âncora) enquanto
-//                    faltam MAIS de 7 dias para expira_em; depois fase 'final' → um por dia nos
-//                    últimos 7 dias (fatias de 24h contadas de trás, a partir de expira_em).
-// Fases diárias/semanais só entre LEMBRETE_HORA_INICIO e LEMBRETE_HORA_FIM (São Paulo): fora
-// da janela o claim não acontece e a fatia espera o próximo tique dentro dela (a fatia é
-// "devida" enquanto durar, então ninguém perde a vez — só adia). Entre dois lembretes dessas
-// fases vale ainda um intervalo mínimo (LEMBRETE_GAP_MIN_HORAS): cobre a virada semanal→final e
-// a fatia adiada pela janela, sem permitir dois avisos no mesmo dia.
+// COALESCE(publicado_em, criado_em), reparos criado_em — convenção de enviarPushNovoPendente).
+// Regra aprovada pelo dono em 10/11/2026 (substitui a de 17/10, que tinha fase SEMANAL para
+// W > 168h — demandas longas ficavam 7 dias sem lembrete):
+//   W ≤ 24h   fase 'curta'  → DOIS lembretes, em W/3 e 2W/3 (fatias k = 1, 2), a qualquer hora.
+//   W > 24h   fase 'diaria' → UM por dia durante TODA a vida da demanda: fatias de 24h desde a
+//             âncora (k = 1, 2, …), só entre LEMBRETE_HORA_INICIO e LEMBRETE_HORA_FIM (São Paulo)
+//             — fora da janela o claim não acontece e a fatia espera o próximo tique dentro dela
+//             (a fatia é "devida" enquanto durar, então ninguém perde a vez — só adia) — e com
+//             intervalo mínimo entre dois lembretes (LEMBRETE_GAP_MIN_HORAS), que cobre a fatia
+//             adiada pela janela sem permitir dois avisos no mesmo dia.
 //
 // CLAIM atômico por FATIA (mesmo desenho dos crons de 5 min): o UPDATE grava
 // lembrete_enviado_em = NOW() e lembretes_enviados + 1 e devolve via RETURNING só as linhas que
 // ELE reivindicou. "Fatia devida" = NOW() ≥ início da fatia atual E o último lembrete é anterior
 // a esse início — duas réplicas/tiques não repetem a mesma fatia (o WHERE é reavaliado sobre a
 // linha atual quando há concorrência). Claim ANTES do envio e nunca desfeito: falha de envio
-// fica no log; a demanda espera a próxima fatia.
+// fica no log; a demanda espera a próxima fatia. Na fase curta o contador (lembretes_enviados)
+// também limita a LEMBRETES_CURTA: fatia perdida (servidor parado) não é reposta.
 // push_novo_enviado_em IS NOT NULL: lembrar antes do aviso original (tera_midias pendente)
 // seria anunciar duas vezes na ordem errada — a rede de segurança ainda vai mandar o primeiro.
 // entrega: null — NUNCA passa por push_entregas (mesma razão do push "oferta aumentada": a
 // PK é a da entrega do aviso de demanda nova e a repescagem reenviaria com o texto errado).
+// TETO diário (15 pushes de demanda): quem está no teto NÃO recebe o lembrete, mas ele entra no
+// push-resumo do dia (avisos_acima_do_teto com lembrete = true → "Mais N pedidos perto de você
+// ainda esperam profissional", enviarResumosAcimaDoTeto) — decisão do dono, 10/11/2026.
 // E-mail: tipo em email_alertas leva o número do lembrete (lembrete_reparo#2) — o UNIQUE
 // (tipo, demanda, usuário) é por fatia, então o 2º+ lembrete não fica bloqueado pelo 1º.
 const LEMBRETE_HORA_INICIO = 8
 const LEMBRETE_HORA_FIM = 20
 const LEMBRETE_GAP_MIN_HORAS = 20
-const LEMBRETE_UNICA_MAX_HORAS = 24
-const LEMBRETE_DIARIA_MAX_HORAS = 168
+const LEMBRETE_CURTA_MAX_HORAS = 24
+const LEMBRETES_CURTA = 2
 const SQL_JANELA_LEMBRETE = `EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'America/Sao_Paulo')) >= ${LEMBRETE_HORA_INICIO}
     AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'America/Sao_Paulo')) < ${LEMBRETE_HORA_FIM}`
 const valorLembrete = (v) => (Number(v) > 0 ? formatarReaisPush(v) : 'Valor a combinar')
@@ -1240,16 +1244,17 @@ const predicadoLembrete = (lado) => `
 // Janela W em horas (NUMERIC): a coluna da demanda ou, se NULL, expira_em − âncora.
 const sqlJanelaHoras = (lado) => `COALESCE(d.${lado.janelaCol}, EXTRACT(EPOCH FROM (d.expira_em - ${lado.ancora})) / 3600.0)`
 const sqlFaseLembrete = (lado) => `CASE
-      WHEN ${sqlJanelaHoras(lado)} <= ${LEMBRETE_UNICA_MAX_HORAS}  THEN 'unica'
-      WHEN ${sqlJanelaHoras(lado)} <= ${LEMBRETE_DIARIA_MAX_HORAS} THEN 'diaria'
-      WHEN d.expira_em - NOW() > INTERVAL '7 days'                  THEN 'semanal'
-      ELSE 'final' END`
+      WHEN ${sqlJanelaHoras(lado)} <= ${LEMBRETE_CURTA_MAX_HORAS} THEN 'curta'
+      ELSE 'diaria' END`
+// Passo da fase curta (W/3, em horas); NULLIF evita divisão por zero numa janela degenerada
+// (início de fatia NULL = nunca devida).
+const sqlPassoCurta = (lado) => `(NULLIF(${sqlJanelaHoras(lado)}, 0) / ${LEMBRETES_CURTA + 1}.0)`
 // Início da FATIA ATUAL de cada fase (a fatia k=0 é a própria publicação e nunca é devida).
+// Curta: k = min(floor(decorrido / passo), LEMBRETES_CURTA) — a última fatia (2W/3) segue até expirar.
 const sqlInicioFatia = (lado) => `CASE ${sqlFaseLembrete(lado)}
-      WHEN 'unica'   THEN ${lado.ancora} + (${sqlJanelaHoras(lado)} / 2) * INTERVAL '1 hour'
-      WHEN 'diaria'  THEN ${lado.ancora} + floor(EXTRACT(EPOCH FROM (NOW() - ${lado.ancora})) / 86400) * INTERVAL '1 day'
-      WHEN 'semanal' THEN ${lado.ancora} + floor(EXTRACT(EPOCH FROM (NOW() - ${lado.ancora})) / 604800) * INTERVAL '7 days'
-      ELSE d.expira_em - (floor(EXTRACT(EPOCH FROM (d.expira_em - NOW())) / 86400) + 1) * INTERVAL '1 day' END`
+      WHEN 'curta' THEN ${lado.ancora} + LEAST(floor((EXTRACT(EPOCH FROM (NOW() - ${lado.ancora})) / 3600.0) / ${sqlPassoCurta(lado)}), ${LEMBRETES_CURTA})
+                        * ${sqlPassoCurta(lado)} * INTERVAL '1 hour'
+      ELSE ${lado.ancora} + floor(EXTRACT(EPOCH FROM (NOW() - ${lado.ancora})) / 86400) * INTERVAL '1 day' END`
 // Subconsulta `s`: elegíveis + fase + início da fatia, calculados UMA vez por linha. O UPDATE e a
 // prévia leem daqui, então claim e dry-run nunca divergem.
 const sqlCalculoLembrete = (lado) => `
@@ -1261,8 +1266,8 @@ const sqlCalculoLembrete = (lado) => `
 const sqlFatiaDevida = (lado) => `
       NOW() >= s.inicio_fatia AND s.inicio_fatia > ${lado.ancora}
       AND (d.lembrete_enviado_em IS NULL OR d.lembrete_enviado_em < s.inicio_fatia)
-      AND (s.fase <> 'unica' OR d.lembretes_enviados = 0)
-      AND (s.fase = 'unica' OR (${SQL_JANELA_LEMBRETE}
+      AND (s.fase <> 'curta' OR d.lembretes_enviados < ${LEMBRETES_CURTA})
+      AND (s.fase = 'curta' OR (${SQL_JANELA_LEMBRETE}
            AND (d.lembrete_enviado_em IS NULL OR d.lembrete_enviado_em < NOW() - (${LEMBRETE_GAP_MIN_HORAS} * INTERVAL '1 hour'))))`
 const COLUNAS_LEMBRETE = (lado) => `d.id, d.titulo, d.cidade, d.uf, d.categoria, ${lado.comCategoria ? 'd.categorias, ' : ''}d.${lado.colunaValor} AS valor, d.lembretes_enviados, d.latitude, d.longitude, ${sqlInteressados(lado)} AS interessados`
 // O claim em si (UPDATE … RETURNING). Exportado só para o dry-run executar o MESMO statement
@@ -1275,8 +1280,8 @@ const sqlClaimLembrete = (lado) => `
    RETURNING ${COLUNAS_LEMBRETE(lado)}, s.fase`
 
 // Próximo lembrete previsto (só para prévia/admin; o claim não usa isto). Reproduz a regra em
-// JS a partir do que a subconsulta devolveu: fatia devida → agora; senão início da próxima fatia
-// (ou da fase 'final', se vier antes), adiada para a janela 08–20h SP e para o gap mínimo.
+// JS a partir do que a subconsulta devolveu: fatia devida → agora; senão a próxima fatia ainda não
+// enviada (curta: W/3, 2W/3; diária: +1 dia), adiada para a janela 08–20h SP e para o gap mínimo.
 // SP não tem horário de verão desde 2019: deslocamento fixo de −3h.
 const MS_H = 3600 * 1000, MS_D = 24 * MS_H, SP_OFFSET_MS = -3 * MS_H
 const adiarParaJanela = (t) => {
@@ -1286,16 +1291,24 @@ const adiarParaJanela = (t) => {
   const dia = Date.UTC(sp.getUTCFullYear(), sp.getUTCMonth(), sp.getUTCDate()) + (h >= LEMBRETE_HORA_FIM ? MS_D : 0)
   return new Date(dia + LEMBRETE_HORA_INICIO * MS_H - SP_OFFSET_MS)
 }
-const proximoLembrete = ({ fase, inicio_fatia, ancora, expira_em, lembrete_enviado_em, lembretes_enviados, devida_agora, agora }) => {
+const proximoLembrete = ({ fase, inicio_fatia, ancora, expira_em, janela_horas, lembrete_enviado_em, lembretes_enviados, devida_agora, agora }) => {
   if (devida_agora) return agora
-  const inicio = new Date(inicio_fatia), exp = new Date(expira_em), ult = lembrete_enviado_em ? new Date(lembrete_enviado_em) : null
-  if (fase === 'unica') return (Number(lembretes_enviados) > 0 || ult) ? null : (inicio > agora ? inicio : null)
+  const anc = new Date(ancora), exp = new Date(expira_em), ult = lembrete_enviado_em ? new Date(lembrete_enviado_em) : null
+  if (fase === 'curta') {
+    if (Number(lembretes_enviados) >= LEMBRETES_CURTA || !(Number(janela_horas) > 0)) return null
+    const passo = (Number(janela_horas) / (LEMBRETES_CURTA + 1)) * MS_H
+    for (let k = 1; k <= LEMBRETES_CURTA; k++) {
+      const t = new Date(anc.getTime() + k * passo)
+      if (ult && ult >= t) continue // fatia já consumida
+      if (t > agora) return t < exp ? t : null
+    }
+    return null
+  }
+  const inicio = new Date(inicio_fatia)
   const jaEnviadaNestaFatia = ult && ult >= inicio
   let prox
-  if (!jaEnviadaNestaFatia && inicio > new Date(ancora)) prox = inicio < agora ? agora : inicio
-  else if (fase === 'diaria' || fase === 'final') prox = new Date(inicio.getTime() + MS_D)
-  else prox = new Date(Math.min(inicio.getTime() + 7 * MS_D, exp.getTime() - 7 * MS_D))
-  if (fase === 'semanal' && prox > new Date(exp.getTime() - 7 * MS_D)) prox = new Date(exp.getTime() - 7 * MS_D)
+  if (!jaEnviadaNestaFatia && inicio > anc) prox = inicio < agora ? agora : inicio
+  else prox = new Date(inicio.getTime() + MS_D)
   if (ult) prox = new Date(Math.max(prox.getTime(), ult.getTime() + LEMBRETE_GAP_MIN_HORAS * MS_H))
   prox = adiarParaJanela(prox)
   return prox < exp ? prox : null
@@ -1641,9 +1654,10 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
             excluirManifestados: { interesse: lado.interesse, demandaId: d.id },
             demanda: { tabela: lado.tabela, id: d.id },
             // Mesmo alcance da demanda nova (cidade OU até min(raio, 50 km)) e conta no teto de 15
-            // pushes de demanda por dia; acima do teto o lembrete não sai (e não entra no resumo).
+            // pushes de demanda por dia; acima do teto o lembrete não sai como push próprio, mas
+            // entra no resumo do dia com texto de lembrete (lembrete: true).
             porDistancia: ponto(d),
-            tetoDiario: { tabela: lado.tabela, demandaId: d.id, ...ponto(d), lote: claim.rows.slice(i + 1).map(ponto), resumo: false },
+            tetoDiario: { tabela: lado.tabela, demandaId: d.id, ...ponto(d), lote: claim.rows.slice(i + 1).map(ponto), lembrete: true },
             aposPagina: (resultados) => registrarLembretesPush(lado.tabela, d.id, 'lembrete', resultados),
           })
         } catch (err) {
@@ -1879,7 +1893,9 @@ const avisarForaDaArea = semSobreposicao('avisarForaDaArea', async () => {
 // Quem bateu os TETO_PUSH_DEMANDA_DIA pushes de demanda do dia deixa de receber um push por pedido;
 // os pedidos seguintes ficam em avisos_acima_do_teto e viram, no MÁXIMO UMA vez por dia (São
 // Paulo) e só entre LEMBRETE_HORA_INICIO e LEMBRETE_HORA_FIM, um push só:
-//   "Mais N pedidos perto de você hoje" / "Toque para ver."
+//   só pedidos NOVOS            → "Mais N pedidos perto de você hoje" / "Toque para ver."
+//   algum lembrete "ainda aberto" (avisos_acima_do_teto.lembrete, 10/11/2026)
+//                              → "Mais N pedidos perto de você ainda esperam profissional" / "Toque para ver."
 // data.tipo: 'novo_reparo' (ou 'nova_obra' quando só há obras) SEM id de demanda — o roteador de
 // toques do app (AppNavigator.navegarParaNotificacao) já trata os dois e, sem id, abre o FEED do
 // profissional; nas versões anteriores à aba unificada também (abaFeedPro). Um tipo novo cairia
@@ -1893,10 +1909,12 @@ const avisarForaDaArea = semSobreposicao('avisarForaDaArea', async () => {
 // repetido não reenvia. Cadência: INTERVALO_LEMBRETE (server.js).
 const RESUMO_TETO_ESPERA_MIN = 60
 const SQL_PESSOA_DA_CONTA = (alias) => `COALESCE(${sqlCpfNormalizado(`${alias}.cpf_cnpj`)}, ${alias}.id::text)`
-const mensagemResumoTeto = (n, soObras = false) => ({
-  titulo: n === 1 ? 'Mais 1 pedido perto de você hoje' : `Mais ${n} pedidos perto de você hoje`,
+const mensagemResumoTeto = (n, soObras = false, lembrete = false) => ({
+  titulo: lembrete
+    ? (n === 1 ? 'Mais 1 pedido perto de você ainda espera profissional' : `Mais ${n} pedidos perto de você ainda esperam profissional`)
+    : (n === 1 ? 'Mais 1 pedido perto de você hoje' : `Mais ${n} pedidos perto de você hoje`),
   corpo: 'Toque para ver.',
-  data: { tipo: soObras ? 'nova_obra' : 'novo_reparo', resumo: true, total: n },
+  data: { tipo: soObras ? 'nova_obra' : 'novo_reparo', resumo: true, total: n, ...(lembrete ? { lembrete: true } : {}) },
 })
 let resumosDoTetoEmExecucao = false
 const enviarResumosAcimaDoTeto = async () => {
@@ -1922,7 +1940,7 @@ const enviarResumosAcimaDoTeto = async () => {
          FROM pendentes p
         WHERE t.tabela = p.tabela AND t.demanda_id = p.demanda_id AND t.usuario_id = p.usuario_id
           AND t.resumo_em IS NULL AND p.pessoa IN (SELECT pessoa FROM devidas)
-       RETURNING t.tabela, t.demanda_id, t.usuario_id, p.pessoa`
+       RETURNING t.tabela, t.demanda_id, t.usuario_id, t.lembrete, p.pessoa`
     )
     if (claim.rows.length > 0) {
       // Só conta o pedido que continua aberto: "Mais N pedidos" tem de bater com o que o feed mostra.
@@ -1938,12 +1956,15 @@ const enviarResumosAcimaDoTeto = async () => {
       }
       const porPessoa = new Map()
       for (const l of claim.rows) {
-        const p = porPessoa.get(l.pessoa) || { usuarioId: l.usuario_id, demandas: new Set() }
-        if (vivos.has(`${l.tabela}:${l.demanda_id}`)) p.demandas.add(`${l.tabela}:${l.demanda_id}`)
+        const p = porPessoa.get(l.pessoa) || { usuarioId: l.usuario_id, demandas: new Set(), lembrete: false }
+        if (vivos.has(`${l.tabela}:${l.demanda_id}`)) {
+          p.demandas.add(`${l.tabela}:${l.demanda_id}`)
+          if (l.lembrete === true) p.lembrete = true
+        }
         porPessoa.set(l.pessoa, p)
       }
       let enviados = 0
-      for (const { usuarioId, demandas } of porPessoa.values()) {
+      for (const { usuarioId, demandas, lembrete } of porPessoa.values()) {
         if (demandas.size === 0) continue
         try {
           // Mesmas travas do aviso de demanda: assinatura ativa, pessoa não suspensa, app não desinstalado.
@@ -1953,7 +1974,7 @@ const enviarResumosAcimaDoTeto = async () => {
           if (apto.rows.length === 0) continue
           const contato = await contatoDaPessoa(usuarioId)
           if (!contato?.push_token) continue
-          const msg = mensagemResumoTeto(demandas.size, [...demandas].every(x => x.startsWith('obras:')))
+          const msg = mensagemResumoTeto(demandas.size, [...demandas].every(x => x.startsWith('obras:')), lembrete)
           const r = await enviarPushNotificacao(contato.push_token, msg.titulo, msg.corpo, msg.data, usuarioId)
           if (r === 'enviado') enviados++
         } catch (err) {
