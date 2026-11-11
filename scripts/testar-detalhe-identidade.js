@@ -194,10 +194,16 @@ const main = async () => {
   r = await getObra(PP, O1)
   ok(eh(r, PP.id, true, false), 'obra — a conta casada: sou_escolhido true', ident(r))
   r = await getObra(PR, O1)
-  ok(eh(r, PP.id, true, false) && r.body.obra.endereco_obra === 'Rua A, 10',
-     'obra — logado como REPARADOR, match da conta PINTOR: sou_escolhido true, conta_id = a conta pintor (e vê o endereço do escolhido)', ident(r))
+  // Endereço ao escolhido só com horário combinado (privacidadeDemanda, 11/11/2026): sem
+  // chegada_prevista_em sai null + endereco_liberado false; com ele, o endereço.
+  ok(eh(r, PP.id, true, false) && r.body.obra.endereco_obra === null && r.body.obra.endereco_liberado === false,
+     'obra — logado como REPARADOR, match da conta PINTOR: sou_escolhido true, conta_id = a conta pintor (endereço ainda oculto: sem horário)', ident(r))
+  await db.query(`UPDATE obras SET chegada_prevista_em = now() + INTERVAL '1 day' WHERE id = $1`, [O1])
+  r = await getObra(PR, O1)
+  ok(eh(r, PP.id, true, false) && r.body.obra.endereco_obra === 'Rua A, 10' && r.body.obra.endereco_liberado === true,
+     'obra — com horário combinado, a pessoa do match vê o endereço (pela conta irmã também)', ident(r))
   r = await getObra(EP, O1)
-  ok(eh(r, EP.id, false, false) && r.body.obra.endereco_obra === undefined, 'obra — pintor estranho: sou_escolhido false (e sem endereço)', ident(r))
+  ok(eh(r, EP.id, false, false) && r.body.obra.endereco_obra === null && r.body.obra.endereco_liberado === false, 'obra — pintor estranho: sou_escolhido false (e sem endereço)', ident(r))
   r = await getObra(DA, O1)
   ok(eh(r, DA.id, false, true), 'obra — dono com profissional escolhido: sou_dono true, sou_escolhido false', ident(r))
   r = await getObra(DB, O1)
@@ -221,7 +227,10 @@ const main = async () => {
   await db.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE reparo_id = $1 AND usuario_id = $2`, [R1, PR.id])
   await db.query(`UPDATE reparos SET match_usuario_id = $2, match_feito_em = now() WHERE id = $1`, [R1, PR.id])
   r = await getReparo(PP, R1)
-  ok(eh(r, PR.id, true, false) && r.body.reparo.endereco_reparo === 'Rua B, 20', 'serviço — logado como PINTOR, match da conta REPARADOR: sou_escolhido true, conta_id = a conta reparador', ident(r))
+  ok(eh(r, PR.id, true, false) && r.body.reparo.endereco_reparo === null && r.body.reparo.endereco_liberado === false, 'serviço — logado como PINTOR, match da conta REPARADOR: sou_escolhido true, conta_id = a conta reparador (endereço só com horário)', ident(r))
+  await db.query(`UPDATE reparos SET chegada_prevista_em = now() + INTERVAL '1 day' WHERE id = $1`, [R1])
+  r = await getReparo(PP, R1)
+  ok(eh(r, PR.id, true, false) && r.body.reparo.endereco_reparo === 'Rua B, 20' && r.body.reparo.endereco_liberado === true, 'serviço — com horário combinado: endereço liberado à pessoa do match', ident(r))
   r = await getReparo(PR, R1)
   ok(eh(r, PR.id, true, false), 'serviço — a conta casada: sou_escolhido true', ident(r))
   r = await getReparo(EP, R1)

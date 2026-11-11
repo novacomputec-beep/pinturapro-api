@@ -17,6 +17,8 @@ const { sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa } = require('../u
 const { sqlPessoaPodeObras } = require('../utils/capacidadeObras')
 const { sqlEspecialidadesDaPessoa, gravarEspecialidadesInferidas } = require('../utils/especialidadesInferidas')
 const { mascararLista } = require('../utils/tentativasContato')
+// Coordenadas arredondadas no feed (utils/privacidadeDemanda): o filtro por raio roda nas exatas.
+const { ofuscarCoordenadasLista } = require('../utils/privacidadeDemanda')
 // Marca do dono no card (utils/responsabilidade): propostas de horário que ele deixou vencer em 90 dias.
 const { sqlClienteNaoRespondeu90d } = require('../utils/responsabilidade')
 
@@ -126,7 +128,7 @@ const listar = async (req, res) => {
     // Título mascarado na leitura (linha antiga, gravada antes do filtro de contato) — o mesmo
     // tratamento de GET /obras/:id. Só o título sai no card do feed.
     res.json({
-      obras: mascararLista(result.rows, ['titulo']),
+      obras: ofuscarCoordenadasLista(mascararLista(result.rows, ['titulo'])),
       pagina: parseInt(page),
       total: result.rows.length,
       filtro: filtroMeta,
