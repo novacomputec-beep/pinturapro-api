@@ -55,7 +55,11 @@ const main = async () => {
     [D(3), U(2), 'pendente', null, null, null, null, false],
     [D(3), U(4), 'expirado', null, null, null, null, false],
   ])
-  const { listarDesistencias, contarInteressadosAtivos, desistenciaRecentePorDemanda, anexarDesistenciaRecente, ROTULO_DESISTENCIA } = require(path.join(REPO, 'src/utils/desistencias'))
+  const { listarDesistencias, contarInteressadosAtivos, desistenciaRecentePorDemanda, anexarDesistenciaRecente, ROTULO_DESISTENCIA,
+          migrarDesistencias, registrarDesistenciaSnapshot, rotuloMotivo, ROTULO_CONTA_EXCLUIDA_F } = require(path.join(REPO, 'src/utils/desistencias'))
+  // Tabela do retrato (conta excluída) — a mesma migração de boot, 2x (idempotente).
+  const cliente = { query: (s, p) => db.query(s, p) }
+  await migrarDesistencias(cliente); await migrarDesistencias(cliente)
 
   let l = await listarDesistencias('reparos', D(1))
   ok(l.length === 1 && l[0].usuario_id === U(1), 'reparo 1: só o cancelamento feito pelo próprio profissional (desfazer do dono, cancelamento do dono e recusado ficam fora)', l.map(x => x.nome))
@@ -75,7 +79,41 @@ const main = async () => {
   ok(l.length === 2 && l[0].nome === 'Hudson' && l[0].motivo_texto === 'Outro motivo' && l[0].detalhe === 'Peguei outro serviço' && l[1].motivo_texto === 'Não precisa mais',
      'obra: candidaturas canceladas pelo pintor, mais recente primeiro, "Não precisa mais" / "Outro motivo"', l.map(x => [x.nome, x.motivo_texto]))
   ok(await contarInteressadosAtivos('obras', D(3)) === 1, 'obra: 1 ativo (expirado fora)')
-  ok(Object.keys(ROTULO_DESISTENCIA).sort().join() === 'imprevisto,nao_consigo_horario,nao_preciso,outro', 'cobre os 4 motivos de cancelamentoMatchService')
+  ok(Object.keys(ROTULO_DESISTENCIA).sort().join() === 'conta_excluida,imprevisto,nao_consigo_horario,nao_preciso,outro', 'cobre os 4 motivos de cancelamentoMatchService + conta_excluida')
+  ok(ROTULO_DESISTENCIA.conta_excluida === 'O profissional excluiu a conta e não vai mais fazer o serviço.' && rotuloMotivo('conta_excluida') === ROTULO_DESISTENCIA.conta_excluida
+     && rotuloMotivo('conta_excluida', 'm') === ROTULO_DESISTENCIA.conta_excluida && rotuloMotivo('conta_excluida', 'f') === ROTULO_CONTA_EXCLUIDA_F && rotuloMotivo('conta_excluida', 'F') === ROTULO_CONTA_EXCLUIDA_F,
+     'conta_excluida: "O profissional…" sem gênero/masculino; "A profissional…" só com genero f')
+
+  // ═══ Retrato de conta excluída: sobrevive à cascata e entra nas duas leituras ═══════════════
+  // Elaine era o match do reparo 5; a conta dela vai ser apagada. O retrato é gravado ANTES (como
+  // cancelamentoMatchService.desfazerMatchesPorExclusao faz) e depois a proposta e a conta somem.
+  const ELAINE = U(7)
+  await db.query(`INSERT INTO usuarios (id, nome, foto_url) VALUES ($1, 'Elaine Kelly', 'https://res.cloudinary.com/demo/image/upload/v1/fotos/elaine.jpg')`, [ELAINE])
+  await ins('reparo_id', 'interesse_reparos', [[D(5), ELAINE, 'aceito', null, null, null, null, false], [D(5), U(2), 'recusado', null, null, null, null, false]])
+  const idRetrato = await registrarDesistenciaSnapshot(cliente, { tabela: 'reparos', demandaId: D(5), usuario: { id: ELAINE, nome: 'Elaine Kelly', foto_url: 'https://res.cloudinary.com/demo/image/upload/v1/fotos/elaine.jpg' } })
+  await db.query(`DELETE FROM interesse_reparos WHERE usuario_id = $1`, [ELAINE])
+  await db.query(`DELETE FROM usuarios WHERE id = $1`, [ELAINE])
+  l = await listarDesistencias('reparos', D(5))
+  ok(l.length === 1 && l[0].id === idRetrato && l[0].usuario_id === ELAINE && l[0].nome === 'Elaine' && l[0].motivo === 'conta_excluida' && l[0].acordo === false && l[0].detalhe === null && l[0].cancelado_em,
+     'conta excluída: a desistência vem do retrato (nome curto "Elaine K." → "Elaine", id do retrato, usuario_id preservado)', l[0])
+  ok(l[0].motivo_texto === 'O profissional excluiu a conta e não vai mais fazer o serviço.', 'rótulo do retrato sem gênero: "O profissional…"', l[0].motivo_texto)
+  ok(l[0].foto_url === 'https://res.cloudinary.com/demo/image/upload/w_200,h_200,c_fill,g_face,q_auto,f_auto/v1/fotos/elaine.jpg', 'foto do retrato otimizada', l[0].foto_url)
+  const snap = (await db.query(`SELECT nome_curto, genero, motivo FROM desistencias WHERE id = $1`, [idRetrato])).rows[0]
+  ok(snap.nome_curto === 'Elaine K.' && snap.genero === null && snap.motivo === 'conta_excluida', 'linha gravada: nome_curto "Elaine K.", genero NULL, motivo conta_excluida', snap)
+  await db.query(`UPDATE desistencias SET genero = 'f' WHERE id = $1`, [idRetrato])
+  l = await listarDesistencias('reparos', D(5))
+  ok(l[0].motivo_texto === 'A profissional excluiu a conta e não vai mais fazer o serviço.', 'com genero f gravado: "A profissional…"', l[0].motivo_texto)
+  const mapa5 = await desistenciaRecentePorDemanda('reparos', [D(5), D(1)])
+  ok(mapa5[D(5)]?.nome === 'Elaine' && mapa5[D(5)].motivo_texto === 'A profissional excluiu a conta e não vai mais fazer o serviço.' && mapa5[D(1)]?.nome === 'Hudson',
+     'desistencia_recente: o retrato alimenta a lista /minhas como qualquer desistência', mapa5[D(5)])
+  // Proposta cancelada cujo usuário sumiu SEM retrato (caso antigo): LEFT JOIN não derruba a linha; nome null.
+  await db.query(`UPDATE interesse_reparos SET usuario_id = $2, cancelado_por = $2 WHERE reparo_id = $1 AND usuario_id = $3`, [D(2), U(77), U(3)])
+  l = await listarDesistencias('reparos', D(2))
+  ok(l.length === 2 && l.some(x => x.usuario_id === U(77) && x.nome === null && x.motivo_texto === 'xyz_motivo_novo'), 'proposta cancelada de conta que já não existe e sem retrato: continua na lista, nome null', l.map(x => [x.usuario_id.slice(-2), x.nome]))
+  // Retrato + proposta cancelada do MESMO profissional ainda presente: não duplica (a proposta já aparece).
+  await registrarDesistenciaSnapshot(cliente, { tabela: 'reparos', demandaId: D(2), usuario: { id: U(1), nome: 'Hudson Vinícius Silva', foto_url: null } })
+  l = await listarDesistencias('reparos', D(2))
+  ok(l.length === 2, 'retrato de quem ainda tem a proposta cancelada na demanda não duplica a desistência', l.length)
   let erro = null
   try { await listarDesistencias('usuarios', D(1)) } catch (e) { erro = e.message }
   ok(/tabela inválida/.test(erro || ''), 'tabela inválida lança')

@@ -62,7 +62,7 @@ const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
 const { JANELA_AGENDADO, SUGESTOES_MAX_POR_LADO, ERRO_LIMITE_SUGESTOES, colunaSugestoes, sugestoesRestantes, RESPOSTAS_COMPARECIMENTO, PRAZO_MINIMO_REMARCAR, RE_DATA_HORA, temFuso, sqlDataHora, SQL_ZERAR_AGENDA, SQL_ISENCAO_FALTA, formatarDataHoraSP } = require('../utils/agendamento')
 const { nomeCurto, fotoOtimizada } = require('../utils/donoResumo')
 // Desistências (profissional cancelou depois de escolhido) e interessados ativos — só ao dono em GET /:id.
-const { listarDesistencias, contarInteressadosAtivos, anexarDesistenciaRecente } = require('../utils/desistencias')
+const { listarDesistencias, contarInteressadosAtivos, anexarDesistenciaRecente, migrarDesistencias } = require('../utils/desistencias')
 // Indicações: recálculo do indicador após cada aprovação, código/link em GET /indicacoes/minhas.
 const { normalizarCodigo, recalcularIndicador, LINK_INDICACAO } = require('../utils/indicacoes')
 // Grupos de categorias relacionadas (mapa público em GET /config/grupos-categorias) e o teto de
@@ -747,6 +747,8 @@ const migracaoPronta = (async () => {
     await migrarEspecialidadesInferidas(client)
     // Registro das contas excluídas (utils/contasExcluidas): id, nome, cpf_hash, role, excluido_em, por.
     await migrarContasExcluidas(client)
+    // Retrato da desistência por exclusão de conta (utils/desistencias): tabela desistencias.
+    await migrarDesistencias(client)
     // Avisos ao PROFISSIONAL casado (alertaService.avisarMatchFeito / lembrarPrazoChegada):
     // aviso_match_enviado_em = push "Match feito!" logo após o match; lembrete_chegada_enviado_em
     // = lembrete antes do prazo de chegada. Cada um é um claim atômico (UPDATE ... WHERE IS NULL

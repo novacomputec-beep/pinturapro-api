@@ -116,6 +116,8 @@ const main = async () => {
   `)
   // contas_excluidas — a mesma migração de boot (utils/contasExcluidas).
   await require(path.join(REPO, 'src/utils/contasExcluidas')).migrarContasExcluidas({ query: (s, p) => db.query(s, p) })
+  // Retrato da desistência por exclusão de conta (utils/desistencias) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/desistencias')).migrarDesistencias({ query: (s, p) => db.query(s, p) })
   const usr = (id, nome, email, role, extra = {}) => db.query(
     `INSERT INTO usuarios (id, nome, email, role, tipo_dono, tipo_prestador, cpf_cnpj, senha_hash, push_token, google_sub, foto_url, verificacao_doc_frente_url, verificacao_selfie_url)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,

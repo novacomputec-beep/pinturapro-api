@@ -33,6 +33,8 @@ const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunci
 const { ehMesmaPessoa } = require('../utils/tipoConta')
 const { STATUS_VALENDO } = require('../utils/reaberturaMatch')
 const { MARCA } = require('../utils/marca')
+// Retrato da desistência por exclusão de conta (sobrevive à cascata) — utils/desistencias.
+const { registrarDesistenciaSnapshot } = require('../utils/desistencias')
 
 const MOTIVOS = ['imprevisto', 'nao_preciso', 'nao_consigo_horario', 'outro']
 const ROTULO_MOTIVO = {
@@ -277,9 +279,13 @@ const executar = async ({ lado, d, canceladoPor, atorId = canceladoPor, motivo, 
 // de existir. Roda DENTRO da transação da exclusão (`client`) e devolve os efeitos a disparar DEPOIS
 // do COMMIT (avisarMatchesDesfeitosPorExclusao): dono (push + e-mail), interessados que voltaram a
 // valer ("reabriu") e o reanúncio aos profissionais que ainda não se manifestaram.
-const MOTIVO_CONTA_EXCLUIDA = 'conta_excluida'
+// 'conta_excluida' — a mesma chave que utils/desistencias rotula para o dono.
+const { MOTIVO_CONTA_EXCLUIDA } = require('../utils/desistencias')
 const desfazerMatchesPorExclusao = async (client, profissionalId) => {
   const efeitos = []
+  // Retrato do profissional (nome curto, foto) lido ANTES da cascata: é o que o dono vai ver na
+  // folha de desistência depois que a conta não existir mais (utils/desistencias).
+  const retrato = (await client.query(`SELECT id, nome, foto_url FROM usuarios WHERE id = $1`, [profissionalId])).rows[0] || { id: profissionalId }
   for (const lado of Object.values(LADOS)) {
     const abertas = await client.query(
       `SELECT id, titulo, criado_por FROM ${lado.tabela}
@@ -311,6 +317,8 @@ const desfazerMatchesPorExclusao = async (client, profissionalId) => {
           WHERE ${lado.proposta.coluna} = $1 AND usuario_id <> $2 AND status = ANY($3::text[])`,
         [d.id, profissionalId, STATUS_VALENDO]
       )).rows.map(x => x.usuario_id)
+      // Desistência que SOBREVIVE à exclusão (a proposta dele é apagada pela cascata logo adiante).
+      await registrarDesistenciaSnapshot(client, { tabela: lado.tabela, demandaId: d.id, usuario: retrato, motivo: MOTIVO_CONTA_EXCLUIDA })
       efeitos.push({ lado, d, interessados })
       console.log(`[CancelarMatch] ${lado.tipo} ${d.id}: match de ${profissionalId} desfeito por exclusão da conta (${interessados.length} interessado(s) voltam a valer)`)
     }
