@@ -38,7 +38,7 @@ const { purgarPushRecibosAntigos } = require('./src/utils/pushRecibos')
 const { verificarEscolhaPendente } = require('./src/services/escolhaPendenteService')
 // "Você já pode escolher outro profissional": ao dono quando o desfazer escolha libera (≤ 25% do
 // intervalo match→prazo restando, sem horário proposto). Cadência dos cronômetros.
-const { avisarDesfazerLiberado } = require('./src/services/desfazerEscolhaService')
+const { avisarDesfazerLiberado, avisarDonosProfissionalDesinstalou } = require('./src/services/desfazerEscolhaService')
 const { avisarRespostaFinalDono, aplicarCreditosPendentes } = require('./src/services/responsabilidadeService')
 const { rodarBackfillEReanuncioUnico } = require('./src/services/obrasInferidasService')
 // Resumo do dia ao admin às 18:00 SP (push + e-mail com o link da aba Canal do WhatsApp).
@@ -859,6 +859,9 @@ const iniciarAgendador = () => {
   // Dono com profissional escolhido que não marcou horário: aviso único quando o desfazer libera
   // (services/desfazerEscolhaService). Fica devido até o prazo, então o 1º tique de 1 min o pega.
   setInterval(() => { avisarDesfazerLiberado() }, INTERVALO_CRONOMETRO)
+  // Escolhido que DESINSTALOU o app (desinstalado_em) em demanda aberta sem horário: aviso único ao dono
+  // (claim aviso_desinstalou_em). Também disparado na hora pelo recibo DeviceNotRegistered (alertaService).
+  setInterval(() => { avisarDonosProfissionalDesinstalou() }, INTERVALO_CRONOMETRO)
   // Admin: "Resumo do dia pronto (N pedidos)" às 18:00 SP, 1x/dia (claim em configuracoes).
   setInterval(() => { enviarResumoDiaAdmin() }, INTERVALO_CRONOMETRO)
   setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)

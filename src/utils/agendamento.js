@@ -69,7 +69,7 @@ const sqlDataHora = (param, paramTemFuso) =>
 // dos "Agende" deste match, exposta em GET /:id) e desfazer_aviso_em (claim do aviso "você já
 // pode escolher outro", desfazerEscolhaService) são estado DESTE match pelo mesmo motivo.
 const SQL_ZERAR_AGENDA = `chegada_proposta_por = NULL, chegada_pendente_rodada = 0,
-              lembrete_agendar_enviados = 0, desfazer_aviso_em = NULL,
+              lembrete_agendar_enviados = 0, desfazer_aviso_em = NULL, aviso_desinstalou_em = NULL,
               lembrete_agendar_sem_proposta = 0, horario_vencido_em = NULL, horarios_vencidos = 0,
               lembrete_agenda_vespera_em = NULL, lembrete_agenda_2h_em = NULL, lembrete_agenda_hora_em = NULL,
               lembrete_agenda_dono_vespera_em = NULL, lembrete_agenda_dono_2h_em = NULL,

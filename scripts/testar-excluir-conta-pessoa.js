@@ -82,7 +82,7 @@ const main = async () => {
       pedido_tempo_status text, pedido_tempo_motivo text, pedido_tempo_minutos int, chegada_janela text, chegada_prevista_em timestamptz,
       chegada_declarada_por uuid, chegada_declarada_em timestamptz, chegada_pendente_janela text, chegada_pendente_em timestamptz, chegada_recusada_em timestamptz,
       chegada_confirmada_em timestamptz, aviso_match_enviado_em timestamptz, lembrete_chegada_enviado_em timestamptz, chegada_proposta_por uuid, chegada_pendente_rodada int DEFAULT 0,
-      lembrete_agendar_enviados int DEFAULT 0, desfazer_aviso_em timestamptz, lembrete_agendar_sem_proposta int DEFAULT 0, horario_vencido_em timestamptz, horarios_vencidos int DEFAULT 0,
+      lembrete_agendar_enviados int DEFAULT 0, desfazer_aviso_em timestamptz, aviso_desinstalou_em timestamptz, lembrete_agendar_sem_proposta int DEFAULT 0, horario_vencido_em timestamptz, horarios_vencidos int DEFAULT 0,
       lembrete_agenda_vespera_em timestamptz, lembrete_agenda_2h_em timestamptz, lembrete_agenda_hora_em timestamptz, lembrete_agenda_dono_vespera_em timestamptz, lembrete_agenda_dono_2h_em timestamptz,
       vigia_comparecimento_em timestamptz, comparecimento_resposta text, comparecimento_respondido_em timestamptz, lembrete_agendar_offsets int[] DEFAULT '{}', lembrete_agendar_ultimo_em timestamptz,
       lembrete_agendar_dono_em timestamptz, chegada_proposta_em timestamptz, lembrete_resposta_1h_em timestamptz, lembrete_resposta_antes_em timestamptz, lembrete_resposta_ultimo_em timestamptz,

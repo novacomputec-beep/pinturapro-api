@@ -182,6 +182,9 @@ const removerTokensDesinstalados = async (tokens) => {
   try {
     const { removidos, novos } = await marcarDesinstalados(tokens)
     console.log(`[Push] ${tokens.length} token(s) inválido(s) removido(s) (DeviceNotRegistered) | contas: ${removidos} | desinstalações novas: ${novos}`)
+    // Escolhido de demanda aberta sem horário desinstalou → dono avisado (uma vez por match).
+    // require tardio: desfazerEscolhaService importa este módulo (ciclo).
+    if (novos > 0) await require('./desfazerEscolhaService').avisarDonosProfissionalDesinstalou()
   } catch (err) {
     console.error('[Push] Erro ao remover tokens inválidos:', err.message)
   }
