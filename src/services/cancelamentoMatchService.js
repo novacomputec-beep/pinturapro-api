@@ -31,7 +31,7 @@ const { pool } = require('../utils/supabase')
 const { SQL_ZERAR_AGENDA, formatarDataHoraSP } = require('../utils/agendamento')
 const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunciarDemanda, contatoDaPessoa } = require('./alertaService')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
-const { STATUS_VALENDO } = require('../utils/reaberturaMatch')
+const { STATUS_VALENDO, restaurarPropostasRebaixadas } = require('../utils/reaberturaMatch')
 const { MARCA } = require('../utils/marca')
 // Retrato da desistência por exclusão de conta (sobrevive à cascata) — utils/desistencias.
 const { registrarDesistenciaSnapshot } = require('../utils/desistencias')
@@ -229,6 +229,9 @@ const executar = async ({ lado, d, canceladoPor, atorId = canceladoPor, motivo, 
         WHERE ${lado.proposta.coluna} = $1 AND usuario_id = $2 AND status = 'aceito'`,
       [d.id, profissionalId, canceladoPor, motivo, detalhe, !!acordo]
     )
+    // Demanda que SEGUE ABERTA: as propostas rebaixadas pelo match voltam a valer na mesma
+    // transação (utils/reaberturaMatch — era o que faltava aqui: B55RT, 11/11/2026).
+    if (!encerrar) await restaurarPropostasRebaixadas(client, lado.tabela, d.id)
     await client.query('COMMIT')
     desfeito = true
   } catch (err) {
@@ -306,12 +309,7 @@ const desfazerMatchesPorExclusao = async (client, profissionalId) => {
           WHERE ${lado.proposta.coluna} = $1 AND usuario_id = $2 AND status = 'aceito'`,
         [d.id, profissionalId, MOTIVO_CONTA_EXCLUIDA]
       )
-      await client.query(
-        `UPDATE ${lado.proposta.tabela}
-            SET status = status_antes_match, status_antes_match = NULL
-          WHERE ${lado.proposta.coluna} = $1 AND usuario_id <> $2 AND status = 'recusado' AND status_antes_match IS NOT NULL`,
-        [d.id, profissionalId]
-      )
+      await restaurarPropostasRebaixadas(client, lado.tabela, d.id)
       const interessados = (await client.query(
         `SELECT DISTINCT usuario_id FROM ${lado.proposta.tabela}
           WHERE ${lado.proposta.coluna} = $1 AND usuario_id <> $2 AND status = ANY($3::text[])`,

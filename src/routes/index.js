@@ -31,6 +31,8 @@ const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaCon
 // substitui o uso de POST /:id/expirar-match por dono/profissional.
 const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQL_LIMPAR_MATCH,
         desfazerMatchesPorExclusao, avisarMatchesDesfeitosPorExclusao } = require('../services/cancelamentoMatchService')
+// Propostas rebaixadas pelo match voltam a valer quando a demanda retorna ao feed (regra única).
+const { sqlRestaurarPropostas } = require('../utils/reaberturaMatch')
 // Exclusão de conta: registro em contas_excluidas (utils/contasExcluidas).
 const { migrarContasExcluidas, registrarContaExcluida } = require('../utils/contasExcluidas')
 const { handler: desfazerEscolhaHandler, sqlDesfazerLiberadoEm, sqlPodeEscolherOutro } = require('../services/desfazerEscolhaService')
@@ -4504,6 +4506,10 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
          UPDATE candidaturas SET status = 'expirado'
           WHERE obra_id IN (SELECT id FROM desfeito) AND usuario_id = $2::uuid AND status = 'aceito'
           RETURNING id
+       ), restauradas AS (
+         -- A obra volta ao feed: candidaturas rebaixadas pelo match voltam a valer (utils/reaberturaMatch).
+         ${sqlRestaurarPropostas('obras', { em: 'SELECT id FROM desfeito' })}
+         RETURNING rp.id
        )
        SELECT id FROM desfeito`,
       [req.params.id, pintorId, ehDono]
@@ -5933,6 +5939,10 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
          UPDATE interesse_reparos SET status = 'expirado'
           WHERE reparo_id IN (SELECT id FROM desfeito) AND usuario_id = $2::uuid AND status = 'aceito'
           RETURNING id
+       ), restauradas AS (
+         -- O serviço volta ao feed: interesses rebaixados pelo match voltam a valer (utils/reaberturaMatch).
+         ${sqlRestaurarPropostas('reparos', { em: 'SELECT id FROM desfeito' })}
+         RETURNING rp.id
        )
        SELECT id FROM desfeito`,
       [req.params.id, prestadorId, ehDono]

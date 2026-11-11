@@ -35,6 +35,8 @@ const { SQL_ZERAR_AGENDA, TOLERANCIA_CHEGADA_MIN, sqlPrazoChegada, sqlLimiteCheg
 // Avisos de atraso são críticos pós-match: push E e-mail, com dedupe em email_alertas.
 const { entregarPushEEmail, contatoDaPessoa } = require('./alertaService')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
+// Restauração das propostas rebaixadas pelo match quando a demanda volta ao feed (regra única).
+const { sqlRestaurarPropostas } = require('../utils/reaberturaMatch')
 
 const MINUTOS_PERMITIDOS = [15, 30, 60]
 const MAX_PEDIDOS_POR_MATCH = 2
@@ -248,9 +250,13 @@ const recusarNoBanco = async (client, lado, d) => {
            ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
        WHERE id = $1 AND match_usuario_id = $2::uuid
        RETURNING id
+     ), expirada AS (
+       UPDATE ${lado.proposta.tabela} SET status = 'expirado'
+        WHERE ${lado.proposta.coluna} IN (SELECT id FROM desfeito) AND usuario_id = $2::uuid AND status = 'aceito'
+        RETURNING id
      )
-     UPDATE ${lado.proposta.tabela} SET status = 'expirado'
-      WHERE ${lado.proposta.coluna} IN (SELECT id FROM desfeito) AND usuario_id = $2::uuid AND status = 'aceito'`,
+     -- A demanda volta ao feed: propostas rebaixadas pelo match voltam a valer (utils/reaberturaMatch).
+     ${sqlRestaurarPropostas(lado.tabela, { em: 'SELECT id FROM desfeito' })}`,
     [d.id, d.match_usuario_id]
   )
 }

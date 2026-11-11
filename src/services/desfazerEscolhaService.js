@@ -50,6 +50,8 @@ const { pool } = require('../utils/supabase')
 const { registrarCompromissoNaoCumprido } = require('./responsabilidadeService')
 const { formatarDataHoraSP } = require('../utils/agendamento')
 const { SQL_LIMPAR_MATCH } = require('./cancelamentoMatchService')
+// Restauração das propostas rebaixadas pelo match — regra única de utils/reaberturaMatch.
+const { restaurarPropostasRebaixadas } = require('../utils/reaberturaMatch')
 const { entregarPushEEmail, inserirFaltaUnica, avaliarSuspensaoPorFaltas, MOTIVO_FALTA_SEM_HORARIO, semSobreposicao, contatoDaPessoa } = require('./alertaService')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
 
@@ -175,13 +177,8 @@ const handler = (tabela, modo = 'desfazer') => {
           WHERE ${lado.proposta.coluna} = $1 AND usuario_id = $2 AND status = 'aceito'`,
         [d.id, profissionalId, req.usuario.id, motivo]
       )
-      // Propostas rebaixadas PELO MATCH voltam ao status que tinham.
-      await client.query(
-        `UPDATE ${lado.proposta.tabela}
-            SET status = status_antes_match, status_antes_match = NULL
-          WHERE ${lado.proposta.coluna} = $1 AND usuario_id <> $2 AND status = 'recusado' AND status_antes_match IS NOT NULL`,
-        [d.id, profissionalId]
-      )
+      // Propostas rebaixadas PELO MATCH voltam ao status que tinham (regra única: utils/reaberturaMatch).
+      await restaurarPropostasRebaixadas(client, lado.tabela, d.id)
       interessados = (await client.query(
         `SELECT DISTINCT usuario_id FROM ${lado.proposta.tabela}
           WHERE ${lado.proposta.coluna} = $1 AND usuario_id <> $2 AND status = ANY($3::text[])`,

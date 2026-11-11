@@ -113,7 +113,7 @@ const main = async () => {
   await db.query(`UPDATE obras SET match_usuario_id = $2, chegada_prevista_em = now() - INTERVAL '20 minutes', chegada_janela = 'manha' WHERE id = $1`, [D(5), U(2)])
   await inserir('obras',   6, 'O3 sem proposta');            await proposta('obras', 6, U(1))
   // Concorrentes: rebaixados PELO MATCH (status_antes_match preenchido, como rejeitarConcorrentes grava)
-  // em R1 e O3 (sem horário → voltam a valer) e em O2 (horário valendo → fora do escopo, ficam recusados);
+  // em R1, O3 e O2 (todos voltam a valer quando a demanda retorna ao feed — regra única de 11/11/2026);
   // 'Recusado' foi recusado explicitamente pelo dono em R1 (sem marcador → fica recusado).
   const rebaixado = (tabela, n, usuario, antes) =>
     db.query(`INSERT INTO ${tabela === 'reparos' ? 'interesse_reparos' : 'candidaturas'} (${tabela === 'reparos' ? 'reparo_id' : 'obra_id'}, usuario_id, status, status_antes_match) VALUES ($1, $2, 'recusado', $3)`, [D(n), usuario, antes])
@@ -205,7 +205,9 @@ const main = async () => {
   ok(pushesDe('dono').some(p => p.data.obra_id === D(6) && p.title === '⏰ O profissional não marcou horário'), 'O3: dono recebe "não marcou horário" (sem silêncio: é evento crítico)')
   ok((await statusProposta('obras', 6, U(3))).status === 'contraproposta_dono', "O3: concorrente volta a 'contraproposta_dono' (status que tinha antes do match)")
   ok(!pushesDe('conc').some(p => p.data.obra_id === D(6)) && (await linha('obras', 6)).aviso_reabertura_em !== null, 'O3 às 23:30 SP: aviso de reabertura ADIADO (claim devido, nenhum push ao concorrente)')
-  ok((await statusProposta('obras', 5, U(3))).status === 'recusado' && (await linha('obras', 5)).aviso_reabertura_em === null, 'O2 (horário valendo, não chegou): concorrente NÃO é restaurado nem avisado (fora do escopo)')
+  // 11/11/2026 (B55RT): TODO un-match que devolve a demanda ao feed restaura os concorrentes rebaixados pelo match
+  // (utils/reaberturaMatch) — inclusive com horário valendo. O aviso de reabertura segue só no 'sem horário'.
+  ok((await statusProposta('obras', 5, U(3))).status === 'pendente' && (await linha('obras', 5)).aviso_reabertura_em === null, 'O2 (horário valendo, não chegou): concorrente É restaurado (regra única); sem o aviso de reabertura do "sem horário"')
   // 07:30 SP do dia seguinte: o tique do cron entrega o aviso adiado.
   await fixarAgora(21.5 * 60)
   await A.avisarReabertura('obras')
