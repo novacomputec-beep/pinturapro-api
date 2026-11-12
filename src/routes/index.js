@@ -132,6 +132,7 @@ const { enviarEmail } = require('../services/emailService')
 const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL, sqlDonoDaPessoa, ehMesmaPessoa,
         sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa, contasProfissionaisDaPessoa, ehMesmoProfissional } = require('../utils/tipoConta')
 const { SQL_PROMOCOES_DA_PESSOA, SQL_SYNC_PROMOCOES_POR_PESSOA } = require('../utils/promocoesPessoa')
+const { normalizarTelefoneWhatsapp, primeiroNome: primeiroNomeWhatsapp } = require('../utils/telefoneWhatsapp')
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
@@ -327,6 +328,17 @@ const migracaoPronta = (async () => {
         falhas              INT NOT NULL DEFAULT 0
       )
     `)
+    // "WhatsApp em 1 clique" (painel): o admin abre o wa.me no próprio aparelho e marca a linha
+    // como enviada (POST /admin/whatsapp-envios). O servidor NÃO envia nada; isto é só o registro
+    // de quem já foi contatado em cada campanha (texto livre escolhido pelo painel).
+    await client.query(`CREATE TABLE IF NOT EXISTS whatsapp_envios (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      campanha   TEXT NOT NULL,
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      admin_id   UUID REFERENCES usuarios(id) ON DELETE SET NULL,
+      enviado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`)
+    await client.query(`CREATE INDEX IF NOT EXISTS whatsapp_envios_campanha_usuario_idx ON whatsapp_envios (campanha, usuario_id, enviado_em DESC)`)
     // Aviso de aprovação da verificação — mesmo padrão de CLAIM do aviso_fim_gratuidade_em
     // (assinaturas): NULL = pendente de aviso; preenchida no mesmo UPDATE que reivindica o
     // envio, então re-run ou segunda réplica nunca manda duas vezes. DEFAULT NOW() de
@@ -10377,6 +10389,81 @@ router.get('/admin/crescimento', autenticar, exigirAdmin, async (req, res) => {
   } catch (err) {
     console.error('[admin/crescimento]', err.message)
     res.status(500).json({ erro: 'Erro ao calcular o crescimento' })
+  }
+})
+
+// ── "WhatsApp em 1 clique" (admin) ──────────────────────────────────────────────────────────
+// GET /admin/whatsapp-lista?role=prestador|dono_obra&especialidade=<slug>&cidade=<nome>&uf=<UF>
+//                          &apenas_ativos=true&campanha=<texto>
+// Todos os filtros opcionais; sem role vêm as duas. cidade compara dobrada (acento/caixa), uf
+// em maiúsculas, especialidade = slug contido em usuarios.especialidades, apenas_ativos=true →
+// usuarios.ativo = true. Resposta: { total, itens: [{ id, nome, primeiro_nome, role,
+// telefone_original, telefone_wa, status_numero, ultimo_uso_app, enviado_em }] } por nome.
+// telefone_wa/status_numero: utils/telefoneWhatsapp. ultimo_uso_app = MAX(ultimo_em) em
+// versoes_app_vistas (null se o app nunca reportou). enviado_em = último envio marcado PARA A
+// campanha informada (null sem campanha ou nunca marcado). Só leitura; nada é enviado.
+// role=prestador inclui os papéis profissionais legados (pintor/assinante), como os contadores do
+// painel (/admin/crescimento); cada item devolve o role real. admin/aprovador nunca entram.
+const ROLES_WHATSAPP = { prestador: ['prestador', 'pintor', 'assinante'], dono_obra: ['dono_obra'] }
+const TODOS_ROLES_WHATSAPP = [...ROLES_WHATSAPP.prestador, ...ROLES_WHATSAPP.dono_obra]
+const MAX_CAMPANHA = 100
+router.get('/admin/whatsapp-lista', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const q = req.query
+    const txt = (v) => (typeof v === 'string' ? v.trim() : '')
+    const role = txt(q.role) || null
+    if (role && !Object.hasOwn(ROLES_WHATSAPP, role)) return res.status(400).json({ erro: "role deve ser 'prestador' ou 'dono_obra'" })
+    const especialidade = txt(q.especialidade) || null
+    const cidade = txt(q.cidade) ? normalizar(txt(q.cidade)) : null
+    const uf = txt(q.uf) ? txt(q.uf).toUpperCase() : null
+    const apenasAtivos = txt(q.apenas_ativos) === 'true'
+    const campanha = txt(q.campanha).slice(0, MAX_CAMPANHA) || null
+    const r = await pool.query(
+      `SELECT u.id, u.nome, u.role, u.telefone,
+              (SELECT MAX(v.ultimo_em) FROM versoes_app_vistas v WHERE v.usuario_id = u.id) AS ultimo_uso_app,
+              (SELECT MAX(w.enviado_em) FROM whatsapp_envios w
+                WHERE $6::text IS NOT NULL AND w.campanha = $6::text AND w.usuario_id = u.id) AS enviado_em
+         FROM usuarios u
+        WHERE u.role = ANY($1::text[])
+          AND ($2::text IS NULL OR $2::text = ANY(COALESCE(u.especialidades, '{}'::text[])))
+          AND ($3::text IS NULL OR ${sqlNormalizarCidade('u.cidade')} = $3::text)
+          AND ($4::text IS NULL OR upper(btrim(u.uf)) = $4::text)
+          AND (NOT $5::boolean OR u.ativo = true)
+        ORDER BY lower(u.nome), u.id`,
+      [role ? ROLES_WHATSAPP[role] : TODOS_ROLES_WHATSAPP, especialidade, cidade, uf, apenasAtivos, campanha]
+    )
+    const itens = r.rows.map(u => ({
+      id: u.id, nome: u.nome, primeiro_nome: primeiroNomeWhatsapp(u.nome), role: u.role,
+      telefone_original: u.telefone, ...normalizarTelefoneWhatsapp(u.telefone),
+      ultimo_uso_app: u.ultimo_uso_app, enviado_em: u.enviado_em,
+    }))
+    res.json({ total: itens.length, itens })
+  } catch (err) {
+    console.error('[admin/whatsapp-lista]', err.message)
+    res.status(500).json({ erro: 'Erro ao montar a lista de WhatsApp' })
+  }
+})
+
+// POST /admin/whatsapp-envios { campanha, usuario_id } — marca a linha como enviada (o admin já
+// abriu o wa.me). Só registra; NÃO envia mensagem. Cada chamada grava uma linha (reenvio na
+// mesma campanha atualiza o enviado_em da lista). 201 { id, campanha, usuario_id, admin_id, enviado_em }.
+router.post('/admin/whatsapp-envios', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const campanha = typeof req.body?.campanha === 'string' ? req.body.campanha.trim() : ''
+    const usuarioId = typeof req.body?.usuario_id === 'string' ? req.body.usuario_id.trim() : ''
+    if (!campanha || campanha.length > MAX_CAMPANHA) return res.status(400).json({ erro: `campanha obrigatória (até ${MAX_CAMPANHA} caracteres)` })
+    if (!RE_UUID.test(usuarioId)) return res.status(400).json({ erro: 'usuario_id inválido' })
+    const r = await pool.query(
+      `INSERT INTO whatsapp_envios (campanha, usuario_id, admin_id)
+       SELECT $1::text, u.id, $3::uuid FROM usuarios u WHERE u.id = $2::uuid
+       RETURNING id, campanha, usuario_id, admin_id, enviado_em`,
+      [campanha, usuarioId, req.usuario.id]
+    )
+    if (r.rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' })
+    res.status(201).json(r.rows[0])
+  } catch (err) {
+    console.error('[admin/whatsapp-envios]', err.message)
+    res.status(500).json({ erro: 'Erro ao registrar envio' })
   }
 })
 
