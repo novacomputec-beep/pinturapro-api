@@ -18,7 +18,7 @@ const { CATEGORIAS_SERVICO } = require('./categoriasApp')
 const CHAVE_GRUPOS_ATIVO = 'grupos_relacionados_ativo'
 
 const GRUPOS_RELACIONADOS = {
-  'Elétrica e tecnologia':        ['eletrica', 'eletronica', 'climatizacao', 'informatica', 'seguranca_eletronica'],
+  'Elétrica e tecnologia':        ['eletrica', 'eletronica', 'climatizacao', 'seguranca_eletronica'],
   'Reparos da casa':              ['alvenaria', 'hidraulica', 'marcenaria', 'montagem_moveis', 'estofamento', 'chaveiro',
                                    'vidraceiro', 'serralheria', 'gesseiro'],
   'Limpeza e cuidados da casa':   ['faxina', 'dedetizacao', 'jardineiro'],
@@ -30,7 +30,7 @@ const GRUPOS_RELACIONADOS = {
   'Transporte':                   ['motorista', 'motociclista', 'mudancas', 'mecanica', 'lavajato', 'borracheiro'],
   'Segurança':                    ['vigia', 'seguranca'],
   'Digital e aulas':              ['editor_video', 'social_midia', 'profissional_home_office', 'panfletagem',
-                                   'aula_particular', 'personal_trainer', 'tradutor'],
+                                   'aula_particular', 'personal_trainer', 'tradutor', 'informatica'],
   'Arte e criação':               ['artesanato', 'costura', 'tatuagem', 'placas_fachadas'],
 }
 
