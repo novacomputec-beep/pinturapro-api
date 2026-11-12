@@ -100,6 +100,12 @@ const main = async () => {
   await db.exec(`CREATE TABLE IF NOT EXISTS assinaturas (usuario_id uuid, status text, tipo text, plano text, proximo_vencimento timestamptz, atualizado_em timestamptz)`)
   // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
+  // Aviso de reabertura (alertaService.avisarReabertura): aviso_reabertura_em, teto diário e bloqueios — as mesmas migrações de boot.
+  await require(path.join(REPO, 'src/utils/reaberturaMatch')).migrarReaberturaMatch(db)
+  await require(path.join(REPO, 'src/utils/avisosPorDistancia')).migrarAvisosPorDistancia(db)
+  await db.exec(`CREATE TABLE IF NOT EXISTS avisos_fora_area (tabela text, demanda_id uuid, usuario_id uuid, enviado_em timestamptz NOT NULL DEFAULT now());
+    CREATE TABLE IF NOT EXISTS push_entregas (primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
+    CREATE TABLE IF NOT EXISTS prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);`)
   // Dono com push; Prof (escolhido) com push; interessados: A com push, B só e-mail; C recusado pelo dono antes do match.
   await db.query(`INSERT INTO usuarios (id, nome, email, push_token) VALUES
     ($1, 'Dono', 'dono@x.invalid', 'ExponentPushToken[dono]'), ($2, 'Prof Silva', 'prof@x.invalid', 'ExponentPushToken[prof]'),
@@ -263,13 +269,25 @@ const main = async () => {
   const pProf = pushesDe('prof')
   ok(pProf.length === 1 && pProf[0].title === 'Você saiu do serviço "Demanda 10 dias"' && /contou como 1 falta/.test(pProf[0].body) && pProf[0].data.tipo === 'interesse_recusado' && pProf[0].data.reparo_id === D(c10d.n),
      'push ao profissional (texto aprovado, tipo interesse_recusado)', pProf[0] && { title: pProf[0].title, body: pProf[0].body })
-  const pAna = pushesDe('ana')
-  ok(pAna.length === 1 && pAna[0].title === 'O pedido "Demanda 10 dias" reabriu' && /Seu interesse continua valendo/.test(pAna[0].body) && /Ainda não há escolhido/.test(pAna[0].body) && pAna[0].data.tipo === 'novo_reparo',
-     'push à interessada Ana (texto aprovado, tipo novo_reparo)', pAna[0] && { title: pAna[0].title, body: pAna[0].body })
+  ok(pushesDe('ana').length === 0 && !emails.some(e => e.para === 'ana@x.invalid' || e.para === 'beto@x.invalid'), 'interessados: nada direto do desfazer (o aviso é do cron de reabertura)')
+  ok(d.aviso_reabertura_em !== null, 'aviso de reabertura marcado no un-match (aviso_reabertura_em)')
   ok(pushesDe('caio').length === 0, 'Caio (recusado) não é avisado')
   pDono = pushesDe('dono')
   ok(pDono.length === 1 && pDono[0].title === 'Pedido reaberto' && pDono[0].body === 'Avisamos os 2 interessados. Escolha o novo profissional quando quiser.' && pDono[0].data.reparo_id === D(c10d.n),
      'push ao dono (autor) com N = 2', pDono[0] && { title: pDono[0].title, body: pDono[0].body })
+  // 7,5 dias depois de T0 (10:00 SP) = 22:00 SP: silêncio noturno → o aviso fica adiado, não descartado.
+  await A.avisarReabertura('reparos')
+  ok(pushesDe('ana').length === 0 && (await linha(c10d)).aviso_reabertura_em !== null, '22:00 SP (silêncio): aviso de reabertura adiado, marca mantida')
+  await fixarAgora(c10d.liberaMin + 9 * 60) // 07:00 SP
+  await A.avisarReabertura('reparos')
+  const pAna = pushesDe('ana')
+  ok(pAna.length === 1 && pAna[0].title === '🔔 Pedido disponível de novo'
+     && pAna[0].body === '"Demanda 10 dias" está aberto e sua proposta continua valendo — o cliente pode escolher você.'
+     && JSON.stringify(pAna[0].data) === JSON.stringify({ tipo: 'novo_reparo', reaberta: true, reparo_id: D(c10d.n) }),
+     '07:00 SP: push NEUTRO à interessada Ana (texto aprovado, data { tipo, reaberta, reparo_id })', pAna[0] && { title: pAna[0].title, body: pAna[0].body, data: pAna[0].data })
+  ok(pushesDe('prof').length === 1 && pushesDe('caio').length === 0 && !emails.some(e => e.para === 'caio@x.invalid'), 'profissional que perdeu o match e Caio (recusado) não recebem o aviso de reabertura')
+  ok((await linha(c10d)).aviso_reabertura_em === null, 'claim do aviso de reabertura limpo')
+  await fixarAgora(c10d.liberaMin)
   const paraDe = (e) => e.para
   ok(emails.filter(e => paraDe(e) === 'prof@x.invalid').length === 1 && emails.filter(e => paraDe(e) === 'ana@x.invalid').length === 1 && emails.filter(e => paraDe(e) === 'beto@x.invalid').length === 1 && emails.filter(e => paraDe(e) === 'dono@x.invalid').length === 1,
      'e-mail ao profissional, a Ana, a Beto (sem token) e ao dono', emails.map(e => [e.para, e.assunto]))
@@ -286,7 +304,8 @@ const main = async () => {
   ok(iso(d.expira_em) === emMin(c10d.liberaMin + 60), 'prazo vencido → expira_em = agora + 1h (piso)', d.expira_em)
   p = await propostas(c2h)
   ok(p[U(1)].status === 'cancelado' && p[U(2)].status === 'pendente', "candidatura 'cancelado'; concorrente de volta a 'pendente'")
-  ok(pushesDe('prof')[0]?.data.tipo === 'candidatura_recusada' && pushesDe('ana')[0]?.data.tipo === 'nova_obra' && pushesDe('dono')[0]?.data.obra_id === D(c2h.n), 'tipos de push do lado obra', pushes.map(x => x.data.tipo))
+  ok(pushesDe('prof')[0]?.data.tipo === 'candidatura_recusada' && pushesDe('ana').length === 0 && pushesDe('dono')[0]?.data.obra_id === D(c2h.n) && d.aviso_reabertura_em !== null,
+     'tipos de push do lado obra; interessada sem aviso direto (reabertura marcada para o cron)', pushes.map(x => x.data.tipo))
   ok((await faltas(U(1))).length === 2, '2ª falta registrada')
 
   // 8) 30 dias aos 22,5 dias: 3ª falta → suspensão (3 em 90 dias) + push "Conta suspensa"

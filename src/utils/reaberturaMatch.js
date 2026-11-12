@@ -14,9 +14,14 @@ const LADOS = {
   reparos: { proposta: 'interesse_reparos', coluna: 'reparo_id', chave: 'reparo_id', tipoPushInteressado: 'novo_reparo' },
 }
 
-// Texto do aviso aos interessados (push + e-mail), aprovado pelo dono em 10/11/2026.
-const TITULO_REABERTA = '🔄 Pedido disponível de novo'
-const corpoReaberta = (titulo) => `A demanda "${titulo}" voltou a ficar disponível — o cliente pode escolher você.`
+// Texto do aviso aos interessados (push + e-mail) — o MESMO em todo caminho que reabre um match
+// (dono, 12/11/2026; enviado só por alertaService.avisarReabertura). NEUTRO: nunca diz quem saiu,
+// por quê nem quantas vezes.
+const TITULO_REABERTA = '🔔 Pedido disponível de novo'
+const corpoReaberta = (titulo) => `"${titulo}" está aberto e sua proposta continua valendo — o cliente pode escolher você.`
+// SET de toda transação de un-match que deixa a demanda aberta: marca o aviso de reabertura como
+// devido (o cron o envia fora do silêncio noturno). Usado como fragmento de UPDATE.
+const SQL_MARCAR_REABERTURA = 'aviso_reabertura_em = NOW()'
 // Texto ao dono quando o match morreu sem o profissional marcar horário (substitui o genérico
 // "⏰ Prazo expirado!" nesse caso; data.tipo continua 'match_expirado' → detalhe da demanda).
 const TITULO_DONO_SEM_HORARIO = '⏰ O profissional não marcou horário'
@@ -60,6 +65,6 @@ const migrarReaberturaMatch = async (client) => {
 }
 
 module.exports = {
-  STATUS_VALENDO, LADOS, TITULO_REABERTA, corpoReaberta, TITULO_DONO_SEM_HORARIO, corpoDonoSemHorario, migrarReaberturaMatch,
+  STATUS_VALENDO, LADOS, TITULO_REABERTA, corpoReaberta, SQL_MARCAR_REABERTURA, TITULO_DONO_SEM_HORARIO, corpoDonoSemHorario, migrarReaberturaMatch,
   sqlRestaurarPropostas, restaurarPropostasRebaixadas,
 }

@@ -121,6 +121,12 @@ const main = async () => {
   await db.exec(`CREATE TABLE IF NOT EXISTS assinaturas (usuario_id uuid, status text, tipo text, plano text, proximo_vencimento timestamptz, atualizado_em timestamptz)`)
   // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
+  // Aviso de reabertura (alertaService.avisarReabertura): aviso_reabertura_em, teto diário de push e bloqueios.
+  await require(path.join(REPO, 'src/utils/reaberturaMatch')).migrarReaberturaMatch(db)
+  await require(path.join(REPO, 'src/utils/avisosPorDistancia')).migrarAvisosPorDistancia(db)
+  await db.exec(`CREATE TABLE IF NOT EXISTS avisos_fora_area (tabela text, demanda_id uuid, usuario_id uuid, enviado_em timestamptz NOT NULL DEFAULT now());
+    CREATE TABLE IF NOT EXISTS push_entregas (primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
+    CREATE TABLE IF NOT EXISTS prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);`)
   await db.query(`INSERT INTO usuarios (id, nome, email, push_token, role, tipo_dono, tipo_prestador, cpf_cnpj) VALUES
     ($1, 'Maria', 'maria@x.invalid', $7, 'dono_obra', 'reparo', NULL, '111'), ($2, 'Alex Silva', 'alex@x.invalid', $8, 'prestador', NULL, 'reparador', '222'),
     ($3, 'Ana', 'ana@x.invalid', $9, 'prestador', NULL, 'reparador', '333'), ($4, 'Beto', 'beto@x.invalid', NULL, 'prestador', NULL, 'reparador', '444'),
@@ -225,8 +231,16 @@ const main = async () => {
   ok((await db.query(`SELECT count(*)::int AS n FROM faltas_profissional WHERE usuario_id = $1 AND demanda_id = $2`, [PROF, D(1)])).rows[0].n === 1, '1 falta registrada (responsabilidade, 10/11/2026: escolher outro conta falta)')
   ok(pushesDe('alex').length === 1 && pushesDe('alex')[0].title === 'O cliente escolheu outro profissional' && pushesDe('alex')[0].data.reparo_id === D(1) && pushesDe('alex')[0].data.motivo === 'escolheu_outro',
      'push ao profissional: "O cliente escolheu outro profissional"', pushesDe('alex')[0] && { title: pushesDe('alex')[0].title, body: pushesDe('alex')[0].body })
-  ok(pushesDe('ana').length === 1 && /reabriu/.test(pushesDe('ana')[0].title) && emails.some(e => e.para === 'beto@x.invalid') && pushesDe('maria').length === 1 && /reaberto/i.test(pushesDe('maria')[0].title),
-     'interessados (Ana por push, Beto por e-mail) e dono avisados da reabertura', { ana: pushesDe('ana').length, maria: pushesDe('maria').map(p => p.title) })
+  ok(pushesDe('ana').length === 0 && !emails.some(e => e.para === 'beto@x.invalid') && pushesDe('maria').length === 1 && /reaberto/i.test(pushesDe('maria')[0].title) && l.aviso_reabertura_em !== null,
+     'dono avisado da reabertura; interessados nada direto (aviso de reabertura marcado para o cron)', { ana: pushesDe('ana').length, maria: pushesDe('maria').map(p => p.title) })
+  await job(() => A.avisarReabertura('reparos'))
+  const tituloR1 = (await db.query(`SELECT titulo FROM reparos WHERE id = $1`, [D(1)])).rows[0].titulo
+  const pAnaR = pushesDe('ana')
+  ok(pAnaR.length === 1 && pAnaR[0].title === '🔔 Pedido disponível de novo' && pAnaR[0].body === `"${tituloR1}" está aberto e sua proposta continua valendo — o cliente pode escolher você.`
+     && JSON.stringify(pAnaR[0].data) === JSON.stringify({ tipo: 'novo_reparo', reaberta: true, reparo_id: D(1) })
+     && emails.some(e => e.para === 'beto@x.invalid' && e.assunto === '🔔 Pedido disponível de novo') && !emails.some(e => e.para === 'caio@x.invalid' && e.assunto === '🔔 Pedido disponível de novo'),
+     'cron de reabertura: Ana (push) e Beto (e-mail) recebem o aviso NEUTRO; Caio (recusado) não', pAnaR.map(p => [p.title, p.body]))
+  ok(pushesDe('alex').length === 0 && !emails.some(e => e.para === 'alex@x.invalid' && e.assunto === '🔔 Pedido disponível de novo'), 'o profissional que perdeu o match não recebe o aviso de reabertura')
   ok((await escolherOutro('reparos', D(1))).body.codigo === 'SEM_MATCH', 'de novo sem match: 409 SEM_MATCH')
   // Novo escolhido: a demanda recomeça limpa para ele
   await db.query(`UPDATE reparos SET match_usuario_id = $2, match_feito_em = now(), ${SQL_ZERAR_AGENDA} WHERE id = $1`, [D(1), OUTRO])

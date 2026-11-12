@@ -118,7 +118,9 @@ const main = async () => {
   await require(path.join(REPO, 'src/utils/contasExcluidas')).migrarContasExcluidas({ query: (s, p) => db.query(s, p) })
   // Retrato da desistência por exclusão de conta (utils/desistencias) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/desistencias')).migrarDesistencias({ query: (s, p) => db.query(s, p) })
-  const usr = (id, nome, email, role, extra = {}) => db.query(
+  // aviso_reabertura_em (o un-match por exclusão marca o aviso neutro de reabertura) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/reaberturaMatch')).migrarReaberturaMatch({ query: (s, p) => db.query(s, p) })
+  const usr =(id, nome, email, role, extra = {}) => db.query(
     `INSERT INTO usuarios (id, nome, email, role, tipo_dono, tipo_prestador, cpf_cnpj, senha_hash, push_token, google_sub, foto_url, verificacao_doc_frente_url, verificacao_selfie_url)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
     [id, nome, email, role, extra.tipo_dono || null, extra.tipo_prestador || null, extra.cpf ?? null, extra.senha_hash ?? '$2b$04$naoconferecomnadanaoconferecomnadanaoconferecomnadanaoco', `tok-${id.slice(-2)}`, extra.google_sub || null,

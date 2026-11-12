@@ -88,6 +88,11 @@ const main = async () => {
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
   // Reabertura pelo cronômetro (aviso_reabertura_em, status_antes_match) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/reaberturaMatch')).migrarReaberturaMatch(db)
+  // Aviso de reabertura (alertaService.avisarReabertura): teto diário de push e bloqueios.
+  await require(path.join(REPO, 'src/utils/avisosPorDistancia')).migrarAvisosPorDistancia(db)
+  await db.exec(`CREATE TABLE IF NOT EXISTS avisos_fora_area (tabela text, demanda_id uuid, usuario_id uuid, enviado_em timestamptz NOT NULL DEFAULT now());
+    CREATE TABLE IF NOT EXISTS push_entregas (primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
+    CREATE TABLE IF NOT EXISTS prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);`)
   await db.query(`INSERT INTO usuarios (id, nome, email, push_token) VALUES
     ($1, 'Dono', 'dono@x.invalid', 'ExponentPushToken[dono]'), ($2, 'Prof', 'prof@x.invalid', 'ExponentPushToken[prof]'), ($3, 'Outro Prof', 'outro@x.invalid', 'ExponentPushToken[outro]'),
     ($4, 'Concorrente', 'conc@x.invalid', 'ExponentPushToken[conc]'), ($5, 'Recusado', 'rec@x.invalid', 'ExponentPushToken[rec]')`,
@@ -165,9 +170,11 @@ const main = async () => {
   ok((await statusProposta('reparos', 1, U(3))).status === 'pendente' && (await statusProposta('reparos', 1, U(3))).status_antes_match === null, "R1: concorrente rebaixado PELO MATCH volta a 'pendente' (status_antes_match limpo)")
   ok((await statusProposta('reparos', 1, U(4))).status === 'recusado', 'R1: recusado explicitamente pelo dono continua recusado')
   const pConc = pushesDe('conc').find(p => p.data.reparo_id === D(1))
-  ok(pConc && pConc.title === '🔄 Pedido disponível de novo' && pConc.body === 'A demanda "R1 sem proposta" voltou a ficar disponível — o cliente pode escolher você.' && pConc.data.tipo === 'novo_reparo' && pConc.data.reaberta === true,
-     'R1: concorrente recebe push "disponível de novo" (texto aprovado, toque novo_reparo + reaberta)', pConc && { title: pConc.title, body: pConc.body, tipo: pConc.data.tipo })
-  ok(emails.some(e => e.para === 'conc@x.invalid' && e.assunto === '🔄 Pedido disponível de novo'), 'R1: e-mail ao concorrente')
+  ok(pConc && pConc.title === '🔔 Pedido disponível de novo' && pConc.body === '"R1 sem proposta" está aberto e sua proposta continua valendo — o cliente pode escolher você.'
+     && JSON.stringify(pConc.data) === JSON.stringify({ tipo: 'novo_reparo', reaberta: true, reparo_id: D(1) }),
+     'R1: concorrente recebe o aviso NEUTRO "disponível de novo" (texto aprovado, data { tipo novo_reparo, reaberta, reparo_id })', pConc && { title: pConc.title, body: pConc.body, data: pConc.data })
+  ok(!pushesDe('prof').some(p => p.title === '🔔 Pedido disponível de novo'), 'R1: o profissional que perdeu o match não recebe o aviso de reabertura')
+  ok(emails.some(e => e.para === 'conc@x.invalid' && e.assunto === '🔔 Pedido disponível de novo'), 'R1: e-mail ao concorrente')
   ok(!pushesDe('rec').length, 'R1: quem o dono recusou explicitamente NÃO é avisado')
   ok((await linha('reparos', 1)).aviso_reabertura_em === null, 'R1: claim aviso_reabertura_em limpo após o aviso')
   const chavesConc = (await db.query(`SELECT tipo FROM email_alertas WHERE demanda_id = $1 AND usuario_id = $2`, [D(1), U(3)])).rows.map(x => x.tipo)
@@ -206,15 +213,21 @@ const main = async () => {
   ok((await statusProposta('obras', 6, U(3))).status === 'contraproposta_dono', "O3: concorrente volta a 'contraproposta_dono' (status que tinha antes do match)")
   ok(!pushesDe('conc').some(p => p.data.obra_id === D(6)) && (await linha('obras', 6)).aviso_reabertura_em !== null, 'O3 às 23:30 SP: aviso de reabertura ADIADO (claim devido, nenhum push ao concorrente)')
   // 11/11/2026 (B55RT): TODO un-match que devolve a demanda ao feed restaura os concorrentes rebaixados pelo match
-  // (utils/reaberturaMatch) — inclusive com horário valendo. O aviso de reabertura segue só no 'sem horário'.
-  ok((await statusProposta('obras', 5, U(3))).status === 'pendente' && (await linha('obras', 5)).aviso_reabertura_em === null, 'O2 (horário valendo, não chegou): concorrente É restaurado (regra única); sem o aviso de reabertura do "sem horário"')
+  // (utils/reaberturaMatch) — inclusive com horário valendo. 12/11/2026: o aviso NEUTRO de reabertura também
+  // (todo caminho que restaura propostas marca aviso_reabertura_em).
+  ok((await statusProposta('obras', 5, U(3))).status === 'pendente' && (await linha('obras', 5)).aviso_reabertura_em !== null && !pushesDe('conc').some(p => p.data.obra_id === D(5)),
+     'O2 (horário valendo, não chegou): concorrente É restaurado e o aviso de reabertura também fica devido (adiado às 23:30)')
   // 07:30 SP do dia seguinte: o tique do cron entrega o aviso adiado.
   await fixarAgora(21.5 * 60)
   await A.avisarReabertura('obras')
   const pConcO3 = pushesDe('conc').find(p => p.data.obra_id === D(6))
-  ok(pConcO3 && pConcO3.title === '🔄 Pedido disponível de novo' && pConcO3.body === 'A demanda "O3 sem proposta" voltou a ficar disponível — o cliente pode escolher você.' && pConcO3.data.tipo === 'nova_obra',
-     'O3 às 07:30 SP: concorrente avisado (toque nova_obra)', pConcO3 && { title: pConcO3.title, tipo: pConcO3.data.tipo })
-  ok((await linha('obras', 6)).aviso_reabertura_em === null && emails.some(e => e.para === 'conc@x.invalid' && e.assunto === '🔄 Pedido disponível de novo'), 'O3: claim limpo + e-mail ao concorrente')
+  ok(pConcO3 && pConcO3.title === '🔔 Pedido disponível de novo' && pConcO3.body === '"O3 sem proposta" está aberto e sua proposta continua valendo — o cliente pode escolher você.'
+     && JSON.stringify(pConcO3.data) === JSON.stringify({ tipo: 'nova_obra', reaberta: true, obra_id: D(6) }),
+     'O3 às 07:30 SP: concorrente avisado (aviso NEUTRO, toque nova_obra)', pConcO3 && { title: pConcO3.title, data: pConcO3.data })
+  ok((await linha('obras', 6)).aviso_reabertura_em === null && emails.some(e => e.para === 'conc@x.invalid' && e.assunto === '🔔 Pedido disponível de novo'), 'O3: claim limpo + e-mail ao concorrente')
+  const pConcO2 = pushesDe('conc').find(p => p.data.obra_id === D(5))
+  ok(pConcO2 && pConcO2.title === '🔔 Pedido disponível de novo' && (await linha('obras', 5)).aviso_reabertura_em === null, 'O2 às 07:30 SP: concorrente também recebe o aviso NEUTRO (com horário valendo)', pConcO2 && pConcO2.body)
+  ok(!pushesDe('outro').some(p => p.title === '🔔 Pedido disponível de novo'), 'O2: o profissional que perdeu o match não recebe o aviso de reabertura')
   await A.avisarReabertura('obras')
   ok(pushesDe('conc').filter(p => p.data.obra_id === D(6)).length === 1, 'O3: rodar de novo não repete o aviso')
   const f2 = await faltas(U(2))
