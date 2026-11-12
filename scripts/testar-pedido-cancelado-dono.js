@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // PEDIDO CANCELADO PELO DONO (dono, 12/11/2026): DELETE /reparos/dono/:id e /obras/dono/:id de uma demanda
 // ABERTA sem match → push (sem e-mail) "🔕 Pedido cancelado" / "\"<título>\" foi cancelado pelo cliente.",
-// data { tipo: 'pedido_cancelado', reparo_id | obra_id }, a cada PESSOA interessada não recusada, menos
-// suspensos. Já cancelada, expirada, com match real (409) ou de outro dono (404): nada.
+// data { tipo: 'pedido_cancelado', reparo_id | obra_id }, a cada PESSOA com interesse ainda ativo (fora:
+// recusado, cancelado/desistiu, expirado; NULL = pendente), menos suspensos. Já cancelada, expirada, com match real (409) ou de outro dono (404): nada.
 // SQL REAL em PGlite; rotas reais; Expo/Brevo falsos.
 //   npm i -D @electric-sql/pglite && node scripts/testar-pedido-cancelado-dono.js
 process.env.JWT_SECRET = 'segredo-de-teste'
@@ -156,6 +156,13 @@ const main = async () => {
   await usr(PS, 'Sérgio', 'prestador', { tipo_prestador: 'reparador', cpf: '777', esp: ['eletrica'] })
   await usr(PN, 'Nina', 'prestador', { tipo_prestador: 'reparador', cpf: '888', esp: ['eletrica'], semToken: true })
   await db.query(`UPDATE usuarios SET suspenso_em = now() WHERE id = $1`, [PS])
+  // Interesses inativos: X1 cancelado (desistiu pelo profissional), X2 'desistiu', X3 expirado.
+  // X4 com status NULL conta como pendente (ativo).
+  const X1 = U(11), X2 = U(12), X3 = U(13), X4 = U(14)
+  await usr(X1, 'Xico', 'prestador', { tipo_prestador: 'reparador', cpf: '1111', esp: ['eletrica'] })
+  await usr(X2, 'Xena', 'prestador', { tipo_prestador: 'reparador', cpf: '1112', esp: ['eletrica'] })
+  await usr(X3, 'Xavier', 'prestador', { tipo_prestador: 'reparador', cpf: '1113', esp: ['eletrica'] })
+  await usr(X4, 'Xuxa', 'prestador', { tipo_prestador: 'reparador', cpf: '1114', esp: ['eletrica'] })
 
   const TIT = '🔕 Pedido cancelado'
   let n = 100
@@ -169,7 +176,8 @@ const main = async () => {
       [id, titulos[id], DONO, status, match])
     const l = LADO[tabela]
     await db.query(`INSERT INTO ${l.proposta} (${l.coluna}, usuario_id, status) VALUES
-      ($1, $2, 'pendente'), ($1, $3, 'pendente'), ($1, $4, 'contraproposta_dono'), ($1, $5, 'recusado'), ($1, $6, 'pendente'), ($1, $7, 'pendente')`, [id, PA, PA2, PB, PC, PS, PN])
+      ($1, $2, 'pendente'), ($1, $3, 'pendente'), ($1, $4, 'contraproposta_dono'), ($1, $5, 'recusado'), ($1, $6, 'pendente'), ($1, $7, 'pendente'),
+      ($1, $8, 'cancelado'), ($1, $9, 'desistiu'), ($1, $10, 'expirado'), ($1, $11, NULL)`, [id, PA, PA2, PB, PC, PS, PN, X1, X2, X3, X4])
     if (aceito) await db.query(`INSERT INTO ${l.proposta} (${l.coluna}, usuario_id, status) VALUES ($1, $2, 'aceito')`, [id, match])
     return id
   }
@@ -185,8 +193,9 @@ const main = async () => {
     let r = await quieto(() => chamar('delete', rotaDel, DONO, id))
     const ps = cancelados(p0)
     ok(r.status === 200, `${tabela}: DELETE responde 200 (resposta inalterada)`, r)
-    ok(ps.length === 2 && ps.filter(p => [tok(PA), tok(PA2)].includes(p.to)).length === 1 && ps.some(p => p.to === tok(PB)),
-       `${tabela}: push a A (uma vez por pessoa, A/A2) e B`, ps.map(p => p.to))
+    ok(ps.length === 3 && ps.filter(p => [tok(PA), tok(PA2)].includes(p.to)).length === 1 && ps.some(p => p.to === tok(PB)) && ps.some(p => p.to === tok(X4)),
+       `${tabela}: push a A (uma vez por pessoa, A/A2), B e ao interesse com status NULL`, ps.map(p => p.to))
+    ok(![X1, X2, X3].some(u => ps.some(p => p.to === tok(u))), `${tabela}: cancelado, desistiu e expirado não recebem`)
     ok(ps.every(p => p.body === `"${titulos[id]}" foi cancelado pelo cliente.` && igualData(p.data, { tipo: 'pedido_cancelado', [chave]: id })),
        `${tabela}: texto e data exatos`, ps[0] && [ps[0].body, ps[0].data])
     ok(![PC, PS, DONO].some(u => cancelados(p0).some(p => p.to === tok(u))), `${tabela}: recusado, suspenso e dono não recebem`)
