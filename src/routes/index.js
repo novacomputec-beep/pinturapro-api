@@ -131,6 +131,7 @@ const { enviarEmail } = require('../services/emailService')
 // quem TRABALHA (Fase 2b) — contas profissionais do mesmo CPF são UM profissional.
 const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinha, multiplasContasAtivo, MAX_CONTAS_POR_EMAIL, sqlDonoDaPessoa, ehMesmaPessoa,
         sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa, contasProfissionaisDaPessoa, ehMesmoProfissional } = require('../utils/tipoConta')
+const { SQL_PROMOCOES_DA_PESSOA, SQL_SYNC_PROMOCOES_POR_PESSOA } = require('../utils/promocoesPessoa')
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
@@ -339,6 +340,17 @@ const migracaoPronta = (async () => {
     await client.query(`INSERT INTO configuracoes (chave, valor)
                         SELECT 'aprovacao_automatica', 'false'
                         WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'aprovacao_automatica')`)
+    // Sync ÚNICO de aceita_promocoes por pessoa (utils/promocoesPessoa): antes a preferência era
+    // por conta; pessoa com valores mistos fica toda em true. Marcador em configuracoes garante
+    // uma execução só — depois dele o PATCH já mantém as contas iguais.
+    const syncPromocoes = await client.query(`INSERT INTO configuracoes (chave, valor)
+                        SELECT 'sync_aceita_promocoes_pessoa_em', NOW()::text
+                        WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'sync_aceita_promocoes_pessoa_em')
+                        RETURNING chave`)
+    if (syncPromocoes.rowCount === 1) {
+      const sp = await client.query(SQL_SYNC_PROMOCOES_POR_PESSOA)
+      console.log(`[migration] sync aceita_promocoes por pessoa: ${sp.rowCount} conta(s) passaram de false para true`)
+    }
     // Janela de lançamento grátis — valor = timestamp ISO enquanto o período está
     // ativo, string vazia '' quando desligado. Governa apenas NOVOS cadastros; linhas
     // tipo='gratuito' já criadas permanecem grátis (a lógica de aprovação mesclada
@@ -2287,19 +2299,19 @@ router.post('/auth/push-status', autenticar, async (req, res) => {
   }
 })
 
-// Preferências da própria conta. Hoje só aceita_promocoes (opt-out de push promocional do
-// painel admin). Só a linha do req.usuario.id; body precisa trazer boolean estrito.
+// Preferências da PESSOA. Hoje só aceita_promocoes (opt-out de push promocional do painel
+// admin): grava em TODA conta de mesmo CPF normalizado, de qualquer role (utils/promocoesPessoa);
+// conta sem CPF grava só nela. Body precisa trazer boolean estrito.
 router.patch('/auth/preferencias', autenticar, async (req, res) => {
   try {
     const { aceita_promocoes } = req.body
     if (typeof aceita_promocoes !== 'boolean') {
       return res.status(400).json({ erro: 'aceita_promocoes deve ser true ou false' })
     }
-    const upd = await pool.query(
-      'UPDATE usuarios SET aceita_promocoes = $1 WHERE id = $2 RETURNING aceita_promocoes',
-      [aceita_promocoes, req.usuario.id]
-    )
-    res.json({ mensagem: 'Preferências atualizadas', aceita_promocoes: upd.rows[0].aceita_promocoes })
+    const upd = await pool.query(SQL_PROMOCOES_DA_PESSOA, [aceita_promocoes, req.usuario.id])
+    const propria = upd.rows.find(r => String(r.id) === String(req.usuario.id))
+    if (!propria) return res.status(404).json({ erro: 'Usuário não encontrado' })
+    res.json({ mensagem: 'Preferências atualizadas', aceita_promocoes: propria.aceita_promocoes, contas_atualizadas: upd.rows.length })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar preferências' })
   }
