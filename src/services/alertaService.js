@@ -946,8 +946,24 @@ const htmlEmailNovaDemanda = ({ nome, titulo, corpo, aba, botao = botaoEmailDema
 // renderização poder mandar a mesma coisa que a produção mandaria.
 // lado (opcional): o lembrete "ainda aberto" passa o seu, com outro tipo e outra mensagem;
 // sem ele, o lado de demanda nova de sempre.
+// "Ainda aberto" (decisão do dono, 12/11/2026): e-mail com o texto de demanda NOVA que sai tarde —
+// o que ficou para o dia seguinte (lado.adiado, cron enviarEmailsPendentesNovaDemanda) ou qualquer
+// um enviado mais de HORAS_EMAIL_AINDA_ABERTO depois do anúncio (demanda.anunciada_ha_mais_de_6h,
+// calculado no SELECT de reivindicarEmailsNovaDemanda) — não pode chamar de "Novo" um pedido de
+// ontem. Mesmo botão/link e mesmo HTML; só assunto e corpo mudam. O lembrete (mensagem própria)
+// não passa por aqui.
+const HORAS_EMAIL_AINDA_ABERTO = 6
+const mensagemEmailAindaAberto = (tabela, demanda) => {
+  const { rotulo } = tabela === 'obras' ? apresentacaoObra(demanda.categoria, '🎨') : apresentacaoReparoLista(demanda, '🔧')
+  return {
+    titulo: `⏳ Pedido ainda aberto: ${demanda.titulo}`,
+    corpo: `"${demanda.titulo}" em ${demanda.cidade} ainda está esperando profissional${rotulo ? ` — categoria: ${rotulo}` : ''}.`,
+  }
+}
 const montarEmailNovaDemanda = (tabela, demanda, demandaId, nome, lado = LADOS_EMAIL[tabela]) => {
-  const { titulo, corpo } = lado.mensagem(demanda, demandaId)
+  const textoDeDemandaNova = lado.mensagem === LADOS_EMAIL[tabela]?.mensagem
+  const aindaAberto = textoDeDemandaNova && (lado.adiado === true || demanda.anunciada_ha_mais_de_6h === true)
+  const { titulo, corpo } = aindaAberto ? mensagemEmailAindaAberto(tabela, demanda) : lado.mensagem(demanda, demandaId)
   return {
     assunto: titulo,
     html: htmlEmailNovaDemanda({ nome: nome?.split(' ')[0] || 'profissional', titulo, corpo, aba: lado.aba, botao: botaoEmailDemanda(demanda.codigo_publico) }),
@@ -969,7 +985,11 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
   try {
     // `interessados` só no lembrete (lado.interesse): é o que escolhe o texto do corpo.
     const dem = await client.query(
-      `SELECT d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor, d.codigo_publico, d.latitude, d.longitude
+      `SELECT d.titulo, d.cidade, d.uf, d.categoria, d.${lado.colunaValor} AS valor, d.codigo_publico, d.latitude, d.longitude,
+              -- Âncora do "ainda aberto" (montarEmailNovaDemanda): o anúncio real (push_novo_enviado_em,
+              -- carimbado antes de qualquer e-mail de demanda nova); sem ele, a publicação.
+              (COALESCE(d.push_novo_enviado_em, ${tabela === 'obras' ? 'd.publicado_em, ' : ''}d.criado_em)
+                 < NOW() - make_interval(hours => ${HORAS_EMAIL_AINDA_ABERTO})) AS anunciada_ha_mais_de_6h
               ${tabela === 'obras' ? ', d.especialidades_inferidas' : ', NULL::text[] AS especialidades_inferidas'}
               ${lado.comCategoria ? ', d.categorias' : ''}
               ${lado.interesse ? `, (SELECT count(*)::int FROM ${lado.interesse.tabela} x WHERE x.${lado.interesse.coluna} = d.id) AS interessados` : ''}
@@ -1159,7 +1179,8 @@ const enviarEmailsPendentesNovaDemanda = async () => {
         continue
       }
       if ((await orcamentoEmailsDeDemanda()).restante <= 0) break
-      await enviarEmailsNovaDemanda(d.tabela, d.id)
+      // adiado: texto "ainda aberto" (montarEmailNovaDemanda); tipo e claim seguem os de demanda nova.
+      await enviarEmailsNovaDemanda(d.tabela, d.id, { adiado: true })
       enviadas++
     }
     if (enviadas > 0) console.log(`[EmailAlerta] pendentes do teto: ${enviadas} demanda(s) reprocessada(s) de ${pendentes.rows.length} marcada(s)`)
