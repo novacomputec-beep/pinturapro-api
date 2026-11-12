@@ -40,7 +40,7 @@ const { verificarEscolhaPendente } = require('./src/services/escolhaPendenteServ
 // intervalo match→prazo restando, sem horário proposto). Cadência dos cronômetros.
 const { avisarDesfazerLiberado, avisarDonosProfissionalDesinstalou } = require('./src/services/desfazerEscolhaService')
 const { avisarRespostaFinalDono, aplicarCreditosPendentes } = require('./src/services/responsabilidadeService')
-const { rodarBackfillEReanuncioUnico } = require('./src/services/obrasInferidasService')
+const { rodarBackfillEReanuncioUnico, rodarReanunciosUnicosPorObra } = require('./src/services/obrasInferidasService')
 // Resumo do dia ao admin às 18:00 SP (push + e-mail com o link da aba Canal do WhatsApp).
 const { enviarResumoDiaAdmin } = require('./src/services/resumoDiaAdminService')
 // Mesmo caminho de e-mail do reset/link de assinatura (SMTP/nodemailer do authController).
@@ -906,7 +906,10 @@ const iniciarAgendador = () => {
   setInterval(() => { aplicarCreditosPendentes() }, INTERVALO_LEMBRETE)
   // Especialidades inferidas das obras: backfill das abertas sem lista e, UMA vez (claim em
   // configuracoes), o reanúncio de YS5XR/BR5V3 aos recém-casados. 90 s após o boot, depois da migração.
-  setTimeout(() => { rodarBackfillEReanuncioUnico() }, 90 * 1000)
+  setTimeout(() => { rodarBackfillEReanuncioUnico().finally(() => rodarReanunciosUnicosPorObra()) }, 90 * 1000)
+  // Reanúncio único por obra (obrasInferidasService.REANUNCIOS_UNICOS_OBRA): só reivindica entre 08h e
+  // 20h SP, então um boot fora dessa janela é coberto por este tique; depois do claim é um SELECT à toa.
+  setInterval(() => { rodarReanunciosUnicosPorObra() }, 30 * 60 * 1000)
   // Lembretes ao dono (30 min / 2h) da solicitação de encerramento pendente do profissional.
   setInterval(() => { lembrarConfirmacaoEncerramento() }, INTERVALO_LEMBRETE)
   // "Ainda trabalhando?" ao profissional com chegada confirmada e sem pedido de conclusão de

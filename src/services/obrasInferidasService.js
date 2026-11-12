@@ -15,10 +15,15 @@ const CODIGOS_REANUNCIO = ['YS5XR', 'BR5V3']
 const CHAVE_CLAIM = 'reanuncio_inferidas_v1'
 const CHAVE_RESULTADO = 'reanuncio_inferidas_v1_resultado'
 
-const reanunciarObraParaInferidos = async (obraId) => {
+// somente (default true): só quem casa pelas inferidas e NÃO é do público genérico. false = o público
+// NORMAL de obra nova inteiro com as regras de hoje (genérico + inferidas), sempre menos quem já foi
+// avisado desta obra — é o reanúncio único por obra (REANUNCIOS_UNICOS_OBRA).
+const reanunciarObraParaInferidos = async (obraId, { somente = true } = {}) => {
   const { broadcastPaginado, enviarEmailsNovaDemanda, mensagemNovaObra, ponto } = alerta()
   const r = await pool.query(
-    `SELECT id, codigo_publico, titulo, descricao, cidade, uf, latitude, longitude, especialidades_inferidas, status, status_aprovacao, expira_em > NOW() AS vigente, match_usuario_id
+    // categoria: mensagemNovaObra usa o emoji e o rótulo dela — sem a coluna o push saía "🎨 … publicada!"
+    // sem "Categoria: …", diferente do aviso normal de obra nova.
+    `SELECT id, codigo_publico, titulo, descricao, categoria, cidade, uf, latitude, longitude, especialidades_inferidas, status, status_aprovacao, expira_em > NOW() AS vigente, match_usuario_id
        FROM obras WHERE id = $1`, [obraId])
   const obra = r.rows[0]
   if (!obra) return { erro: 'obra não encontrada' }
@@ -37,13 +42,54 @@ const reanunciarObraParaInferidos = async (obraId) => {
     demanda: { tabela: 'obras', id: obra.id },
     porDistancia: ponto(obra),
     tetoDiario: { tabela: 'obras', demandaId: obra.id, ...ponto(obra), lote: [] },
-    inferidas: { slugs, somente: true },
+    inferidas: { slugs, somente },
     excluirJaAvisados: { tipo: 'obra', demandaId: obra.id },
   })
-  // E-mail aos mesmos recém-casados (o claim de email_alertas já exclui quem recebeu o e-mail original).
-  await enviarEmailsNovaDemanda('obras', obra.id, { inferidasSomente: true })
+  // E-mail aos mesmos (o claim de email_alertas tipo 'obra' já exclui quem recebeu o e-mail original).
+  const emailsAntes = await pool.query(`SELECT count(*)::int AS n FROM email_alertas WHERE tipo = 'obra' AND demanda_id = $1`, [obra.id])
+  await enviarEmailsNovaDemanda('obras', obra.id, { inferidasSomente: somente })
   const emails = await pool.query(`SELECT count(*)::int AS n FROM email_alertas WHERE tipo = 'obra' AND demanda_id = $1`, [obra.id])
-  return { ...base, push_enviados: total?.enviados ?? 0, push_elegiveis: total?.elegiveis ?? 0, acima_do_teto: total?.acimaDoTeto ?? 0, emails_total_obra: emails.rows[0].n }
+  return { ...base, push_enviados: total?.enviados ?? 0, push_elegiveis: total?.elegiveis ?? 0, acima_do_teto: total?.acimaDoTeto ?? 0,
+           emails_enviados: emails.rows[0].n - emailsAntes.rows[0].n, emails_total_obra: emails.rows[0].n }
+}
+
+// REANÚNCIO ÚNICO POR OBRA (dono, 12/11/2026): obra publicada ANTES de uma regra de público (ex.: a de
+// água/esgoto das especialidades inferidas, 10/11 10:53) recebe UMA vez o aviso normal de obra nova com
+// as regras de hoje, só para quem ainda não foi avisado dela. Claim em configuracoes (chave por obra);
+// só entre 08h e 20h de São Paulo — fora disso não reivindica e o tique seguinte tenta de novo.
+// Obra que não está mais aberta/sem match: claim gravado, nada enviado, sem log de envio.
+const REANUNCIOS_UNICOS_OBRA = [
+  { chave: 'reanuncio_obra_3eab5c42', obraId: '3eab5c42-d85b-4105-a8bb-5017eb2ef29f' },
+]
+const SQL_JANELA_DIA_SP = `EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Sao_Paulo') >= 8 AND EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Sao_Paulo') < 20`
+let reanunciosUnicosEmExecucao = false
+const rodarReanunciosUnicosPorObra = async (lista = REANUNCIOS_UNICOS_OBRA) => {
+  if (reanunciosUnicosEmExecucao) return []
+  reanunciosUnicosEmExecucao = true
+  const feitos = []
+  try {
+    for (const { chave, obraId } of lista) {
+      try {
+        const claim = await pool.query(
+          `INSERT INTO configuracoes (chave, valor) SELECT $1, NOW()::text WHERE ${SQL_JANELA_DIA_SP}
+           ON CONFLICT (chave) DO NOTHING RETURNING chave`, [chave])
+        if (claim.rows.length === 0) continue
+        const r = await reanunciarObraParaInferidos(obraId, { somente: false })
+        await pool.query(`UPDATE configuracoes SET valor = $2, atualizado_em = NOW() WHERE chave = $1`, [chave, JSON.stringify({ em: new Date().toISOString(), ...r })])
+        if (r.pulado || r.erro) { feitos.push({ chave, ...r }); continue }
+        console.log(`[reanuncio] obra ${obraId.slice(0, 8)}: ${r.push_enviados} push, ${r.emails_enviados} e-mail`)
+        feitos.push({ chave, ...r })
+      } catch (err) {
+        // Erro antes de terminar: solta o claim para o próximo tique tentar de novo (quem já recebeu
+        // fica de fora pelo push_entregas / email_alertas, então não há envio em dobro).
+        console.error(`[reanuncio] obra ${obraId.slice(0, 8)}:`, err.message)
+        await pool.query(`DELETE FROM configuracoes WHERE chave = $1`, [chave]).catch(() => {})
+      }
+    }
+  } finally {
+    reanunciosUnicosEmExecucao = false
+  }
+  return feitos
 }
 
 const rodarBackfillEReanuncioUnico = async () => {
@@ -74,4 +120,4 @@ const rodarBackfillEReanuncioUnico = async () => {
   }
 }
 
-module.exports = { reanunciarObraParaInferidos, rodarBackfillEReanuncioUnico, CODIGOS_REANUNCIO, CHAVE_CLAIM, CHAVE_RESULTADO }
+module.exports = { reanunciarObraParaInferidos, rodarBackfillEReanuncioUnico, rodarReanunciosUnicosPorObra, REANUNCIOS_UNICOS_OBRA, CODIGOS_REANUNCIO, CHAVE_CLAIM, CHAVE_RESULTADO }
