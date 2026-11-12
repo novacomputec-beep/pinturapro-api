@@ -18,7 +18,7 @@ const assinaturaLinkCtrl = require('../controllers/assinaturaLinkController')
 const { upload, uploadMidia } = require('../controllers/uploadController')
 const { uploadArquivo, gerarAssinaturaCloudinary, uploadParaCloudinary, gerarUrlAssinadaVerificacao } = require('../services/uploadService')
 const { uploadMidiaStream } = require('../controllers/uploadStreamController')
-const { sqlProximoLembreteAgendar, enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarCategoriasAdicionadas, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, avisarUsuario, encerramentoAutomaticoEm } = require('../services/alertaService')
+const { avisarPedidoCanceladoPeloDono, sqlProximoLembreteAgendar, enviarPushNotificacao, enviarPushEmLoteDetalhado, notificarPintoresSobreNovaObra, notificarPrestadoresSobreNovoReparo, notificarCategoriasAdicionadas, notificarDonoSobreAnaliseObra, dispararPushNovoComClaim, notificarOfertaAumentadaObra, notificarOfertaAumentadaReparo, avisarMatchFeito, verificarCronometroReparos, verificarCronometroObras, JANELA_FALTAS, FALTAS_PARA_SUSPENDER, entregarPushOuEmail, entregarPushEEmail, avisarUsuario, encerramentoAutomaticoEm } = require('../services/alertaService')
 const { ufDeCidade, normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 const { moderarDemanda, avisarModeracao, sanitizarTexto, mascararDigitosPartidos, MENSAGEM_REJEICAO, CODIGO_REJEICAO } = require('../utils/moderacaoDemanda')
 const { montarResumoCanal } = require('../utils/canalResumo')
@@ -3237,7 +3237,7 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
   try {
     // match_real: o match é sustentado por uma candidatura 'aceito' do próprio pintor casado.
     const obra = await pool.query(
-      `SELECT o.id, o.match_usuario_id,
+      `SELECT o.id, o.match_usuario_id, o.status,
               EXISTS (SELECT 1 FROM candidaturas c WHERE c.obra_id = o.id AND c.usuario_id = o.match_usuario_id AND c.status = 'aceito') AS match_real
          FROM obras o WHERE o.id = $1 AND ${sqlDonoDaPessoa('o.criado_por', '$2')}`,
       [req.params.id, req.usuario.id]
@@ -3255,6 +3255,8 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
     // de mídia depois de 7 dias. COALESCE não reinicia contagem já iniciada.
     await pool.query(`UPDATE obras SET status = 'cancelada', status_aprovacao = 'cancelada',
       encerrado_em = COALESCE(encerrado_em, NOW()), ${SQL_LIMPAR_MATCH} WHERE id = $1`, [req.params.id])
+    // Obra aberta sem match cancelada: push aos interessados não recusados (segundo plano).
+    if (obra.rows[0].status === 'aberta') avisarPedidoCanceladoPeloDono('obras', req.params.id).catch(() => {})
     if (obra.rows[0].match_usuario_id) console.log(`[obras/dono DELETE] ${req.params.id}: match órfão (${obra.rows[0].match_usuario_id}) limpo na exclusão`)
     res.json({ mensagem: 'Obra removida com sucesso' })
   } catch (err) {
@@ -4769,7 +4771,7 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
     // match_real: ver DELETE /obras/dono/:id — só um interesse 'aceito' do prestador casado segura
     // a exclusão; match órfão é limpo no UPDATE abaixo.
     const reparo = await pool.query(
-      `SELECT r.id, r.match_usuario_id,
+      `SELECT r.id, r.match_usuario_id, r.status,
               EXISTS (SELECT 1 FROM interesse_reparos ir WHERE ir.reparo_id = r.id AND ir.usuario_id = r.match_usuario_id AND ir.status = 'aceito') AS match_real
          FROM reparos r WHERE r.id = $1 AND ${sqlDonoDaPessoa('r.criado_por', '$2')}`,
       [req.params.id, req.usuario.id]
@@ -4795,6 +4797,8 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
         WHERE id = $1`,
       [req.params.id]
     )
+    // Reparo aberto sem match cancelado: push aos interessados não recusados (segundo plano).
+    if (reparo.rows[0].status === 'aberta') avisarPedidoCanceladoPeloDono('reparos', req.params.id).catch(() => {})
     res.json({ mensagem: 'Serviço cancelado com sucesso' })
   } catch (err) {
     console.error('Erro ao cancelar reparo:', err)
