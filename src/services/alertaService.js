@@ -3496,6 +3496,46 @@ const avisarReabertura = async (tabela) => {
   }
 }
 
+// PEDIDO CANCELADO PELO DONO (dono, 12/11/2026): DELETE /obras/dono/:id e /reparos/dono/:id de uma
+// demanda ABERTA sem match → push (sem e-mail) a cada PESSOA que demonstrou interesse e não foi
+// recusada (status IS DISTINCT FROM 'recusado'), menos contas suspensas. Uma vez por pessoa
+// (DISTINCT ON pessoa; token da conta irmã profissional quando a conta não tem). Chamado sem await
+// depois do UPDATE de cancelamento; nunca lança.
+const TITULO_PEDIDO_CANCELADO = '🔕 Pedido cancelado'
+const corpoPedidoCancelado = (t) => `"${t}" foi cancelado pelo cliente.`
+const avisarPedidoCanceladoPeloDono = async (tabela, demandaId) => {
+  const lado = LADOS_REABERTURA[tabela]
+  if (!lado) return 0
+  try {
+    const d = (await pool.query(`SELECT id, titulo FROM ${tabela} WHERE id = $1`, [demandaId])).rows[0]
+    if (!d) return 0
+    const pros = (await pool.query(
+      `SELECT DISTINCT ON (${SQL_PESSOA_DA_CONTA('u')}) u.id, u.push_token
+         FROM ${lado.proposta} x JOIN usuarios u ON u.id = x.usuario_id
+        WHERE x.${lado.coluna} = $1 AND x.status IS DISTINCT FROM 'recusado'
+          AND ${sqlPessoaNaoSuspensa('u.id')}
+        ORDER BY ${SQL_PESSOA_DA_CONTA('u')}, (u.push_token IS NOT NULL) DESC, u.id`,
+      [d.id])).rows
+    const corpo = corpoPedidoCancelado(d.titulo)
+    const data = { tipo: 'pedido_cancelado', [lado.chave]: d.id }
+    let enviados = 0
+    for (const p of pros) {
+      try {
+        const token = p.push_token || await tokenDaContaIrmaProfissional(p.id)
+        const r = token ? await enviarPushNotificacao(token, TITULO_PEDIDO_CANCELADO, corpo, data, p.id) : 'sem token'
+        if (r === 'enviado') enviados++
+      } catch (err) {
+        console.error(`[PedidoCancelado] ${tabela} ${d.id} push ${p.id}:`, err.message)
+      }
+    }
+    console.log(`[PedidoCancelado] ${tabela} ${d.id}: ${enviados}/${pros.length} interessado(s) avisado(s)`)
+    return enviados
+  } catch (err) {
+    console.error(`[PedidoCancelado] ${tabela} ${demandaId}:`, err.message)
+    return 0
+  }
+}
+
 // Cronômetro de matches de reparos.
 // O prazo do cronômetro inicia em match_feito_em e vai até COALESCE(chegada_prevista_em,
 // expira_em): quando o prestador promete uma janela de chegada, é ELA que passa a valer como
@@ -4071,6 +4111,9 @@ module.exports = {
   MOTIVO_FALTA_SEM_HORARIO,
   MOTIVO_EVENTO_PRAZO_SEM_HORARIO,
   avisarReabertura,
+  avisarPedidoCanceladoPeloDono,
+  TITULO_PEDIDO_CANCELADO,
+  corpoPedidoCancelado,
   reanunciarDemanda,
   enviarPushNotificacao,
   OPCOES_PUSH,
