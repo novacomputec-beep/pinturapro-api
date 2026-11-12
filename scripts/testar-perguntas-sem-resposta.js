@@ -22,9 +22,12 @@ class FakeExpo {
 }
 
 let db
+// PGlite não preenche result.rowCount (o pg preenche): sem isto o claim do e-mail diário
+// (`claim.rowCount === 0` em entregarPushEEmail) nunca vê o conflito e o 2º ciclo mandava e-mail de novo.
+const q = async (sql, params) => { const r = await db.query(sql, params); if (r.rowCount === undefined) r.rowCount = r.rows.length > 0 ? r.rows.length : (r.affectedRows ?? 0); return r }
 const shim = {
-  query: (sql, params) => db.query(sql, params),
-  connect: async () => ({ query: (sql, params) => db.query(sql, params), release() {} }),
+  query: q,
+  connect: async () => ({ query: q, release() {} }),
   on() {},
 }
 const origLoad = Module._load
@@ -70,7 +73,14 @@ const main = async () => {
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     SET search_path = public, pg_catalog;
   `)
+  // Colunas reais de usuarios que o envio lê (pessoa por CPF, suspensão) — acrescentadas DEPOIS das
+  // cinco do INSERT posicional abaixo — e eventos_responsabilidade (bloqueio de pedidos do dono),
+  // pela mesma migração de boot.
+  await db.exec(`ALTER TABLE usuarios ADD COLUMN role text, ADD COLUMN tipo_prestador text, ADD COLUMN cpf_cnpj text, ADD COLUMN suspenso_em timestamptz;
+                 CREATE TABLE assinaturas (usuario_id uuid, status text, tipo text, proximo_vencimento timestamptz);`)
+  await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade({ query: (s, p) => db.query(s, p) })
   await db.query(`INSERT INTO usuarios VALUES ($1, 'Dono Silva', 'dono@x.invalid', 'ExponentPushToken[dono]')`, [U(99)])
+  await db.query(`UPDATE usuarios SET role = 'dono_obra', cpf_cnpj = '999' WHERE id = $1`, [U(99)])
   for (const n of [1, 2, 3]) await db.query(`INSERT INTO usuarios VALUES ($1, $2, $3, $4)`, [U(n), `Prof ${n}`, `p${n}@x.invalid`, `ExponentPushToken[p${n}]`])
   await fixarAgora(0)
   // Quatro demandas abertas sem match; "restante" até expira_em contado de T0. Perguntas às 09:30 SP (T0 − 30 min).
@@ -170,6 +180,34 @@ const main = async () => {
   await perguntar(c10d, U(4), 30)
   await tique(1440 + 11 * 60 + 1); ok(await ciclo(c10d) === 3, '21:01: 10d pergunta nova há 30 min → lembra de novo', await ciclo(c10d))
   ok(pushesDe('dono').filter(p => p.data.reparo_id === D(1)).pop().title === '❓ 1 pergunta aguarda sua resposta', 'reinício: só a nova pendente', pushesDe('dono').filter(p => p.data.reparo_id === D(1)).pop().title)
+
+  // 13) Dono SUSPENSO ou com pedidos BLOQUEADOS (7 dias, cliente_nao_respondeu): não recebe, e o ciclo
+  //     não é consumido — ao liberar, o lembrete sai no tique seguinte, na cadência de sempre.
+  const donos = { suspenso: U(98), bloqueado: U(97), normal: U(96) }
+  const extras = { suspenso: { n: 8, tabela: 'reparos', tipo: 'reparo' }, bloqueado: { n: 9, tabela: 'obras', tipo: 'obra' }, normal: { n: 10, tabela: 'reparos', tipo: 'reparo' } }
+  for (const [k, id] of Object.entries(donos)) {
+    await db.query(`INSERT INTO usuarios (id, nome, email, push_token, role, cpf_cnpj) VALUES ($1, $2, $3, $4, 'dono_obra', $5)`,
+      [id, `Dono ${k}`, `${k}@x.invalid`, `ExponentPushToken[${k}]`, `9${id.slice(-2)}`])
+    const c = extras[k]
+    await db.query(`INSERT INTO ${c.tabela} (id, titulo, criado_por, status, status_aprovacao, match_usuario_id, expira_em, criado_em)
+                    VALUES ($1, $2, $3, 'aberta', 'aprovada', NULL, now() + INTERVAL '5 days', now() - INTERVAL '3 hours')`, [D(c.n), `Pedido ${k}`, id])
+    await perguntar(c, U(1), 31)
+  }
+  await db.query(`UPDATE usuarios SET suspenso_em = now() WHERE id = $1`, [donos.suspenso])
+  await db.query(`INSERT INTO eventos_responsabilidade (tipo_evento, usuario_id, tabela, demanda_id, bloqueio_ate)
+                  VALUES ('cliente_nao_respondeu', $1, 'obras', $2, now() + INTERVAL '3 days')`, [donos.bloqueado, D(extras.bloqueado.n)])
+  const cicloDe = async (k) => ciclo(extras[k])
+  await tique(1440 + 11 * 60 + 2) // 21:02 SP
+  ok(await cicloDe('suspenso') === 0 && pushesDe('suspenso').length === 0 && !emails.some(e => e.para === 'suspenso@x.invalid'), 'dono suspenso: nenhum lembrete (push nem e-mail), ciclo não consumido')
+  ok(await cicloDe('bloqueado') === 0 && pushesDe('bloqueado').length === 0 && !emails.some(e => e.para === 'bloqueado@x.invalid'), 'dono com pedidos bloqueados (7 dias): nenhum lembrete, ciclo não consumido')
+  ok(await cicloDe('normal') === 1 && pushesDe('normal').length === 1, 'dono normal no mesmo tique: lembrado (controle)')
+  await db.query(`UPDATE usuarios SET suspenso_em = NULL WHERE id = $1`, [donos.suspenso])
+  await db.query(`UPDATE eventos_responsabilidade SET bloqueio_ate = now() - INTERVAL '1 minute' WHERE usuario_id = $1`, [donos.bloqueado])
+  await tique(1440 + 11 * 60 + 3) // 21:03 SP
+  ok(await cicloDe('suspenso') === 1 && pushesDe('suspenso').length === 1 && pushesDe('suspenso')[0].title === '❓ 1 pergunta aguarda sua resposta',
+     'suspensão levantada: lembrete sai no tique seguinte, mesmo texto', pushesDe('suspenso').map(p => p.title))
+  ok(await cicloDe('bloqueado') === 1 && pushesDe('bloqueado').length === 1 && pushesDe('bloqueado')[0].data.obra_id === D(extras.bloqueado.n),
+     'bloqueio vencido: lembrete sai no tique seguinte', pushesDe('bloqueado').map(p => p.data))
 
   console.log(falhas === 0 ? '\nTUDO OK' : `\n${falhas} FALHA(S)`)
   process.exit(falhas ? 1 : 0)
