@@ -83,6 +83,10 @@ const main = async () => {
     INSERT INTO configuracoes (chave, valor) VALUES ('grupos_relacionados_ativo', 'true');
   `)
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
+
+  // reparos.local_atendimento + usuarios.atende_* (utils/localAtendimento) — a mesma migração de boot.
+
+  await require(path.join(REPO, 'src/utils/localAtendimento')).migrarLocalAtendimento({ query: (s, p) => db.query(s, p) })
   await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(db)
   silenciar(true)
   await fa.migrarAvisosForaDaArea({ query: (s, p) => db.query(s, p) })

@@ -145,6 +145,10 @@ const main = async () => {
     SET search_path = public, pg_catalog;
   `)
   await U_.migrarResponsabilidade(db)
+
+  // reparos.local_atendimento + usuarios.atende_* (utils/localAtendimento) — a mesma migração de boot.
+
+  await require(path.join(REPO, 'src/utils/localAtendimento')).migrarLocalAtendimento({ query: (s, p) => db.query(s, p) })
   // obras.especialidades_inferidas (capacidadesDaPessoa / feed / aviso de obra nova leem a coluna) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(db)
   // Retrato da desistência por exclusão de conta (utils/desistencias) — a mesma migração de boot.

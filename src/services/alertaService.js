@@ -43,6 +43,8 @@ const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZE
 // Reabertura pelo cronômetro quando o profissional nunca marcou horário (utils/reaberturaMatch):
 // propostas rebaixadas pelo match voltam a valer, dono recebe "não marcou horário", interessados
 // recebem "disponível de novo" (fora do silêncio noturno, claim aviso_reabertura_em).
+// Onde o serviço acontece (beleza/cuidados/pet): mesmo filtro em todo alcance de profissional por reparo.
+const { sqlAtendeLocalDaDemanda } = require('../utils/localAtendimento')
 const { STATUS_VALENDO: STATUS_VALENDO_REABERTURA, LADOS: LADOS_REABERTURA, TITULO_REABERTA, corpoReaberta, SQL_MARCAR_REABERTURA, TITULO_DONO_SEM_HORARIO, corpoDonoSemHorario, sqlRestaurarPropostas } = require('../utils/reaberturaMatch')
 // Grupos de categorias relacionadas (lado reparo): a categoria da demanda vira a lista de slugs
 // do seu grupo (chave grupos_relacionados_ativo) antes do casamento com especialidades, nos DOIS
@@ -499,6 +501,12 @@ const broadcastPaginado = async ({ publico, cidade, uf, titulo, corpo, data, rot
     if (demanda) {
       params.push(demanda.id)
       filtrosOpcionais += `\n         AND ${sqlNaoMesmoCpfDoCriador(demanda.tabela, `$${params.length}`)}`
+      // Onde o serviço acontece (utils/localAtendimento) — reparo nova, lembrete, reanúncio, oferta,
+      // categorias adicionadas, "fora da área". O pedido de INDICAÇÃO (foraDasCategorias) não é
+      // convite para atender, então não filtra.
+      if (demanda.tabela === 'reparos' && !foraDasCategorias) {
+        filtrosOpcionais += `\n         AND ${sqlAtendeLocalDaDemanda('reparos', `$${params.length}`)}`
+      }
     }
     if (excluirUsuarioId) {
       params.push(excluirUsuarioId)
@@ -1068,6 +1076,8 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          AND ${sqlCasaCategorias('$4')}
          ${sqlSemManifestacao(lado.interesse, '$5')}
          AND ${sqlNaoMesmoCpfDoCriador(tabela, '$5')}
+         -- Onde o serviço acontece (utils/localAtendimento): o mesmo filtro do push.
+         AND ${sqlAtendeLocalDaDemanda(tabela, '$5')}
          -- Lembrete "ainda aberto" ($7): no máx. UM e-mail de lembrete por demanda × prestador
          -- por dia de São Paulo (política de 29/10/2026), além do UNIQUE por fatia.
          AND (NOT $7::boolean OR NOT EXISTS (
@@ -3443,6 +3453,7 @@ const avisarReabertura = async (tabela) => {
           WHERE x.${lado.coluna} = $1 AND x.status = ANY($2::text[])
             AND ${sqlSemBloqueioNaDemanda(tabela, '$1', 'u.id')}
             AND ${sqlPessoaNaoSuspensa('u.id')}
+            AND ${sqlAtendeLocalDaDemanda(tabela, '$1', 'u')}
           ORDER BY ${SQL_PESSOA_DA_CONTA('u')}, (u.push_token IS NOT NULL) DESC, u.id`,
         [d.id, STATUS_VALENDO_REABERTURA])).rows
       const titulo = TITULO_REABERTA

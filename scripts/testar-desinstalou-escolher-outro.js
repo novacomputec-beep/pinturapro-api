@@ -170,6 +170,10 @@ const main = async () => {
   `)
   const cliente = { query: (s, p) => db.query(s, p) }
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(cliente)
+
+  // reparos.local_atendimento + usuarios.atende_* (utils/localAtendimento) — a mesma migração de boot.
+
+  await require(path.join(REPO, 'src/utils/localAtendimento')).migrarLocalAtendimento({ query: (s, p) => db.query(s, p) })
   await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(cliente)
   await require(path.join(REPO, 'src/utils/contasExcluidas')).migrarContasExcluidas(cliente)
   await require(path.join(REPO, 'src/utils/desistencias')).migrarDesistencias(cliente)
