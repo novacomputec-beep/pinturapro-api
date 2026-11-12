@@ -3497,10 +3497,12 @@ const avisarReabertura = async (tabela) => {
 }
 
 // PEDIDO CANCELADO PELO DONO (dono, 12/11/2026): DELETE /obras/dono/:id e /reparos/dono/:id de uma
-// demanda ABERTA sem match → push (sem e-mail) a cada PESSOA que demonstrou interesse e não foi
-// recusada (status IS DISTINCT FROM 'recusado'), menos contas suspensas. Uma vez por pessoa
-// (DISTINCT ON pessoa; token da conta irmã profissional quando a conta não tem). Chamado sem await
-// depois do UPDATE de cancelamento; nunca lança.
+// demanda ABERTA sem match → push (sem e-mail) a cada PESSOA com interesse AINDA ATIVO (fora:
+// recusado pelo dono, cancelado/desistiu pelo profissional, expirado — STATUS_INTERESSE_INATIVO;
+// status NULL conta como pendente), menos contas suspensas. Uma vez por pessoa (DISTINCT ON pessoa;
+// token da conta irmã profissional quando a conta não tem). Chamado sem await depois do UPDATE de
+// cancelamento; nunca lança.
+const STATUS_INTERESSE_INATIVO = ['recusado', 'cancelado', 'desistiu', 'expirado']
 const TITULO_PEDIDO_CANCELADO = '🔕 Pedido cancelado'
 const corpoPedidoCancelado = (t) => `"${t}" foi cancelado pelo cliente.`
 const avisarPedidoCanceladoPeloDono = async (tabela, demandaId) => {
@@ -3512,10 +3514,10 @@ const avisarPedidoCanceladoPeloDono = async (tabela, demandaId) => {
     const pros = (await pool.query(
       `SELECT DISTINCT ON (${SQL_PESSOA_DA_CONTA('u')}) u.id, u.push_token
          FROM ${lado.proposta} x JOIN usuarios u ON u.id = x.usuario_id
-        WHERE x.${lado.coluna} = $1 AND x.status IS DISTINCT FROM 'recusado'
+        WHERE x.${lado.coluna} = $1 AND COALESCE(x.status, 'pendente') <> ALL($2::text[])
           AND ${sqlPessoaNaoSuspensa('u.id')}
         ORDER BY ${SQL_PESSOA_DA_CONTA('u')}, (u.push_token IS NOT NULL) DESC, u.id`,
-      [d.id])).rows
+      [d.id, STATUS_INTERESSE_INATIVO])).rows
     const corpo = corpoPedidoCancelado(d.titulo)
     const data = { tipo: 'pedido_cancelado', [lado.chave]: d.id }
     let enviados = 0
