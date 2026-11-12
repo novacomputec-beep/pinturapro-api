@@ -5,7 +5,8 @@
 // 'aberta' sem match (agenda/chegada zeradas, prazo com piso de 1h), propostas rebaixadas PELO MATCH
 // voltam ao status de antes (status_antes_match), SEM falta/evento/bloqueio; depois do COMMIT o dono
 // recebe push + e-mail "O profissional escolhido saiu do ProTudo — escolha outro interessado para
-// "<título>".", os interessados que voltaram a valer recebem "reabriu" e os demais o reanúncio.
+// "<título>".", os interessados que voltaram a valer recebem o aviso NEUTRO "🔔 Pedido disponível de
+// novo" (pelo cron de reabertura — aviso_reabertura_em marcado no un-match) e os demais o reanúncio.
 // Toda exclusão grava uma linha em contas_excluidas (id, nome, cpf_hash, role, excluido_em, por).
 // SQL REAL num Postgres em memória (PGlite); rotas reais (cadeia inteira, JWT); Expo/Brevo falsos.
 //   npm i -D @electric-sql/pglite && node scripts/testar-exclusao-conta-match.js
@@ -44,7 +45,17 @@ silenciar(true)
 const router = require(path.join(REPO, 'src/routes/index.js'))
 const CM = require(path.join(REPO, 'src/services/cancelamentoMatchService'))
 const CE = require(path.join(REPO, 'src/utils/contasExcluidas'))
+const A = require(path.join(REPO, 'src/services/alertaService'))
 silenciar(false)
+// O aviso de reabertura só sai fora do silêncio 22–07 SP; o teste roda no relógio real, então o cron é
+// chamado com NOW() fixado no último 12:00 SP (≤ agora, logo antes do expira_em das demandas).
+const avisarReaberturaDeDia = async (tabela) => {
+  const agora = Date.now()
+  let base = new Date(agora); base.setUTCHours(15, 0, 0, 0)
+  if (base.getTime() > agora) base = new Date(base.getTime() - 86400000)
+  await db.exec(`SET search_path = public, pg_catalog; CREATE OR REPLACE FUNCTION public.now() RETURNS timestamptz LANGUAGE sql STABLE AS $$ SELECT '${base.toISOString()}'::timestamptz $$`)
+  try { await quieto(() => A.avisarReabertura(tabela)) } finally { await db.exec(`DROP FUNCTION public.now()`) }
+}
 
 let falhas = 0
 const ok = (c, rot, extra) => { if (!c) falhas++; logOrig(`${c ? 'OK  ' : 'FAIL'} ${rot}${extra !== undefined ? ' | ' + JSON.stringify(extra) : ''}`) }
@@ -138,6 +149,7 @@ const main = async () => {
   await CE.migrarContasExcluidas(cliente)
   await CE.migrarContasExcluidas(cliente)
   await require(path.join(REPO, 'src/utils/desistencias')).migrarDesistencias(cliente)
+  await require(path.join(REPO, 'src/utils/reaberturaMatch')).migrarReaberturaMatch(cliente)
   ok(true, 'migração contas_excluidas idempotente (2x)')
   const usr = (id, nome, role, extra = {}) => db.query(
     `INSERT INTO usuarios (id, nome, email, role, tipo_dono, tipo_prestador, cpf_cnpj, push_token, cidade, uf, especialidades, senha_hash)
@@ -199,9 +211,20 @@ const main = async () => {
   ok(pd.some(p => p.body === 'O profissional escolhido saiu do ProTudo — escolha outro interessado para "Trocar chuveiro".'), 'texto exato ao dono', pd.map(p => p.body))
   const ed = emailsPara('maria@x.invalid')
   ok(ed.length === 2 && ed.every(e => /saiu do ProTudo/.test(e.html || '') || /saiu do ProTudo/.test(e.assunto || '')), 'dono: 2 e-mails (push E e-mail)', ed.map(e => e.assunto))
-  ok(pushesPara(I1).some(p => /reabriu/.test(p.title) && p.data?.reaberta === true) && pushesPara(I2).some(p => /reabriu/.test(p.title)) && pushesPara(PRO2).some(p => /reabriu/.test(p.title)),
-     'interessados que voltaram a valer (I1, I2, Beto): "O pedido … reabriu"', { i1: pushesPara(I1).map(p => p.title), beto: pushesPara(PRO2).map(p => p.title) })
-  ok(!pushesPara(I3).some(p => /reabriu/.test(p.title)), 'I3 (recusado antes do match) NÃO recebe "reabriu"', pushesPara(I3).map(p => p.title))
+  const TITULO_NEUTRO = '🔔 Pedido disponível de novo'
+  ok(![I1, I2, PRO2].some(u => pushesPara(u).some(p => p.title === TITULO_NEUTRO || /reabriu|saiu do/.test(p.title + p.body))),
+     'interessados que voltaram a valer: nada direto da exclusão (o aviso é do cron de reabertura)', { i1: pushesPara(I1).map(p => p.title) })
+  ok(r1.aviso_reabertura_em !== null && o1.aviso_reabertura_em !== null, 'R1 e O1: aviso de reabertura marcado no un-match')
+  await avisarReaberturaDeDia('reparos')
+  await avisarReaberturaDeDia('obras')
+  const neutro = (p, titulo, data) => p.title === TITULO_NEUTRO && p.body === `"${titulo}" está aberto e sua proposta continua valendo — o cliente pode escolher você.` && JSON.stringify(p.data) === JSON.stringify(data)
+  ok(pushesPara(I1).filter(p => p.title === TITULO_NEUTRO).length === 1 && pushesPara(I1).some(p => neutro(p, 'Trocar chuveiro', { tipo: 'novo_reparo', reaberta: true, reparo_id: R1 }))
+     && pushesPara(I2).some(p => neutro(p, 'Trocar chuveiro', { tipo: 'novo_reparo', reaberta: true, reparo_id: R1 })),
+     'cron de reabertura: I1 e I2 recebem o aviso NEUTRO do reparo (sem "saiu do ProTudo")', { i1: pushesPara(I1).map(p => [p.title, p.body]) })
+  const pBeto = pushesPara(PRO2).filter(p => p.title === TITULO_NEUTRO)
+  ok(pBeto.length === 1 && pBeto[0].data?.tipo === 'nova_obra' && pBeto[0].data?.obra_id === O1 && pBeto[0].data?.reaberta === true && Object.keys(pBeto[0].data).length === 3,
+     'cron de reabertura: Beto recebe o aviso NEUTRO da obra (data { tipo nova_obra, reaberta, obra_id })', pBeto.map(p => p.data))
+  ok(!pushesPara(I3).some(p => p.title === TITULO_NEUTRO), 'I3 (recusado antes do match) NÃO recebe o aviso de reabertura', pushesPara(I3).map(p => p.title))
   ok(pushesPara(LIVRE).length >= 1, 'quem nunca se manifestou recebe o reanúncio (reanunciarDemanda)', pushesPara(LIVRE).map(p => p.title))
   ok(pushesPara(PRO).length === 0 && pushesPara(PRO_IRMA).length === 0, 'a conta excluída não recebe nada')
   let ce = (await db.query(`SELECT id, nome, role, por, cpf_hash FROM contas_excluidas ORDER BY id`)).rows

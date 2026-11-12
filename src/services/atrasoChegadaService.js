@@ -36,7 +36,7 @@ const { SQL_ZERAR_AGENDA, TOLERANCIA_CHEGADA_MIN, sqlPrazoChegada, sqlLimiteCheg
 const { entregarPushEEmail, contatoDaPessoa } = require('./alertaService')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
 // Restauração das propostas rebaixadas pelo match quando a demanda volta ao feed (regra única).
-const { sqlRestaurarPropostas } = require('../utils/reaberturaMatch')
+const { sqlRestaurarPropostas, SQL_MARCAR_REABERTURA } = require('../utils/reaberturaMatch')
 
 const MINUTOS_PERMITIDOS = [15, 30, 60]
 const MAX_PEDIDOS_POR_MATCH = 2
@@ -244,6 +244,8 @@ const recusarNoBanco = async (client, lado, d) => {
          chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
          chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
          chegada_confirmada_em = NULL, ${SQL_ZERAR_AGENDA},
+         -- Aviso NEUTRO às propostas que voltam a valer (alertaService.avisarReabertura).
+         ${SQL_MARCAR_REABERTURA},
          prestadores_bloqueados = CASE
            WHEN $2::uuid IS NULL OR $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
            THEN prestadores_bloqueados

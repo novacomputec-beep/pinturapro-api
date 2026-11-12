@@ -31,7 +31,9 @@ const { pool } = require('../utils/supabase')
 const { SQL_ZERAR_AGENDA, formatarDataHoraSP } = require('../utils/agendamento')
 const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunciarDemanda, contatoDaPessoa } = require('./alertaService')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
-const { STATUS_VALENDO, restaurarPropostasRebaixadas } = require('../utils/reaberturaMatch')
+// Reabertura: propostas rebaixadas pelo match voltam a valer e o aviso NEUTRO aos interessados fica
+// devido (SQL_MARCAR_REABERTURA → alertaService.avisarReabertura, o único que avisa).
+const { STATUS_VALENDO, restaurarPropostasRebaixadas, SQL_MARCAR_REABERTURA } = require('../utils/reaberturaMatch')
 const { MARCA } = require('../utils/marca')
 // Retrato da desistência por exclusão de conta (sobrevive à cascata) — utils/desistencias.
 const { registrarDesistenciaSnapshot } = require('../utils/desistencias')
@@ -216,7 +218,7 @@ const executar = async ({ lado, d, canceladoPor, atorId = canceladoPor, motivo, 
     const upd = await client.query(
       `UPDATE ${lado.tabela} SET ${SQL_LIMPAR_MATCH},
               expira_em = GREATEST(expira_em, NOW() + INTERVAL '${PISO_PRAZO_RESTANTE}')
-              ${encerrar ? `, status = 'cancelada', status_aprovacao = 'cancelada', encerrado_em = COALESCE(encerrado_em, NOW())` : ''}
+              ${encerrar ? `, status = 'cancelada', status_aprovacao = 'cancelada', encerrado_em = COALESCE(encerrado_em, NOW())` : `, ${SQL_MARCAR_REABERTURA}`}
         WHERE id = $1 AND match_usuario_id = $2 AND a_caminho_em IS NULL AND status = 'aberta'
         RETURNING id`,
       [d.id, profissionalId]
@@ -298,7 +300,8 @@ const desfazerMatchesPorExclusao = async (client, profissionalId) => {
     for (const d of abertas.rows) {
       await client.query(
         `UPDATE ${lado.tabela} SET ${SQL_LIMPAR_MATCH},
-                expira_em = GREATEST(expira_em, NOW() + INTERVAL '${PISO_PRAZO_RESTANTE}')
+                expira_em = GREATEST(expira_em, NOW() + INTERVAL '${PISO_PRAZO_RESTANTE}'),
+                ${SQL_MARCAR_REABERTURA}
           WHERE id = $1 AND match_usuario_id = $2`,
         [d.id, profissionalId]
       )
@@ -333,14 +336,7 @@ const avisarMatchesDesfeitosPorExclusao = async (efeitos) => {
         data: { tipo: 'match_cancelado', [lado.chave]: d.id, motivo: MOTIVO_CONTA_EXCLUIDA, por: 'profissional', acordo: false },
         rotulo: `conta excluída ${lado.tipo} ${d.id} dono`,
       })
-      for (const u of interessados) {
-        await avisar(u, {
-          titulo: `O pedido "${d.titulo}" reabriu`,
-          corpo: `O profissional escolhido saiu do ${MARCA}. Seu interesse continua valendo e o cliente vai escolher de novo. Ainda não há escolhido.`,
-          data: { tipo: lado.tipo === 'obra' ? 'nova_obra' : 'novo_reparo', [lado.chave]: d.id, reaberta: true },
-          rotulo: `conta excluída ${lado.tipo} ${d.id} interessado`,
-        })
-      }
+      // Interessados que voltaram a valer: aviso NEUTRO pelo cron (aviso_reabertura_em marcado no un-match).
       await reanunciarDemanda(lado.tabela, d.id).catch(() => {})
     } catch (err) {
       console.error(`[CancelarMatch] avisos da exclusão (${lado.tipo} ${d.id}):`, err.message)

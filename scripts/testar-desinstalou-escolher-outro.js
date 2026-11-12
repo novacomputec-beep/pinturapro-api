@@ -249,7 +249,13 @@ const main = async () => {
   ok(pushesPara(PRO).length === 0, 'profissional sem token (desinstalou): nenhum push a ele')
   const ePro = emails.filter(x => x.para === '002@x.invalid' && /escolheu outro/.test(x.html || x.assunto || ''))
   ok(ePro.length >= 1 && ePro.every(x => /Sem penalidade/.test(JSON.stringify(x)) && !/contou como 1 falta/.test(JSON.stringify(x))), 'e-mail de reserva ao profissional: "Sem penalidade", sem "contou como 1 falta"', ePro.map(x => Object.keys(x)))
-  ok(pushesPara(PA).some(p => /reabriu/.test(p.title)) && pushesPara(PB).some(p => /reabriu/.test(p.title)), 'interessados restaurados avisados ("reabriu")')
+  ok(pushesPara(PA).length === 0 && pushesPara(PB).length === 0, 'interessados: nada direto do escolher-outro (o aviso é do cron de reabertura)')
+  await quieto(() => A.avisarReabertura('reparos'))
+  const neutro = (p) => p.title === '🔔 Pedido disponível de novo' && p.body === '"Serviço 11" está aberto e sua proposta continua valendo — o cliente pode escolher você.'
+    && JSON.stringify(p.data) === JSON.stringify({ tipo: 'novo_reparo', reaberta: true, reparo_id: R1 })
+  ok(pushesPara(PA).length === 1 && neutro(pushesPara(PA)[0]) && pushesPara(PB).length === 1 && neutro(pushesPara(PB)[0]),
+     'cron de reabertura: A e B recebem o aviso NEUTRO (sem "desinstalou", sem quem/por quê)', [...pushesPara(PA), ...pushesPara(PB)].map(p => [p.title, p.body]))
+  ok(!emails.some(x => x.para === '002@x.invalid' && /Pedido disponível de novo/.test(x.assunto || '')), 'o profissional que perdeu o match não recebe o aviso de reabertura')
   ok(pushesPara(DONO).some(p => p.title === 'Pedido reaberto'), 'dono: "Pedido reaberto"')
 
   // ═══ 6. Escolher outro pela regra dos lembretes continua COM falta/evento ═══════════════════

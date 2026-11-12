@@ -32,7 +32,7 @@ const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaCon
 const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQL_LIMPAR_MATCH,
         desfazerMatchesPorExclusao, avisarMatchesDesfeitosPorExclusao } = require('../services/cancelamentoMatchService')
 // Propostas rebaixadas pelo match voltam a valer quando a demanda retorna ao feed (regra única).
-const { sqlRestaurarPropostas } = require('../utils/reaberturaMatch')
+const { sqlRestaurarPropostas, SQL_MARCAR_REABERTURA } = require('../utils/reaberturaMatch')
 // Exclusão de conta: registro em contas_excluidas (utils/contasExcluidas).
 const { migrarContasExcluidas, registrarContaExcluida } = require('../utils/contasExcluidas')
 const { handler: desfazerEscolhaHandler, sqlDesfazerLiberadoEm, sqlPodeEscolherOutro, sqlMotivoEscolherOutro } = require('../services/desfazerEscolhaService')
@@ -4507,6 +4507,8 @@ router.post('/obras/:id/expirar-match', autenticar, async (req, res) => {
                 chegada_janela = NULL, chegada_prevista_em = NULL, chegada_declarada_por = NULL, chegada_declarada_em = NULL,
                 chegada_pendente_janela = NULL, chegada_pendente_em = NULL, chegada_recusada_em = NULL,
                 chegada_confirmada_em = NULL, ${SQL_ZERAR_AGENDA},
+                -- Aviso NEUTRO às candidaturas que voltam a valer (alertaService.avisarReabertura).
+                ${SQL_MARCAR_REABERTURA},
                 prestadores_bloqueados = CASE
                   -- Isenção igual à do cron (SQL_ISENCAO_FALTA, utils/agendamento): janela que
                   -- nunca virou compromisso — recusada pelo dono OU proposta DO PROFISSIONAL sem
@@ -5945,6 +5947,8 @@ router.post('/reparos/:id/expirar-match', autenticar, async (req, res) => {
            chegada_recusada_em = NULL,
            chegada_confirmada_em = NULL,
            ${SQL_ZERAR_AGENDA},
+           -- Aviso NEUTRO aos interesses que voltam a valer (alertaService.avisarReabertura).
+           ${SQL_MARCAR_REABERTURA},
            prestadores_bloqueados = CASE
              -- Isenção por janela não honrada pelo dono (ver POST /obras/:id/expirar-match e o
              -- CASE dos crons): recusada OU proposta do profissional sem resposta, e nenhuma

@@ -27,8 +27,9 @@
 //   - as propostas rebaixadas a 'recusado' PELO MATCH (status_antes_match, utils/
 //     rejeitarConcorrentes) voltam ao status que tinham; as já pendentes seguem como estão.
 //     Recusa explícita do dono antes do match fica recusada.
-// Depois do commit (push + e-mail, cota crítica 'aviso:', nunca lançam): ao profissional, a
-// cada interessado que segue valendo e ao dono (com o nº de interessados avisados). Motivo
+// Depois do commit (push + e-mail, cota crítica 'aviso:', nunca lançam): ao profissional e ao dono
+// (com o nº de interessados). Os interessados que seguem valendo recebem o aviso NEUTRO de
+// reabertura pelo cron (aviso_reabertura_em, marcado no un-match — alertaService.avisarReabertura). Motivo
 // 'escolha_desfeita' fica fora da contagem de cancelamentos frequentes (cancelamentoMatchService).
 //
 // "ESCOLHER OUTRO" (dono, 10/11/2026) — o MESMO caminho, em outro modo (handler(tabela,
@@ -51,7 +52,7 @@ const { registrarCompromissoNaoCumprido } = require('./responsabilidadeService')
 const { formatarDataHoraSP } = require('../utils/agendamento')
 const { SQL_LIMPAR_MATCH } = require('./cancelamentoMatchService')
 // Restauração das propostas rebaixadas pelo match — regra única de utils/reaberturaMatch.
-const { restaurarPropostasRebaixadas } = require('../utils/reaberturaMatch')
+const { restaurarPropostasRebaixadas, SQL_MARCAR_REABERTURA } = require('../utils/reaberturaMatch')
 const { entregarPushEEmail, inserirFaltaUnica, avaliarSuspensaoPorFaltas, MOTIVO_FALTA_SEM_HORARIO, semSobreposicao, contatoDaPessoa } = require('./alertaService')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
 
@@ -181,6 +182,7 @@ const handler = (tabela, modo = 'desfazer') => {
       const upd = await client.query(
         `UPDATE ${lado.tabela} SET ${SQL_LIMPAR_MATCH},
                 expira_em = GREATEST(expira_em, NOW() + INTERVAL '${PISO_PRAZO_RESTANTE}'),
+                ${SQL_MARCAR_REABERTURA},
                 prestadores_bloqueados = CASE WHEN $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
                                               THEN prestadores_bloqueados
                                               ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
@@ -248,15 +250,8 @@ const handler = (tabela, modo = 'desfazer') => {
           rotulo: `escolha desfeita ${lado.tipo} ${d.id} profissional`,
         })
       }
-      for (const u of await contatos(interessados)) {
-        await avisar(u, {
-          ator_id: req.usuario.id,
-          titulo: `O pedido "${d.titulo}" reabriu`,
-          corpo: 'O profissional escolhido não marcou o horário. Seu interesse continua valendo e o cliente vai escolher de novo. Ainda não há escolhido.',
-          data: { tipo: lado.tipoPushInteressado, [lado.chave]: d.id, reaberta: true },
-          rotulo: `escolha desfeita ${lado.tipo} ${d.id} interessado`,
-        })
-      }
+      // Interessados que voltaram a valer: aviso NEUTRO pelo cron (aviso_reabertura_em marcado no
+      // un-match — alertaService.avisarReabertura), nunca daqui.
       // Dono UMA vez por pessoa (alertaService.contatoDaPessoa): token/e-mail da conta irmã se a dele está vazio.
       const dono = await contatoDaPessoa(d.criado_por)
       if (dono) {

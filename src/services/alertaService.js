@@ -43,7 +43,7 @@ const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZE
 // Reabertura pelo cronômetro quando o profissional nunca marcou horário (utils/reaberturaMatch):
 // propostas rebaixadas pelo match voltam a valer, dono recebe "não marcou horário", interessados
 // recebem "disponível de novo" (fora do silêncio noturno, claim aviso_reabertura_em).
-const { STATUS_VALENDO: STATUS_VALENDO_REABERTURA, LADOS: LADOS_REABERTURA, TITULO_REABERTA, corpoReaberta, TITULO_DONO_SEM_HORARIO, corpoDonoSemHorario, sqlRestaurarPropostas } = require('../utils/reaberturaMatch')
+const { STATUS_VALENDO: STATUS_VALENDO_REABERTURA, LADOS: LADOS_REABERTURA, TITULO_REABERTA, corpoReaberta, SQL_MARCAR_REABERTURA, TITULO_DONO_SEM_HORARIO, corpoDonoSemHorario, sqlRestaurarPropostas } = require('../utils/reaberturaMatch')
 // Grupos de categorias relacionadas (lado reparo): a categoria da demanda vira a lista de slugs
 // do seu grupo (chave grupos_relacionados_ativo) antes do casamento com especialidades, nos DOIS
 // públicos (broadcastPaginado e reivindicarEmailsNovaDemanda). utils/gruposCategorias só importa
@@ -2183,11 +2183,14 @@ const reivindicarEmailLembreteCiclo = async (demandaId, usuarioId, dia) => {
 }
 // corpoEmail (opcional): texto do e-mail quando precisa diferir do push (ex.: o caminho no app,
 // que no push é o próprio toque). Sem ele, o e-mail repete o corpo do push.
-const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, corpoEmail, data, rotulo, lembrete = false, emailCadaCiclo = false }) => {
+// semPush: só o e-mail (quem chama já decidiu o push — ex.: avisarReabertura, que respeita o teto
+// diário de push). discriminador: entra no hash da chave do e-mail sem ir no data do push (ex.: o
+// instante da reabertura, para cada rodada ter o seu e-mail).
+const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, corpoEmail, data, rotulo, lembrete = false, emailCadaCiclo = false, semPush = false, discriminador = null }) => {
   if (ehOProprioAutor({ usuario_id, ator_id, rotulo })) return 'autor'
   const vias = []
   try {
-    const token = push_token || await tokenDaContaIrmaProfissional(usuario_id)
+    const token = semPush ? null : (push_token || await tokenDaContaIrmaProfissional(usuario_id))
     if (token) {
       const r = await enviarPushNotificacao(token, titulo, corpo, data, usuario_id)
       if (r === 'enviado') vias.push('push')
@@ -2200,7 +2203,7 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
       ? `lembrete#${diaSP()}`
       // data entra no hash: avisos de MESMO texto sobre coisas diferentes (2º candidato, 2ª
       // pergunta) levam um discriminador em data (candidatura_id, pergunta_id) e saem.
-      : (/^[a-z_]+$/.test(evento) ? `${evento}#${hash8(`${titulo}\n${corpo}\n${JSON.stringify(data)}`)}` : null)
+      : (/^[a-z_]+$/.test(evento) ? `${evento}#${hash8(`${titulo}\n${corpo}\n${JSON.stringify(data)}${discriminador === null ? '' : `\n${discriminador}`}`)}` : null)
     const temChave = !!(usuario_id && UUID_RE_AVISO.test(demandaId) && chave)
     if (lembrete && !temChave) return vias.length ? vias.join('+') : 'sem contato'
     if (lembrete && emailCadaCiclo) {
@@ -3404,36 +3407,70 @@ const registrarFaltaSemHorario = async (tabela, demanda) => {
   }
 }
 
-// Aviso de REABERTURA aos interessados cujas propostas voltaram a valer (CTE restauradas dos dois
-// crons abaixo): claim atômico em aviso_reabertura_em (devido desde o un-match; réplicas e tiques
-// repetidos não duplicam) só FORA do silêncio noturno 22:00–07:00 SP — match que morre de
-// madrugada avisa no 1º tique das 07:00. Linha que deixou de valer nesse meio-tempo (novo match,
-// encerrada, prazo vencido) tem o claim limpo sem aviso. Push + e-mail por entregarPushEEmail
-// (1:1 a quem já se manifestou — fora do teto diário dos avisos de demanda em massa; e-mail na
-// reserva crítica 'aviso:%', UM por reabertura: expira_em novo em data discrimina a rodada).
-// Toque: nova_obra / novo_reparo + reaberta (o mesmo do "desfazer escolha") → detalhe no feed.
+// Aviso de REABERTURA — o ÚNICO aviso aos profissionais cujas propostas voltaram a valer quando um
+// match acaba e a demanda segue aberta (decisão do dono, 12/11/2026). TODO caminho de un-match que
+// restaura propostas (utils/reaberturaMatch.sqlRestaurarPropostas) só marca aviso_reabertura_em =
+// NOW() na própria transação; quem avisa é isto, no tique de 1 min dos cronômetros. Texto NEUTRO
+// (TITULO_REABERTA / corpoReaberta): nunca diz quem saiu, por quê nem quantas vezes.
+//   - Claim atômico em aviso_reabertura_em só FORA do silêncio noturno 22:00–07:00 SP: o que
+//     reabre de madrugada fica marcado e sai no 1º tique das 07:00 (adiado, nunca descartado).
+//     Linha que deixou de valer nesse meio-tempo (novo match, encerrada, prazo vencido) tem o
+//     claim limpo sem aviso.
+//   - Destinatários: propostas em STATUS_VALENDO (o profissional que perdeu o match nunca está:
+//     a proposta dele vira cancelado/expirado no mesmo un-match), UMA vez por PESSOA, sem bloqueio
+//     na demanda nem do dono (sqlSemBloqueioNaDemanda) e não suspensa.
+//   - Push dentro do teto diário de 15 pushes de demanda por pessoa (conta como 'reanuncio');
+//     acima dele não sai push: entra no push-resumo "Mais N pedidos…" (avisos_acima_do_teto,
+//     rearmado como lembrete). E-mail sempre, na reserva crítica 'aviso:%', UM por reabertura
+//     (o instante marcado discrimina a rodada, fora do data do push).
+//   - Toque: data { tipo: nova_obra | novo_reparo, reaberta: true, obra_id | reparo_id } → detalhe.
 const avisarReabertura = async (tabela) => {
   const lado = LADOS_REABERTURA[tabela]
   try {
     const claim = await pool.query(`
       UPDATE ${tabela} d SET aviso_reabertura_em = NULL
-       WHERE d.aviso_reabertura_em IS NOT NULL
+        FROM (SELECT id, aviso_reabertura_em FROM ${tabela} WHERE aviso_reabertura_em IS NOT NULL) marca
+       WHERE d.id = marca.id AND d.aviso_reabertura_em IS NOT NULL
          AND (NOT (d.status = 'aberta' AND d.match_usuario_id IS NULL AND d.expira_em > NOW()) OR ${SQL_FORA_SILENCIO})
-   RETURNING d.id, d.titulo, d.criado_por, d.expira_em,
+   RETURNING d.id, d.titulo, marca.aviso_reabertura_em AS marcado_em,
              (d.status = 'aberta' AND d.match_usuario_id IS NULL AND d.expira_em > NOW()) AS vale`)
     for (const d of claim.rows) {
       if (!d.vale) { console.log(`[Reabertura] ${tabela} ${d.id}: deixou de valer antes do aviso — claim limpo`); continue }
       const pros = (await pool.query(
-        `SELECT u.id, u.push_token, u.email, u.nome FROM ${lado.proposta} x JOIN usuarios u ON u.id = x.usuario_id
-          WHERE x.${lado.coluna} = $1 AND x.status = ANY($2::text[])`, [d.id, STATUS_VALENDO_REABERTURA])).rows
+        `SELECT DISTINCT ON (${SQL_PESSOA_DA_CONTA('u')}) u.id, u.push_token, u.email, u.nome,
+                (${sqlPushesDeDemandaHoje('u.id')}) >= ${TETO_PUSH_DEMANDA_DIA} AS acima_do_teto
+           FROM ${lado.proposta} x JOIN usuarios u ON u.id = x.usuario_id
+          WHERE x.${lado.coluna} = $1 AND x.status = ANY($2::text[])
+            AND ${sqlSemBloqueioNaDemanda(tabela, '$1', 'u.id')}
+            AND ${sqlPessoaNaoSuspensa('u.id')}
+          ORDER BY ${SQL_PESSOA_DA_CONTA('u')}, (u.push_token IS NOT NULL) DESC, u.id`,
+        [d.id, STATUS_VALENDO_REABERTURA])).rows
+      const titulo = TITULO_REABERTA
+      const corpo = corpoReaberta(d.titulo)
+      const data = { tipo: lado.tipoPushInteressado, reaberta: true, [lado.chave]: d.id }
       for (const p of pros) {
-        const via = await entregarPushEEmail({
-          usuario_id: p.id, push_token: p.push_token, email: p.email, nome: p.nome,
-          titulo: TITULO_REABERTA, corpo: corpoReaberta(d.titulo),
-          data: { tipo: lado.tipoPushInteressado, [lado.chave]: d.id, reaberta: true, expira_em: new Date(d.expira_em).toISOString() },
+        let viaPush = 'sem push'
+        try {
+          if (p.acima_do_teto) {
+            await registrarAcimaDoTeto(tabela, d.id, [p.id], pool, { lembrete: true })
+            viaPush = 'acima do teto → resumo'
+          } else {
+            const token = p.push_token || await tokenDaContaIrmaProfissional(p.id)
+            if (token) {
+              viaPush = await enviarPushNotificacao(token, titulo, corpo, data, p.id)
+              if (viaPush === 'enviado') await registrarLembretesPush(tabela, d.id, 'reanuncio', [{ id: p.id, resultado: 'enviado' }])
+            }
+          }
+        } catch (err) {
+          viaPush = 'falha'
+          console.error(`[Reabertura] ${tabela} ${d.id} push ${p.id}:`, err.message)
+        }
+        const viaEmail = await entregarPushEEmail({
+          usuario_id: p.id, email: p.email, nome: p.nome, titulo, corpo, data, semPush: true,
+          discriminador: new Date(d.marcado_em).toISOString(),
           rotulo: `reabertura ${tabela} ${d.id} interessado ${p.id}`,
         })
-        console.log(`[Reabertura] ${tabela} ${d.id} → interessado ${p.id} via ${via}`)
+        console.log(`[Reabertura] ${tabela} ${d.id} → interessado ${p.id} | push: ${viaPush} | e-mail: ${viaEmail}`)
       }
       console.log(`[Reabertura] ${tabela} ${d.id}: ${pros.length} interessado(s) avisado(s)`)
     }
@@ -3530,7 +3567,7 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
       // as propostas dos concorrentes rebaixadas pelo match voltam a valer (CTE restauradas, a
       // mesma regra do "escolher outro") e o aviso de reabertura aos interessados fica devido
       // (aviso_reabertura_em → avisarReabertura, fora do silêncio noturno).
-      const semHorarioIds = candidatos.rows.filter(nuncaPropos).map(c => c.id)
+      // Com ou sem horário marcado, o aviso de reabertura fica devido (avisarReabertura, texto neutro).
       const expirados = await pool.query(`
         WITH desfeitos AS (
           UPDATE reparos SET
@@ -3538,7 +3575,7 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
             match_feito_em = NULL,
             match_usuario_id = NULL,
             notif_5min_enviada = false,
-            aviso_reabertura_em = CASE WHEN id = ANY($3::uuid[]) THEN NOW() ELSE aviso_reabertura_em END,
+            ${SQL_MARCAR_REABERTURA},
             -- Mesmo re-armamento do lado obra (ver o comentário lá): sem isto o reparo volta
             -- ao feed com prazo novo e marcos velhos, e não recebe aviso de expiração nenhum.
             marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL,
@@ -3596,7 +3633,7 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
           RETURNING rp.id
         )
         SELECT id FROM desfeitos
-      `, [candidatos.rows.map(c => c.id), candidatos.rows.map(c => c.match_usuario_id), semHorarioIds])
+      `, [candidatos.rows.map(c => c.id), candidatos.rows.map(c => c.match_usuario_id)])
       expiradosCount = expirados.rows.length
 
       // Só notifica e contabiliza falta para quem o UPDATE realmente pegou. Os dois lados
@@ -3692,7 +3729,7 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
     let expiradosCount = 0
     if (candidatos.rows.length > 0) {
       // Sem horário marcado: mesmas CTE/claim do cron de reparos (ver lá).
-      const semHorarioIds = candidatos.rows.filter(nuncaPropos).map(c => c.id)
+      // Com ou sem horário marcado, o aviso de reabertura fica devido (avisarReabertura, texto neutro).
       const expirados = await pool.query(`
         WITH desfeitos AS (
           UPDATE obras SET
@@ -3700,7 +3737,7 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
             match_feito_em = NULL,
             match_usuario_id = NULL,
             notif_5min_enviada = false,
-            aviso_reabertura_em = CASE WHEN id = ANY($3::uuid[]) THEN NOW() ELSE aviso_reabertura_em END,
+            ${SQL_MARCAR_REABERTURA},
             -- Marcos re-armados junto com o expira_em novo, exatamente como POST
             -- /obras/:id/estender já faz: a obra volta ao feed com prazo novo, então os 3
             -- avisos de expiração precisam valer de novo. Sem isto ela carregava os marcos
@@ -3753,7 +3790,7 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
           RETURNING rp.id
         )
         SELECT id FROM desfeitos
-      `, [candidatos.rows.map(c => c.id), candidatos.rows.map(c => c.match_usuario_id), semHorarioIds])
+      `, [candidatos.rows.map(c => c.id), candidatos.rows.map(c => c.match_usuario_id)])
       expiradosCount = expirados.rows.length
 
       // try/catch por linha pelo mesmo motivo do cron de reparos.
