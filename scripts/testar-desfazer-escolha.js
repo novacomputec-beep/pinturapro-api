@@ -100,6 +100,10 @@ const main = async () => {
   await db.exec(`CREATE TABLE IF NOT EXISTS assinaturas (usuario_id uuid, status text, tipo text, plano text, proximo_vencimento timestamptz, atualizado_em timestamptz)`)
   // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
+
+  // reparos.local_atendimento + usuarios.atende_* (utils/localAtendimento) — a mesma migração de boot.
+
+  await require(path.join(REPO, 'src/utils/localAtendimento')).migrarLocalAtendimento({ query: (s, p) => db.query(s, p) })
   // Aviso de reabertura (alertaService.avisarReabertura): aviso_reabertura_em, teto diário e bloqueios — as mesmas migrações de boot.
   await require(path.join(REPO, 'src/utils/reaberturaMatch')).migrarReaberturaMatch(db)
   await require(path.join(REPO, 'src/utils/avisosPorDistancia')).migrarAvisosPorDistancia(db)

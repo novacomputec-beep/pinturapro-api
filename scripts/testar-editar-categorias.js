@@ -71,6 +71,8 @@ const main = async () => {
     CREATE TABLE configuracoes (chave text, valor text);
     INSERT INTO configuracoes VALUES ('grupos_relacionados_ativo', 'true');
   `)
+  // reparos.local_atendimento + usuarios.atende_* (utils/localAtendimento) — a mesma migração de boot.
+  await require(path.join(REPO, 'src/utils/localAtendimento')).migrarLocalAtendimento({ query: (s, p) => db.query(s, p) })
   const prof = async (n, esp, { token = true, suspenso = null, cpf = null, cidade = 'Uberlândia', role = 'prestador', tipo = 'reparador' } = {}) => {
     await db.query(`INSERT INTO usuarios VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, 'MG', $10, NULL)`,
       [U(n), `Prof ${n}`, `p${n}@x.invalid`, role, tipo, esp, token ? `ExponentPushToken[u${n}]` : null, suspenso, cidade, cpf])

@@ -177,6 +177,10 @@ const main = async () => {
   `)
   // obras.especialidades_inferidas (capacidadesDaPessoa / feed / aviso de obra nova leem a coluna) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(db)
+
+  // reparos.local_atendimento + usuarios.atende_* (utils/localAtendimento) — a mesma migração de boot.
+
+  await require(path.join(REPO, 'src/utils/localAtendimento')).migrarLocalAtendimento({ query: (s, p) => db.query(s, p) })
   // n → conta. Todas em Uberlândia/MG, assinatura ativa, token e verificadas, salvo a observação.
   const CONTAS = {
     DONO:   { n: 1,  role: 'dono_obra', tipo_dono: 'pintura' },

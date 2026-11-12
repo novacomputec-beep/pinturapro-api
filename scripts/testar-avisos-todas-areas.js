@@ -129,6 +129,10 @@ const main = async () => {
   `)
   // obras.especialidades_inferidas (capacidadesDaPessoa / feed / aviso de obra nova leem a coluna) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/especialidadesInferidas')).migrarEspecialidadesInferidas(db)
+
+  // reparos.local_atendimento + usuarios.atende_* (utils/localAtendimento) — a mesma migração de boot.
+
+  await require(path.join(REPO, 'src/utils/localAtendimento')).migrarLocalAtendimento({ query: (s, p) => db.query(s, p) })
   await fixarAgora('2026-11-10T15:00:00Z') // terça, 12:00 em São Paulo — dentro da janela
   for (const [nome, c] of Object.entries(C)) {
     const role = c.role || 'prestador'

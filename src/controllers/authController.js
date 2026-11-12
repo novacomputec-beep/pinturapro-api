@@ -835,7 +835,7 @@ const listarContas = async (req, res) => {
 const perfil = async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, aceita_promocoes, verificacao_status, referencias, avisos_todas_areas FROM usuarios WHERE id = $1',
+      'SELECT id, nome, email, telefone, cidade, especialidades, anos_experiencia, tamanho_equipe, role, foto_url, tipo_dono, tipo_prestador, boas_vindas_exibida, aceita_promocoes, verificacao_status, referencias, avisos_todas_areas, atende_casa_cliente, atende_local_proprio FROM usuarios WHERE id = $1',
       [req.usuario.id]
     )
     const assinaturaResult = await pool.query(
@@ -930,7 +930,22 @@ const atualizarPerfil = async (req, res) => {
     if (mexeAvisos && typeof req.body.avisos_todas_areas !== 'boolean') {
       return res.status(400).json({ erro: 'avisos_todas_areas deve ser true ou false' })
     }
-    if (!mexeNome && !mexeTelefone && !mexeCidade && !mexeUf && !mexeEspecialidades && !mexeAvisos) {
+    // Onde o profissional atende (utils/localAtendimento): na casa do cliente e/ou no próprio local.
+    // Só booleano de verdade; o resultado final (o que veio + o já gravado) não pode ser os dois false.
+    const mexeCasa = Object.prototype.hasOwnProperty.call(req.body, 'atende_casa_cliente')
+    const mexeProprio = Object.prototype.hasOwnProperty.call(req.body, 'atende_local_proprio')
+    for (const [mexe, campo] of [[mexeCasa, 'atende_casa_cliente'], [mexeProprio, 'atende_local_proprio']]) {
+      if (mexe && typeof req.body[campo] !== 'boolean') return res.status(400).json({ erro: `${campo} deve ser true ou false` })
+    }
+    if (mexeCasa || mexeProprio) {
+      const atual = (await pool.query('SELECT atende_casa_cliente, atende_local_proprio FROM usuarios WHERE id = $1', [req.usuario.id])).rows[0] || {}
+      const casa = mexeCasa ? req.body.atende_casa_cliente : atual.atende_casa_cliente !== false
+      const proprio = mexeProprio ? req.body.atende_local_proprio : atual.atende_local_proprio !== false
+      if (!casa && !proprio) {
+        return res.status(400).json({ erro: 'Escolha ao menos um local de atendimento: na casa do cliente ou no seu local', codigo: 'LOCAL_ATENDIMENTO_OBRIGATORIO' })
+      }
+    }
+    if (!mexeNome && !mexeTelefone && !mexeCidade && !mexeUf && !mexeEspecialidades && !mexeAvisos && !mexeCasa && !mexeProprio) {
       return res.status(400).json({ erro: 'Nenhum campo para atualizar' })
     }
 
@@ -963,14 +978,18 @@ const atualizarPerfil = async (req, res) => {
               cidade   = COALESCE(NULLIF(btrim($5), ''), cidade),
               uf       = COALESCE(NULLIF(btrim($6), ''), uf),
               especialidades = CASE WHEN $8::boolean THEN $9::text[] ELSE especialidades END,
-              avisos_todas_areas = CASE WHEN $10::boolean THEN $11::boolean ELSE avisos_todas_areas END
+              avisos_todas_areas = CASE WHEN $10::boolean THEN $11::boolean ELSE avisos_todas_areas END,
+              atende_casa_cliente = CASE WHEN $12::boolean THEN $13::boolean ELSE atende_casa_cliente END,
+              atende_local_proprio = CASE WHEN $14::boolean THEN $15::boolean ELSE atende_local_proprio END
         WHERE id = $7
-        RETURNING id, nome, email, telefone, cidade, uf, foto_url, especialidades, avisos_todas_areas`,
+        RETURNING id, nome, email, telefone, cidade, uf, foto_url, especialidades, avisos_todas_areas, atende_casa_cliente, atende_local_proprio`,
       [mexeNome, mexeNome ? nome.trim() : null,
        mexeTelefone, mexeTelefone ? telefone : null,
        cidade || '', uf || '', req.usuario.id,
        mexeEspecialidades, especialidadesValidadas,
-       mexeAvisos, mexeAvisos ? req.body.avisos_todas_areas : null]
+       mexeAvisos, mexeAvisos ? req.body.avisos_todas_areas : null,
+       mexeCasa, mexeCasa ? req.body.atende_casa_cliente : null,
+       mexeProprio, mexeProprio ? req.body.atende_local_proprio : null]
     )
     const salvo = result.rows[0]
     // Especialidades mudam as CAPACIDADES (reparador que marca/tira especialidade de obra, pintor

@@ -133,6 +133,7 @@ const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinh
         sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa, contasProfissionaisDaPessoa, ehMesmoProfissional } = require('../utils/tipoConta')
 const { SQL_PROMOCOES_DA_PESSOA, SQL_SYNC_PROMOCOES_POR_PESSOA } = require('../utils/promocoesPessoa')
 const { normalizarTelefoneWhatsapp, primeiroNome: primeiroNomeWhatsapp } = require('../utils/telefoneWhatsapp')
+const { normalizarLocalAtendimento, aceitaLocalAtendimento, sqlAtendeLocal, migrarLocalAtendimento } = require('../utils/localAtendimento')
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
@@ -779,6 +780,9 @@ const migracaoPronta = (async () => {
     await migrarContasExcluidas(client)
     // Retrato da desistência por exclusão de conta (utils/desistencias): tabela desistencias.
     await migrarDesistencias(client)
+    // Onde o serviço acontece (utils/localAtendimento): reparos.local_atendimento e
+    // usuarios.atende_casa_cliente / atende_local_proprio (DEFAULT true: ninguém muda).
+    await migrarLocalAtendimento(client)
     // Avisos ao PROFISSIONAL casado (alertaService.avisarMatchFeito / lembrarPrazoChegada):
     // aviso_match_enviado_em = push "Match feito!" logo após o match; lembrete_chegada_enviado_em
     // = lembrete antes do prazo de chegada. Cada um é um claim atômico (UPDATE ... WHERE IS NULL
@@ -4685,6 +4689,10 @@ router.post('/reparos/dono', autenticar, exigirNaoSuspenso, async (req, res) => 
       }
     }
     const categoriaPrincipal = listaCategorias[0]
+    // Onde o serviço acontece (utils/localAtendimento): só nas categorias de beleza/cuidados/pet;
+    // nas demais o campo é ignorado (NULL). App antigo não manda → NULL → nenhum filtro.
+    const localAtendimento = normalizarLocalAtendimento(req.body?.local_atendimento, listaCategorias)
+    if (localAtendimento.erro) return res.status(400).json({ erro: localAtendimento.erro })
     // Mesmo teto do POST /obras/dono e sobre a MESMA contagem (obras + reparos): o limite é por
     // dono, não por tipo de demanda, senão 2 obras + 2 reparos passariam.
     // Mesmo bloqueio de pedidos novos do POST /obras/dono (utils/responsabilidade).
@@ -4717,14 +4725,14 @@ router.post('/reparos/dono', autenticar, exigirNaoSuspenso, async (req, res) => 
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam o reparo já criado em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id, prazo_modo, prazo_timezone, categorias)
+      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id, prazo_modo, prazo_timezone, categorias, local_atendimento)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',
                CASE WHEN $18::text = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia('$19::text')} ELSE $10::timestamptz END,
-               $11,$12,$13,$14,$15,$16,$17,$18,$19,$20::text[])
+               $11,$12,$13,$14,$15,$16,$17,$18,$19,$20::text[],$21::text)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoriaPrincipal, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo, prazoZona, listaCategorias]
+      [req.usuario.id, titulo, categoriaPrincipal, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo, prazoZona, listaCategorias, localAtendimento.valor]
     )
     res.status(201).json(result.rows[0])
     // ESTE e o unico envio que dispara no fluxo real, e por isso ele FICA. O INSERT acima
@@ -4841,17 +4849,24 @@ router.patch('/reparos/dono/:id/categorias', autenticar, async (req, res) => {
         return res.status(400).json({ erro: `Categoria inválida: ${String(c)}` })
       }
     }
+    // local_atendimento (utils/localAtendimento): chave presente → grava o valor validado contra as
+    // categorias NOVAS; ausente → mantém o gravado. Em qualquer caso, categorias novas fora da lista
+    // de beleza/cuidados/pet zeram o campo (NULL).
+    const mexeLocal = Object.prototype.hasOwnProperty.call(req.body || {}, 'local_atendimento')
+    const localAtendimento = normalizarLocalAtendimento(mexeLocal ? req.body.local_atendimento : null, categorias)
+    if (localAtendimento.erro) return res.status(400).json({ erro: localAtendimento.erro })
     // Lista ANTIGA sai no mesmo UPDATE (subconsulta travada com FOR UPDATE): duas edições
     // concorrentes não leem a mesma "antes". Linha antiga sem `categorias` usa [categoria].
     const upd = await pool.query(
       `UPDATE reparos r
-          SET categorias = $2::text[], categoria = ($2::text[])[1]
+          SET categorias = $2::text[], categoria = ($2::text[])[1],
+              local_atendimento = CASE WHEN NOT $4::boolean THEN NULL WHEN $5::boolean THEN $6::text ELSE r.local_atendimento END
          FROM (SELECT id, COALESCE(categorias, CASE WHEN categoria IS NULL THEN '{}'::text[] ELSE ARRAY[categoria] END) AS antes
                  FROM reparos WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$3')} AND status = 'aberta' AND match_usuario_id IS NULL
                   FOR UPDATE) o
         WHERE r.id = o.id
-    RETURNING r.id, r.categoria, r.categorias, o.antes, r.status_aprovacao, r.push_novo_enviado_em, r.expira_em`,
-      [req.params.id, categorias, req.usuario.id]
+    RETURNING r.id, r.categoria, r.categorias, r.local_atendimento, o.antes, r.status_aprovacao, r.push_novo_enviado_em, r.expira_em`,
+      [req.params.id, categorias, req.usuario.id, aceitaLocalAtendimento(categorias), mexeLocal, localAtendimento.valor]
     )
     if (upd.rows.length === 0) {
       const existe = await pool.query(`SELECT 1 FROM reparos WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$2')}`, [req.params.id, req.usuario.id])
@@ -4868,7 +4883,7 @@ router.patch('/reparos/dono/:id/categorias', autenticar, async (req, res) => {
       notificarCategoriasAdicionadas(r.id, antes).catch(err =>
         console.error(`[reparos/categorias] aviso de categorias adicionadas falhou | ${r.id}:`, err.message))
     }
-    res.json({ categoria: r.categoria, categorias: r.categorias, adicionadas, removidas, aviso })
+    res.json({ categoria: r.categoria, categorias: r.categorias, local_atendimento: r.local_atendimento, adicionadas, removidas, aviso })
   } catch (err) {
     console.error('[reparos/categorias]', err.message)
     res.status(500).json({ erro: 'Erro ao atualizar categorias' })
@@ -5309,7 +5324,7 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPod
     const params = [req.usuario.id]
 
     let query = `
-      SELECT r.id, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.cidade, r.bairro, r.uf,
+      SELECT r.id, r.titulo, r.categoria, r.categorias, r.local_atendimento, r.valor_estimado, r.cidade, r.bairro, r.uf,
              r.latitude, r.longitude, r.coordenadas_origem,
              -- prazo_atendimento_horas (D81): o card do feed no app lê exatamente este campo
              -- para a faixa de urgência ("🔴 URGENTE / Atender em até Nh") e devolve null
@@ -5346,7 +5361,10 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPod
         )
         -- Pedido criado pela OUTRA conta da mesma pessoa (mesmo CPF normalizado): não aparece
         -- — POST /reparos/:id/interesse o recusa com 400 demanda_propria. Sem CPF, não filtra.
-        AND ${sqlNaoDemandaPropria('r')}`
+        AND ${sqlNaoDemandaPropria('r')}
+        -- Onde o serviço acontece (utils/localAtendimento): 'casa_cliente' some para quem não atende
+        -- na casa do cliente; 'local_profissional' para quem não atende no próprio local.
+        AND NOT EXISTS (SELECT 1 FROM usuarios eu_la WHERE eu_la.id = $1::uuid AND NOT ${sqlAtendeLocal('r.local_atendimento', 'eu_la')})`
 
     // Filtro por categoria casa QUALQUER uma das categorias do reparo (reparos.categorias, GIN);
     // linha sem o array (categoria NULL de legado) não casa, como antes.
