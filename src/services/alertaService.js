@@ -43,6 +43,8 @@ const { TZ_AGENDA, JANELA_AGENDADO, VIGIA_ATRASO, LEMBRETE_AGENDA_JANELA, SQL_ZE
 // Reabertura pelo cronômetro quando o profissional nunca marcou horário (utils/reaberturaMatch):
 // propostas rebaixadas pelo match voltam a valer, dono recebe "não marcou horário", interessados
 // recebem "disponível de novo" (fora do silêncio noturno, claim aviso_reabertura_em).
+// Bloqueio de pedidos novos do dono (7 dias): o lembrete de perguntas sem resposta não vai a quem está bloqueado.
+const { sqlPedidosLiberadoEm } = require('../utils/responsabilidade')
 // Onde o serviço acontece (beleza/cuidados/pet): mesmo filtro em todo alcance de profissional por reparo.
 const { sqlAtendeLocalDaDemanda } = require('../utils/localAtendimento')
 const { STATUS_VALENDO: STATUS_VALENDO_REABERTURA, LADOS: LADOS_REABERTURA, TITULO_REABERTA, corpoReaberta, SQL_MARCAR_REABERTURA, TITULO_DONO_SEM_HORARIO, corpoDonoSemHorario, sqlRestaurarPropostas } = require('../utils/reaberturaMatch')
@@ -2935,6 +2937,10 @@ const sqlClaimPerguntasSemResposta = (lado) => `
        WHERE u.id = d.criado_por AND q.demanda_id = d.id
          AND d.status = 'aberta' AND d.status_aprovacao = 'aprovada'
          AND d.match_usuario_id IS NULL AND d.expira_em > NOW()
+         -- Dono suspenso ou com pedidos bloqueados (7 dias, PEDIDOS_BLOQUEADOS — utils/responsabilidade)
+         -- não recebe; o ciclo NÃO é consumido, então volta na cadência de sempre quando liberar.
+         AND ${sqlPessoaNaoSuspensa('u.id')}
+         AND ${sqlPedidosLiberadoEm('u.id')} IS NULL
          AND NOW() >= (CASE WHEN d.lembrete_perguntas_ultimo_em IS NULL THEN q.primeira + INTERVAL '30 minutes'
                             WHEN q.ultima > d.lembrete_perguntas_ultimo_em THEN q.ultima + INTERVAL '30 minutes'
                             ELSE d.lembrete_perguntas_ultimo_em + ${sqlIntervaloRestante('d.expira_em')} END)
