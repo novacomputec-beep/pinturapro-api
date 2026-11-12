@@ -124,6 +124,7 @@ const main = async () => {
 
   // reparos.local_atendimento + usuarios.atende_* (utils/localAtendimento) — a mesma migração de boot.
 
+  await db.exec('ALTER TABLE reparos ADD COLUMN IF NOT EXISTS categoria text; ALTER TABLE reparos ADD COLUMN IF NOT EXISTS categorias text[];') // colunas reais (reparos multi-categoria)
   await require(path.join(REPO, 'src/utils/localAtendimento')).migrarLocalAtendimento({ query: (s, p) => db.query(s, p) })
   // Aviso de reabertura (alertaService.avisarReabertura): aviso_reabertura_em, teto diário de push e bloqueios.
   await require(path.join(REPO, 'src/utils/reaberturaMatch')).migrarReaberturaMatch(db)

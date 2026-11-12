@@ -780,9 +780,6 @@ const migracaoPronta = (async () => {
     await migrarContasExcluidas(client)
     // Retrato da desistência por exclusão de conta (utils/desistencias): tabela desistencias.
     await migrarDesistencias(client)
-    // Onde o serviço acontece (utils/localAtendimento): reparos.local_atendimento e
-    // usuarios.atende_casa_cliente / atende_local_proprio (DEFAULT true: ninguém muda).
-    await migrarLocalAtendimento(client)
     // Avisos ao PROFISSIONAL casado (alertaService.avisarMatchFeito / lembrarPrazoChegada):
     // aviso_match_enviado_em = push "Match feito!" logo após o match; lembrete_chegada_enviado_em
     // = lembrete antes do prazo de chegada. Cada um é um claim atômico (UPDATE ... WHERE IS NULL
@@ -972,6 +969,10 @@ const migracaoPronta = (async () => {
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS categorias TEXT[]`)
     await client.query(`CREATE INDEX IF NOT EXISTS reparos_categorias_gin_idx ON reparos USING GIN (categorias)`)
     await client.query(`UPDATE reparos SET categorias = ARRAY[categoria] WHERE categorias IS NULL AND categoria IS NOT NULL`)
+    // Onde o serviço acontece (utils/localAtendimento): reparos.local_atendimento e
+    // usuarios.atende_casa_cliente / atende_local_proprio (DEFAULT true: ninguém muda), mais a
+    // limpeza dos reparos sem categoria elegível. DEPOIS de reparos.categorias, que a limpeza lê.
+    await migrarLocalAtendimento(client)
 
     // ---- Índices da auditoria de escala: cada um nomeia a query/job que serve ----
     // GET /obras (obrasController.listar): filtro `o.categoria = $n`. reparos já tinha

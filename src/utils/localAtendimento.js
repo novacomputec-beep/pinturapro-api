@@ -12,10 +12,11 @@
 const { categoriasDoReparo } = require('./categoriasApp')
 
 // Slugs REAIS de CATEGORIAS_SERVICO (utils/categoriasApp): manicure/pedicure, cabelo, barbeiro,
-// maquiagem, sobrancelha, depilação, massagem, podólogo, tatuagem e pet.
+// maquiagem, sobrancelha, depilação, massagem, podólogo e pet. 'tatuagem' saiu (dono, 12/11/2026):
+// tatuagem é sempre no estúdio, a pergunta não faz sentido.
 const CATEGORIAS_LOCAL_ATENDIMENTO = Object.freeze([
   'manicure', 'cabelo', 'barbeiro', 'maquiagem', 'design_sobrancelhas',
-  'depilacao', 'massagem', 'podologo', 'tatuagem', 'pet',
+  'depilacao', 'massagem', 'podologo', 'pet',
 ])
 const LOCAIS_ATENDIMENTO = Object.freeze(['casa_cliente', 'local_profissional', 'tanto_faz'])
 
@@ -59,6 +60,16 @@ const migrarLocalAtendimento = async (client) => {
     CHECK (local_atendimento IN ('casa_cliente', 'local_profissional', 'tanto_faz'))`)
   await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS atende_casa_cliente BOOLEAN NOT NULL DEFAULT true`)
   await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS atende_local_proprio BOOLEAN NOT NULL DEFAULT true`)
+  // Reparo com local gravado mas SEM nenhuma categoria da lista atual (ex.: só 'tatuagem', que saiu
+  // da lista em 12/11/2026) volta a NULL — sem filtro. Idempotente: depois da 1ª vez não acha nada.
+  // Linha legada sem `categorias` usa [categoria], como categoriasDoReparo.
+  const limpos = await client.query(
+    `UPDATE reparos SET local_atendimento = NULL
+      WHERE local_atendimento IS NOT NULL
+        AND NOT (COALESCE(categorias, CASE WHEN categoria IS NULL THEN '{}'::text[] ELSE ARRAY[categoria] END) && $1::text[])
+      RETURNING id`,
+    [CATEGORIAS_LOCAL_ATENDIMENTO])
+  if (limpos.rows.length > 0) console.log(`[migration] local_atendimento: ${limpos.rows.length} reparo(s) sem categoria elegível voltaram a NULL`)
 }
 
 module.exports = {

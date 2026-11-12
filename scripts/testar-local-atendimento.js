@@ -250,8 +250,11 @@ const main = async () => {
 
   // ═══ 1. Constante e normalização ═══════════════════════════════════════════════════════════
   const slugsServico = new Set(require(path.join(REPO, 'src/utils/categoriasApp')).CATEGORIAS_SERVICO.map(c => c.slug))
-  ok(LA.CATEGORIAS_LOCAL_ATENDIMENTO.length === 10 && LA.CATEGORIAS_LOCAL_ATENDIMENTO.every(s => slugsServico.has(s)),
-     'CATEGORIAS_LOCAL_ATENDIMENTO: 10 slugs, todos existentes em CATEGORIAS_SERVICO', LA.CATEGORIAS_LOCAL_ATENDIMENTO)
+  ok(LA.CATEGORIAS_LOCAL_ATENDIMENTO.length === 9 && LA.CATEGORIAS_LOCAL_ATENDIMENTO.every(s => slugsServico.has(s)),
+     'CATEGORIAS_LOCAL_ATENDIMENTO: 9 slugs, todos existentes em CATEGORIAS_SERVICO', LA.CATEGORIAS_LOCAL_ATENDIMENTO)
+  ok(!LA.CATEGORIAS_LOCAL_ATENDIMENTO.includes('tatuagem') && LA.normalizarLocalAtendimento('casa_cliente', ['tatuagem']).valor === null,
+     'tatuagem fora da lista: casa_cliente em tatuagem → ignorado (NULL)')
+  ok(LA.normalizarLocalAtendimento('casa_cliente', ['tatuagem', 'maquiagem']).valor === 'casa_cliente', 'tatuagem + maquiagem → aceito (maquiagem é elegível)')
   ok(LA.normalizarLocalAtendimento('casa_cliente', ['manicure']).valor === 'casa_cliente', 'manicure + casa_cliente → aceito')
   ok(LA.normalizarLocalAtendimento('casa_cliente', ['eletrica', 'pet']).valor === 'casa_cliente', 'qualquer categoria da lista basta (eletrica + pet)')
   ok(LA.normalizarLocalAtendimento('casa_cliente', ['eletrica']).valor === null, 'eletrica + casa_cliente → ignorado (NULL)')
@@ -266,6 +269,8 @@ const main = async () => {
   const criado = r.body?.id
   r = await criar({ categorias: ['eletrica'], local_atendimento: 'casa_cliente' })
   ok(r.status === 201 && r.body.local_atendimento === null, 'POST eletrica + casa_cliente → ignorado (NULL)', { status: r.status, local: r.body?.local_atendimento })
+  r = await criar({ categorias: ['tatuagem'], local_atendimento: 'local_profissional' })
+  ok(r.status === 201 && r.body.local_atendimento === null, 'POST tatuagem + local_profissional → ignorado (NULL)', { status: r.status, local: r.body?.local_atendimento })
   r = await criar({ categorias: ['cabelo'], local_atendimento: 'na_lua' })
   ok(r.status === 400 && /local_atendimento/.test(r.body.erro), 'POST cabelo + valor inválido → 400', r.body)
   r = await criar({ categorias: ['cabelo'] })
@@ -345,6 +350,24 @@ const main = async () => {
     a = alcancados(p0, e0, id)
     ok(a.push === ESPERADO[local] && a.email === ESPERADO[local], `${rotulo}: aviso de reabertura → ${ESPERADO[local]}`, a)
   }
+  // ═══ 6. Limpeza na migração: reparo cuja ÚNICA categoria elegível era tatuagem volta a NULL ══
+  const sujo = (cats, local) => { const id = D(n++); return db.query(
+    `INSERT INTO reparos (id, titulo, categoria, categorias, criado_por, cidade, uf, expira_em, local_atendimento)
+     VALUES ($1, 'antigo', ($2::text[])[1], $2::text[], $3, 'Uberlândia', 'MG', now() + INTERVAL '1 day', $4)`, [id, cats, DONO, local]).then(() => id) }
+  const soTatuagem = await sujo(['tatuagem'], 'local_profissional')
+  const tatuagemEMaquiagem = await sujo(['tatuagem', 'maquiagem'], 'casa_cliente')
+  const legadoSemArray = D(n++)
+  await db.query(`INSERT INTO reparos (id, titulo, categoria, categorias, criado_por, cidade, uf, expira_em, local_atendimento) VALUES ($1, 'legado', 'tatuagem', NULL, $2, 'Uberlândia', 'MG', now() + INTERVAL '1 day', 'casa_cliente')`, [legadoSemArray, DONO])
+  silenciar(true)
+  await LA.migrarLocalAtendimento({ query: (s, p) => db.query(s, p) })
+  await LA.migrarLocalAtendimento({ query: (s, p) => db.query(s, p) }) // 2º boot: idempotente
+  silenciar(false)
+  const localDe = async (id) => (await db.query(`SELECT local_atendimento FROM reparos WHERE id = $1`, [id])).rows[0].local_atendimento
+  ok(await localDe(soTatuagem) === null, 'migração: reparo só de tatuagem → local_atendimento NULL')
+  ok(await localDe(legadoSemArray) === null, 'migração: linha legada (categoria = tatuagem, sem array) → NULL')
+  ok(await localDe(tatuagemEMaquiagem) === 'casa_cliente', 'migração: tatuagem + maquiagem mantém o local (maquiagem segue elegível)')
+  ok(await localDe(ids.casa_cliente) === 'casa_cliente', 'migração: manicure intacto')
+
   // Obras nunca filtram (a coluna é só de reparos).
   ok(LA.sqlAtendeLocalDaDemanda('obras', '$1') === 'true', 'obras: predicado sempre verdadeiro')
 
