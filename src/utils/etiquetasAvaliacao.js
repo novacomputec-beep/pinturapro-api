@@ -1,9 +1,10 @@
 // Etiquetas da avaliação do profissional — FONTE ÚNICA da API (o app lê GET /config/
 // etiquetas-avaliacao e nunca as grava em código).
 //
-// Estrutura: 11 grupos de especialidade × 5 níveis × 3 etiquetas, mais as UNIVERSAIS por
-// nível (4–5: Pontual, Educado; 1–3: Atrasou, Mal-educado). Os 10 grupos de serviço são os
-// MESMOS de utils/gruposCategorias (GRUPOS_RELACIONADOS, chaves em CHAVE_DO_GRUPO); o 11º,
+// Estrutura: 12 grupos de especialidade × 5 níveis × 3 etiquetas, mais as UNIVERSAIS por
+// nível (4–5: Pontual, Educado; 1–3: Atrasou, Mal-educado). Os grupos de serviço são os
+// MESMOS de utils/gruposCategorias (GRUPOS_RELACIONADOS, chaves em CHAVE_DO_GRUPO), com uma
+// exceção só nas etiquetas: 'eletrica_tec' (ver SLUGS_ELETRICOS abaixo); o último,
 // 'construcao_pintura' ("Construção e pintura"), cobre TODA obra (lado pintor/construtor:
 // ESPECIALIDADES_OBRA). Reparo cujas categorias não caem em grupo nenhum (só 'outros')
 // aceita apenas as universais.
@@ -43,6 +44,13 @@ const ETIQUETAS_POR_GRUPO = {
     3: ['Resolveu em parte', 'Faltou capricho', 'Um pouco de sujeira'],
     2: ['Problema voltou', 'Serviço mal feito', 'Deixou sujeira'],
     1: ['Não resolveu', 'Piorou o problema', 'Estragou algo'],
+  },
+  eletrica_tec: { // Elétrica e tecnologia — só ETIQUETAS (dono, 13/11/2026): no push é Consertos da casa
+    5: ['Resolveu de vez', 'Serviço muito seguro', 'Super organizado'],
+    4: ['Resolveu o problema', 'Serviço seguro', 'Organizado'],
+    3: ['Resolveu em parte', 'Faltou capricho', 'Pouco organizado'],
+    2: ['Problema voltou', 'Serviço inseguro', 'Desorganizado'],
+    1: ['Não resolveu', 'Serviço perigoso', 'Estragou algo'],
   },
   limpeza: { // Limpeza e jardim (era "Limpeza e cuidados da casa")
     5: ['Ficou impecável', 'Muito caprichoso', 'Super atencioso'],
@@ -109,11 +117,28 @@ const ETIQUETAS_POR_GRUPO = {
   },
 }
 
-// Os 11 grupos na ordem de apresentação: os 10 de serviço (ordem de GRUPOS_RELACIONADOS) + obra.
+// ELÉTRICA NAS ETIQUETAS (dono, 13/11/2026): o push segue com "Consertos da casa" inteiro
+// (gruposCategorias), mas a AVALIAÇÃO de serviço elétrico volta ao conjunto de "Elétrica e
+// tecnologia": no catálogo, Consertos lista as especialidades SEM estas quatro e um grupo
+// 'eletrica_tec' lista só elas. A regra de grupo (servidor e app) é a mesma de sempre: todo grupo
+// cujas especialidades tocam alguma categoria da demanda — elétrica pura avalia só com as de
+// elétrica; elétrica + hidráulica, com as duas.
+const SLUGS_ELETRICOS = ['eletrica', 'eletronica', 'climatizacao', 'seguranca_eletronica']
+const GRUPO_ELETRICO = { chave: 'eletrica_tec', nome: 'Elétrica e tecnologia', especialidades: SLUGS_ELETRICOS }
+
+// Os 12 grupos na ordem de apresentação: os 10 de serviço (ordem de GRUPOS_RELACIONADOS), com
+// Elétrica e tecnologia logo depois de Consertos da casa, + obra.
 const GRUPOS_AVALIACAO = [
-  ...Object.entries(GRUPOS_RELACIONADOS).map(([nome, especialidades]) => ({ chave: CHAVE_DO_GRUPO[nome], nome, especialidades })),
+  ...Object.entries(GRUPOS_RELACIONADOS).flatMap(([nome, especialidades]) => {
+    const chave = CHAVE_DO_GRUPO[nome]
+    if (chave !== 'reparos_casa') return [{ chave, nome, especialidades }]
+    return [{ chave, nome, especialidades: especialidades.filter(s => !SLUGS_ELETRICOS.includes(s)) }, GRUPO_ELETRICO]
+  }),
   GRUPO_OBRA,
 ]
+// Toda especialidade elétrica precisa estar em Consertos (é de lá que sai) — senão a regra acima
+// tiraria uma slug de grupo nenhum.
+if (!SLUGS_ELETRICOS.every(s => CHAVE_DO_SLUG[s] === 'reparos_casa')) throw new Error('etiquetasAvaliacao: slug elétrica fora de Consertos da casa')
 
 // Conferência na carga: todo grupo tem 5 níveis × 3 etiquetas, nenhuma repete uma universal.
 const validarTabela = () => {
@@ -142,12 +167,14 @@ const catalogoEtiquetas = () => ({
   selo_bem_avaliado: { minimo_cinco_estrelas: SELO_MIN_CINCO_ESTRELAS },
 })
 
-// Grupo(s) da demanda avaliada: obra → ['construcao_pintura']; reparo → chave de cada categoria
-// (categoriasDoReparo) que esteja em algum grupo, sem repetição. Vazio = só universais.
+// Grupo(s) da demanda avaliada: obra → ['construcao_pintura']; reparo → todo grupo de serviço do
+// catálogo (GRUPOS_AVALIACAO) cujas especialidades tocam alguma categoria (categoriasDoReparo) —
+// a MESMA regra do app (services/etiquetasAvaliacao.gruposDaDemanda), na ordem do catálogo.
+// Vazio = só universais.
 const gruposDaDemanda = (tabela, demanda) => {
   if (tabela === 'obras') return [GRUPO_OBRA.chave]
-  const chaves = categoriasDoReparo(demanda).map(slug => CHAVE_DO_SLUG[slug]).filter(Boolean)
-  return [...new Set(chaves)]
+  const cats = categoriasDoReparo(demanda)
+  return GRUPOS_AVALIACAO.filter(g => g !== GRUPO_OBRA && g.especialidades.some(s => cats.includes(s))).map(g => g.chave)
 }
 
 // Etiquetas permitidas para (grupos, nota): união das do(s) grupo(s) no nível + universais do nível.
@@ -175,7 +202,7 @@ const sqlSeloBemAvaliado = (exprUsuarioId) =>
   `((SELECT COUNT(*) FROM avaliacoes sa WHERE sa.avaliado_id = ${exprUsuarioId} AND sa.estrelas = 5) >= ${SELO_MIN_CINCO_ESTRELAS})`
 
 module.exports = {
-  NIVEIS, ETIQUETAS_UNIVERSAIS, ETIQUETAS_POR_GRUPO, GRUPOS_AVALIACAO, GRUPO_OBRA,
+  NIVEIS, ETIQUETAS_UNIVERSAIS, ETIQUETAS_POR_GRUPO, GRUPOS_AVALIACAO, GRUPO_OBRA, SLUGS_ELETRICOS,
   SELO_MIN_CINCO_ESTRELAS, ETIQUETAS_MAX_POR_AVALIACAO,
   catalogoEtiquetas, gruposDaDemanda, etiquetasPermitidas, validarEtiquetas, sqlSeloBemAvaliado,
 }
