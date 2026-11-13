@@ -194,8 +194,12 @@ const main = async () => {
   ok(r.status === 200 && r.body.papel === 'dono', 'cancelar-match (simular) pela conta irmã B: papel = dono', r.body)
   r = await chamar(rota('post', '/obras/dono/:id/desfazer-match'), { usuario: S, params: { id: D(4) } })
   ok(r.status === 403, 'desfazer-match: estranho → 403', r.body)
+  // Trocar de profissional (13/11/2026) não espera mais: para só testar a posse sem desfazer, O4 fica
+  // "a caminho" durante a chamada (409 A_CAMINHO = passou da posse).
+  await db.query(`UPDATE obras SET a_caminho_em = now() WHERE id = $1`, [D(4)])
   r = await chamar(rota('post', '/obras/dono/:id/desfazer-match'), { usuario: B, params: { id: D(4) } })
-  ok(r.status === 409 && r.body.codigo === 'AGUARDE', 'desfazer-match pela conta irmã B passa na posse (409 AGUARDE: ainda cedo), não 403', r.body)
+  await db.query(`UPDATE obras SET a_caminho_em = NULL WHERE id = $1`, [D(4)])
+  ok(r.status === 409 && r.body.codigo === 'A_CAMINHO', 'desfazer-match pela conta irmã B passa na posse (409 A_CAMINHO), não 403', r.body)
   r = await chamar(rota('post', '/obras/:id/encerrar'), { usuario: S, params: { id: D(2) }, body: {} })
   ok(r.status === 403, 'encerrar: estranho → 403', r.body)
   r = await chamar(rota('post', '/obras/:id/encerrar'), { usuario: B, params: { id: D(2) }, body: {} })

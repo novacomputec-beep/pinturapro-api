@@ -42,6 +42,15 @@
 // demanda de volta ao feed com candidaturas, interesses, perguntas e respostas intactos,
 // profissional bloqueado nesta demanda. 409 ESCOLHER_OUTRO_INDISPONIVEL quando pode_escolher_outro é false.
 //
+// TROCAR DE PROFISSIONAL (dono, 13/11/2026 — o "Trocar de profissional" do app chama desfazer-match):
+//   - modo 'desfazer' vale em QUALQUER estado do match até o "Estou a caminho" (a_caminho_em /
+//     chegada declarada / confirmada → 409 A_CAMINHO, mensagem de sempre): inclusive com horário
+//     proposto ou combinado e sem a espera dos 75% (as regras de cima, AGUARDE e
+//     HORARIO_EM_NEGOCIACAO, deixam de valer para ele; seguem no modo 'escolher_outro');
+//   - falta + compromisso_nao_cumprido SÓ quando pode_escolher_outro era true pelos avisos ignorados
+//     (motivo_escolher_outro 'avisos_ignorados', lido na linha travada), nos dois modos. Fora disso
+//     nada contra o profissional e ele recebe UM push neutro (TITULO_TROCA / corpoTroca), sem e-mail.
+//   - a demanda segue aberta e as propostas rebaixadas pelo match voltam (reaberturaMatch), como antes.
 // RESPONSABILIDADE (dono, 10/11/2026 — utils/responsabilidade): nos DOIS modos o profissional
 // que ignorou os lembretes "Agende" leva a falta de sempre (faltas_profissional + suspensão por
 // faltas) E um evento compromisso_nao_cumprido (contado por pessoa, 90 dias; sai ao dono nas
@@ -53,7 +62,7 @@ const { formatarDataHoraSP } = require('../utils/agendamento')
 const { SQL_LIMPAR_MATCH } = require('./cancelamentoMatchService')
 // Restauração das propostas rebaixadas pelo match — regra única de utils/reaberturaMatch.
 const { restaurarPropostasRebaixadas, SQL_MARCAR_REABERTURA } = require('../utils/reaberturaMatch')
-const { entregarPushEEmail, inserirFaltaUnica, avaliarSuspensaoPorFaltas, MOTIVO_FALTA_SEM_HORARIO, semSobreposicao, contatoDaPessoa } = require('./alertaService')
+const { entregarPushEEmail, enviarPushNotificacao, inserirFaltaUnica, avaliarSuspensaoPorFaltas, MOTIVO_FALTA_SEM_HORARIO, semSobreposicao, contatoDaPessoa } = require('./alertaService')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
 
 // Fração do intervalo match→prazo que ainda pode restar quando o desfazer libera.
@@ -81,6 +90,13 @@ const sqlPodeDesfazer = (p = '') =>
   `(${p}status = 'aberta' AND ${p}match_usuario_id IS NOT NULL AND ${p}match_feito_em IS NOT NULL
     AND ${p}chegada_pendente_em IS NULL AND ${p}chegada_prevista_em IS NULL
     AND ${p}a_caminho_em IS NULL AND ${p}chegada_declarada_em IS NULL AND ${p}chegada_confirmada_em IS NULL)`
+// Modo 'desfazer' (trocar de profissional): demanda aberta com match e o profissional ainda não saiu
+// ("Estou a caminho") nem chegou. Horário proposto/combinado não segura.
+const sqlPodeTrocar = (p = '') =>
+  `(${p}status = 'aberta' AND ${p}match_usuario_id IS NOT NULL AND ${p}match_feito_em IS NOT NULL
+    AND ${p}a_caminho_em IS NULL AND ${p}chegada_declarada_em IS NULL AND ${p}chegada_confirmada_em IS NULL)`
+const TITULO_TROCA = 'Troca de profissional'
+const corpoTroca = (titulo) => `O cliente escolheu outro profissional para "${titulo}". Isso não conta contra você.`
 // O escolhido DESINSTALOU o app (usuarios.desinstalado_em, marcado pelo recibo DeviceNotRegistered —
 // utils/desinstalacoes). Volta a false sozinho quando ele reinstala (registrarReinstalacao limpa).
 const sqlEscolhidoDesinstalou = (p = '') =>
@@ -122,6 +138,7 @@ const recusa = (lado, d, ehDono, modo = 'desfazer') => {
   if (d.a_caminho_em || d.chegada_declarada_em || d.chegada_confirmada_em) {
     return { status: 409, corpo: { erro: 'O profissional já está a caminho ou chegou: não dá mais para desfazer a escolha.', codigo: 'A_CAMINHO' } }
   }
+  if (modo === 'desfazer') return null
   if (d.chegada_pendente_em || d.chegada_prevista_em) {
     return { status: 409, corpo: { erro: 'O profissional já propôs ou combinou um horário. Para sair do atendimento, use o cancelamento.', codigo: 'HORARIO_EM_NEGOCIACAO' } }
   }
@@ -175,7 +192,8 @@ const handler = (tabela, modo = 'desfazer') => {
       // Escolher outro porque o escolhido DESINSTALOU o app: sem falta, sem compromisso_nao_cumprido,
       // sem "contou como 1 falta" no aviso — ele não viu os lembretes. A proposta dele guarda o
       // motivo em cancelado_detalhe. Decidido na linha travada (sqlMotivoEscolherOutro).
-      semPenalidade = escolherOutro && d.motivo_escolher_outro === MOTIVO_ESCOLHER_OUTRO_DESINSTALOU
+      // Falta só quando pode_escolher_outro era true pelos avisos ignorados (dono, 13/11/2026).
+      semPenalidade = !(d.pode_escolher_outro === true && d.motivo_escolher_outro === MOTIVO_ESCOLHER_OUTRO_AVISOS)
 
       // A linha está travada, mas o WHERE repete as condições (inclusive a espera pelo relógio
       // do banco): se algo mudou entre o SELECT e aqui, nada é alterado e o pedido aborta.
@@ -186,8 +204,7 @@ const handler = (tabela, modo = 'desfazer') => {
                 prestadores_bloqueados = CASE WHEN $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}'))
                                               THEN prestadores_bloqueados
                                               ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END
-          WHERE id = $1 AND match_usuario_id = $2 AND ${sqlPodeDesfazer()}
-            AND ${escolherOutro ? sqlPodeEscolherOutro() : `NOW() >= match_feito_em + ${sqlEspera()}`}
+          WHERE id = $1 AND match_usuario_id = $2 AND ${escolherOutro ? `${sqlPodeDesfazer()} AND ${sqlPodeEscolherOutro()}` : sqlPodeTrocar()}
           RETURNING id`,
         [d.id, profissionalId]
       )
@@ -197,7 +214,7 @@ const handler = (tabela, modo = 'desfazer') => {
             SET status = 'cancelado', cancelado_por = $3, cancelado_motivo = $4, cancelado_detalhe = $5,
                 cancelado_em = NOW(), cancelado_acordo = false, status_antes_match = NULL
           WHERE ${lado.proposta.coluna} = $1 AND usuario_id = $2 AND status = 'aceito'`,
-        [d.id, profissionalId, req.usuario.id, motivo, semPenalidade ? MOTIVO_ESCOLHER_OUTRO_DESINSTALOU : null]
+        [d.id, profissionalId, req.usuario.id, motivo, d.motivo_escolher_outro === MOTIVO_ESCOLHER_OUTRO_DESINSTALOU ? MOTIVO_ESCOLHER_OUTRO_DESINSTALOU : null]
       )
       // Propostas rebaixadas PELO MATCH voltam ao status que tinham (regra única: utils/reaberturaMatch).
       await restaurarPropostasRebaixadas(client, lado.tabela, d.id)
@@ -220,7 +237,7 @@ const handler = (tabela, modo = 'desfazer') => {
     } finally {
       if (client) client.release()
     }
-    console.log(`[${rotuloLog}] ${lado.tipo} ${d.id}: dono ${req.usuario.id} desfez a escolha de ${profissionalId} (${semPenalidade ? 'profissional desinstalou: SEM falta/evento' : 'falta + compromisso_nao_cumprido registrados'}; ${interessados.length} interessado(s) seguem valendo)`)
+    console.log(`[${rotuloLog}] ${lado.tipo} ${d.id}: dono ${req.usuario.id} desfez a escolha de ${profissionalId} (${semPenalidade ? 'SEM falta/evento' : 'avisos ignorados: falta + compromisso_nao_cumprido registrados'}; ${interessados.length} interessado(s) seguem valendo)`)
     res.json({ mensagem: `Escolha desfeita. ${lado.artigo} voltou ao feed.`, profissional_id: profissionalId, interessados_avisados: interessados.length, modo, ...(escolherOutro ? { motivo_escolher_outro: d.motivo_escolher_outro } : {}) })
 
     // Fora da transação e depois da resposta. Ordem: suspensão (pode mandar "Conta suspensa"),
@@ -228,15 +245,17 @@ const handler = (tabela, modo = 'desfazer') => {
     // (o dono é o autor e PRECISA receber o dele).
     ;(async () => {
       if (!semPenalidade) await avaliarSuspensaoPorFaltas(profissionalId)
-      const [prof] = await contatos([profissionalId])
+      if (semPenalidade) {
+        // Nada contra ele: UM push neutro, sem e-mail (token da conta irmã profissional se faltar).
+        const prof = await contatoDaPessoa(profissionalId)
+        const via = prof?.push_token
+          ? await enviarPushNotificacao(prof.push_token, TITULO_TROCA, corpoTroca(d.titulo), { tipo: lado.tipoPushProfissional, [lado.chave]: d.id, motivo, sem_penalidade: true }, profissionalId)
+          : 'sem token'
+        console.log(`[${rotuloLog}] ${lado.tipo} ${d.id}: push neutro ao profissional ${profissionalId} → ${via}`)
+      }
+      const [prof] = semPenalidade ? [] : await contatos([profissionalId])
       if (prof) {
-        await avisar(prof, semPenalidade ? {
-          ator_id: req.usuario.id,
-          titulo: 'O cliente escolheu outro profissional',
-          corpo: `"${d.titulo}": o cliente escolheu outro profissional porque você desinstalou o app. Sem penalidade.`,
-          data: { tipo: lado.tipoPushProfissional, [lado.chave]: d.id, motivo: MOTIVO_ESCOLHEU_OUTRO, desinstalou: true },
-          rotulo: `escolheu outro ${lado.tipo} ${d.id} profissional`,
-        } : escolherOutro ? {
+        await avisar(prof, escolherOutro ? {
           ator_id: req.usuario.id,
           titulo: 'O cliente escolheu outro profissional',
           corpo: `"${d.titulo}": o cliente escolheu outro profissional porque o horário não foi marcado. Isso contou como 1 falta.`,
@@ -339,5 +358,5 @@ module.exports = {
   LIBERA_FRACAO_RESTANTE, MOTIVO_ESCOLHA_DESFEITA, MOTIVO_ESCOLHEU_OUTRO, LEMBRETES_PARA_ESCOLHER_OUTRO, MOTIVO_FALTA,
   MOTIVO_ESCOLHER_OUTRO_DESINSTALOU, MOTIVO_ESCOLHER_OUTRO_AVISOS,
   sqlEspera, sqlDesfazerLiberadoEm, sqlPodeEscolherOutro, sqlMotivoEscolherOutro, sqlEscolhidoDesinstalou,
-  handler, avisarDesfazerLiberado, avisarDonosProfissionalDesinstalou, TITULO_LIBERADO, corpoLiberado, tituloDesinstalou, corpoDesinstalou,
+  handler, avisarDesfazerLiberado, sqlPodeTrocar, TITULO_TROCA, corpoTroca, avisarDonosProfissionalDesinstalou, TITULO_LIBERADO, corpoLiberado, tituloDesinstalou, corpoDesinstalou,
 }

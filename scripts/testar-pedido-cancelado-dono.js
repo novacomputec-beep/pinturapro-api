@@ -2,7 +2,7 @@
 // PEDIDO CANCELADO PELO DONO (dono, 12/11/2026): DELETE /reparos/dono/:id e /obras/dono/:id de uma demanda
 // ABERTA sem match → push (sem e-mail) "🔕 Pedido cancelado" / "\"<título>\" foi cancelado pelo cliente.",
 // data { tipo: 'pedido_cancelado', reparo_id | obra_id }, a cada PESSOA com interesse ainda ativo (fora:
-// recusado, cancelado/desistiu, expirado; NULL = pendente), menos suspensos. Já cancelada, expirada, com match real (409) ou de outro dono (404): nada.
+// recusado, cancelado/desistiu, expirado; NULL = pendente), menos suspensos; e quando o dono ENCERRA via cancelar-match (inclui os rebaixados pelo match). Já cancelada, expirada, com match real (409) ou de outro dono (404): nada.
 // SQL REAL em PGlite; rotas reais; Expo/Brevo falsos.
 //   npm i -D @electric-sql/pglite && node scripts/testar-pedido-cancelado-dono.js
 process.env.JWT_SECRET = 'segredo-de-teste'
@@ -225,6 +225,43 @@ const main = async () => {
     p0 = pushes.length
     r = await quieto(() => chamar('delete', rotaDel, PB, id))
     ok(r.status === 404 && cancelados(p0).length === 0, `${tabela}: outro usuário → 404, nenhum push`, r.status)
+  }
+
+  // Dono ENCERRA pelo cancelar-match (nao_preciso) com escolhido: os demais interessados ativos — inclusive
+  // os rebaixados pelo match ('recusado' + status_antes_match valendo) — recebem o "🔕 Pedido cancelado";
+  // o escolhido (PRO) recebe só o aviso de sempre; recusado de verdade, suspenso e inativos não.
+  for (const tabela of ['reparos', 'obras']) {
+    const chave = LADO[tabela].chave
+    const id = D(n++)
+    titulos[id] = `${tabela === 'reparos' ? 'Serviço' : 'Obra'} encerrado ${n}`
+    await db.query(`INSERT INTO ${tabela} (id, titulo, categoria, criado_por, valor, valor_estimado, cidade, uf, status, match_usuario_id, match_feito_em, expira_em, publicado_em)
+                    VALUES ($1, $2, 'eletrica', $3, 100, 100, 'Uberlândia', 'MG', 'aberta', $4, now() - INTERVAL '1 hour', now() + INTERVAL '2 days', now() - INTERVAL '1 day')`,
+      [id, titulos[id], DONO, PRO])
+    const l = LADO[tabela]
+    await db.query(`INSERT INTO ${l.proposta} (${l.coluna}, usuario_id, status, status_antes_match) VALUES
+      ($1, $2, 'aceito', NULL), ($1, $3, 'recusado', 'pendente'), ($1, $4, 'recusado', 'contraproposta_dono'), ($1, $5, 'recusado', NULL),
+      ($1, $6, 'recusado', 'pendente'), ($1, $7, 'expirado', NULL), ($1, $8, 'recusado', 'pendente')`, [id, PRO, PA, PB, PC, PS, X3, PA2])
+    const p0 = pushes.length
+    const r = await quieto(() => chamar('post', `/${tabela}/:id/cancelar-match`, DONO, id, { motivo: 'nao_preciso' }))
+    const st = (await db.query(`SELECT status FROM ${tabela} WHERE id = $1`, [id])).rows[0].status
+    const ps = cancelados(p0)
+    ok(r.status === 200 && r.body.demanda_encerrada === true && st === 'cancelada', `${tabela}: cancelar-match nao_preciso pelo dono encerra (cancelada)`, { status: r.status, st })
+    ok(ps.length === 2 && ps.filter(p => [tok(PA), tok(PA2)].includes(p.to)).length === 1 && ps.some(p => p.to === tok(PB))
+       && ps.every(p => p.body === `"${titulos[id]}" foi cancelado pelo cliente.` && igualData(p.data, { tipo: 'pedido_cancelado', [chave]: id })),
+       `${tabela}: "🔕 Pedido cancelado" aos rebaixados pelo match (A uma vez por pessoa, B)`, ps.map(p => p.to))
+    ok(![PRO, PC, PS, X3, DONO].some(u => ps.some(p => p.to === tok(u))), `${tabela}: escolhido, recusado de verdade, suspenso, expirado e dono não recebem o "Pedido cancelado"`)
+    ok(pushes.slice(p0).some(p => p.to === tok(PRO) && p.data?.tipo === 'match_cancelado'), `${tabela}: escolhido recebe o aviso de sempre (match_cancelado)`)
+  }
+  // Dono cancela MANTENDO aberta (imprevisto): nada de "Pedido cancelado".
+  {
+    const id = D(n++)
+    titulos[id] = `Serviço mantido ${n}`
+    await db.query(`INSERT INTO reparos (id, titulo, categoria, criado_por, valor_estimado, cidade, uf, status, match_usuario_id, match_feito_em, expira_em, publicado_em)
+                    VALUES ($1, $2, 'eletrica', $3, 100, 'Uberlândia', 'MG', 'aberta', $4, now() - INTERVAL '1 hour', now() + INTERVAL '2 days', now() - INTERVAL '1 day')`, [id, titulos[id], DONO, PRO])
+    await db.query(`INSERT INTO interesse_reparos (reparo_id, usuario_id, status, status_antes_match) VALUES ($1, $2, 'aceito', NULL), ($1, $3, 'recusado', 'pendente')`, [id, PRO, PA])
+    const p0 = pushes.length
+    const r = await quieto(() => chamar('post', '/reparos/:id/cancelar-match', DONO, id, { motivo: 'imprevisto' }))
+    ok(r.status === 200 && r.body.demanda_encerrada === false && cancelados(p0).length === 0, 'dono cancela mantendo aberta: nenhum "Pedido cancelado"', r.body)
   }
 
   const errosReais = erros.filter(e => !/sem banco/.test(e))

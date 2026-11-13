@@ -251,8 +251,9 @@ const main = async () => {
   const prop = (await db.query(`SELECT cancelado_motivo, cancelado_detalhe FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [R1, PRO])).rows[0]
   ok(prop.cancelado_motivo === 'escolheu_outro' && prop.cancelado_detalhe === 'desinstalou', 'proposta: cancelado_motivo escolheu_outro, cancelado_detalhe desinstalou', prop)
   ok(pushesPara(PRO).length === 0, 'profissional sem token (desinstalou): nenhum push a ele')
-  const ePro = emails.filter(x => x.para === '002@x.invalid' && /escolheu outro/.test(x.html || x.assunto || ''))
-  ok(ePro.length >= 1 && ePro.every(x => /Sem penalidade/.test(JSON.stringify(x)) && !/contou como 1 falta/.test(JSON.stringify(x))), 'e-mail de reserva ao profissional: "Sem penalidade", sem "contou como 1 falta"', ePro.map(x => Object.keys(x)))
+  // Trocar de profissional (13/11/2026): sem penalidade o aviso ao profissional é UM push neutro, sem e-mail.
+  const ePro = emails.filter(x => x.para === '002@x.invalid')
+  ok(ePro.length === 0, 'profissional sem penalidade: só o push neutro (sem token aqui), nenhum e-mail', ePro.map(x => x.assunto))
   ok(pushesPara(PA).length === 0 && pushesPara(PB).length === 0, 'interessados: nada direto do escolher-outro (o aviso é do cron de reabertura)')
   await quieto(() => A.avisarReabertura('reparos'))
   const neutro = (p) => p.title === '🔔 Pedido disponível de novo' && p.body === '"Serviço 11" está aberto e sua proposta continua valendo — o cliente pode escolher você.'
