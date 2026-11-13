@@ -82,21 +82,21 @@ const main = async () => {
   await prof(1, ['eletrica'])        // avisado no original (push + e-mail)
   await prof(2, ['eletronica'])      // grupo antigo; push original FALHOU (linha 'falha'), sem e-mail
   await prof(3, ['climatizacao'])    // grupo antigo; nunca avisado (sem linha) → fora mesmo assim (excluirCategorias)
-  await prof(4, ['hidraulica'])      // entra pelo grupo novo: push + e-mail
-  await prof(5, ['alvenaria'])       // mesmo grupo de hidraulica (Reparos da casa): push + e-mail
+  await prof(4, ['mecanica'])      // entra pelo grupo novo: push + e-mail
+  await prof(5, ['borracheiro'])       // mesmo grupo de mecanica (Transporte): push + e-mail
   await prof(6, ['faxina'])          // fora dos dois
-  await prof(7, ['hidraulica'], { token: false }) // sem token: só e-mail
-  await prof(8, ['hidraulica'], { suspenso: '2026-11-01' }) // suspenso: nada
-  await prof(9, ['hidraulica'])      // já tem linha em push_entregas (repescagem antiga): sem push, e-mail sim
-  await prof(11, ['hidraulica'], { cpf: '11111111111' }) // outra conta do dono: nada
-  await prof(12, ['hidraulica'], { cidade: 'Araguari' })  // outra cidade: nada
+  await prof(7, ['mecanica'], { token: false }) // sem token: só e-mail
+  await prof(8, ['mecanica'], { suspenso: '2026-11-01' }) // suspenso: nada
+  await prof(9, ['mecanica'])      // já tem linha em push_entregas (repescagem antiga): sem push, e-mail sim
+  await prof(11, ['mecanica'], { cpf: '11111111111' }) // outra conta do dono: nada
+  await prof(12, ['mecanica'], { cidade: 'Araguari' })  // outra cidade: nada
 
   await db.query(`INSERT INTO reparos VALUES ($1, 'Troca de fiação', 'Uberlândia', 'MG', 'Centro', 'eletrica', '{eletrica}', 300, $2, 'aberta', 'aprovada', NULL,
                   now() + INTERVAL '3 days', now() - INTERVAL '2 hours', now() - INTERVAL '2 hours', 'ABCDE')`, [D(1), U(99)])
   await db.query(`INSERT INTO push_entregas (tipo, demanda_id, usuario_id, resultado) VALUES ('reparo', $1, $2, 'enviado'), ('reparo', $1, $3, 'falha'), ('reparo', $1, $4, 'enviado')`, [D(1), U(1), U(2), U(9)])
   await db.query(`INSERT INTO email_alertas (tipo, demanda_id, usuario_id) VALUES ('reparo', $1, $2)`, [D(1), U(1)])
   // R2: ainda NÃO anunciado (push_novo_enviado_em NULL). R3: encerrado. R4: de outro dono.
-  await db.query(`INSERT INTO reparos VALUES ($1, 'Pia', 'Uberlândia', 'MG', NULL, 'hidraulica', '{hidraulica}', 100, $2, 'aberta', 'aprovada', NULL, now() + INTERVAL '3 days', NULL, now(), 'FGHJK')`, [D(2), U(99)])
+  await db.query(`INSERT INTO reparos VALUES ($1, 'Pia', 'Uberlândia', 'MG', NULL, 'mecanica', '{mecanica}', 100, $2, 'aberta', 'aprovada', NULL, now() + INTERVAL '3 days', NULL, now(), 'FGHJK')`, [D(2), U(99)])
   await db.query(`INSERT INTO reparos VALUES ($1, 'Velho', 'Uberlândia', 'MG', NULL, 'faxina', '{faxina}', 100, $2, 'encerrada', 'aprovada', NULL, now() + INTERVAL '3 days', now(), now(), 'MNPQR')`, [D(3), U(99)])
   await db.query(`INSERT INTO reparos VALUES ($1, 'Alheio', 'Uberlândia', 'MG', NULL, 'faxina', '{faxina}', 100, $2, 'aberta', 'aprovada', NULL, now() + INTERVAL '3 days', now(), now(), 'STUVW')`, [D(4), U(1)])
 
@@ -105,7 +105,7 @@ const main = async () => {
   ok(r.status === 404, 'id inválido → 404', r.body)
   r = await patch(U(99), D(1), [])
   ok(r.status === 400 && /obrigat/i.test(r.body.erro), 'lista vazia → 400', r.body)
-  r = await patch(U(99), D(1), ['eletrica', 'hidraulica', 'faxina', 'pintura'])
+  r = await patch(U(99), D(1), ['eletrica', 'mecanica', 'faxina', 'pintura'])
   ok(r.status === 400 && /máximo 3/.test(r.body.erro), '4 categorias → 400', r.body)
   r = await patch(U(99), D(1), ['eletrica', 'eletrica'])
   ok(r.status === 400 && /repetidas/.test(r.body.erro), 'repetidas → 400', r.body)
@@ -118,16 +118,16 @@ const main = async () => {
   ok(pushes.length === 0 && emails.length === 0, 'nada enviado até aqui')
 
   // --- R2 não anunciado: grava, mas não avisa (o aviso original sairá com a lista nova)
-  r = await patch(U(99), D(2), ['hidraulica', 'eletrica'])
+  r = await patch(U(99), D(2), ['mecanica', 'eletrica'])
   await esperar(300)
   ok(r.status === 200 && r.body.aviso === 'nenhum' && JSON.stringify(r.body.adicionadas) === '["eletrica"]' && pushes.length === 0 && emails.length === 0,
      'reparo ainda não anunciado: salva, aviso = nenhum, zero envios', r.body)
 
-  // --- R1: adiciona hidraulica (grupo Reparos da casa)
-  r = await patch(U(99), D(1), ['eletrica', 'hidraulica'])
-  ok(r.status === 200 && r.body.categoria === 'eletrica' && JSON.stringify(r.body.categorias) === '["eletrica","hidraulica"]'
-     && JSON.stringify(r.body.adicionadas) === '["hidraulica"]' && r.body.removidas.length === 0 && r.body.aviso === 'disparado',
-     'PATCH grava categorias/categoria, adicionadas=[hidraulica], aviso disparado', r.body)
+  // --- R1: adiciona mecanica (grupo Transporte)
+  r = await patch(U(99), D(1), ['eletrica', 'mecanica'])
+  ok(r.status === 200 && r.body.categoria === 'eletrica' && JSON.stringify(r.body.categorias) === '["eletrica","mecanica"]'
+     && JSON.stringify(r.body.adicionadas) === '["mecanica"]' && r.body.removidas.length === 0 && r.body.aviso === 'disparado',
+     'PATCH grava categorias/categoria, adicionadas=[mecanica], aviso disparado', r.body)
   await esperar(600)
   ok(JSON.stringify(quem(pushes, 'to')) === JSON.stringify([4, 5]), 'push só a U4 e U5 (grupo novo, nunca avisados) — fora: já avisados, grupo antigo, sem token, suspenso, outra cidade, CPF do dono', quem(pushes, 'to'))
   ok(pushes[0]?.title === '⚡ Novo serviço disponível!' && /Troca de fiação.*Elétrica \+1/.test(pushes[0]?.body) && pushes[0]?.data.tipo === 'novo_reparo' && pushes[0]?.data.reparo_id === D(1),
@@ -142,28 +142,28 @@ const main = async () => {
 
   // --- remover eletrica: nada
   const p0 = pushes.length, e0 = emails.length
-  r = await patch(U(99), D(1), ['hidraulica'])
+  r = await patch(U(99), D(1), ['mecanica'])
   await esperar(300)
   ok(r.status === 200 && JSON.stringify(r.body.removidas) === '["eletrica"]' && r.body.adicionadas.length === 0 && r.body.aviso === 'nenhum' && pushes.length === p0 && emails.length === e0,
      'remover categoria: removidas=[eletrica], aviso nenhum, zero envios', r.body)
 
   // --- adicionar 'outros': regra do Outros — push a TODO reparador da cidade ainda não avisado e fora do grupo antigo; e-mail só aos grupos (nada novo)
-  r = await patch(U(99), D(1), ['hidraulica', 'outros'])
+  r = await patch(U(99), D(1), ['mecanica', 'outros'])
   await esperar(600)
   const novos = pushes.slice(p0)
   ok(r.body.aviso === 'disparado' && JSON.stringify(quem(novos, 'to')) === JSON.stringify([3, 6]),
-     "'outros' adicionado: push a U3 e U6 (fora do grupo hidraulica e sem linha) — U1/U2/U4/U5/U9 já avisados, U8 suspenso, U11 CPF, U12 cidade", quem(novos, 'to'))
+     "'outros' adicionado: push a U3 e U6 (fora do grupo mecanica e sem linha) — U1/U2/U4/U5/U9 já avisados, U8 suspenso, U11 CPF, U12 cidade", quem(novos, 'to'))
   ok(emails.length === e0, "'outros': e-mail fica restrito aos grupos — ninguém novo", emails.length - e0)
 
   // --- idempotência: repetir a mesma lista não adiciona nada
   const p1 = pushes.length
-  r = await patch(U(99), D(1), ['hidraulica', 'outros'])
+  r = await patch(U(99), D(1), ['mecanica', 'outros'])
   await esperar(200)
   ok(r.body.adicionadas.length === 0 && r.body.aviso === 'nenhum' && pushes.length === p1, 'mesma lista de novo: nada', r.body)
 
   // --- chamada direta com reparo casado: null
   await db.query(`UPDATE reparos SET match_usuario_id = $2 WHERE id = $1`, [D(1), U(4)])
-  const direto = await A.notificarCategoriasAdicionadas(D(1), ['hidraulica'])
+  const direto = await A.notificarCategoriasAdicionadas(D(1), ['mecanica'])
   ok(direto === null, 'notificarCategoriasAdicionadas com match: null (não avisa)', direto)
 
   console.log(falhas === 0 ? '\nTUDO OK' : `\n${falhas} FALHA(S)`)

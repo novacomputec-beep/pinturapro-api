@@ -68,7 +68,7 @@ const main = async () => {
   }
   await prof(99, { role: 'dono_obra', tipo: null, esp: null, cpf: '111.111.111-11', token: false }) // dono
   await prof(1, { esp: ['eletrica'] })                     // no grupo → fora
-  await prof(2, { esp: ['eletronica'] })                   // mesmo grupo (Elétrica e tecnologia) → fora
+  await prof(2, { esp: ['eletronica'] })                   // mesmo grupo (Consertos da casa) → fora
   await prof(3, { esp: ['faxina'] })                       // entra
   await prof(4, { esp: ['manicure'], pedidaEm: '2026-11-03T17:00:00Z' }) // gap (1 dia) → fora
   await prof(5, { esp: ['manicure'], pedidaEm: '2026-10-31T16:00:00Z' }) // 4 dias → entra
@@ -112,7 +112,7 @@ const main = async () => {
   const r1 = porDemanda(D(1)), r4 = porDemanda(D(4)), o5 = porDemanda(D(5))
   const reparoTodos = [...r1, ...r4]
   ok(JSON.stringify(quem(reparoTodos)) === JSON.stringify([1, 2, 3, 5, 10]), 'reparos: público = U1,U2 (só via R4) + U3,U5,U10 — fora: grupo, gap 1d, suspenso, pintor, outra cidade, CPF do dono', quem(reparoTodos))
-  ok(quem(r1).every(u => ![1, 2].includes(u)), 'R1 (Elétrica): U1/U2 do grupo Elétrica e tecnologia excluídos', quem(r1))
+  ok(quem(r1).every(u => ![1, 2].includes(u)), 'R1 (Elétrica): U1/U2 do grupo Consertos da casa excluídos', quem(r1))
   ok(quem(r4).every(u => [1, 2, 3, 5, 10].includes(u)), 'R4 (outros sozinho): só quem não marcou outros', quem(r4))
   const porUsuario = {}
   for (const m of enviados) porUsuario[m.to] = (porUsuario[m.to] || 0) + 1

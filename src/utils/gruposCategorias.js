@@ -17,11 +17,16 @@ const { CATEGORIAS_SERVICO } = require('./categoriasApp')
 
 const CHAVE_GRUPOS_ATIVO = 'grupos_relacionados_ativo'
 
+// Reagrupamento (dono, 13/11/2026): "Elétrica e tecnologia" + "Reparos da casa" viram "Consertos da
+// casa" (seguranca_eletronica, a única que sobrava em Elétrica e tecnologia, vai junto com a
+// elétrica); "Limpeza e cuidados da casa" vira "Limpeza e jardim"; "Divulgação e publicidade" nasce
+// com locucao/jingles_vinhetas/marketing_publicidade + social_midia, panfletagem, placas_fachadas e
+// editor_video (que saem de Digital e aulas / Arte e criação). Nenhum slug renomeado.
 const GRUPOS_RELACIONADOS = {
-  'Elétrica e tecnologia':        ['eletrica', 'eletronica', 'climatizacao', 'seguranca_eletronica'],
-  'Reparos da casa':              ['alvenaria', 'hidraulica', 'marcenaria', 'montagem_moveis', 'estofamento', 'chaveiro',
-                                   'vidraceiro', 'serralheria', 'gesseiro'],
-  'Limpeza e cuidados da casa':   ['faxina', 'dedetizacao', 'jardineiro'],
+  'Consertos da casa':            ['eletrica', 'eletronica', 'climatizacao', 'hidraulica', 'alvenaria', 'gesseiro',
+                                   'marcenaria', 'serralheria', 'vidraceiro', 'chaveiro', 'estofamento', 'montagem_moveis',
+                                   'seguranca_eletronica'],
+  'Limpeza e jardim':             ['faxina', 'dedetizacao', 'jardineiro'],
   'Beleza':                       ['cabelo', 'manicure', 'maquiagem', 'barbeiro', 'depilacao', 'massagem', 'podologo',
                                    'design_sobrancelhas'],
   'Festas e eventos':             ['aluguel_festas', 'decoracao_festas', 'recreacao_infantil', 'dj', 'musico', 'garcom',
@@ -29,18 +34,21 @@ const GRUPOS_RELACIONADOS = {
   'Cuidado':                      ['baba', 'cuidador', 'pet'],
   'Transporte':                   ['motorista', 'motociclista', 'mudancas', 'mecanica', 'lavajato', 'borracheiro'],
   'Segurança':                    ['vigia', 'seguranca'],
-  'Digital e aulas':              ['editor_video', 'social_midia', 'profissional_home_office', 'panfletagem',
-                                   'aula_particular', 'personal_trainer', 'tradutor', 'informatica'],
-  'Arte e criação':               ['artesanato', 'costura', 'tatuagem', 'placas_fachadas'],
+  'Digital e aulas':              ['profissional_home_office', 'aula_particular', 'personal_trainer', 'tradutor', 'informatica'],
+  'Arte e criação':               ['artesanato', 'costura', 'tatuagem'],
+  'Divulgação e publicidade':     ['locucao', 'jingles_vinhetas', 'marketing_publicidade', 'social_midia', 'panfletagem',
+                                   'placas_fachadas', 'editor_video'],
 }
 
 // Chave curta e estável de cada grupo (API: /admin/crescimento-nichos, etiquetas de avaliação).
 // Nome novo em GRUPOS_RELACIONADOS exige chave aqui — validarGrupos() derruba o boot sem ela.
 const CHAVE_DO_GRUPO = {
-  'Elétrica e tecnologia': 'eletrica_tec', 'Reparos da casa': 'reparos_casa',
-  'Limpeza e cuidados da casa': 'limpeza', 'Beleza': 'beleza', 'Festas e eventos': 'festas',
+// Consertos da casa e Limpeza e jardim herdam as chaves dos grupos que sucederam (reparos_casa,
+// limpeza); eletrica_tec deixou de existir.
+  'Consertos da casa': 'reparos_casa', 'Limpeza e jardim': 'limpeza',
+  'Beleza': 'beleza', 'Festas e eventos': 'festas',
   'Cuidado': 'cuidado', 'Transporte': 'transporte', 'Segurança': 'seguranca',
-  'Digital e aulas': 'digital_aulas', 'Arte e criação': 'arte',
+  'Digital e aulas': 'digital_aulas', 'Arte e criação': 'arte', 'Divulgação e publicidade': 'divulgacao',
 }
 
 // slug → lista do seu grupo (ele incluído). Montado uma vez; slug sem grupo não está no mapa.

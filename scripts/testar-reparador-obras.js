@@ -137,8 +137,8 @@ const main = async () => {
   ok(/inválida/.test(v.erro || ''), 'tipo NULL (legado): slug de obra continua recusado', v)
   v = esp.validarEspecialidades(['eletrica'], true, null)
   ok(!v.erro, 'tipo NULL (legado): lista de serviços como antes', v)
-  ok(esp.ESPECIALIDADES_REPARADOR.length === 59 && !OBRA4.some(s => esp.ESPECIALIDADES_REPARADOR.includes(s)),
-     'ESPECIALIDADES_REPARADOR (vocabulário de reparos.categoria) segue só com serviços (59) e SEM slug de obra', esp.ESPECIALIDADES_REPARADOR.length)
+  ok(esp.ESPECIALIDADES_REPARADOR.length === 62 && !OBRA4.some(s => esp.ESPECIALIDADES_REPARADOR.includes(s)),
+     'ESPECIALIDADES_REPARADOR (vocabulário de reparos.categoria) segue só com serviços (62) e SEM slug de obra', esp.ESPECIALIDADES_REPARADOR.length)
   ok(esp.ESPECIALIDADES_VALIDAS === esp.ESPECIALIDADES_REPARADOR, 'alias ESPECIALIDADES_VALIDAS intacto')
   ok(!Object.values(GRUPOS_RELACIONADOS).flat().some(s => OBRA4.includes(s)), 'GRUPOS_RELACIONADOS sem slug de obra (casamento de reparo não expande)')
   ok(esp.GRUPO_OBRAS_REPARADOR.nome === 'Obras de Construção Civil' && igual(esp.GRUPO_OBRAS_REPARADOR.categorias, esp.ESPECIALIDADES_OBRA),
@@ -192,8 +192,8 @@ const main = async () => {
     RSUS:   { n: 7,  tipo: 'reparador', esp: ['pintor'], suspenso: true },
     RFORA:  { n: 8,  tipo: 'reparador', esp: ['pintor'], cidade: 'Uberaba' },
     RSEM:   { n: 9,  tipo: 'reparador', esp: ['pintor'], assinatura: 'cancelada' },
-    RCACHE: { n: 10, tipo: 'reparador', esp: ['hidraulica'] },                                    // ganha obra "em outra réplica"
-    RPERF:  { n: 11, tipo: 'reparador', esp: ['hidraulica'] },                                    // ganha/perde obra pelo PUT /auth/perfil
+    RCACHE: { n: 10, tipo: 'reparador', esp: ['mecanica'] },                                    // ganha obra "em outra réplica"
+    RPERF:  { n: 11, tipo: 'reparador', esp: ['mecanica'] },                                    // ganha/perde obra pelo PUT /auth/perfil
     RONLY:  { n: 12, tipo: 'reparador', esp: ['construtor'] },                                    // só obra, nenhum serviço
     ADM:    { n: 13, role: 'admin' },
     RNULO:  { n: 14, tipo: 'reparador', esp: null },                                              // especialidades NULL
@@ -310,7 +310,7 @@ const main = async () => {
   // especialidade de obra é gravada "por outra réplica" (direto no banco, sem invalidar).
   g = await gates(RCACHE.id)
   ok(todasTier(g), 'RCACHE sem obra → 403 (e o cache de autenticar fica com a lista antiga)', resumo(g))
-  await db.query(`UPDATE usuarios SET especialidades = '{hidraulica,engenheiro}' WHERE id = $1`, [RCACHE.id])
+  await db.query(`UPDATE usuarios SET especialidades = '{mecanica,engenheiro}' WHERE id = $1`, [RCACHE.id])
   g = await gates(RCACHE.id)
   ok(todasPassam(g), 'especialidade de obra gravada em OUTRA réplica: o gate reconfere a negativa no banco e libera NA HORA', resumo(g))
 
@@ -318,13 +318,13 @@ const main = async () => {
   g = await gates(RPERF.id)
   ok(todasTier(g), 'RPERF sem obra → 403', resumo(g))
   const reqPerf = (await db.query(`SELECT id, nome, email, role, ativo, tipo_prestador, especialidades FROM usuarios WHERE id = $1`, [RPERF.id])).rows[0]
-  r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPerf, body: { especialidades: ['hidraulica', 'pintor', 'pedreiro_servente'] } })
+  r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPerf, body: { especialidades: ['mecanica', 'pintor', 'pedreiro_servente'] } })
   ok(r.status === 200 && r.body.pode_obras === true && r.body.especialidades.length === 3, 'PUT /auth/perfil marcando obra → 200 com pode_obras: true', r.body)
   g = await gates(RPERF.id)
   ok(todasPassam(g), 'depois do save, RPERF passa nas 6 rotas', resumo(g))
-  r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPerf, body: { especialidades: ['hidraulica', 'eletrica', 'faxina', 'pintor', 'construtor', 'engenheiro'] } })
+  r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPerf, body: { especialidades: ['mecanica', 'eletrica', 'faxina', 'pintor', 'construtor', 'engenheiro'] } })
   ok(r.status === 400 && /no máximo 5/.test(r.body.erro), 'PUT /auth/perfil com 6 (3 serviço + 3 obra) → 400 teto 5', r.body)
-  r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPerf, body: { especialidades: ['hidraulica'] } })
+  r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPerf, body: { especialidades: ['mecanica'] } })
   ok(r.status === 200 && r.body.pode_obras === false, 'PUT /auth/perfil tirando obra → pode_obras: false', r.body)
   g = await gates(RPERF.id)
   ok(todasTier(g), 'depois de tirar a especialidade, RPERF volta ao 403 na mesma réplica (cache invalidado)', resumo(g))

@@ -67,7 +67,7 @@ const SEED_DICAS = [
   ] },
   { lado: 'profissional', tema: 'Receber pedidos', icone: '📲', tema_ordem: 1, dicas: [
     [1, 'Os avisos chegam **só da sua cidade**. Para ver cidades vizinhas, use o **filtro de distância** no feed. Mantenha a cidade certa.', 'editar_perfil'],
-    [2, 'Você recebe os pedidos das **suas especialidades e do grupo delas** (ex.: Elétrica recebe toda a área de Reparos da casa).', 'especialidades'],
+    [2, 'Você recebe os pedidos das **suas especialidades e do grupo delas** (ex.: Elétrica recebe toda a área de Consertos da casa).', 'especialidades'],
     [3, 'Pedido marcado **"Outros"** chega por push a todos.'],
     [4, 'Abriu um pedido a mais de 5 km e depois passou perto? O app avisa **"Serviço próximo a você"**.'],
     [5, 'Notificações desligadas = só e-mail, e mais devagar. **Ative os avisos.**', 'ativar_avisos'],
