@@ -4,7 +4,10 @@
 // e os campos lembretes_agendar_enviados / proximo_lembrete_agendar_em (alertaService), com o SQL
 // REAL num Postgres em memória (PGlite) e o alertaService REAL (Expo/Brevo falsos que só coletam;
 // faltas e suspensão de verdade). NOW() sombreado por public.now() para andar o relógio.
-// Regra (06/11/2026): libera quando resta ≤ 25% de (expira_em − match) = match + 75% do intervalo.
+// Regra (06/11/2026): desfazer_liberado_em / aviso ao dono quando resta ≤ 25% de (expira_em − match).
+// TROCAR DE PROFISSIONAL (13/11/2026): o POST desfazer-match não espera mais nem para em horário
+// proposto/combinado — só o "Estou a caminho" segura (409 A_CAMINHO). Falta + compromisso SÓ com
+// pode_escolher_outro por avisos ignorados; fora disso, nada contra ele e UM push neutro (sem e-mail).
 //   npm i -D @electric-sql/pglite && node scripts/testar-desfazer-escolha.js
 const path = require('path')
 const Module = require('module')
@@ -165,8 +168,7 @@ const main = async () => {
   ok(r.status === 403, 'terceiro não pode desfazer: 403', r.body)
   r = await chamar(h.reparos, { id: U(99) }, { id: 'nao-e-uuid' })
   ok(r.status === 404, 'id inválido: 404', r.body)
-  r = await desfazer(c10d)
-  ok(r.status === 409 && r.body.codigo === 'AGUARDE' && iso(r.body.liberado_em) === emMin(c10d.liberaMin) && /a partir de/.test(r.body.erro), 'cedo demais (T0): 409 AGUARDE com liberado_em', r.body)
+  // (sem AGUARDE desde 13/11/2026: o dono troca a qualquer momento antes do "a caminho" — seção 6)
 
   // 3) lembretes "Agende seu atendimento" deste match: contagem e próximo (campos de GET /:id)
   let ag = await agendar(c10d)
@@ -183,8 +185,6 @@ const main = async () => {
 
   // 4) aviso ao dono quando libera (avisarDesfazerLiberado): 1x por match, só com prazo à frente
   await fixarAgora(89)
-  r = await desfazer(c2h)
-  ok(r.status === 409 && r.body.codigo === 'AGUARDE', '2 horas a 89 min: AGUARDE', r.body.codigo)
   await S.avisarDesfazerLiberado()
   ok(pushes.length === 0 && emails.length === 0, '89 min: nenhum aviso de liberação ainda')
   await fixarAgora(90)
@@ -211,26 +211,20 @@ const main = async () => {
   ok(pDono.length === 1 && pDono[0].data.reparo_id === D(c40h.n) && /Demanda 40 horas/.test(pDono[0].body), '40 horas liberou às 30h: aviso ao dono (reparo_id); 10 dias ainda não', pDono.map(p => p.data))
   await limparAvisos()
 
-  await fixarAgora(c10d.liberaMin - 1)
-  r = await desfazer(c10d)
-  ok(r.status === 409 && r.body.codigo === 'AGUARDE', '10 dias a 1 min de liberar: ainda AGUARDE', r.body.codigo)
   await fixarAgora(c10d.liberaMin)
   await S.avisarDesfazerLiberado()
   pDono = pushesDe('dono')
   ok(pDono.length === 1 && pDono[0].data.reparo_id === D(c10d.n), '7,5 dias: aviso só da demanda de 10 dias (2h e 40h já avisadas/vencidas; 30 dias ainda não)', pDono.map(p => p.data))
   await limparAvisos()
 
-  // horário proposto / combinado / a caminho / sem match / fechada
-  await db.query(`UPDATE reparos SET chegada_pendente_em = now() + INTERVAL '1 day' WHERE id = $1`, [D(c40h.n)])
+  // a caminho (com horário combinado) / chegada declarada / sem match / fechada
+  await db.query(`UPDATE reparos SET chegada_prevista_em = now() + INTERVAL '1 day', a_caminho_em = now() WHERE id = $1`, [D(c40h.n)])
   r = await desfazer(c40h)
-  ok(r.status === 409 && r.body.codigo === 'HORARIO_EM_NEGOCIACAO' && await liberadoEm(c40h) === null && (await agendar(c40h)).proximo === null, 'horário proposto: 409 HORARIO_EM_NEGOCIACAO; desfazer_liberado_em e próximo lembrete null', r.body.codigo)
-  await db.query(`UPDATE reparos SET chegada_pendente_em = NULL, chegada_prevista_em = now() + INTERVAL '1 day' WHERE id = $1`, [D(c40h.n)])
+  ok(r.status === 409 && r.body.codigo === 'A_CAMINHO' && /já está a caminho ou chegou/.test(r.body.erro) && await liberadoEm(c40h) === null, 'a caminho: 409 A_CAMINHO com a mensagem de sempre', r.body)
+  await db.query(`UPDATE reparos SET a_caminho_em = NULL, chegada_declarada_em = now() WHERE id = $1`, [D(c40h.n)])
   r = await desfazer(c40h)
-  ok(r.status === 409 && r.body.codigo === 'HORARIO_EM_NEGOCIACAO' && await liberadoEm(c40h) === null, 'horário combinado: 409 e null', r.body.codigo)
-  await db.query(`UPDATE reparos SET chegada_prevista_em = NULL, a_caminho_em = now() WHERE id = $1`, [D(c40h.n)])
-  r = await desfazer(c40h)
-  ok(r.status === 409 && r.body.codigo === 'A_CAMINHO' && await liberadoEm(c40h) === null, 'a caminho: 409 A_CAMINHO e null', r.body.codigo)
-  await db.query(`UPDATE reparos SET a_caminho_em = NULL, status = 'encerrada' WHERE id = $1`, [D(c40h.n)])
+  ok(r.status === 409 && r.body.codigo === 'A_CAMINHO', 'chegada declarada: 409 A_CAMINHO', r.body.codigo)
+  await db.query(`UPDATE reparos SET chegada_declarada_em = NULL, chegada_prevista_em = NULL, status = 'encerrada' WHERE id = $1`, [D(c40h.n)])
   r = await desfazer(c40h)
   ok(r.status === 409 && r.body.codigo === 'DEMANDA_FECHADA', 'encerrada: 409 DEMANDA_FECHADA', r.body.codigo)
   await db.query(`UPDATE reparos SET status = 'aberta', match_usuario_id = NULL WHERE id = $1`, [D(c40h.n)])
@@ -238,20 +232,19 @@ const main = async () => {
   ok(r.status === 409 && r.body.codigo === 'SEM_MATCH' && await liberadoEm(c40h) === null, 'sem match: 409 SEM_MATCH e null', r.body.codigo)
   ok((await faltas(U(1))).length === 0 && pushes.length === 0 && emails.length === 0, 'nenhuma guarda gerou falta, push ou e-mail')
 
-  // 5) CORRIDA: o profissional propõe horário entre o SELECT FOR UPDATE e o UPDATE → aborta, nada muda
-  corrida = { antesDe: /^\s*UPDATE reparos SET/, sql: `UPDATE reparos SET chegada_pendente_em = now() + INTERVAL '1 day', chegada_proposta_em = now() WHERE id = $1`, params: [D(c10d.n)] }
+  // 5) CORRIDA: o profissional sai ("Estou a caminho") entre o SELECT FOR UPDATE e o UPDATE → aborta, nada muda
+  corrida = { antesDe: /^\s*UPDATE reparos SET/, sql: `UPDATE reparos SET a_caminho_em = now() WHERE id = $1`, params: [D(c10d.n)] }
   r = await desfazer(c10d)
   let d = await linha(c10d)
-  ok(r.status === 409 && r.body.codigo === 'ESTADO_MUDOU' && corrida === null, 'corrida (proposta no meio): 409 ESTADO_MUDOU', r.body)
-  // (na PGlite a proposta injetada corre na MESMA conexão e cai junto no ROLLBACK; em produção
-  // ela está commitada por outra conexão e a linha travada já a mostra ao SELECT FOR UPDATE.)
+  ok(r.status === 409 && r.body.codigo === 'ESTADO_MUDOU' && corrida === null, 'corrida (a caminho no meio): 409 ESTADO_MUDOU', r.body)
   ok(d.match_usuario_id === U(1) && (await propostas(c10d))[U(1)].status === 'aceito' && (await faltas(U(1))).length === 0 && pushes.length === 0,
      'corrida: match, proposta e faltas intactos, nenhum aviso (transação abortada)', { match: d.match_usuario_id })
-  await db.query(`UPDATE reparos SET chegada_pendente_em = NULL, chegada_proposta_em = NULL WHERE id = $1`, [D(c10d.n)])
+  await db.query(`UPDATE reparos SET a_caminho_em = NULL WHERE id = $1`, [D(c10d.n)])
 
-  // 6) desfaz de fato — reparo de 10 dias aos 7,5 dias
+  // 6) troca de fato — reparo de 10 dias com horário PROPOSTO pelo profissional (antes segurava)
+  await db.query(`UPDATE reparos SET chegada_pendente_em = now() + INTERVAL '1 day', chegada_proposta_em = now() WHERE id = $1`, [D(c10d.n)])
   r = await desfazer(c10d); await assentar()
-  ok(r.status === 200 && r.body.profissional_id === U(1) && r.body.interessados_avisados === 2, '10 dias aos 7,5 d: 200, 2 interessados avisados', r.body)
+  ok(r.status === 200 && r.body.profissional_id === U(1) && r.body.interessados_avisados === 2, 'horário proposto: troca permitida (200), 2 interessados avisados', r.body)
   d = await linha(c10d)
   ok(d.match_usuario_id === null && d.match_feito_em === null && d.status === 'aberta' && d.a_caminho_em === null && d.lembrete_agendar_ultimo_em === null && d.lembrete_agendar_dono_em === null
      && d.lembrete_agendar_enviados === 0 && d.desfazer_aviso_em === null,
@@ -265,15 +258,14 @@ const main = async () => {
      'Ana e Beto voltam ao status de antes do match (pendente / contraproposta_dono)', { ana: p[U(2)].status, beto: p[U(3)].status })
   ok(p[U(4)].status === 'recusado', 'Caio (recusado pelo dono antes do match) continua recusado')
   ok(await liberadoEm(c10d) === null && (await agendar(c10d)).proximo === null, 'depois: desfazer_liberado_em e próximo lembrete null')
-  // falta
+  // sem avisos ignorados (pode_escolher_outro false): nada contra ele
   let f = await faltas(U(1))
-  ok(f.length === 1 && f[0].tabela === 'reparos' && f[0].demanda_id === D(c10d.n) && f[0].motivo === 'não marcou horário', 'falta registrada com motivo "não marcou horário"', f)
-  let u1 = (await db.query(`SELECT suspenso_em FROM usuarios WHERE id = $1`, [U(1)])).rows[0]
-  ok(u1.suspenso_em === null, '1 falta: ainda não suspende')
-  // avisos
+  const evs = async () => (await db.query(`SELECT count(*)::int AS n FROM eventos_responsabilidade WHERE usuario_id = $1`, [U(1)])).rows[0].n
+  ok(f.length === 0 && await evs() === 0, 'sem avisos ignorados: NENHUMA falta nem compromisso_nao_cumprido', { faltas: f, eventos: await evs() })
   const pProf = pushesDe('prof')
-  ok(pProf.length === 1 && pProf[0].title === 'Você saiu do serviço "Demanda 10 dias"' && /contou como 1 falta/.test(pProf[0].body) && pProf[0].data.tipo === 'interesse_recusado' && pProf[0].data.reparo_id === D(c10d.n),
-     'push ao profissional (texto aprovado, tipo interesse_recusado)', pProf[0] && { title: pProf[0].title, body: pProf[0].body })
+  ok(pProf.length === 1 && pProf[0].title === S.TITULO_TROCA && pProf[0].body === 'O cliente escolheu outro profissional para "Demanda 10 dias". Isso não conta contra você.' && pProf[0].data.tipo === 'interesse_recusado' && pProf[0].data.reparo_id === D(c10d.n),
+     'push NEUTRO ao profissional ("Isso não conta contra você")', pProf[0] && { title: pProf[0].title, body: pProf[0].body })
+  ok(!emails.some(e => e.para === 'prof@x.invalid'), 'profissional: só o push, nenhum e-mail')
   ok(pushesDe('ana').length === 0 && !emails.some(e => e.para === 'ana@x.invalid' || e.para === 'beto@x.invalid'), 'interessados: nada direto do desfazer (o aviso é do cron de reabertura)')
   ok(d.aviso_reabertura_em !== null, 'aviso de reabertura marcado no un-match (aviso_reabertura_em)')
   ok(pushesDe('caio').length === 0, 'Caio (recusado) não é avisado')
@@ -294,15 +286,17 @@ const main = async () => {
   ok((await linha(c10d)).aviso_reabertura_em === null, 'claim do aviso de reabertura limpo')
   await fixarAgora(c10d.liberaMin)
   const paraDe = (e) => e.para
-  ok(emails.filter(e => paraDe(e) === 'prof@x.invalid').length === 1 && emails.filter(e => paraDe(e) === 'ana@x.invalid').length === 1 && emails.filter(e => paraDe(e) === 'beto@x.invalid').length === 1 && emails.filter(e => paraDe(e) === 'dono@x.invalid').length === 1,
-     'e-mail ao profissional, a Ana, a Beto (sem token) e ao dono', emails.map(e => [e.para, e.assunto]))
+  ok(emails.filter(e => paraDe(e) === 'prof@x.invalid').length === 0 && emails.filter(e => paraDe(e) === 'ana@x.invalid').length === 1 && emails.filter(e => paraDe(e) === 'beto@x.invalid').length === 1 && emails.filter(e => paraDe(e) === 'dono@x.invalid').length === 1,
+     'e-mail a Ana, a Beto (sem token) e ao dono; nenhum ao profissional', emails.map(e => [e.para, e.assunto]))
   const chaves = (await db.query(`SELECT tipo FROM email_alertas WHERE demanda_id = $1`, [D(c10d.n)])).rows.map(x => x.tipo)
-  ok(chaves.length === 4 && chaves.every(k => k.startsWith('aviso:')), "e-mails na cota crítica ('aviso:')", chaves)
+  ok(chaves.length === 3 && chaves.every(k => k.startsWith('aviso:')), "e-mails na cota crítica ('aviso:')", chaves)
   r = await desfazer(c10d)
   ok(r.status === 409 && r.body.codigo === 'SEM_MATCH', 'repetir: 409 SEM_MATCH', r.body.codigo)
 
-  // 7) obra de 2h aos 7,5 dias: prazo vencido → expira_em sobe ao piso NOW()+1h; 2ª falta
+  // 7) obra de 2h aos 7,5 dias: prazo vencido → expira_em sobe ao piso NOW()+1h. O escolhido IGNOROU
+  //    os 2 avisos "Agende" (pode_escolher_outro true) → falta + compromisso_nao_cumprido e o aviso de sempre.
   pushes.length = 0; emails.length = 0
+  await db.query(`UPDATE obras SET lembrete_agendar_sem_proposta = 2 WHERE id = $1`, [D(c2h.n)])
   r = await desfazer(c2h); await assentar()
   ok(r.status === 200, 'obra 2h (prazo vencido): 200', r.body)
   d = await linha(c2h)
@@ -311,20 +305,21 @@ const main = async () => {
   ok(p[U(1)].status === 'cancelado' && p[U(2)].status === 'pendente', "candidatura 'cancelado'; concorrente de volta a 'pendente'")
   ok(pushesDe('prof')[0]?.data.tipo === 'candidatura_recusada' && pushesDe('ana').length === 0 && pushesDe('dono')[0]?.data.obra_id === D(c2h.n) && d.aviso_reabertura_em !== null,
      'tipos de push do lado obra; interessada sem aviso direto (reabertura marcada para o cron)', pushes.map(x => x.data.tipo))
-  ok((await faltas(U(1))).length === 2, '2ª falta registrada')
+  ok((await faltas(U(1))).length === 1 && await evs() === 1, 'avisos ignorados: 1 falta + 1 compromisso_nao_cumprido', { faltas: (await faltas(U(1))).length, eventos: await evs() })
+  ok(pushesDe('prof').some(x => /Você saiu do serviço/.test(x.title) && /contou como 1 falta/.test(x.body)) && !pushesDe('prof').some(x => x.title === S.TITULO_TROCA),
+     'avisos ignorados: push "Você saiu… contou como 1 falta" (não o neutro)', pushesDe('prof').map(x => x.title))
 
-  // 8) 30 dias aos 22,5 dias: 3ª falta → suspensão (3 em 90 dias) + push "Conta suspensa"
-  await fixarAgora(c30d.liberaMin - 1)
-  r = await desfazer(c30d)
-  ok(r.status === 409 && r.body.codigo === 'AGUARDE', '30 dias a 1 min de liberar: AGUARDE', r.body.codigo)
-  await fixarAgora(c30d.liberaMin)
-  pushes.length = 0
+  // 8) obra de 30 dias com horário COMBINADO (chegada_prevista_em), bem antes dos 75%: troca permitida, sem falta
+  await db.query(`UPDATE obras SET chegada_prevista_em = now() + INTERVAL '2 days', chegada_janela = '08:00-10:00' WHERE id = $1`, [D(c30d.n)])
+  pushes.length = 0; emails.length = 0
   r = await desfazer(c30d); await assentar()
-  ok(r.status === 200, '30 dias aos 22,5 d → 200', r.body)
-  ok((await faltas(U(1))).length === 3, '3ª falta')
-  u1 = (await db.query(`SELECT suspenso_em, suspenso_motivo FROM usuarios WHERE id = $1`, [U(1)])).rows[0]
-  ok(u1.suspenso_em !== null && /3 faltas/.test(u1.suspenso_motivo), '3 faltas em 90 dias → conta suspensa (mecanismo existente)', u1)
-  ok(pushesDe('prof').some(x => x.data.tipo === 'conta_suspensa') && pushesDe('prof').some(x => /Você saiu/.test(x.title)), 'push "Conta suspensa" e "Você saiu" ao profissional', pushesDe('prof').map(x => x.title))
+  d = await linha(c30d)
+  p = await propostas(c30d)
+  ok(r.status === 200 && d.match_usuario_id === null && d.chegada_prevista_em === null && d.status === 'aberta' && p[U(2)].status === 'pendente' && p[U(3)].status === 'contraproposta_dono',
+     'horário combinado: 200, agenda zerada, demanda aberta, interessados restaurados', { status: r.status, match: d.match_usuario_id })
+  ok((await faltas(U(1))).length === 1 && await evs() === 1, 'horário combinado: nada novo contra o profissional (segue 1 falta / 1 evento)')
+  ok(pushesDe('prof').length === 1 && pushesDe('prof')[0].title === S.TITULO_TROCA && pushesDe('prof')[0].data.obra_id === D(c30d.n) && !emails.some(e => e.para === 'prof@x.invalid'),
+     'horário combinado: 1 push neutro ao profissional, sem e-mail', pushesDe('prof').map(x => x.title))
 
   // 9) cancelamentos frequentes: escolha_desfeita não conta (mesma consulta do serviço)
   const n = (await db.query(

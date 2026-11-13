@@ -265,7 +265,8 @@ const main = async () => {
   await db.query(`UPDATE candidaturas SET status = 'aceito', cancelado_motivo = NULL, cancelado_por = NULL, cancelado_em = NULL WHERE obra_id = $1 AND usuario_id = $2`, [D(2), PROF])
   await db.query(`UPDATE candidaturas SET usuario_id = $3 WHERE obra_id = $1 AND usuario_id = $2`, [D(2), PROF, OUTRO])
   silenciar(true); r = await chamar(S.handler('obras'), DONO, D(2)); await assentar(); silenciar(false)
-  ok(r.status === 200 && r.body.modo === 'desfazer' && (await db.query(`SELECT count(*)::int AS n FROM faltas_profissional WHERE usuario_id = $1`, [OUTRO])).rows[0].n === 1, 'desfazer clássico (75% do prazo): continua com 1 falta', { status: r.status, body: r.body })
+  // Trocar de profissional (13/11/2026): sem os 2 avisos ignorados (pode_escolher_outro false) não há falta.
+  ok(r.status === 200 && r.body.modo === 'desfazer' && (await db.query(`SELECT count(*)::int AS n FROM faltas_profissional WHERE usuario_id = $1`, [OUTRO])).rows[0].n === 0, 'desfazer sem avisos ignorados: troca feita, SEM falta', { status: r.status, body: r.body })
 
   const inesperados = erros.filter(e => !/sem banco|PAGBANK|migration/i.test(e))
   ok(inesperados.length === 0, 'nenhum erro logado', inesperados.slice(0, 4))

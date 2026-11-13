@@ -3505,7 +3505,11 @@ const avisarReabertura = async (tabela) => {
 const STATUS_INTERESSE_INATIVO = ['recusado', 'cancelado', 'desistiu', 'expirado']
 const TITULO_PEDIDO_CANCELADO = '🔕 Pedido cancelado'
 const corpoPedidoCancelado = (t) => `"${t}" foi cancelado pelo cliente.`
-const avisarPedidoCanceladoPeloDono = async (tabela, demandaId) => {
+// Também usado quando o dono ENCERRA via cancelar-match (cancelamentoMatchService.executar, dono
+// 13/11/2026): ali as propostas rebaixadas pelo match ('recusado' com status_antes_match valendo)
+// não são restauradas e contam como ativas; excluirUsuarioId = o escolhido (já recebe "O cliente
+// cancelou…"), fora por PESSOA. Sem match (DELETE do dono) não há rebaixadas: nada muda ali.
+const avisarPedidoCanceladoPeloDono = async (tabela, demandaId, { excluirUsuarioId = null } = {}) => {
   const lado = LADOS_REABERTURA[tabela]
   if (!lado) return 0
   try {
@@ -3514,10 +3518,14 @@ const avisarPedidoCanceladoPeloDono = async (tabela, demandaId) => {
     const pros = (await pool.query(
       `SELECT DISTINCT ON (${SQL_PESSOA_DA_CONTA('u')}) u.id, u.push_token
          FROM ${lado.proposta} x JOIN usuarios u ON u.id = x.usuario_id
-        WHERE x.${lado.coluna} = $1 AND COALESCE(x.status, 'pendente') <> ALL($2::text[])
+        WHERE x.${lado.coluna} = $1
+          AND (COALESCE(x.status, 'pendente') <> ALL($2::text[])
+               OR (x.status = 'recusado' AND x.status_antes_match = ANY($3::text[])))
+          AND ($4::uuid IS NULL OR ${SQL_PESSOA_DA_CONTA('u')} IS DISTINCT FROM
+               (SELECT ${SQL_PESSOA_DA_CONTA('ex')} FROM usuarios ex WHERE ex.id = $4::uuid))
           AND ${sqlPessoaNaoSuspensa('u.id')}
         ORDER BY ${SQL_PESSOA_DA_CONTA('u')}, (u.push_token IS NOT NULL) DESC, u.id`,
-      [d.id, STATUS_INTERESSE_INATIVO])).rows
+      [d.id, STATUS_INTERESSE_INATIVO, STATUS_VALENDO_REABERTURA, excluirUsuarioId])).rows
     const corpo = corpoPedidoCancelado(d.titulo)
     const data = { tipo: 'pedido_cancelado', [lado.chave]: d.id }
     let enviados = 0

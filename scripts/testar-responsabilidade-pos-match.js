@@ -224,9 +224,12 @@ const main = async () => {
   await db.query(`UPDATE candidaturas SET usuario_id = $3 WHERE obra_id = $1 AND usuario_id = $2`, [D(2), PROF, OUTRO])
   r = await quieto(() => chamar(S.handler('obras'), DONO, D(2)))
   ev = await eventos('compromisso_nao_cumprido', OUTRO)
-  ok(r.status === 200 && r.body.modo === 'desfazer' && ev.length === 1 && ev[0].motivo === 'escolha_desfeita' && (await db.query(`SELECT count(*)::int AS n FROM faltas_profissional WHERE usuario_id = $1`, [OUTRO])).rows[0].n === 1,
-     'desfazer clássico: evento (motivo escolha_desfeita) + falta', { status: r.status, eventos: ev.length })
-  ok((await R.registrarCompromissoNaoCumprido(db, { tabela: 'obras', demandaId: D(2), profissionalId: OUTRO, donoId: DONO, motivo: 'x' })) === false && (await eventos('compromisso_nao_cumprido', OUTRO)).length === 1, 'evento idempotente por (profissional, demanda)')
+  // Trocar de profissional (13/11/2026): sem os 2 avisos ignorados, nada contra o profissional.
+  ok(r.status === 200 && r.body.modo === 'desfazer' && ev.length === 0 && (await db.query(`SELECT count(*)::int AS n FROM faltas_profissional WHERE usuario_id = $1`, [OUTRO])).rows[0].n === 0,
+     'desfazer sem avisos ignorados: SEM evento e SEM falta', { status: r.status, eventos: ev.length })
+  ok((await R.registrarCompromissoNaoCumprido(db, { tabela: 'obras', demandaId: D(2), profissionalId: OUTRO, donoId: DONO, motivo: 'x' })) === true
+     && (await R.registrarCompromissoNaoCumprido(db, { tabela: 'obras', demandaId: D(2), profissionalId: OUTRO, donoId: DONO, motivo: 'x' })) === false
+     && (await eventos('compromisso_nao_cumprido', OUTRO)).length === 1, 'evento idempotente por (profissional, demanda)')
   // Janela de 90 dias
   await db.query(`UPDATE eventos_responsabilidade SET criado_em = now() - INTERVAL '91 days' WHERE usuario_id = $1`, [OUTRO])
   ok((await contadoresProf(OUTRO)).n === 0, 'evento com 91 dias sai da contagem')

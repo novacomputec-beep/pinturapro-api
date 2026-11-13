@@ -29,7 +29,7 @@
 // pendente sai em GET /:id como pedido_cancelamento (pedidoCancelamento).
 const { pool } = require('../utils/supabase')
 const { SQL_ZERAR_AGENDA, formatarDataHoraSP } = require('../utils/agendamento')
-const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunciarDemanda, contatoDaPessoa } = require('./alertaService')
+const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunciarDemanda, contatoDaPessoa, avisarPedidoCanceladoPeloDono } = require('./alertaService')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
 // Reabertura: propostas rebaixadas pelo match voltam a valer e o aviso NEUTRO aos interessados fica
 // devido (SQL_MARCAR_REABERTURA → alertaService.avisarReabertura, o único que avisa).
@@ -270,6 +270,9 @@ const executar = async ({ lado, d, canceladoPor, atorId = canceladoPor, motivo, 
     }, { ator: atorId })
   }
   if (!encerrar) reanunciarDemanda(lado.tabela, d.id).catch(() => {})
+  // Dono encerrou o pedido (dono, 13/11/2026): os demais interessados ainda ativos recebem o
+  // "🔕 Pedido cancelado" (o escolhido já recebeu o aviso acima).
+  if (encerrar) avisarPedidoCanceladoPeloDono(lado.tabela, d.id, { excluirUsuarioId: profissionalId }).catch(() => {})
   avisarCancelamentosFrequentes(canceladoPor)
   return { ok: true, encerrada: encerrar }
 }
