@@ -63,15 +63,35 @@ const main = async () => {
   ok(!(await G.expandirCategoria('eletrica')).includes('informatica') && (await G.expandirCategoria('eletrica')).includes('hidraulica') && !(await G.expandirCategoria('faxina')).includes('eletrica'),
      'eletrica alcança hidráulica (Consertos), não informática nem faxina')
   ok(!(await G.expandirCategoria('editor_video')).includes('aula_particular') && (await G.expandirCategoria('editor_video')).includes('locucao'), 'editor_video saiu de Digital e aulas e foi para Divulgação')
-  // Etiquetas de avaliação: os mesmos 10 grupos (+ obra); Divulgação reusa o conjunto de Digital e aulas.
+  // Etiquetas de avaliação: os 10 grupos (+ obra) e, SÓ nas etiquetas, Elétrica e tecnologia separada de
+  // Consertos (dono, 13/11/2026); Divulgação reusa o conjunto de Digital e aulas.
   const ET = require(path.join(REPO, 'src/utils/etiquetasAvaliacao'))
-  ok(ET.GRUPOS_AVALIACAO.length === 11 && ET.GRUPOS_AVALIACAO.map(g => g.chave).join() === 'reparos_casa,limpeza,beleza,festas,cuidado,transporte,seguranca,digital_aulas,arte,divulgacao,construcao_pintura',
-     'etiquetas: 10 grupos de serviço + obra, na ordem dos grupos', ET.GRUPOS_AVALIACAO.map(g => `${g.chave}:${g.nome}`))
-  ok(JSON.stringify(ET.ETIQUETAS_POR_GRUPO.divulgacao) === JSON.stringify(ET.ETIQUETAS_POR_GRUPO.digital_aulas) && !ET.ETIQUETAS_POR_GRUPO.eletrica_tec,
-     'etiquetas: Divulgação = conjunto de Digital e aulas; eletrica_tec removido')
-  ok(JSON.stringify(ET.gruposDaDemanda('reparos', { categorias: ['eletrica', 'locucao'] })) === '["reparos_casa","divulgacao"]', 'avaliação de reparo eletrica + locucao: grupos reparos_casa e divulgacao')
-  ok(ET.validarEtiquetas(['Serviço impecável'], ['reparos_casa'], 5).valor?.length === 1 && !!ET.validarEtiquetas(['Serviço muito seguro'], ['reparos_casa'], 5).erro,
-     'elétrica agora avalia com as etiquetas de Consertos (as antigas de Elétrica e tecnologia não valem mais)')
+  ok(ET.GRUPOS_AVALIACAO.length === 12 && ET.GRUPOS_AVALIACAO.map(g => g.chave).join() === 'reparos_casa,eletrica_tec,limpeza,beleza,festas,cuidado,transporte,seguranca,digital_aulas,arte,divulgacao,construcao_pintura',
+     'etiquetas: Consertos, Elétrica e tecnologia, os outros 9 de serviço + obra', ET.GRUPOS_AVALIACAO.map(g => `${g.chave}:${g.nome}`))
+  const gEle = ET.GRUPOS_AVALIACAO.find(g => g.chave === 'eletrica_tec'), gCons = ET.GRUPOS_AVALIACAO.find(g => g.chave === 'reparos_casa')
+  ok(gEle.nome === 'Elétrica e tecnologia' && gEle.especialidades.join() === 'eletrica,eletronica,climatizacao,seguranca_eletronica'
+     && gCons.especialidades.join() === 'hidraulica,alvenaria,gesseiro,marcenaria,serralheria,vidraceiro,chaveiro,estofamento,montagem_moveis',
+     'catálogo: elétrica/eletrônica/climatização/segurança eletrônica no grupo de etiquetas elétrico; Consertos com os outros 9', { ele: gEle.especialidades, cons: gCons.especialidades })
+  ok(JSON.stringify(ET.ETIQUETAS_POR_GRUPO.eletrica_tec[5]) === '["Resolveu de vez","Serviço muito seguro","Super organizado"]' && JSON.stringify(ET.ETIQUETAS_POR_GRUPO.eletrica_tec[1]) === '["Não resolveu","Serviço perigoso","Estragou algo"]',
+     'conjunto elétrico de antes restaurado ("Serviço muito seguro"…)')
+  ok(JSON.stringify(ET.ETIQUETAS_POR_GRUPO.divulgacao) === JSON.stringify(ET.ETIQUETAS_POR_GRUPO.digital_aulas), 'etiquetas: Divulgação = conjunto de Digital e aulas')
+  for (const s of ET.SLUGS_ELETRICOS) ok(JSON.stringify(ET.gruposDaDemanda('reparos', { categorias: [s] })) === '["eletrica_tec"]', `avaliação de ${s}: só o conjunto elétrico (não o de Consertos)`)
+  ok(JSON.stringify(ET.gruposDaDemanda('reparos', { categoria: 'eletrica' })) === '["eletrica_tec"]', 'reparo antigo (só categoria) elétrico: conjunto elétrico')
+  ok(JSON.stringify(ET.gruposDaDemanda('reparos', { categorias: ['hidraulica'] })) === '["reparos_casa"]' && JSON.stringify(ET.gruposDaDemanda('reparos', { categorias: ['gesseiro'] })) === '["reparos_casa"]',
+     'outros Consertos (hidráulica, gesseiro): conjunto de Consertos')
+  ok(JSON.stringify(ET.gruposDaDemanda('reparos', { categorias: ['eletrica', 'locucao'] })) === '["eletrica_tec","divulgacao"]', 'elétrica + locução: elétrico e Divulgação')
+  ok(JSON.stringify(ET.gruposDaDemanda('reparos', { categorias: ['eletrica', 'hidraulica'] })) === '["reparos_casa","eletrica_tec"]', 'elétrica + hidráulica: os dois conjuntos (mesma regra do app)')
+  ok(JSON.stringify(ET.gruposDaDemanda('obras', {})) === '["construcao_pintura"]' && ET.gruposDaDemanda('reparos', { categorias: ['outros'] }).length === 0, 'obra e "outros" inalterados')
+  ok(ET.validarEtiquetas(['Serviço muito seguro'], ET.gruposDaDemanda('reparos', { categorias: ['eletrica'] }), 5).valor?.length === 1
+     && !!ET.validarEtiquetas(['Serviço impecável'], ET.gruposDaDemanda('reparos', { categorias: ['eletrica'] }), 5).erro
+     && ET.validarEtiquetas(['Serviço impecável'], ET.gruposDaDemanda('reparos', { categorias: ['hidraulica'] }), 5).valor?.length === 1
+     && !!ET.validarEtiquetas(['Serviço muito seguro'], ET.gruposDaDemanda('reparos', { categorias: ['hidraulica'] }), 5).erro,
+     'validação: elétrica aceita "Serviço muito seguro" e recusa "Serviço impecável"; hidráulica o contrário')
+  // Push intocado: Consertos segue um grupo só e largo.
+  ok((await G.expandirCategoria('eletrica')).includes('hidraulica') && (await G.expandirCategoria('hidraulica')).includes('eletrica') && !G.CHAVE_DO_GRUPO['Elétrica e tecnologia'],
+     'push intocado: elétrica e hidráulica seguem no mesmo grupo (Consertos da casa)')
+  const cat = ET.catalogoEtiquetas()
+  ok(cat.grupos.find(g => g.chave === 'eletrica_tec')?.etiquetas?.[5]?.includes('Serviço muito seguro'), 'GET /config/etiquetas-avaliacao traz o grupo elétrico (o app aplica a mesma regra)')
   ok(!E.ESPECIALIDADES_OBRA.includes('borracheiro') && !C.CATEGORIAS_OBRA.some(c => c.slug === 'borracheiro') && !C.CATEGORIAS_CONSTRUCAO.some(c => c.slug === 'borracheiro'),
      'borracheiro é SERVIÇO: fora das especialidades e das categorias de obra')
   ok(!E.ESPECIALIDADES_OBRA.some(s => NOVAS[s]), 'lado obra intacto (4 papéis)', E.ESPECIALIDADES_OBRA)
