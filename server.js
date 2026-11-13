@@ -258,6 +258,10 @@ app.use('/api/pagamentos/webhook-pagbank', express.raw({ type: '*/*', limit: '1m
 // (uploadStreamController lê o socket direto), e o webhook já é raw com 1 MB acima.
 const LIMITE_CORPO_JSON = '64kb'
 app.use(express.json({ limit: LIMITE_CORPO_JSON }))
+// Caixa-preta dos pedidos (utils/auditoriaDemanda): guarda a requisição no contexto assíncrono para
+// todo UPDATE em pedidos/interesses levar método + rota + usuário ao trigger de eventos_demanda.
+// Depois do express.json de propósito: o parse do corpo por stream não perde o contexto.
+app.use(require('./src/utils/auditoriaDemanda').middlewareAuditoria)
 app.use(express.urlencoded({ extended: true, limit: LIMITE_CORPO_JSON }))
 // Página pública da demanda (/p/<codigo>): FORA de /api de propósito — link curto para o
 // WhatsApp, sem JWT, só leitura das colunas seguras. Passa pelo helmet, CORS, shedding e o
@@ -780,6 +784,7 @@ const lembrarAvaliacaoPendente = async () => {
   }
 }
 
+const { job } = require('./src/utils/auditoriaDemanda')
 const iniciarAgendador = () => {
   const INTERVALO_ENGAJAMENTO  = 8 * 60 * 60 * 1000
   const INTERVALO_EXPIRACAO    = 60 * 60 * 1000
@@ -788,7 +793,7 @@ const iniciarAgendador = () => {
   const INTERVALO_AUTO_ENCERRAR = 5 * 60 * 1000
   const INTERVALO_LEMBRETE     = 5 * 60 * 1000
 
-  setTimeout(() => {
+  setTimeout(job('aquecimento', () => {
     verificarObrasComBaixoEngajamento()
     // APOSENTADO: verificarObrasExpirando() enviava o texto fixo "expira em 24 horas!" para qualquer
     // demanda a <24h de expira_em, independente do tempo real restante. Substituído por
@@ -806,74 +811,74 @@ const iniciarAgendador = () => {
     limparTentativasAntigas()
     limparLinksAssinaturaAntigos()
     purgarPushRecibosAntigos()
-  }, 60 * 1000)
+  }), 60 * 1000)
 
-  setInterval(() => { verificarObrasComBaixoEngajamento() }, INTERVALO_ENGAJAMENTO)
+  setInterval(job('verificarObrasComBaixoEngajamento', () => { verificarObrasComBaixoEngajamento() }), INTERVALO_ENGAJAMENTO)
   // APOSENTADO (ver comentário acima): expiração agora é notificada SÓ por verificarMarcosExpiracao.
   // setInterval(() => { verificarObrasExpirando() }, INTERVALO_EXPIRACAO)
-  setInterval(() => { verificarPrestadoresProximos() }, INTERVALO_PROXIMIDADE)
-  setInterval(() => { verificarMarcosExpiracao() }, INTERVALO_CRONOMETRO)
-  setInterval(() => { verificarCronometroReparos() }, INTERVALO_CRONOMETRO)
-  setInterval(() => { verificarCronometroObras() }, INTERVALO_CRONOMETRO)
+  setInterval(job('verificarPrestadoresProximos', () => { verificarPrestadoresProximos() }), INTERVALO_PROXIMIDADE)
+  setInterval(job('verificarMarcosExpiracao', () => { verificarMarcosExpiracao() }), INTERVALO_CRONOMETRO)
+  setInterval(job('verificarCronometroReparos', () => { verificarCronometroReparos() }), INTERVALO_CRONOMETRO)
+  setInterval(job('verificarCronometroObras', () => { verificarCronometroObras() }), INTERVALO_CRONOMETRO)
   // Atraso na chegada (atrasoChegadaService): aviso no prazo e auto-aceite do pedido pendente.
-  setInterval(() => { avisarAtrasados() }, INTERVALO_CRONOMETRO)
-  setInterval(() => { autoAceitarPedidosAtraso() }, INTERVALO_CRONOMETRO)
+  setInterval(job('avisarAtrasados', () => { avisarAtrasados() }), INTERVALO_CRONOMETRO)
+  setInterval(job('autoAceitarPedidosAtraso', () => { autoAceitarPedidosAtraso() }), INTERVALO_CRONOMETRO)
   // Lembrete ao profissional antes do prazo de chegada (prazo − min(1h, metade do intervalo
   // match→prazo)): mesma cadência dos cronômetros, que leem o mesmo prazo. Fora do warm-up: o
   // lembrete fica devido até o prazo, então o primeiro tique de 1 min o pega.
-  setInterval(() => { lembrarPrazoChegada() }, INTERVALO_CRONOMETRO)
+  setInterval(job('lembrarPrazoChegada', () => { lembrarPrazoChegada() }), INTERVALO_CRONOMETRO)
   // Agendamento livre: lembretes do horário aceito ao profissional (véspera 18:00, 2h antes, na
   // hora) e a vigia "o profissional veio?" ao dono (1h depois do horário). Mesma cadência dos
   // cronômetros; fora do warm-up pelo mesmo motivo do lembrete acima.
-  setInterval(() => { lembrarAgendamento() }, INTERVALO_CRONOMETRO)
+  setInterval(job('lembrarAgendamento', () => { lembrarAgendamento() }), INTERVALO_CRONOMETRO)
   // "Agende seu atendimento": ao profissional casado que ainda não propôs dia/hora, em
   // antecedências fixas antes do prazo de chegada (faixa da demanda). Mesma cadência; fora do
   // warm-up porque a antecedência corrente fica devida até a seguinte — o próximo tique a pega.
-  setInterval(() => { lembrarAgendarAtendimento() }, INTERVALO_CRONOMETRO)
+  setInterval(job('lembrarAgendarAtendimento', () => { lembrarAgendarAtendimento() }), INTERVALO_CRONOMETRO)
   // O mesmo aviso REPETIDO (push + e-mail) enquanto ninguém propõe horário: 1h após o match e
   // depois pelo tempo restante até o prazo (12h/6h/2h/30 min), silêncio 22–07 (SP) e aviso ao
   // dono a partir do 2º ciclo (1x/dia).
-  setInterval(() => { repetirLembreteAgendar() }, INTERVALO_CRONOMETRO)
+  setInterval(job('repetirLembreteAgendar', () => { repetirLembreteAgendar() }), INTERVALO_CRONOMETRO)
   // "Responda o horário proposto": à parte que deve responder uma proposta de horário pendente,
   // 1h depois da proposta e 1h antes do horário. Mesma cadência; fora do warm-up (janela de 60 min).
-  setInterval(() => { lembrarRespostaHorario() }, INTERVALO_CRONOMETRO)
+  setInterval(job('lembrarRespostaHorario', () => { lembrarRespostaHorario() }), INTERVALO_CRONOMETRO)
   // Proposta de horário do profissional que venceu sem resposta do dono: volta a "aguardando
   // horário", avisa o profissional (push + e-mail) e os lembretes "Agende" recomeçam.
-  setInterval(() => { expirarPropostasDeHorario() }, INTERVALO_CRONOMETRO)
+  setInterval(job('expirarPropostasDeHorario', () => { expirarPropostasDeHorario() }), INTERVALO_CRONOMETRO)
   // Aviso final ao DONO 1h antes da proposta do profissional vencer: "Responda ou cancele o
   // pedido — se ignorar, sua conta fica marcada" (push + e-mail, uma vez por proposta).
-  setInterval(() => { avisarRespostaFinalDono() }, INTERVALO_CRONOMETRO)
+  setInterval(job('avisarRespostaFinalDono', () => { avisarRespostaFinalDono() }), INTERVALO_CRONOMETRO)
   // Ao DONO, proposta do profissional pendente: o mesmo aviso REPETIDO (push + e-mail) 30 min
   // após a proposta e depois pelo tempo restante até o horário proposto (12h/6h/2h/30 min),
   // silêncio 22–07 (SP), até ele responder ou o horário passar.
-  setInterval(() => { repetirRespostaHorarioDono() }, INTERVALO_CRONOMETRO)
+  setInterval(job('repetirRespostaHorarioDono', () => { repetirRespostaHorarioDono() }), INTERVALO_CRONOMETRO)
   // Ao DONO de demanda aberta sem match com pergunta(s) sem resposta: "N perguntas aguardam sua
   // resposta" (push + e-mail) 30 min após a pergunta mais antiga e depois pelo tempo restante
   // até expira_em (12h/6h/2h/30 min), silêncio 22–07 (SP); pergunta nova reinicia a contagem.
-  setInterval(() => { lembrarPerguntasSemResposta() }, INTERVALO_CRONOMETRO)
-  setInterval(() => { vigiarComparecimento() }, INTERVALO_CRONOMETRO)
+  setInterval(job('lembrarPerguntasSemResposta', () => { lembrarPerguntasSemResposta() }), INTERVALO_CRONOMETRO)
+  setInterval(job('vigiarComparecimento', () => { vigiarComparecimento() }), INTERVALO_CRONOMETRO)
   // Dono com interessados pendentes e sem escolha: lembrete diário, avisos 24h/2h e vencimento
   // (services/escolhaPendenteService). Cadência dos cronômetros: o aviso de vencimento sai no
   // minuto do expira_em.
-  setInterval(() => { verificarEscolhaPendente() }, INTERVALO_CRONOMETRO)
+  setInterval(job('verificarEscolhaPendente', () => { verificarEscolhaPendente() }), INTERVALO_CRONOMETRO)
   // Dono com profissional escolhido que não marcou horário: aviso único quando o desfazer libera
   // (services/desfazerEscolhaService). Fica devido até o prazo, então o 1º tique de 1 min o pega.
-  setInterval(() => { avisarDesfazerLiberado() }, INTERVALO_CRONOMETRO)
+  setInterval(job('avisarDesfazerLiberado', () => { avisarDesfazerLiberado() }), INTERVALO_CRONOMETRO)
   // Escolhido que DESINSTALOU o app (desinstalado_em) em demanda aberta sem horário: aviso único ao dono
   // (claim aviso_desinstalou_em). Também disparado na hora pelo recibo DeviceNotRegistered (alertaService).
-  setInterval(() => { avisarDonosProfissionalDesinstalou() }, INTERVALO_CRONOMETRO)
+  setInterval(job('avisarDonosProfissionalDesinstalou', () => { avisarDonosProfissionalDesinstalou() }), INTERVALO_CRONOMETRO)
   // Admin: "Resumo do dia pronto (N pedidos)" às 18:00 SP, 1x/dia (claim em configuracoes).
-  setInterval(() => { enviarResumoDiaAdmin() }, INTERVALO_CRONOMETRO)
-  setInterval(() => { deletarMidiasAntigas() }, 24 * 60 * 60 * 1000)
+  setInterval(job('enviarResumoDiaAdmin', () => { enviarResumoDiaAdmin() }), INTERVALO_CRONOMETRO)
+  setInterval(job('deletarMidiasAntigas', () => { deletarMidiasAntigas() }), 24 * 60 * 60 * 1000)
   // Poda das tentativas de auth: a tabela acumula linhas de e-mails inexistentes, que é o
   // preço de contar TODOS (o que fecha o oráculo de existência de conta).
-  setInterval(() => { limparTentativasAntigas(); limparLinksAssinaturaAntigos(); purgarPushRecibosAntigos() }, 24 * 60 * 60 * 1000)
-  setInterval(() => { expirarAssinaturasVencidas() }, 60 * 60 * 1000)
+  setInterval(job('limparTentativasAntigas', () => { limparTentativasAntigas(); limparLinksAssinaturaAntigos(); purgarPushRecibosAntigos() }), 24 * 60 * 60 * 1000)
+  setInterval(job('expirarAssinaturasVencidas', () => { expirarAssinaturasVencidas() }), 60 * 60 * 1000)
   // Suspensões por contato (7 dias) vencidas: de hora em hora, como a expiração de assinatura —
   // a folga de até 1h num prazo de 7 dias é irrelevante. Fora do warm-up: a próxima hora pega.
-  setInterval(() => { liberarSuspensoesContato() }, 60 * 60 * 1000)
+  setInterval(job('liberarSuspensoesContato', () => { liberarSuspensoesContato() }), 60 * 60 * 1000)
   // Pedido de acordo de cancelamento vale 2h: varredura de 5 em 5 min, como os claims de cronômetro.
-  setInterval(() => { expirarPedidosCancelamento() }, 5 * 60 * 1000)
+  setInterval(job('expirarPedidosCancelamento', () => { expirarPedidosCancelamento() }), 5 * 60 * 1000)
   // De 5 em 5 minutos. Era de hora em hora, justificado pelo prazo (então de 2 dias) do
   // encerramento — mas a MESMA função também auto-confirma chegada, e esse prazo passou a ser
   // de 30 min nos reparos. Uma varredura horária é mais grossa que a própria janela: o reparo
@@ -882,59 +887,59 @@ const iniciarAgendador = () => {
   // 30–35 min. O encerramento (2 dias numa obra, 3 horas num reparo) também não se importa
   // com a cadência mais fina; o custo é apenas o SELECT/UPDATE dos dois lados, indexado e
   // quase sempre vazio.
-  setInterval(() => { autoEncerrarPendentes() }, INTERVALO_AUTO_ENCERRAR)
+  setInterval(job('autoEncerrarPendentes', () => { autoEncerrarPendentes() }), INTERVALO_AUTO_ENCERRAR)
   // Lembretes "ainda aberto" em fatias pela janela da demanda (W/2 única; diária; semanal →
   // diária na última semana; 08–20h SP nas repetidas): de 5 em 5 min, como os claims de
   // cronômetro — a fatia de W=1h cai em 30 min e não pode esperar 10. Fora do warm-up: a
   // fatia fica devida até acabar, então o próximo tique a pega.
   // No MESMO tique e ANTES dos lembretes: os e-mails de demanda nova que o teto diário cortou
   // (alertaService.enviarEmailsPendentesNovaDemanda) saem primeiro; nunca lança.
-  setInterval(async () => { await enviarEmailsPendentesNovaDemanda(); lembrarDemandasSemResposta() }, INTERVALO_LEMBRETE)
+  setInterval(job('enviarEmailsPendentesNovaDemanda', async () => { await enviarEmailsPendentesNovaDemanda(); lembrarDemandasSemResposta() }), INTERVALO_LEMBRETE)
   // "Pedido de indicação": demanda sem match e sem manifestação 48h+ após criado_em pede, UMA vez,
   // a quem não faz aquele serviço que indique o app (push só, 08–20h SP, 1 por profissional a
   // cada 3 dias). Mesma cadência do lembrete; fora do warm-up: a condição fica devida até o match
   // ou a expiração, então o próximo tique a pega.
-  setInterval(() => { pedirIndicacoes() }, INTERVALO_LEMBRETE)
+  setInterval(job('pedirIndicacoes', () => { pedirIndicacoes() }), INTERVALO_LEMBRETE)
   // Aviso "fora da sua área": o gancho da publicação envia na hora; este tique pega as demandas
   // publicadas fora da janela 08–20h SP (ou cujo gancho não rodou) e limpa o log do teto diário.
-  setInterval(() => { avisarForaDaArea() }, INTERVALO_LEMBRETE)
+  setInterval(job('avisarForaDaArea', () => { avisarForaDaArea() }), INTERVALO_LEMBRETE)
   // Push-resumo "Mais N pedidos perto de você hoje": o que passou do teto diário de 15 pushes de
   // demanda por pessoa — no máximo um por dia, só entre 08h e 20h de São Paulo.
-  setInterval(() => { enviarResumosAcimaDoTeto() }, INTERVALO_LEMBRETE)
+  setInterval(job('enviarResumosAcimaDoTeto', () => { enviarResumosAcimaDoTeto() }), INTERVALO_LEMBRETE)
   // Crédito de compensação guardado (7 dias por cliente que não respondeu) de quem passou a ter
   // assinatura paga e ativa: vira dias de vencimento, sem cobrança (utils/responsabilidade).
-  setInterval(() => { aplicarCreditosPendentes() }, INTERVALO_LEMBRETE)
+  setInterval(job('aplicarCreditosPendentes', () => { aplicarCreditosPendentes() }), INTERVALO_LEMBRETE)
   // Especialidades inferidas das obras: backfill das abertas sem lista e, UMA vez (claim em
   // configuracoes), o reanúncio de YS5XR/BR5V3 aos recém-casados. 90 s após o boot, depois da migração.
-  setTimeout(() => { rodarBackfillEReanuncioUnico().finally(() => rodarReanunciosUnicosPorObra()) }, 90 * 1000)
+  setTimeout(job('rodarBackfillEReanuncioUnico', () => { rodarBackfillEReanuncioUnico().finally(() => rodarReanunciosUnicosPorObra()) }), 90 * 1000)
   // Reanúncio único por obra (obrasInferidasService.REANUNCIOS_UNICOS_OBRA): só reivindica entre 08h e
   // 20h SP, então um boot fora dessa janela é coberto por este tique; depois do claim é um SELECT à toa.
-  setInterval(() => { rodarReanunciosUnicosPorObra() }, 30 * 60 * 1000)
+  setInterval(job('rodarReanunciosUnicosPorObra', () => { rodarReanunciosUnicosPorObra() }), 30 * 60 * 1000)
   // Lembretes ao dono (30 min / 2h) da solicitação de encerramento pendente do profissional.
-  setInterval(() => { lembrarConfirmacaoEncerramento() }, INTERVALO_LEMBRETE)
+  setInterval(job('lembrarConfirmacaoEncerramento', () => { lembrarConfirmacaoEncerramento() }), INTERVALO_LEMBRETE)
   // "Ainda trabalhando?" ao profissional com chegada confirmada e sem pedido de conclusão de
   // ninguém: fatias de 6h (reparo) / 3 dias (obra) desde a chegada, silêncio 22–07h SP. Mesma
   // cadência dos outros lembretes; o claim por fatia torna o tique repetido inofensivo.
-  setInterval(() => { lembrarConclusaoPendente() }, INTERVALO_LEMBRETE)
+  setInterval(job('lembrarConclusaoPendente', () => { lembrarConclusaoPendente() }), INTERVALO_LEMBRETE)
   // Versão "atual" do app: sobe sozinha quando N usuários não testadores já rodam uma maior.
   // 5 min: o aviso de atualização não é urgente, e a consulta agrupa uma tabela pequena.
-  setInterval(() => { cronPromoverVersaoAtual() }, INTERVALO_LEMBRETE)
+  setInterval(job('cronPromoverVersaoAtual', () => { cronPromoverVersaoAtual() }), INTERVALO_LEMBRETE)
   // De hora em hora como o job de expiração: as bandas de 12h e 6h não existem numa cadência
   // diária — um tick por dia pularia as duas mais urgentes.
-  setInterval(() => { notificarAssinaturasProximasVencimento() }, 60 * 60 * 1000)
+  setInterval(job('notificarAssinaturasProximasVencimento', () => { notificarAssinaturasProximasVencimento() }), 60 * 60 * 1000)
   // Mesma cadência do aviso de vencimento: a coorte só existe após um desligamento da
   // janela de lançamento, então quase todo tick é um SELECT vazio e indexável.
-  setInterval(() => { notificarFimGratuidade() }, 60 * 60 * 1000)
+  setInterval(job('notificarFimGratuidade', () => { notificarFimGratuidade() }), 60 * 60 * 1000)
   // De hora em hora, como o aviso de vencimento. As bandas aqui são de DIAS, então uma
   // cadência horária é folgada de sobra: o lembrete sai no máximo ~1h depois de o contrato
   // completar 1 (ou 3) dia(s) encerrado. Fora do warm-up pelo mesmo motivo que o aviso de
   // vencimento: nada aqui é urgente o bastante para justificar disparar a cada deploy.
-  setInterval(() => { lembrarAvaliacaoPendente() }, 60 * 60 * 1000)
+  setInterval(job('lembrarAvaliacaoPendente', () => { lembrarAvaliacaoPendente() }), 60 * 60 * 1000)
   // Descarga do buffer de visitas (src/utils/visitas.js): agrupa as visitas da janela num
   // UPDATE por tabela, em vez de um UPDATE por visualização no caminho de leitura.
   iniciarFlushVisitas()
 
-  setInterval(async () => {
+  setInterval(job('aprovacaoAutomatica', async () => {
     try {
       // Toggle "Modo Auto": OFF ('false' ou ausente) → admin presente, exige revisão manual.
       // Nenhuma aprovação automática acontece enquanto estiver OFF.
@@ -997,7 +1002,7 @@ const iniciarAgendador = () => {
     } catch (err) {
       console.error('[Timeout verificação] Erro:', err.message)
     }
-  }, 20 * 1000)
+  }), 20 * 1000)
 
   console.log(`Agendador iniciado — engajamento: 8h | expiração: 1h | proximidade: 10min | verificação timeout: 20s (limiar 15s) | marcos expiração (6h/60/30/15min, reparos+obras): 1min | cronômetro reparos: 1min | cronômetro obras: 1min | lembrete prazo de chegada ao profissional: 1min | mídias antigas: 24h | expiração assinaturas: 1h | aviso vencimento: 1h | lembrete avaliação (1d/3d): 1h | lembrete demanda sem match (W/2 | diário | semanal→diário, 08-20h SP): ${INTERVALO_LEMBRETE / 60000}min | promoção da versão atual do app: ${INTERVALO_LEMBRETE / 60000}min | flush de visitas: ${INTERVALO_FLUSH_MS / 1000}s`)
 }
