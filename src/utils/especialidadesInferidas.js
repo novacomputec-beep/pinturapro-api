@@ -14,7 +14,7 @@
 // "tomada" casa "tomadas", mas "agua" não casa "aguardo"; termo com * no fim é prefixo: "eletric*"
 // casa "elétrica", "eletricista", "elétrico") e os slugs que entram quando algum termo aparece. A
 // expansão é CURADA por regra (água/esgoto → hidraulica + alvenaria + pedreiro_servente; papel de
-// parede → pintor + gesseiro), não o grupo inteiro de utils/gruposCategorias ("Reparos da casa"
+// parede → pintor + gesseiro), não o grupo inteiro de utils/gruposCategorias ("Consertos da casa"
 // tem 9 ofícios — chaveiro e estofador não têm o que fazer num ponto de esgoto). Além delas, as
 // `palavras` declaradas em CATEGORIAS_SERVICO (utils/categoriasApp) viram regra da própria
 // categoria, menos as da lista TERMOS_GENERICOS ("manutenção" marcaria toda obra).

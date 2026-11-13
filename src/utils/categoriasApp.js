@@ -72,6 +72,10 @@ const CATEGORIAS_SERVICO = [
   // interfone, manutenção) — só documentação/consumo pelo app; a API não os lê.
   { slug: 'seguranca_eletronica', rotulo: 'Segurança eletrônica', emoji: '📹',
     palavras: ['câmeras', 'portão eletrônico', 'cerca elétrica', 'alarme', 'interfone', 'manutenção'] },
+  { slug: 'locucao',         rotulo: 'Locução',           emoji: '🎙️',
+    palavras: ['locução', 'carro de som', 'som em porta de loja', 'rádio indoor'] },
+  { slug: 'jingles_vinhetas', rotulo: 'Jingles e vinhetas', emoji: '🎵' },
+  { slug: 'marketing_publicidade', rotulo: 'Marketing e publicidade', emoji: '📈' },
   { slug: 'outros',          rotulo: 'Outros',            emoji: '➕' },
 ]
 

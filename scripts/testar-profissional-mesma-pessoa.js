@@ -133,8 +133,8 @@ const C = {
   PN:   { n: 8,  tipo: 'pintor',    esp: ['pintor'],   cpf: '444.444.444-44', email: 'pn@x.invalid' },       // pintor SEM serviço
   NL:   { n: 9,  tipo: null,        esp: ['eletrica'], cpf: '555.555.555-55', email: 'nl@x.invalid' },       // legado: tipo NULL
   DP:   { n: 10, role: 'dono_obra', tipo_dono: 'reparo', cpf: '111.111.111-11', email: 'pessoa@x.invalid' }, // conta de DONO da PESSOA
-  DUP:  { n: 11, tipo: 'pintor',    esp: ['pintor', 'hidraulica'],    cpf: '777.777.777-77', email: 'duo.p@x.invalid' }, // DUO: elegível nos dois lados
-  DUR:  { n: 12, tipo: 'reparador', esp: ['hidraulica', 'construtor'], cpf: '77777777777',   email: 'duo.r@x.invalid' }, // DUO: idem
+  DUP:  { n: 11, tipo: 'pintor',    esp: ['pintor', 'mecanica'],    cpf: '777.777.777-77', email: 'duo.p@x.invalid' }, // DUO: elegível nos dois lados
+  DUR:  { n: 12, tipo: 'reparador', esp: ['mecanica', 'construtor'], cpf: '77777777777',   email: 'duo.r@x.invalid' }, // DUO: idem
   IP:   { n: 13, tipo: 'pintor',    esp: ['pintor'],   cpf: '666.666.666-66', email: 'inat@x.invalid' },
   IR:   { n: 14, tipo: 'reparador', esp: ['eletrica'], cpf: '666.666.666-66', email: 'inat@x.invalid', inativa: true }, // irmã DESATIVADA
   ADM:  { n: 15, role: 'admin', cpf: null, email: 'adm@x.invalid' },
@@ -154,7 +154,7 @@ const main = async () => {
   ok(/inválida/.test(v.erro || ''), 'pintor: slug fora das duas listas continua recusado', v)
   v = esp.validarEspecialidades(['pintor'], true, null)
   ok(/inválida/.test(v.erro || ''), 'tipo NULL: lista de sempre (slug de obra recusado)', v)
-  ok(esp.ESPECIALIDADES_REPARADOR.length === 59 && esp.ESPECIALIDADES_OBRA.length === 4, 'listas de base intactas (59 serviços, 4 de obra)')
+  ok(esp.ESPECIALIDADES_REPARADOR.length === 62 && esp.ESPECIALIDADES_OBRA.length === 4, 'listas de base intactas (62 serviços, 4 de obra)')
   const P = (tipo, e, role = 'prestador') => ({ role, tipo_prestador: tipo, especialidades: e })
   ok(cap.podeServicos(P('reparador', ['eletrica'])) && cap.podeServicos(P('reparador', ['pintor'])) && cap.podeServicos(P('reparador', null)),
      'podeServicos: reparador sempre (mesmo só com especialidade de obra ou sem lista)')
@@ -314,11 +314,11 @@ const main = async () => {
   // anterior, fora do escopo; o que a Fase 2b muda aqui é o pintor PS entrar.
   ok(igual(para(), [PR, EST, SR, PS, IR].map(c => tok(c.id))),
      'push NOVO SERVIÇO (elétrica): reparadores que casam + PINTOR com "eletrica" (PS); pintor sem serviço e tipo NULL NÃO', para())
-  await reparo(D(3), 'Vazamento', 'hidraulica')
+  await reparo(D(3), 'Vazamento', 'mecanica')
   await obra(D(4), 'Pintura do muro')
   silenciar(true)
   pushes.length = 0
-  await alerta.notificarPrestadoresSobreNovoReparo(D(3))     // 'hidraulica': DUP (pintor) e DUR (reparador) casam
+  await alerta.notificarPrestadoresSobreNovoReparo(D(3))     // 'mecanica': DUP (pintor) e DUR (reparador) casam
   const pushHidraulica = para()
   emails.length = 0
   await alerta.enviarEmailsNovaDemanda('reparos', D(3))

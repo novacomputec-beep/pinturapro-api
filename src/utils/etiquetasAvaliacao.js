@@ -37,21 +37,14 @@ const ETIQUETAS_POR_GRUPO = {
     2: ['Acabamento ruim', 'Desperdiçou material', 'Deixou sujeira'],
     1: ['Serviço mal feito', 'Abandonou a obra', 'Estragou material'],
   },
-  reparos_casa: { // Reparos da casa
+  reparos_casa: { // Consertos da casa (era "Reparos da casa"; absorveu "Elétrica e tecnologia" em 13/11/2026)
     5: ['Resolveu de vez', 'Serviço impecável', 'Deixou tudo limpo'],
     4: ['Resolveu o problema', 'Bom serviço', 'Organizado'],
     3: ['Resolveu em parte', 'Faltou capricho', 'Um pouco de sujeira'],
     2: ['Problema voltou', 'Serviço mal feito', 'Deixou sujeira'],
     1: ['Não resolveu', 'Piorou o problema', 'Estragou algo'],
   },
-  eletrica_tec: { // Elétrica e tecnologia
-    5: ['Resolveu de vez', 'Serviço muito seguro', 'Super organizado'],
-    4: ['Resolveu o problema', 'Serviço seguro', 'Organizado'],
-    3: ['Resolveu em parte', 'Faltou capricho', 'Pouco organizado'],
-    2: ['Problema voltou', 'Serviço inseguro', 'Desorganizado'],
-    1: ['Não resolveu', 'Serviço perigoso', 'Estragou algo'],
-  },
-  limpeza: { // Limpeza e cuidados da casa
+  limpeza: { // Limpeza e jardim (era "Limpeza e cuidados da casa")
     5: ['Ficou impecável', 'Muito caprichoso', 'Super atencioso'],
     4: ['Ficou limpo', 'Caprichoso', 'Atencioso'],
     3: ['Limpeza básica', 'Faltou capricho', 'Esqueceu partes'],
@@ -106,6 +99,13 @@ const ETIQUETAS_POR_GRUPO = {
     3: ['Ficou razoável', 'Faltou capricho', 'Acabamento simples'],
     2: ['Não ficou como pedi', 'Fora do combinado', 'Acabamento ruim'],
     1: ['Ficou muito ruim', 'Nada do combinado', 'Estragou o material'],
+  },
+  divulgacao: { // Divulgação e publicidade (13/11/2026) — o mesmo conjunto de Digital e aulas (o mais próximo)
+    5: ['Superou expectativas', 'Muito didático', 'Muito criativo'],
+    4: ['Entregou bem', 'Didático', 'Criativo'],
+    3: ['Entrega razoável', 'Pouco claro', 'Pouco criativo'],
+    2: ['Entregou mal', 'Confuso', 'Fora do combinado'],
+    1: ['Não entregou', 'Muito confuso', 'Nada do combinado'],
   },
 }
 
