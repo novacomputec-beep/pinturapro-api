@@ -1677,7 +1677,12 @@ const semSobreposicao = (nome, fn) => async (...args) => {
     return
   }
   jobsEmExecucao.add(nome)
-  try { return await fn(...args) } finally { jobsEmExecucao.delete(nome) }
+  // Caixa-preta (utils/auditoriaDemanda): o job se identifica pelo nome, salvo quando chamado de
+  // dentro de uma rota (aí vale a rota).
+  const auditoria = require('../utils/auditoriaDemanda')
+  const ctx = auditoria.contextoAtual()
+  const rodar = () => fn(...args)
+  try { return await (ctx && ctx.origem === 'rota' ? rodar() : auditoria.comOrigem({ origem: 'job', rota: nome }, rodar)) } finally { jobsEmExecucao.delete(nome) }
 }
 
 // Lembretes "ainda aberto" — racional, cadência, mensagens e predicados em LADOS_LEMBRETE /

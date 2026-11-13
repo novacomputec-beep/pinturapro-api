@@ -33,6 +33,10 @@ const pool = new Pool({
   idle_in_transaction_session_timeout: 30000
 })
 
+// Caixa-preta dos pedidos (utils/auditoriaDemanda): todo UPDATE em reparos/obras/interesses leva
+// a origem (rota/job) na própria transação, para o trigger de eventos_demanda gravar quem mudou.
+require('./auditoriaDemanda').instrumentarPool(pool)
+
 pool.on('error', (err) => {
   console.error('Erro inesperado no pool do PostgreSQL:', err.message)
 })

@@ -162,7 +162,7 @@ const jwt = require('jsonwebtoken')
 const speakeasy = require('speakeasy')
 
 // One-time column migrations — single transaction so all columns land atomically or none do
-const migracaoPronta = (async () => {
+const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 'boot', rota: 'migracao' }, async () => {
   // pool.connect() dentro do try: erro de conexão (ex.: DB inacessível) é logado
   // em vez de virar unhandled rejection que derruba o processo (crash-loop / 502).
   let client
@@ -1852,6 +1852,19 @@ const migracaoPronta = (async () => {
     await client.query(SQL_CRIAR_TABELA_DICAS)
     await client.query(`CREATE INDEX IF NOT EXISTS dicas_lado_ativo_idx ON dicas (lado, tema_ordem, ordem) WHERE ativo`)
     await seedDicas(client)
+    // Caixa-preta dos pedidos (utils/auditoriaDemanda): eventos_demanda + triggers AFTER UPDATE em
+    // reparos/obras/interesse_reparos/candidaturas. Por último: o WHEN dos triggers lê colunas
+    // (cancelamento_pedido_*, status_aprovacao…) criadas acima.
+    // SAVEPOINT: falha aqui (permissão, versão do Postgres) só desliga a caixa-preta e é logada —
+    // nunca derruba a migração inteira nem impede o servidor de subir.
+    await client.query('SAVEPOINT caixa_preta')
+    try {
+      await require('../utils/auditoriaDemanda').migrarEventosDemanda(client)
+      await client.query('RELEASE SAVEPOINT caixa_preta')
+    } catch (err) {
+      await client.query('ROLLBACK TO SAVEPOINT caixa_preta')
+      console.error('[migration] caixa-preta (eventos_demanda) NÃO instalada:', err.message)
+    }
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -1861,7 +1874,7 @@ const migracaoPronta = (async () => {
   } finally {
     if (client) client.release()
   }
-})()
+})
 
 // Limpa os caches em memória de um usuário. cachePrestadores, que vivia AQUI e guardava a
 // mesma resposta de cacheAssinaturas (mesma consulta, mesmo predicado), foi removido — havia
@@ -10420,6 +10433,42 @@ router.get('/admin/crescimento', autenticar, exigirAdmin, async (req, res) => {
 })
 
 // ── "WhatsApp em 1 clique" (admin) ──────────────────────────────────────────────────────────
+// GET /admin/demandas/:codigo/linha-do-tempo[?tabela=reparos|obras] — só o admin principal.
+// Caixa-preta (utils/auditoriaDemanda): os eventos de eventos_demanda do pedido (código público ou
+// id), em ordem, com o nome de quem fez (usuario_id do token na rota) e, nos eventos de interesse
+// (campo 'interesse:<id>:status'), o nome do profissional. origem: rota | job | boot | desconhecida.
+router.get('/admin/demandas/:codigo/linha-do-tempo', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const cod = String(req.params.codigo || '').trim()
+    if (!cod || cod.length > 64) return res.status(404).json({ erro: 'Pedido não encontrado' })
+    const so = ['reparos', 'obras'].includes(req.query.tabela) ? req.query.tabela : null
+    const achados = (await pool.query(
+      `SELECT * FROM (
+         SELECT 'reparos' AS tabela, id, codigo_publico, titulo, status, criado_por, 1 AS ordem FROM reparos WHERE upper(codigo_publico) = upper($1) OR id::text = lower($1)
+         UNION ALL
+         SELECT 'obras', id, codigo_publico, titulo, status, criado_por, 2 FROM obras WHERE upper(codigo_publico) = upper($1) OR id::text = lower($1)
+       ) d WHERE $2::text IS NULL OR d.tabela = $2 ORDER BY ordem`, [cod, so])).rows
+    if (achados.length === 0) return res.status(404).json({ erro: 'Pedido não encontrado' })
+    const d = achados[0]
+    const eventos = (await pool.query(
+      `SELECT e.id, e.campo, e.valor_antes, e.valor_depois, e.origem, e.rota, e.usuario_id, u.nome AS usuario_nome, e.criado_em,
+              CASE WHEN e.campo LIKE 'interesse:%' THEN split_part(e.campo, ':', 2) END AS profissional_id, p.nome AS profissional_nome
+         FROM eventos_demanda e
+         LEFT JOIN usuarios u ON u.id = e.usuario_id
+         LEFT JOIN usuarios p ON e.campo LIKE 'interesse:%' AND p.id::text = split_part(e.campo, ':', 2)
+        WHERE e.tabela = $1 AND e.demanda_id = $2
+        ORDER BY e.criado_em, e.id`, [d.tabela, d.id])).rows
+    res.json({
+      demanda: { tabela: d.tabela, id: d.id, codigo: d.codigo_publico, titulo: d.titulo, status: d.status, criado_por: d.criado_por },
+      ...(achados.length > 1 ? { tambem_em: achados.slice(1).map(x => ({ tabela: x.tabela, id: x.id })) } : {}),
+      eventos,
+    })
+  } catch (err) {
+    console.error('[admin/linha-do-tempo]', err.message)
+    res.status(500).json({ erro: 'Erro ao carregar a linha do tempo' })
+  }
+})
+
 // GET /admin/whatsapp-lista?role=prestador|dono_obra&especialidade=<slug>&cidade=<nome>&uf=<UF>
 //                          &apenas_ativos=true&campanha=<texto>
 // Todos os filtros opcionais; sem role vêm as duas. cidade compara dobrada (acento/caixa), uf
