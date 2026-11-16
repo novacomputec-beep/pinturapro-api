@@ -36,6 +36,8 @@ const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaCon
 const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQL_LIMPAR_MATCH,
         desfazerMatchesPorExclusao, avisarMatchesDesfeitosPorExclusao,
         pedidoCancelamentoParaApp, semColunasPedidoCancelamentoParaApp } = require('../services/cancelamentoMatchService')
+// "Liberar WhatsApp" (arte "Ela chegou? v2"): o dono libera o próprio número ao escolhido antes do "Estou a caminho".
+const { handler: liberarWhatsappHandler, whatsappLiberado, migrarWhatsappLiberado } = require('../services/liberarWhatsappService')
 // Propostas rebaixadas pelo match voltam a valer quando a demanda retorna ao feed (regra única).
 const { sqlRestaurarPropostas, SQL_MARCAR_REABERTURA } = require('../utils/reaberturaMatch')
 // Exclusão de conta: registro em contas_excluidas (utils/contasExcluidas).
@@ -735,6 +737,8 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     // "Valor a combinar" (utils/valorDemanda): coluna valor_a_combinar nas duas tabelas, valor passa
     // a aceitar NULL e a correção ÚNICA dos pedidos abertos com valor <= 1,00.
     const valoresACombinar = await migrarValorACombinar(client)
+    // "Liberar WhatsApp" (services/liberarWhatsappService): whatsapp_liberado_em / _para em reparos e obras.
+    await migrarWhatsappLiberado(client)
     for (const v of valoresACombinar) console.log(`[migration] valor a combinar: ${v.tabela} ${v.id} "${v.titulo}" (valor era ${v.valor_antes})`)
     // Instante em que o push "nova obra/novo serviço disponível" foi disparado. NULL = ainda
     // não avisado. Escrito UMA vez pelo claim atômico de POST /:id/midias-prontas (o app
@@ -3888,6 +3892,8 @@ for (const tabela of ['obras', 'reparos']) {
   router.post(`/${tabela}/:id/cancelar-match`, autenticar, h.cancelar)
   router.post(`/${tabela}/:id/cancelamento-acordo`, autenticar, h.pedirAcordo)
   router.post(`/${tabela}/:id/cancelamento-acordo/responder`, autenticar, h.responderAcordo)
+  // "Liberar WhatsApp" (services/liberarWhatsappService): SÓ o dono, com profissional escolhido e antes da conclusão.
+  router.post(`/${tabela}/:id/liberar-whatsapp`, autenticar, liberarWhatsappHandler(tabela))
   // Mensagens prontas (services/mensagensProntasService): catálogo da fase + histórico, e o envio
   // por frase_id (sem texto livre). Só o dono (qualquer conta da pessoa) e o profissional escolhido.
   const mp = mensagensProntasHandlers(tabela)
@@ -4020,7 +4026,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       const dono = await pool.query(`SELECT nome, foto_url, telefone FROM usuarios WHERE id = $1`, [obra.criado_por])
       dono_nome = nomeCurto(dono.rows[0]?.nome)
       dono_foto_url = fotoOtimizada(dono.rows[0]?.foto_url)
-      if (obra.a_caminho_em) dono_telefone = dono.rows[0]?.telefone || null
+      // …ou depois de o dono LIBERAR o WhatsApp para este match (liberarWhatsappService).
+      if (obra.a_caminho_em || whatsappLiberado(obra)) dono_telefone = dono.rows[0]?.telefone || null
     }
 
     // Local exato (endereco_obra, ponto_referencia, coordenadas exatas) só para dono, admin e o
@@ -4069,7 +4076,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
     // encerramento_automatico_em: quando o cron fecha sozinho a solicitação pendente do pintor
     // (solicitado_em + 2 dias — alertaService.encerramentoAutomaticoEm); null sem solicitação.
-    res.json({ obra, ...(await identidadeNaDemanda(req, obra, ehDono)), midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, pode_escolher_outro, motivo_escolher_outro, desistencias, interessados_ativos, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
+    res.json({ obra, ...(await identidadeNaDemanda(req, obra, ehDono)), whatsapp_liberado: (ehDono || ehPintorDoMatch) ? whatsappLiberado(obra) : null, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, pode_escolher_outro, motivo_escolher_outro, desistencias, interessados_ativos, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -6731,6 +6738,11 @@ const criarHandlerConfirmarComparecimento = (tabela) => async (req, res) => {
         `UPDATE ${tabela} SET
            chegada_janela = NULL, chegada_prevista_em = NULL,
            chegada_pendente_janela = NULL, chegada_pendente_em = NULL,
+           -- "Ela chegou? v2": o dono diz que combinaram OUTRO horário — some também a chegada que o
+           -- profissional tenha declarado para o horário antigo (a confirmada é NULL pelo guard).
+           chegada_declarada_por = NULL, chegada_declarada_em = NULL,
+           -- chegada_recusada_em é a ISENÇÃO (utils/agendamento.SQL_ISENCAO_FALTA): sem falta nem
+           -- bloqueio para o profissional por este horário; o dono também não leva marca.
            chegada_recusada_em = NOW(),
            notif_5min_enviada = false,
            ${SQL_ZERAR_AGENDA},
@@ -6761,7 +6773,8 @@ const criarHandlerConfirmarComparecimento = (tabela) => async (req, res) => {
     if (resposta === 'sim') {
       avisarProf('✅ Chegada confirmada!', `O solicitante confirmou sua chegada em "${d.titulo}".`, 'chegada_confirmada')
     } else {
-      avisarProf('📅 O cliente pediu para remarcar', `Proponha um novo horário para "${d.titulo}" no app.`, 'chegada_remarcar')
+      // Texto neutro (arte "Ela chegou? v2"): ninguém errou — os dois vão combinar outro dia e hora.
+      avisarProf('🕐 Novo horário', `O cliente pediu para combinar outro dia e hora para "${d.titulo}".`, 'chegada_remarcar')
     }
   } catch (err) {
     console.error(`[${tabela}/confirmar-comparecimento]`, err.message)
@@ -6877,7 +6890,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       const dono = await pool.query(`SELECT nome, foto_url, telefone FROM usuarios WHERE id = $1`, [reparo.criado_por])
       dono_nome = nomeCurto(dono.rows[0]?.nome)
       dono_foto_url = fotoOtimizada(dono.rows[0]?.foto_url)
-      if (reparo.a_caminho_em) dono_telefone = dono.rows[0]?.telefone || null
+      // …ou depois de o dono LIBERAR o WhatsApp para este match (liberarWhatsappService).
+      if (reparo.a_caminho_em || whatsappLiberado(reparo)) dono_telefone = dono.rows[0]?.telefone || null
     }
 
     // Local exato (endereco_reparo, ponto_referencia, coordenadas exatas) só para dono, admin e o
@@ -6921,7 +6935,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     const desistencias = ehDono ? await listarDesistencias('reparos', req.params.id) : null
     const interessados_ativos = ehDono ? await contarInteressadosAtivos('reparos', req.params.id) : null
     // PALIATIVO app 1.2.2/1.2.3: as colunas do pedido de acordo não vão ao app (ninguém abaixo as lê).
-    semColunasPedidoCancelamentoParaApp('reparos', reparo)
+    semColunasPedidoCancelamentoParaApp('reparos', reparo, req)
     res.json({
       reparo,
       // conta_id / sou_escolhido / sou_dono — identidade por pessoa (identidadeNaDemanda).
@@ -6932,8 +6946,10 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       desistencias,
       interessados_ativos,
       // Pedido de acordo de cancelamento vigente (quem, motivo, expira_em) — só dono e prestador do match.
-      // PALIATIVO app 1.2.2/1.2.3 (cancelamentoMatchService): sai null, e o reparo sem cancelamento_pedido_*.
-      pedido_cancelamento: pedidoCancelamentoParaApp('reparos', reparo, req.usuario.id, ehDono),
+      // PALIATIVO app < 1.2.4 (cancelamentoMatchService, por X-App-Version): sai null, e o reparo sem cancelamento_pedido_*.
+      pedido_cancelamento: pedidoCancelamentoParaApp('reparos', reparo, req.usuario.id, ehDono, req),
+      // O dono liberou o WhatsApp para ESTE match (liberarWhatsappService)? Só dono e escolhido; null para os demais.
+      whatsapp_liberado: (ehDono || ehPrestadorDoMatch) ? whatsappLiberado(reparo) : null,
       // A partir de quando o dono pode desfazer a escolha (POST /reparos/dono/:id/desfazer-match).
       desfazer_liberado_em,
       // Lembretes "Agende seu atendimento" já enviados ao prestador deste match e o próximo devido.

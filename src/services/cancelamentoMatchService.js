@@ -28,6 +28,7 @@
 // é limpo pelo cron expirarPedidosCancelamento (server.js, 5 min) avisando quem pediu. O pedido
 // pendente sai em GET /:id como pedido_cancelamento (pedidoCancelamento).
 const { pool } = require('../utils/supabase')
+const { normalizarVersao, compararVersoes } = require('../utils/versaoApp')
 const { SQL_ZERAR_AGENDA, formatarDataHoraSP } = require('../utils/agendamento')
 const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunciarDemanda, contatoDaPessoa, avisarPedidoCanceladoPeloDono } = require('./alertaService')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
@@ -353,14 +354,25 @@ const avisarMatchesDesfeitosPorExclusao = async (efeitos) => {
 // reparo (GET /reparos/:id e POST /reparos/:id/cancelar-match?simular=1). O banco, o job de
 // expiração, o painel e os avisos (push/e-mail) seguem iguais; OBRAS não mudam.
 // Para desligar: OCULTAR_PEDIDO_CANCELAMENTO_NO_APP.reparos = false.
+// POR VERSÃO (16/11/2026): o app corrigido é o 1.2.4. Só some para quem está ABAIXO dele — a
+// versão vem do cabeçalho X-App-Version que o app já manda (utils/versaoApp); sem cabeçalho, ou
+// com valor que não é versão, trata como app antigo (esconde).
 const OCULTAR_PEDIDO_CANCELAMENTO_NO_APP = { reparos: true, obras: false }
+const VERSAO_APP_COM_PEDIDO_CANCELAMENTO = '1.2.4'
+const appAntigoParaPedidoCancelamento = (req) => {
+  let bruto = null
+  try { bruto = typeof req?.get === 'function' ? req.get('x-app-version') : (req?.headers?.['x-app-version'] ?? null) } catch { bruto = null }
+  const versao = normalizarVersao(bruto)
+  return !versao || compararVersoes(versao, VERSAO_APP_COM_PEDIDO_CANCELAMENTO) < 0
+}
+const ocultarPedidoCancelamento = (tabela, req) => !!OCULTAR_PEDIDO_CANCELAMENTO_NO_APP[tabela] && appAntigoParaPedidoCancelamento(req)
 const COLUNAS_PEDIDO_CANCELAMENTO = ['cancelamento_pedido_por', 'cancelamento_pedido_motivo', 'cancelamento_pedido_detalhe', 'cancelamento_pedido_em', 'cancelamento_pedido_expira_em']
 // pedido_cancelamento como o APP deve receber (null enquanto o paliativo vale para a tabela).
-const pedidoCancelamentoParaApp = (tabela, linha, leitorId, ehDono) =>
-  (OCULTAR_PEDIDO_CANCELAMENTO_NO_APP[tabela] ? null : pedidoCancelamento(linha, leitorId, ehDono))
+const pedidoCancelamentoParaApp = (tabela, linha, leitorId, ehDono, req) =>
+  (ocultarPedidoCancelamento(tabela, req) ? null : pedidoCancelamento(linha, leitorId, ehDono))
 // Tira as colunas do pedido da LINHA que vai ao app (no lugar). Chamar DEPOIS de tudo que as lê.
-const semColunasPedidoCancelamentoParaApp = (tabela, linha) => {
-  if (linha && OCULTAR_PEDIDO_CANCELAMENTO_NO_APP[tabela]) for (const c of COLUNAS_PEDIDO_CANCELAMENTO) delete linha[c]
+const semColunasPedidoCancelamentoParaApp = (tabela, linha, req) => {
+  if (linha && ocultarPedidoCancelamento(tabela, req)) for (const c of COLUNAS_PEDIDO_CANCELAMENTO) delete linha[c]
   return linha
 }
 
@@ -378,7 +390,7 @@ const handlers = (tabela) => {
       const classe = classificar(d)
       const simular = ['1', 'true'].includes(String(req.query.simular || '').toLowerCase())
       if (simular) {
-        return res.json({ ...classe, papel, falta: classe.tipo === 'tardio', horario_texto: classe.horario ? formatarDataHoraSP(classe.horario) : null, pedido_cancelamento: pedidoCancelamentoParaApp(tabela, d, req.usuario.id) })
+        return res.json({ ...classe, papel, falta: classe.tipo === 'tardio', horario_texto: classe.horario ? formatarDataHoraSP(classe.horario) : null, pedido_cancelamento: pedidoCancelamentoParaApp(tabela, d, req.usuario.id, undefined, req) })
       }
       const lido = lerMotivo(req.body)
       if (lido.erro) return res.status(400).json({ erro: lido.erro })
@@ -569,6 +581,7 @@ module.exports = {
   MOTIVOS, ROTULO_MOTIVO, ANTECEDENCIA_LIVRE_HORAS, ANTECEDENCIA_LIVRE_FAIXA_CURTA_HORAS, FAIXA_CURTA_HORAS,
   ACORDO_VALIDADE_HORAS, JANELA_CANCELAMENTOS_DIAS, AVISO_CANCELAMENTOS_N, SQL_LIMPAR_MATCH,
   classificar, pedidoCancelamento, handlers,
-  pedidoCancelamentoParaApp, semColunasPedidoCancelamentoParaApp, OCULTAR_PEDIDO_CANCELAMENTO_NO_APP, COLUNAS_PEDIDO_CANCELAMENTO, expirarPedidosCancelamento, cancelarPorAdmin,
+  pedidoCancelamentoParaApp, semColunasPedidoCancelamentoParaApp, OCULTAR_PEDIDO_CANCELAMENTO_NO_APP, COLUNAS_PEDIDO_CANCELAMENTO,
+  VERSAO_APP_COM_PEDIDO_CANCELAMENTO, appAntigoParaPedidoCancelamento, expirarPedidosCancelamento, cancelarPorAdmin,
   MOTIVO_CONTA_EXCLUIDA, desfazerMatchesPorExclusao, avisarMatchesDesfeitosPorExclusao,
 }

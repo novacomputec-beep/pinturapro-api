@@ -59,13 +59,13 @@ const handler = (metodo, caminho) => {
   return layer.route.stack[layer.route.stack.length - 1].handle
 }
 // Como o Express: middleware do router → handler final; o corpo passa por JSON como na rede.
-const chamar = async (metodo, padrao, { usuario, params = {}, query = {}, body = {} } = {}) => {
+const chamar = async (metodo, padrao, { usuario, params = {}, query = {}, body = {}, versao = '' } = {}) => {
   silenciar(true)
   try {
     return await new Promise(resolve => {
       const caminho = padrao.replace(/:([A-Za-z_]+)/g, (_, k) => params[k])
       const res = { statusCode: 200, set() { return this }, status(c) { this.statusCode = c; return this }, json(b) { resolve({ status: this.statusCode, body: JSON.parse(JSON.stringify(b)) }) } }
-      const req = { method: metodo.toUpperCase(), path: caminho, params, query, body, usuario, get: () => '', headers: {}, ip: '127.0.0.1' }
+      const req = { method: metodo.toUpperCase(), path: caminho, params, query, body, usuario, get: (h) => (String(h).toLowerCase() === 'x-app-version' ? versao : ''), headers: {}, ip: '127.0.0.1' }
       mw(req, res, () => Promise.resolve(handler(metodo, padrao)(req, res)).catch(e => resolve({ status: 599, body: { erro: String(e.message) } })))
     })
   } finally { await assentar(); silenciar(false) }
@@ -138,6 +138,22 @@ const main = async () => {
   const b1 = await noBanco('reparos', R1)
   ok(b1.cancelamento_pedido_por === REP.id && b1.cancelamento_pedido_motivo === 'outro' && b1.cancelamento_pedido_em !== null && b1.match_usuario_id === REP.id,
     'banco: o pedido de acordo continua gravado e o match de pé depois das leituras e da simulação', b1)
+
+  // ── POR VERSÃO (X-App-Version): só some para app < 1.2.4; sem cabeçalho ou lixo = app antigo ──
+  ok(C.VERSAO_APP_COM_PEDIDO_CANCELAMENTO === '1.2.4', 'versão do app com a correção: 1.2.4')
+  for (const [versao, esconde] of [['', true], ['1.2.2', true], ['1.2.3', true], ['1.2.3.9', true], ['abc', true], ['1.2.4', false], ['1.2.10', false], ['1.3.0', false], ['2.0', false]]) {
+    const d = await chamar('get', '/reparos/:id', { usuario: DONO, params: { id: R1 }, versao })
+    const s2 = await chamar('post', '/reparos/:id/cancelar-match', { usuario: DONO, params: { id: R1 }, query: { simular: '1' }, versao })
+    if (esconde) {
+      ok(d.body.pedido_cancelamento === null && vazamentos(d.body).length === 0 && s2.body.pedido_cancelamento === null, `versão "${versao}": detalhe e simulação SEM o pedido`, { d: vazamentos(d.body), s: s2.body.pedido_cancelamento })
+    } else {
+      ok(d.body.pedido_cancelamento?.por === 'profissional' && d.body.pedido_cancelamento?.motivo === 'outro' && d.body.reparo?.cancelamento_pedido_por === REP.id && d.body.reparo?.cancelamento_pedido_em != null,
+        `versão "${versao}": detalhe COM pedido_cancelamento e as colunas no reparo`, d.body.pedido_cancelamento)
+      ok(s2.body.pedido_cancelamento?.por === 'profissional', `versão "${versao}": simulação COM pedido_cancelamento`, s2.body.pedido_cancelamento)
+    }
+  }
+  const profNovo = await chamar('get', '/reparos/:id', { usuario: REP, params: { id: R1 }, versao: '1.2.4' })
+  ok(profNovo.body.pedido_cancelamento?.meu === true, 'versão 1.2.4, profissional: vê o próprio pedido (meu: true)', profNovo.body.pedido_cancelamento)
 
   // ── O pedido continua VALENDO: novo pedido é barrado; o dono responde; o job expira ──
   const dup = await chamar('post', '/reparos/:id/cancelamento-acordo', { usuario: DONO, params: { id: R1 }, body: { motivo: 'outro', detalhe: 'x' } })
