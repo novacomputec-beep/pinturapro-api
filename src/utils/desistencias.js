@@ -8,7 +8,7 @@
 // interessados_ativos: quem ainda está na disputa ('pendente' ou 'contraproposta_dono').
 // desistenciaRecentePorDemanda: a desistência MAIS RECENTE de cada demanda de uma lista (GET
 // /reparos/minhas e /obras/minhas), numa consulta só (DISTINCT ON), no formato resumido
-// { id, nome, foto_url, cancelado_em, motivo_texto, acordo }; o chamador só a expõe nas demandas
+// { id, nome, foto_url, cancelado_em, motivo, motivo_texto, acordo }; o chamador só a expõe nas demandas
 // SEM profissional escolhido.
 //
 // CONTA EXCLUÍDA (dono, 11/11/2026): quando a conta do profissional ESCOLHIDO é apagada, a cascata
@@ -118,10 +118,12 @@ const listarDesistencias = async (tabela, demandaId, db = pool) => {
   }))
 }
 
-// Resumo de um item para a lista (sem usuario_id, motivo cru nem detalhe).
+// Resumo de um item para a lista (sem usuario_id nem detalhe). motivo = a chave crua ('imprevisto',
+// 'conta_excluida', 'atraso_chegada', …): é por ela que o app escolhe a folha certa na lista
+// (16/11/2026 — antes só vinha motivo_texto, e 'atraso_chegada' não tinha como ser reconhecido).
 const resumo = (x) => ({
   id: x.id, nome: primeiroNome(x.nome), foto_url: fotoOtimizada(x.foto_url),
-  cancelado_em: x.cancelado_em, motivo_texto: rotuloMotivo(x.cancelado_motivo, x.genero), acordo: !!x.cancelado_acordo,
+  cancelado_em: x.cancelado_em, motivo: x.cancelado_motivo || null, motivo_texto: rotuloMotivo(x.cancelado_motivo, x.genero), acordo: !!x.cancelado_acordo,
 })
 // { [demandaId]: resumo } só para as demandas que têm desistência; `ids` vazio → {}.
 const desistenciaRecentePorDemanda = async (tabela, ids, db = pool) => {
