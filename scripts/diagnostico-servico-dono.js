@@ -4,21 +4,23 @@
 // tirou de aberto/agendado: a linha inteira do reparo, os interesses (status, status_antes_match,
 // cancelado_*), desistencias, eventos_responsabilidade, push_recibos, lembretes_push_enviados,
 // email_alertas e contas_excluidas dos interessados. Não escreve nada.
-//   DATABASE_URL lido de um arquivo .env (nunca impresso):
-//   node scripts/diagnostico-servico-dono.js <arquivo .env> "<nome do dono>" <categoria> [AAAA-MM-DD]
+//   DATABASE_URL vem da variável de ambiente (túnel: scripts/db-tunnel.md) — nunca impresso:
+//   node scripts/diagnostico-servico-dono.js "<nome do dono>" <categoria> [AAAA-MM-DD]
+//   Uso antigo, ainda aceito sem a variável: um arquivo .env como 1º argumento.
 const fs = require('fs')
-const { Pool } = require('pg')
+const { criarPoolLeitura } = require('./db-leitura')
 
-const [, , arqEnv, nome, categoria, dia = new Date().toISOString().slice(0, 10)] = process.argv
-if (!arqEnv || !nome || !categoria) { console.error('uso: <arquivo .env> "<nome do dono>" <categoria> [AAAA-MM-DD]'); process.exit(2) }
-const url = (fs.readFileSync(arqEnv, 'utf8').match(/^DATABASE_URL\s*=\s*"?([^"\r\n]+)"?/m) || [])[1]
-if (!url) { console.error('DATABASE_URL ausente no arquivo'); process.exit(2) }
+const args = process.argv.slice(2)
+// 1º argumento é um arquivo existente → uso antigo (<arquivo .env> antes do nome).
+const arqEnv = args[0] && fs.existsSync(args[0]) && fs.statSync(args[0]).isFile() ? args.shift() : null
+const [nome, categoria, dia = new Date().toISOString().slice(0, 10)] = args
+if (!nome || !categoria) { console.error('uso: [arquivo .env] "<nome do dono>" <categoria> [AAAA-MM-DD]'); process.exit(2) }
 
 const CPF = (a) => `NULLIF(regexp_replace(COALESCE(${a}.cpf_cnpj, ''), '[^0-9]', '', 'g'), '')`
 const mostrar = (rotulo, rows) => { console.log(`\n== ${rotulo} (${rows.length})`); for (const r of rows) console.log(JSON.stringify(r)) }
 
 const main = async () => {
-  const pool = new Pool({ connectionString: url, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 20000 })
+  const pool = criarPoolLeitura(process.env.DATABASE_URL ? null : arqEnv)
   const c = await pool.connect()
   try {
     await c.query('BEGIN TRANSACTION READ ONLY')
