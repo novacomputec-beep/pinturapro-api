@@ -34,7 +34,10 @@ const GRUPOS_RELACIONADOS = {
   'Cuidado':                      ['baba', 'cuidador', 'pet'],
   'Transporte':                   ['motorista', 'motociclista', 'mudancas', 'mecanica', 'lavajato', 'borracheiro'],
   'Segurança':                    ['vigia', 'seguranca'],
-  'Digital e aulas':              ['profissional_home_office', 'aula_particular', 'personal_trainer', 'tradutor', 'informatica'],
+  // "Digital e aulas" virou "Escritório e aulas" (dono, 16/11/2026) e ganhou contabilidade; a CHAVE
+  // continua digital_aulas (etiquetas de avaliação, /admin/crescimento-nichos) — só o rótulo mudou.
+  'Escritório e aulas':           ['profissional_home_office', 'aula_particular', 'personal_trainer', 'tradutor', 'informatica',
+                                   'contabilidade'],
   'Arte e criação':               ['artesanato', 'costura', 'tatuagem'],
   'Divulgação e publicidade':     ['locucao', 'jingles_vinhetas', 'marketing_publicidade', 'social_midia', 'panfletagem',
                                    'placas_fachadas', 'editor_video'],
@@ -48,7 +51,7 @@ const CHAVE_DO_GRUPO = {
   'Consertos da casa': 'reparos_casa', 'Limpeza e jardim': 'limpeza',
   'Beleza': 'beleza', 'Festas e eventos': 'festas',
   'Cuidado': 'cuidado', 'Transporte': 'transporte', 'Segurança': 'seguranca',
-  'Digital e aulas': 'digital_aulas', 'Arte e criação': 'arte', 'Divulgação e publicidade': 'divulgacao',
+  'Escritório e aulas': 'digital_aulas', 'Arte e criação': 'arte', 'Divulgação e publicidade': 'divulgacao',
 }
 
 // slug → lista do seu grupo (ele incluído). Montado uma vez; slug sem grupo não está no mapa.

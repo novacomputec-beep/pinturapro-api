@@ -31,6 +31,7 @@ const ESPECIALIDADES_REPARADOR = [
   'informatica', 'gesseiro', 'placas_fachadas',
   'borracheiro', 'seguranca_eletronica',
   'locucao', 'jingles_vinhetas', 'marketing_publicidade',
+  'contabilidade',
   'outros',
 ]
 

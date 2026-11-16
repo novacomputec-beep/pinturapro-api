@@ -20,7 +20,9 @@ let falhas = 0
 const ok = (c, rot, extra) => { if (!c) falhas++; console.log(`${c ? 'OK  ' : 'FAIL'} ${rot}${extra !== undefined ? ' | ' + JSON.stringify(extra) : ''}`) }
 
 const NOVAS = {
-  informatica:     { rotulo: 'Informática',       emoji: '🖥️', grupo: 'Digital e aulas',       chave: 'digital_aulas', irmao: 'aula_particular' },
+  informatica:     { rotulo: 'Informática',       emoji: '🖥️', grupo: 'Escritório e aulas',    chave: 'digital_aulas', irmao: 'aula_particular' },
+  // Contabilidade (16/11/2026): entra no grupo que passou a se chamar "Escritório e aulas" (chave digital_aulas mantida).
+  contabilidade:   { rotulo: 'Contabilidade',     emoji: '🧾', grupo: 'Escritório e aulas',    chave: 'digital_aulas', irmao: 'informatica' },
   gesseiro:        { rotulo: 'Gesseiro',          emoji: '🪜', grupo: 'Consertos da casa',     chave: 'reparos_casa', irmao: 'alvenaria' },
   placas_fachadas: { rotulo: 'Placas e fachadas', emoji: '🪧', grupo: 'Divulgação e publicidade', chave: 'divulgacao', irmao: 'panfletagem' },
   borracheiro:     { rotulo: 'Borracheiro',       emoji: '🚙', grupo: 'Transporte',            chave: 'transporte',   irmao: 'mecanica' },
@@ -38,7 +40,7 @@ const GRUPOS_FINAIS = {
   'Cuidado': ['baba', 'cuidador', 'pet'],
   'Transporte': ['motorista', 'motociclista', 'mudancas', 'mecanica', 'lavajato', 'borracheiro'],
   'Segurança': ['vigia', 'seguranca'],
-  'Digital e aulas': ['profissional_home_office', 'aula_particular', 'personal_trainer', 'tradutor', 'informatica'],
+  'Escritório e aulas': ['profissional_home_office', 'aula_particular', 'personal_trainer', 'tradutor', 'informatica', 'contabilidade'],
   'Arte e criação': ['artesanato', 'costura', 'tatuagem'],
   'Divulgação e publicidade': ['locucao', 'jingles_vinhetas', 'marketing_publicidade', 'social_midia', 'panfletagem', 'placas_fachadas', 'editor_video'],
 }
@@ -52,13 +54,20 @@ const main = async () => {
 
   // ---- listas
   const slugsApp = C.CATEGORIAS_SERVICO.map(c => c.slug)
-  ok(E.ESPECIALIDADES_REPARADOR.length === 62 && slugsApp.length === 62 && JSON.stringify(E.ESPECIALIDADES_REPARADOR) === JSON.stringify(slugsApp),
-     'ESPECIALIDADES_REPARADOR e CATEGORIAS_SERVICO: 62 slugs, mesma ordem', { n: E.ESPECIALIDADES_REPARADOR.length })
-  ok(E.ESPECIALIDADES_REPARADOR.slice(-5).join() === 'seguranca_eletronica,locucao,jingles_vinhetas,marketing_publicidade,outros', "as novas entram antes de 'outros', na ordem em que chegaram", E.ESPECIALIDADES_REPARADOR.slice(-5))
-  ok(new Set(E.ESPECIALIDADES_REPARADOR).size === 62, 'nenhum slug repetido')
+  ok(E.ESPECIALIDADES_REPARADOR.length === 63 && slugsApp.length === 63 && JSON.stringify(E.ESPECIALIDADES_REPARADOR) === JSON.stringify(slugsApp),
+     'ESPECIALIDADES_REPARADOR e CATEGORIAS_SERVICO: 63 slugs, mesma ordem', { n: E.ESPECIALIDADES_REPARADOR.length })
+  ok(E.ESPECIALIDADES_REPARADOR.slice(-6).join() === 'seguranca_eletronica,locucao,jingles_vinhetas,marketing_publicidade,contabilidade,outros', "as novas entram antes de 'outros', na ordem em que chegaram", E.ESPECIALIDADES_REPARADOR.slice(-5))
+  ok(new Set(E.ESPECIALIDADES_REPARADOR).size === 63, 'nenhum slug repetido')
+  // Contabilidade + rótulo novo do grupo (16/11/2026): só o NOME muda; chave, etiquetas e os outros 9 grupos iguais.
+  ok(!('Digital e aulas' in G.GRUPOS_RELACIONADOS) && G.CHAVE_DO_GRUPO['Escritório e aulas'] === 'digital_aulas' && G.CHAVE_DO_SLUG.contabilidade === 'digital_aulas' && G.CHAVE_DO_SLUG.aula_particular === 'digital_aulas',
+     'grupo "Escritório e aulas": rótulo novo, chave digital_aulas mantida, contabilidade dentro')
+  const catContab = C.CATEGORIAS_SERVICO.find(c => c.slug === 'contabilidade')
+  ok(JSON.stringify(catContab?.palavras) === '["contador","imposto de renda","abertura de empresa","MEI"]', 'contabilidade: palavras de busca (contador, imposto de renda, abertura de empresa, MEI)', catContab)
+  ok((await G.expandirCategoria('contabilidade')).slice().sort().join() === 'aula_particular,contabilidade,informatica,personal_trainer,profissional_home_office,tradutor', 'pedido de contabilidade avisa o grupo Escritório e aulas e só ele', await G.expandirCategoria('contabilidade'))
+  ok(!(await G.expandirCategoria('marketing_publicidade')).includes('contabilidade') && !(await G.expandirCategoria('eletrica')).includes('contabilidade'), 'contabilidade não entra em Divulgação nem em Consertos')
   ok(JSON.stringify(G.GRUPOS_RELACIONADOS) === JSON.stringify(GRUPOS_FINAIS), 'os 10 grupos finais, exatamente (nomes, ordem e slugs)', Object.keys(G.GRUPOS_RELACIONADOS))
   ok(E.ESPECIALIDADES_REPARADOR.filter(s => s !== 'outros').every(s => Object.values(G.GRUPOS_RELACIONADOS).flat().includes(s)), "toda especialidade de serviço (menos 'outros') está em um grupo")
-  ok(JSON.stringify(G.CHAVE_DO_GRUPO) === JSON.stringify({ 'Consertos da casa': 'reparos_casa', 'Limpeza e jardim': 'limpeza', 'Beleza': 'beleza', 'Festas e eventos': 'festas', 'Cuidado': 'cuidado', 'Transporte': 'transporte', 'Segurança': 'seguranca', 'Digital e aulas': 'digital_aulas', 'Arte e criação': 'arte', 'Divulgação e publicidade': 'divulgacao' }),
+  ok(JSON.stringify(G.CHAVE_DO_GRUPO) === JSON.stringify({ 'Consertos da casa': 'reparos_casa', 'Limpeza e jardim': 'limpeza', 'Beleza': 'beleza', 'Festas e eventos': 'festas', 'Cuidado': 'cuidado', 'Transporte': 'transporte', 'Segurança': 'seguranca', 'Escritório e aulas': 'digital_aulas', 'Arte e criação': 'arte', 'Divulgação e publicidade': 'divulgacao' }),
      'chaves: Consertos herda reparos_casa, Limpeza e jardim herda limpeza, divulgacao nova, eletrica_tec some', G.CHAVE_DO_GRUPO)
   ok(!(await G.expandirCategoria('eletrica')).includes('informatica') && (await G.expandirCategoria('eletrica')).includes('hidraulica') && !(await G.expandirCategoria('faxina')).includes('eletrica'),
      'eletrica alcança hidráulica (Consertos), não informática nem faxina')
@@ -74,7 +83,13 @@ const main = async () => {
      'catálogo: elétrica/eletrônica/climatização/segurança eletrônica no grupo de etiquetas elétrico; Consertos com os outros 9', { ele: gEle.especialidades, cons: gCons.especialidades })
   ok(JSON.stringify(ET.ETIQUETAS_POR_GRUPO.eletrica_tec[5]) === '["Resolveu de vez","Serviço muito seguro","Super organizado"]' && JSON.stringify(ET.ETIQUETAS_POR_GRUPO.eletrica_tec[1]) === '["Não resolveu","Serviço perigoso","Estragou algo"]',
      'conjunto elétrico de antes restaurado ("Serviço muito seguro"…)')
-  ok(JSON.stringify(ET.ETIQUETAS_POR_GRUPO.divulgacao) === JSON.stringify(ET.ETIQUETAS_POR_GRUPO.digital_aulas), 'etiquetas: Divulgação = conjunto de Digital e aulas')
+  ok(JSON.stringify(ET.ETIQUETAS_POR_GRUPO.divulgacao) === JSON.stringify(ET.ETIQUETAS_POR_GRUPO.digital_aulas), 'etiquetas: Divulgação = conjunto de Escritório e aulas (digital_aulas)')
+  {
+    const gEsc = ET.GRUPOS_AVALIACAO.find(g => g.chave === 'digital_aulas')
+    ok(gEsc.nome === 'Escritório e aulas' && gEsc.especialidades.includes('contabilidade'), 'catálogo de etiquetas: grupo digital_aulas com o nome novo e contabilidade', { nome: gEsc.nome, esp: gEsc.especialidades })
+    ok(JSON.stringify(ET.gruposDaDemanda('reparos', { categorias: ['contabilidade'] })) === '["digital_aulas"]' && JSON.stringify(ET.ETIQUETAS_POR_GRUPO.digital_aulas[5]) === '["Superou expectativas","Muito didático","Muito criativo"]',
+      'avaliação de contabilidade: o mesmo conjunto de etiquetas do resto do grupo')
+  }
   for (const s of ET.SLUGS_ELETRICOS) ok(JSON.stringify(ET.gruposDaDemanda('reparos', { categorias: [s] })) === '["eletrica_tec"]', `avaliação de ${s}: só o conjunto elétrico (não o de Consertos)`)
   ok(JSON.stringify(ET.gruposDaDemanda('reparos', { categoria: 'eletrica' })) === '["eletrica_tec"]', 'reparo antigo (só categoria) elétrico: conjunto elétrico')
   ok(JSON.stringify(ET.gruposDaDemanda('reparos', { categorias: ['hidraulica'] })) === '["reparos_casa"]' && JSON.stringify(ET.gruposDaDemanda('reparos', { categorias: ['gesseiro'] })) === '["reparos_casa"]',
