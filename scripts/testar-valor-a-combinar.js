@@ -296,6 +296,64 @@ const main = async () => {
   const semFlag = fonte.split('\n').filter(l => /\b(o\.valor|r\.valor_estimado),/.test(l) && /SELECT|as obra_id|as reparo_id/.test(l) && !/valor_a_combinar/.test(l))
   ok(semFlag.length === 0, 'feed, meus-interesses, candidaturas, contratos e admin: toda lista explícita com o valor traz valor_a_combinar', semFlag.map(l => l.trim().slice(0, 80)))
 
+  // ═══ (9) COMPATIBILIDADE: o app nunca recebe valor null num pedido a combinar; o painel recebe ═══
+  // regra pura
+  const amostra = V.protegerValorParaApp({
+    reparos: [{ id: 1, valor_a_combinar: true, valor_estimado: null, valor_proposto: null }, { id: 2, valor_a_combinar: false, valor_estimado: null }, { id: 3, valor_a_combinar: true, valor_estimado: '80.00' }],
+    obra: { valor_a_combinar: true, valor: undefined, valor_acordado: null, candidatos: [{ valor_proposto: null }] }, solto: { valor_a_combinar: true, titulo: 'sem a chave de valor' },
+  })
+  ok(amostra.reparos[0].valor_estimado === '0.01' && amostra.reparos[0].valor_proposto === null && amostra.reparos[0].valor_a_combinar === true, 'compat: a combinar + valor null → "0.01"; valor_proposto intocado; flag preservada', amostra.reparos[0])
+  ok(amostra.reparos[1].valor_estimado === null && amostra.reparos[2].valor_estimado === '80.00', 'compat: sem a flag não inventa valor; valor existente não muda')
+  ok(amostra.obra.valor === '0.01' && amostra.obra.valor_acordado === null && amostra.obra.candidatos[0].valor_proposto === null && !('valor' in amostra.solto), 'compat: objeto aninhado; valor_acordado e propostas intocados; chave ausente não é criada', amostra.obra)
+  ok(V.protegerValorParaApp(null) === null && V.protegerValorParaApp('x') === 'x' && Array.isArray(V.protegerValorParaApp([])), 'compat: null, texto e lista vazia passam direto')
+  for (const [m, p, painel] of [['GET', '/admin/finalizadas', true], ['GET', '/reparos/admin', true], ['GET', '/obras/admin', true], ['GET', '/obras-aprovacao', true], ['GET', '/reparos/aprovacao', true],
+    ['POST', '/obras', true], ['PUT', `/obras/${D(1)}`, true], ['GET', '/obras', false], ['GET', `/obras/${D(1)}`, false], ['POST', '/obras/dono', false], ['GET', '/reparos', false],
+    ['GET', '/reparos/minhas', false], ['GET', '/reparos/meus-interesses', false], ['GET', '/candidaturas/minhas', false], ['POST', `/obras/${D(1)}/candidatura`, false]]) {
+    ok(V.ehRotaDoPainel({ method: m, path: p }) === painel, `${m} ${p}: ${painel ? 'painel (valor fica null)' : 'app (valor protegido)'}`)
+  }
+  // o middleware está no router ANTES de qualquer rota
+  const iMw = router.stack.findIndex(l => !l.route && l.handle && l.handle.name === 'valorACombinarParaApp')
+  const iRota = router.stack.findIndex(l => l.route)
+  ok(iMw >= 0 && iMw < iRota, 'o middleware de compatibilidade está montado no router antes de qualquer rota', { iMw, iRota })
+  // Chamada como o Express faz: middleware do router → handler final da rota.
+  const mw = router.stack[iMw].handle
+  const viaRouter = (metodo, padrao, { usuario, params = {}, query = {}, body = {} } = {}) => new Promise(resolve => {
+    const caminho = padrao.replace(/:([A-Za-z_]+)/g, (_, k) => params[k])
+    const res = { statusCode: 200, set() { return this }, status(c) { this.statusCode = c; return this }, json(b) { resolve({ status: this.statusCode, body: b }) } }
+    const req = { method: metodo.toUpperCase(), path: caminho, params, query, body, usuario, get: () => '', headers: {}, ip: '127.0.0.1' }
+    const h = padrao === '/candidaturas/minhas' ? require(path.join(REPO, 'src/controllers/candidaturasController')).minhas : handler(metodo, padrao)
+    mw(req, res, () => Promise.resolve(h(req, res)).catch(e => resolve({ status: 599, body: { erro: String(e.message) } })))
+  })
+  // todo objeto com valor_a_combinar = true: nenhuma chave de valor do pedido null/undefined
+  const nulos = (dado, achados = [], trilha = '$') => {
+    if (dado === null || typeof dado !== 'object') return achados
+    if (Array.isArray(dado)) { dado.forEach((x, i) => nulos(x, achados, `${trilha}[${i}]`)); return achados }
+    if (dado.valor_a_combinar === true) for (const c of ['valor', 'valor_estimado']) if (c in dado && (dado[c] === null || dado[c] === undefined)) achados.push(`${trilha}.${c}`)
+    for (const k of Object.keys(dado)) nulos(dado[k], achados, `${trilha}.${k}`)
+    return achados
+  }
+  const contem = (dado, id) => JSON.stringify(dado).includes(id)
+  // Estado: RID (reparo a combinar, PRO escolhido) e OID (obra a combinar, PRO2 escolhido); + um de cada SEM escolhido para o feed.
+  r = await calado(() => viaRouter('post', '/reparos/dono', { usuario: DONO, body: { ...baseR, titulo: 'Feed a combinar', valor_a_combinar: true } }))
+  ok(r.status === 201 && r.body.valor_estimado === '0.01' && r.body.valor_a_combinar === true, 'POST /reparos/dono (app): resposta com valor_estimado "0.01" + flag', [r.status, r.body.valor_estimado, r.body.erro])
+  const RFEED = r.body.id
+  ok((await linha('reparos', RFEED)).valor_estimado === null, '…e o BANCO continua com NULL')
+  r = await calado(() => viaRouter('post', '/obras/dono', { usuario: DONO, body: { ...baseO, titulo: 'Obra feed a combinar', valor_a_combinar: true } }))
+  ok(r.status === 201 && r.body.valor === '0.01' && r.body.valor_a_combinar === true, 'POST /obras/dono (app): resposta com valor "0.01" + flag', [r.status, r.body.valor, r.body.erro])
+  const OFEED = r.body.id
+  await db.query(`UPDATE obras SET status = 'aberta', status_aprovacao = 'aprovada', publicado_em = now() WHERE id = $1`, [OFEED])
+  ok((await linha('obras', OFEED)).valor === null, '…e o BANCO continua com NULL (obra)')
+  // As listas do app (feed, detalhe, minhas, meus-interesses, candidaturas, contratos) rodam sobre o
+  // esquema de produção em scripts/testar-valor-a-combinar-app.js.
+  // PAINEL: passa pelo mesmo router e NÃO é alterado
+  for (const [t, filtro, id, col] of [['reparos', 'abertas', RFEED, 'valor_estimado'], ['obras', 'abertas', OFEED, 'valor']]) {
+    const resp = await calado(() => viaRouter('get', `/${t}/admin`, { usuario: ADM, query: { filtro } }))
+    const item = (resp.body[t] || []).find(x => x.id === id)
+    ok(resp.status === 200 && item && item[col] === null && item.valor_a_combinar === true, `painel GET /${t}/admin?filtro=${filtro}: valor continua null (com a flag)`, item && [item[col], item.valor_a_combinar, item.valor_acordado])
+  }
+  r = await calado(() => viaRouter('put', '/obras/:id', { usuario: ADM, params: { id: OPAINEL }, body: { titulo: 'Obra do painel 3' } }))
+  ok(V.ehRotaDoPainel({ method: 'PUT', path: `/obras/${OPAINEL}` }) === true, 'PUT /obras/:id é rota do painel (resposta não é alterada)')
+
   logOrig(falhas === 0 ? '\nTUDO OK' : `\n${falhas} FALHA(S)`)
   process.exit(falhas ? 1 : 0)
 }

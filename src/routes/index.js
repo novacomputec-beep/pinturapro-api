@@ -1,6 +1,10 @@
 require('dotenv').config()
 const express = require('express')
 const router = express.Router()
+// "Valor a combinar" × app já instalado (utils/valorDemanda): em toda resposta ao APP, pedido com
+// valor_a_combinar = true nunca sai com valor null — vai '0.01'. O painel fica de fora. Antes de
+// qualquer rota.
+router.use(require('../utils/valorDemanda').middlewareValorParaApp)
 const { autenticar, exigirAssinaturaAtiva, exigirNaoSuspenso, corpoContaSuspensa, exigirVerificado, exigirAdmin, exigirSuperAdmin, invalidarCacheAssinatura, assinaturaAtivaCacheada, contaDoToken } = require('../middlewares/auth')
 const { registrarVisita } = require('../utils/visitas')
 const { pool } = require('../utils/supabase')
