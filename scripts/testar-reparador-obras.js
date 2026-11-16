@@ -137,7 +137,7 @@ const main = async () => {
   ok(/inválida/.test(v.erro || ''), 'tipo NULL (legado): slug de obra continua recusado', v)
   v = esp.validarEspecialidades(['eletrica'], true, null)
   ok(!v.erro, 'tipo NULL (legado): lista de serviços como antes', v)
-  ok(esp.ESPECIALIDADES_REPARADOR.length === 62 && !OBRA4.some(s => esp.ESPECIALIDADES_REPARADOR.includes(s)),
+  ok(esp.ESPECIALIDADES_REPARADOR.length === 63 && !OBRA4.some(s => esp.ESPECIALIDADES_REPARADOR.includes(s)),
      'ESPECIALIDADES_REPARADOR (vocabulário de reparos.categoria) segue só com serviços (62) e SEM slug de obra', esp.ESPECIALIDADES_REPARADOR.length)
   ok(esp.ESPECIALIDADES_VALIDAS === esp.ESPECIALIDADES_REPARADOR, 'alias ESPECIALIDADES_VALIDAS intacto')
   ok(!Object.values(GRUPOS_RELACIONADOS).flat().some(s => OBRA4.includes(s)), 'GRUPOS_RELACIONADOS sem slug de obra (casamento de reparo não expande)')

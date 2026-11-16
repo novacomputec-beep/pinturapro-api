@@ -94,7 +94,7 @@ const ETIQUETAS_POR_GRUPO = {
     2: ['Desatento', 'Pouco confiável', 'Pouco profissional'],
     1: ['Negligente', 'Não confio', 'Nada profissional'],
   },
-  digital_aulas: { // Digital e aulas
+  digital_aulas: { // Escritório e aulas (era "Digital e aulas"; a chave não mudou)
     5: ['Superou expectativas', 'Muito didático', 'Muito criativo'],
     4: ['Entregou bem', 'Didático', 'Criativo'],
     3: ['Entrega razoável', 'Pouco claro', 'Pouco criativo'],

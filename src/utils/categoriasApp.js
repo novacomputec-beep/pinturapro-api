@@ -76,6 +76,9 @@ const CATEGORIAS_SERVICO = [
     palavras: ['locução', 'carro de som', 'som em porta de loja', 'rádio indoor'] },
   { slug: 'jingles_vinhetas', rotulo: 'Jingles e vinhetas', emoji: '🎵' },
   { slug: 'marketing_publicidade', rotulo: 'Marketing e publicidade', emoji: '📈' },
+  // Contabilidade (dono, 16/11/2026) — grupo "Escritório e aulas" (chave digital_aulas).
+  { slug: 'contabilidade',   rotulo: 'Contabilidade',     emoji: '🧾',
+    palavras: ['contador', 'imposto de renda', 'abertura de empresa', 'MEI'] },
   { slug: 'outros',          rotulo: 'Outros',            emoji: '➕' },
 ]
 
