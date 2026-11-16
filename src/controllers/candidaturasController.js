@@ -25,7 +25,7 @@ const minhas = async (req, res) => {
               -- match da obra é de uma conta DELA — o app não precisa comparar ids de conta.
               c.usuario_id AS conta_id,
               COALESCE(${sqlProfissionalDaPessoa('o.match_usuario_id', '$1')}, false) AS match_da_pessoa,
-              o.id as obra_id, o.titulo, o.categoria, o.valor, o.cidade, o.status as obra_status,
+              o.id as obra_id, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade, o.status as obra_status,
               o.match_usuario_id, o.match_feito_em,
               -- Encerramento assimétrico: só o PINTOR cria solicitação pendente. O dono não
               -- solicita — ele encerra na hora, e é ele quem confirma a solicitação do pintor.
@@ -117,7 +117,7 @@ const pendentes = async (req, res) => {
 
     const result = await pool.query(
       `SELECT c.id, c.status, c.referencias, c.criado_em,
-              o.id as obra_id, o.titulo, o.categoria, o.valor, o.cidade,
+              o.id as obra_id, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade,
               u.id as pintor_id, u.nome as pintor_nome, u.email as pintor_email,
               u.telefone, u.cidade as pintor_cidade, u.anos_experiencia, u.tamanho_equipe
        FROM candidaturas c

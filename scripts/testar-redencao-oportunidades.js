@@ -92,8 +92,8 @@ const main = async () => {
     CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, cidade text, uf text, role text, tipo_prestador text, tipo_dono text, cpf_cnpj text, ativo boolean DEFAULT true,
       push_token text, suspenso_em timestamptz, desinstalado_em timestamptz, especialidades text[], latitude numeric, longitude numeric, raio_km_escolhido numeric);
     CREATE TABLE assinaturas (usuario_id uuid, status text, proximo_vencimento timestamptz);
-    CREATE TABLE reparos (${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
-    CREATE TABLE obras (${colsDemanda}, valor numeric, horas_para_expirar numeric, especialidades_inferidas text[]);
+    CREATE TABLE reparos (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
+    CREATE TABLE obras (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, valor numeric, horas_para_expirar numeric, especialidades_inferidas text[]);
     CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, status text, criado_em timestamptz DEFAULT now());
     CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, status text, criado_em timestamptz DEFAULT now());
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);

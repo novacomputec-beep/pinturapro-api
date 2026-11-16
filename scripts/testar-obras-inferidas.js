@@ -81,8 +81,8 @@ const main = async () => {
       push_token text, suspenso_em timestamptz, desinstalado_em timestamptz, especialidades text[], indicacao_pedida_em timestamptz, latitude numeric, longitude numeric,
       raio_km_escolhido numeric, avisos_todas_areas boolean DEFAULT true);
     CREATE TABLE assinaturas (usuario_id uuid, status text, proximo_vencimento timestamptz);
-    CREATE TABLE obras (${colsDemanda}, valor numeric, push_aprovada_enviado_em timestamptz, enviada_por_dono boolean);
-    CREATE TABLE reparos (${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
+    CREATE TABLE obras (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, valor numeric, push_aprovada_enviado_em timestamptz, enviada_por_dono boolean);
+    CREATE TABLE reparos (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
     CREATE TABLE midias (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, url text, ordem int);
     CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, status text, criado_em timestamptz DEFAULT now());
     CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, criado_em timestamptz DEFAULT now());

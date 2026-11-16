@@ -1874,7 +1874,7 @@ const LADOS_FORA_AREA = [
 const mensagemForaDaArea = (lado, d) => {
   const { emoji } = lado.comCategoria ? apresentacaoReparoLista(d, '🔧') : apresentacaoObra(d.categoria, '🎨')
   const cidade = String(d.cidade || '').trim()
-  const partes = [String(d.titulo || '').trim(), String(d.bairro || '').trim(), Number(d.valor) > 0 ? formatarReaisPush(d.valor) : '']
+  const partes = [String(d.titulo || '').trim(), String(d.bairro || '').trim(), valorLembrete(d.valor)] // sem valor = pedido "valor a combinar"
     .filter(Boolean)
   return {
     titulo: `📣 Pedido${cidade ? ` em ${cidade}` : ''} (fora da sua área)`,
@@ -3030,7 +3030,7 @@ const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaix
           WHERE c.obra_id = o.id AND c.status IS DISTINCT FROM 'recusado'
         )
         AND (u.push_token IS NOT NULL OR NULLIF(btrim(u.email), '') IS NOT NULL)
-      RETURNING o.id, o.titulo, o.total_visitas, o.criado_por, u.push_token, u.email, u.nome
+      RETURNING o.id, o.titulo, o.total_visitas, o.criado_por, o.valor_a_combinar, u.push_token, u.email, u.nome
     `)
 
     // Lembrete ao dono: push + no máx. 1 e-mail/dia por demanda (entregarLembrete). Envio
@@ -3038,7 +3038,7 @@ const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaix
     for (const obra of obras.rows) {
       await entregarLembrete({
         usuario_id: obra.criado_por, push_token: obra.push_token, email: obra.email, nome: obra.nome,
-        titulo: '💡 Considere aumentar sua oferta',
+        titulo: tituloBaixoEngajamento(obra),
         corpo: `Sua obra "${obra.titulo}" teve ${obra.total_visitas} visitas e nenhum profissional se interessou. Considere aumentar o prazo ou revisar o texto.`,
         data: { tipo: 'baixo_engajamento', obra_id: obra.id },
         rotulo: `baixo engajamento obras ${obra.id}`,
@@ -3066,13 +3066,13 @@ const verificarObrasComBaixoEngajamento = semSobreposicao('verificarObrasComBaix
           WHERE ir.reparo_id = r.id AND ir.status IS DISTINCT FROM 'recusado'
         )
         AND (u.push_token IS NOT NULL OR NULLIF(btrim(u.email), '') IS NOT NULL)
-      RETURNING r.id, r.titulo, r.total_visitas, r.criado_por, u.push_token, u.email, u.nome
+      RETURNING r.id, r.titulo, r.total_visitas, r.criado_por, r.valor_a_combinar, u.push_token, u.email, u.nome
     `)
 
     for (const reparo of reparos.rows) {
       await entregarLembrete({
         usuario_id: reparo.criado_por, push_token: reparo.push_token, email: reparo.email, nome: reparo.nome,
-        titulo: '💡 Considere aumentar sua oferta',
+        titulo: tituloBaixoEngajamento(reparo),
         corpo: `Seu serviço "${reparo.titulo}" teve ${reparo.total_visitas} visitas e nenhum profissional se interessou. Considere aumentar o prazo ou revisar o texto.`,
         data: { tipo: 'baixo_engajamento_reparo', reparo_id: reparo.id },
         rotulo: `baixo engajamento reparos ${reparo.id}`,
@@ -3121,6 +3121,12 @@ const formatarTempoRestante = (min) => {
 // RECUSADO calava o alerta para sempre — justamente quando o dono mais precisa dele
 // (demanda expirando e sem ninguém vivo na fila). Agora só linhas vivas suprimem.
 // IS DISTINCT FROM (e não <>) por ser NULL-safe: status NULL continua suprimindo, como hoje.
+// Título do aviso de pouco interesse ao dono. Pedido "valor a combinar" não tem oferta para
+// aumentar (POST /:id/aumentar-valor o recusa): ali o título não sugere valor — o corpo, que já
+// só fala em aumentar o prazo ou revisar o texto, é o mesmo nos dois casos.
+const TITULO_BAIXO_ENGAJAMENTO = '💡 Considere aumentar sua oferta'
+const TITULO_BAIXO_ENGAJAMENTO_A_COMBINAR = '💡 Seu pedido ainda não teve interessados'
+const tituloBaixoEngajamento = (d) => (d?.valor_a_combinar ? TITULO_BAIXO_ENGAJAMENTO_A_COMBINAR : TITULO_BAIXO_ENGAJAMENTO)
 const verificarMarcosExpiracao = async () => {
   const lados = [
     { tabela: 'obras',   idKey: 'obra_id',   janelaCol: 'horas_para_expirar',      substantivo: 'Sua obra',   verbo: 'Estenda o prazo',
@@ -4150,6 +4156,8 @@ const autoEncerrarPendentes = async () => {
 }
 
 module.exports = {
+  // Valor a combinar: textos que mostram (ou deixam de sugerir) valor.
+  mensagemLembreteObra, mensagemLembreteReparo, tituloBaixoEngajamento,
   // Saída por atraso (cronômetro): retrato em desistencias + textos do push do dono.
   notificarMatchDesfeito, registrarAtrasoChegada, tituloDonoAtraso, corpoDonoAtraso,
   semSobreposicao,

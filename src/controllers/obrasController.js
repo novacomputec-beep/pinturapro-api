@@ -5,7 +5,7 @@ const { pool } = require('../utils/supabase')
 // em produção (0 linhas) — e por isso a obra criada pelo painel nunca avisava ninguém.
 const { notificarPintoresSobreNovaObra, dispararPushNovoComClaim } = require('../services/alertaService')
 // Valor obrigatório e > 0 ao criar e ao editar ("Informe quanto quer pagar").
-const { validarValorDemanda } = require('../utils/valorDemanda')
+const { resolverValorDemanda } = require('../utils/valorDemanda')
 const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra } = require('../utils/totalExtensao')
 const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
@@ -28,7 +28,7 @@ const listar = async (req, res) => {
     const offset = (parseInt(page) - 1) * parseInt(limit)
 
     let query = `
-      SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.estado, o.bairro, o.uf,
+      SELECT o.id, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade, o.estado, o.bairro, o.uf,
              o.latitude, o.longitude, o.coordenadas_origem,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status, o.horas_para_expirar, o.prazo_modo, o.criado_em, o.ultima_extensao_horas,
              -- Slugs de ofício deduzidos do título + descrição (utils/especialidadesInferidas), para o
@@ -193,7 +193,8 @@ const criar = async (req, res) => {
       return res.status(400).json({ erro: 'Título, categoria, valor e cidade são obrigatórios' })
     }
     // Valor obrigatório e > 0, a MESMA regra e mensagem do caminho do dono (utils/valorDemanda).
-    const valorObra = validarValorDemanda(req.body.valor)
+    // valor_a_combinar=true → valor NULL + flag (utils/valorDemanda.resolverValorDemanda).
+    const valorObra = resolverValorDemanda(req.body, 'valor')
     if (valorObra.erro) return res.status(400).json(valorObra)
     const valor = valorObra.valor
 
@@ -206,12 +207,12 @@ const criar = async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf,
-        latitude, longitude, metragem, prazo_execucao_dias, expira_em, descricao, tags, status, horas_para_expirar, publicado_em)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'aberta',$15,NOW())
+        latitude, longitude, metragem, prazo_execucao_dias, expira_em, descricao, tags, status, horas_para_expirar, publicado_em, valor_a_combinar)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'aberta',$15,NOW(),$16::boolean)
        RETURNING *`,
       [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal,
        latitude || null, longitude || null, metragem, prazo_execucao_dias,
-       expira_em.toISOString(), descricao, tags || [], horasExpiracao]
+       expira_em.toISOString(), descricao, tags || [], horasExpiracao, valorObra.valor_a_combinar]
     )
 
     const obra = result.rows[0]
@@ -266,11 +267,13 @@ const editar = async (req, res) => {
 
     if (tem('titulo')) set('titulo', titulo)
     if (tem('categoria')) set('categoria', categoria)
-    if (tem('valor')) {
-      // Edição não zera nem negativa o valor: mesma regra da criação (utils/valorDemanda).
-      const valorNovo = validarValorDemanda(valor)
+    if (tem('valor') || tem('valor_a_combinar')) {
+      // Mesma regra da criação (utils/valorDemanda): valor_a_combinar=true zera o valor e liga a
+      // flag; senão o valor é obrigatório e > 0 e a flag desliga — as duas colunas andam juntas.
+      const valorNovo = resolverValorDemanda(req.body, 'valor')
       if (valorNovo.erro) return res.status(400).json(valorNovo)
       set('valor', valorNovo.valor)
+      set('valor_a_combinar', valorNovo.valor_a_combinar)
     }
     if (tem('cidade')) set('cidade', cidade)
     if (tem('bairro')) set('bairro', bairro)
