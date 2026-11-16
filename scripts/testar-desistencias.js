@@ -79,7 +79,7 @@ const main = async () => {
   ok(l.length === 2 && l[0].nome === 'Hudson' && l[0].motivo_texto === 'Outro motivo' && l[0].detalhe === 'Peguei outro serviço' && l[1].motivo_texto === 'Não precisa mais',
      'obra: candidaturas canceladas pelo pintor, mais recente primeiro, "Não precisa mais" / "Outro motivo"', l.map(x => [x.nome, x.motivo_texto]))
   ok(await contarInteressadosAtivos('obras', D(3)) === 1, 'obra: 1 ativo (expirado fora)')
-  ok(Object.keys(ROTULO_DESISTENCIA).sort().join() === 'conta_excluida,imprevisto,nao_consigo_horario,nao_preciso,outro', 'cobre os 4 motivos de cancelamentoMatchService + conta_excluida')
+  ok(Object.keys(ROTULO_DESISTENCIA).sort().join() === 'atraso_chegada,conta_excluida,imprevisto,nao_consigo_horario,nao_preciso,outro', 'cobre os 4 motivos de cancelamentoMatchService + conta_excluida + atraso_chegada (cronômetro)')
   ok(ROTULO_DESISTENCIA.conta_excluida === 'O profissional excluiu a conta e não vai mais fazer o serviço.' && rotuloMotivo('conta_excluida') === ROTULO_DESISTENCIA.conta_excluida
      && rotuloMotivo('conta_excluida', 'm') === ROTULO_DESISTENCIA.conta_excluida && rotuloMotivo('conta_excluida', 'f') === ROTULO_CONTA_EXCLUIDA_F && rotuloMotivo('conta_excluida', 'F') === ROTULO_CONTA_EXCLUIDA_F,
      'conta_excluida: "O profissional…" sem gênero/masculino; "A profissional…" só com genero f')

@@ -28,10 +28,16 @@ const LADOS = {
   obras:   { proposta: 'candidaturas',      coluna: 'obra_id' },
 }
 const MOTIVO_CONTA_EXCLUIDA = 'conta_excluida'
+// ATRASO (dono, 16/11/2026 — 3529D): o cron do cronômetro (alertaService.verificarCronometro*)
+// tirou o escolhido porque ele não chegou no prazo combinado. A proposta dele vira 'expirado' (não
+// 'cancelado'), então sem um retrato o dono não via folha nenhuma: o cron grava aqui uma linha com
+// motivo 'atraso_chegada' e a segunda fonte de sqlFontes a mostra como as demais desistências.
+const MOTIVO_ATRASO_CHEGADA = 'atraso_chegada'
 const ROTULO_DESISTENCIA = {
   imprevisto: 'Imprevisto', nao_consigo_horario: 'Não consegue no horário',
   nao_preciso: 'Não precisa mais', outro: 'Outro motivo',
   conta_excluida: 'O profissional excluiu a conta e não vai mais fazer o serviço.',
+  atraso_chegada: 'Não chegou no prazo combinado',
 }
 const ROTULO_CONTA_EXCLUIDA_F = 'A profissional excluiu a conta e não vai mais fazer o serviço.'
 const STATUS_ATIVOS = ['pendente', 'contraproposta_dono']
@@ -154,5 +160,5 @@ const contarInteressadosAtivos = async (tabela, demandaId, db = pool) => {
 module.exports = {
   listarDesistencias, contarInteressadosAtivos, desistenciaRecentePorDemanda, anexarDesistenciaRecente,
   migrarDesistencias, registrarDesistenciaSnapshot, rotuloMotivo,
-  ROTULO_DESISTENCIA, ROTULO_CONTA_EXCLUIDA_F, MOTIVO_CONTA_EXCLUIDA, STATUS_ATIVOS,
+  ROTULO_DESISTENCIA, ROTULO_CONTA_EXCLUIDA_F, MOTIVO_CONTA_EXCLUIDA, MOTIVO_ATRASO_CHEGADA, STATUS_ATIVOS,
 }

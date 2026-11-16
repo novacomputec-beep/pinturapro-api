@@ -8,7 +8,7 @@ const { MARCA } = require('../utils/marca')
 // Valor acordado (contraproposta → proposta → pedido da demanda): fonte única, ver utils/valorAcordado.
 const { sqlValorAcordadoReparo, sqlValorAcordadoObra } = require('../utils/valorAcordado')
 // Ao estender uma demanda que já tinha vencido com interessados pendentes, avisa esses interessados.
-const { avisarPrazoEstendido } = require('../services/escolhaPendenteService')
+const { avisarPrazoEstendido, avisarPrazoAumentado } = require('../services/escolhaPendenteService')
 const authCtrl         = require('../controllers/authController')
 const obrasCtrl        = require('../controllers/obrasController')
 const candidaturasCtrl = require('../controllers/candidaturasController')
@@ -139,7 +139,7 @@ const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
 const { sqlNaoDemandaPropria, sqlNaoMesmoCpf, ERRO_DEMANDA_PROPRIA, ehDemandaPropria, sqlCpfNormalizado } = require('../utils/demandaPropria')
 // Demanda ABERTA sob trava (FOR UPDATE) nas rotas do profissional: 409 PEDIDO_INDISPONIVEL fora de 'aberta'.
-const { travarDemandaAberta } = require('../utils/demandaAberta')
+const { travarDemandaAberta, ERRO_PRAZO_VENCIDO, ERRO_PRAZO_VENCIDO_PROFISSIONAL, prazoVencido } = require('../utils/demandaAberta')
 // profissionais_avisados (GET /obras/:id e /reparos/:id, só para o dono): quantos profissionais
 // distintos receberam o aviso de demanda nova por push ou e-mail (utils/profissionaisAvisados).
 const { contarProfissionaisAvisados } = require('../utils/profissionaisAvisados')
@@ -3196,6 +3196,21 @@ router.get('/obras', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigi
   }
 })
 
+// situacao_painel (GET /obras/admin e /reparos/admin; dono, 16/11/2026): o que o painel deve
+// MOSTRAR, ao lado do status real (que continua em `status`). 'expirada' não é status no banco;
+// aqui vira 'expirada' quando:
+//   - o pedido segue 'aberta' com o prazo vencido (sem escolhido: expira_em; com escolhido: o
+//     limite de chegada — a mesma conta do campo `expirada`, que fica como está); ou
+//   - foi cancelado/encerrado SEM profissional escolhido DEPOIS de expira_em (encerrado_em >
+//     expira_em): venceu e só então foi fechado (ex.: 4DXCJ, cancelado 1h16 depois do prazo).
+// Encerrado COM profissional (serviço feito) nunca vira 'expirada': ali expira_em passar é normal.
+// Nos demais casos, situacao_painel = status.
+const sqlSituacaoPainel = (a, limiteChegada) => `CASE
+    WHEN ${a}.status = 'aberta' AND (CASE WHEN ${a}.match_usuario_id IS NOT NULL THEN ${limiteChegada} ELSE ${a}.expira_em END) <= NOW() THEN 'expirada'
+    WHEN ${a}.status IN ('cancelada', 'encerrada', 'expirada') AND ${a}.match_usuario_id IS NULL
+         AND ${a}.encerrado_em IS NOT NULL AND ${a}.encerrado_em > ${a}.expira_em THEN 'expirada'
+    ELSE ${a}.status END`
+
 // Painel admin — lista obras por situação (abertas / finalizadas / canceladas-expiradas).
 // O GET /obras público é o feed do pintor: só devolve obras abertas/aprovadas/não
 // expiradas sem match e NÃO expõe contato do dono ao app. O painel precisa deste
@@ -3225,6 +3240,7 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
              o.criado_em, o.horas_para_expirar, o.prazo_modo,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              (o.status = 'aberta' AND (CASE WHEN o.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('o.')} ELSE o.expira_em END) <= NOW()) AS expirada,
+             ${sqlSituacaoPainel('o', sqlLimiteChegada('o.'))} AS situacao_painel,
              (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) AS total_candidaturas,
              ${sqlEscolhidoNome('obras', 'o')} AS escolhido_nome,
              ${sqlEscolhidoEm('obras', 'o')} AS escolhido_em
@@ -3466,15 +3482,18 @@ router.post('/obras/:id/estender', autenticar, async (req, res) => {
          marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL,
          escolha_aviso_24h_em = NULL, escolha_aviso_2h_em = NULL, escolha_expirou_em = NULL,
          ultima_extensao_em = NOW(), ultima_extensao_horas = $5::numeric
-       FROM (SELECT id, escolha_expirou_em IS NOT NULL AS expirou_antes FROM obras WHERE id = $2) a
+       FROM (SELECT id, escolha_expirou_em IS NOT NULL AS expirou_antes, expira_em > NOW() AS vivo_antes FROM obras WHERE id = $2) a
        WHERE obras.id = a.id AND obras.id = $2 AND ${sqlDonoDaPessoa('criado_por', '$3')}
          AND NOT COALESCE(
                ultima_extensao_em > NOW() - ($4::numeric * INTERVAL '1 minute')
                AND ultima_extensao_horas = $5::numeric, FALSE)
-       RETURNING obras.expira_em, a.expirou_antes`,
+       RETURNING obras.expira_em, a.expirou_antes, a.vivo_antes`,
       [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id, DEDUPE_ESTENDER_OBRA_MINUTOS, horas]
     )
     if (upd.rows[0]?.expirou_antes) avisarPrazoEstendido('obras', req.params.id, req.usuario.id)
+    // Ainda NÃO vencida (a.vivo_antes, lido antes do UPDATE): push neutro, sem e-mail, aos
+    // interessados ativos — escolhaPendenteService (5). Vencida sem o aviso de vencimento: nada.
+    else if (upd.rows[0]?.vivo_antes) avisarPrazoAumentado('obras', req.params.id, req.usuario.id)
 
     // rowCount = 0 → o predicado de dedupe barrou (retry do mesmo horas na janela). Não é erro: o
     // cliente pediu um estado que o servidor já tem, então devolve o prazo ATUAL como sucesso, com
@@ -4122,6 +4141,8 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
       if (cand.status !== 'pendente') {
         return res.status(409).json({ erro: 'Esta candidatura não está mais disponível para aceite.' })
       }
+      // Prazo vencido (utils/demandaAberta): 409 antes de qualquer escrita — o dono aumenta o prazo.
+      if (await prazoVencido(pool, 'obras', obra_id)) return res.status(409).json(ERRO_PRAZO_VENCIDO)
       const jaAceito = await pool.query(
         `SELECT id FROM candidaturas WHERE obra_id = $1 AND status = 'aceito' AND id != $2`,
         [req.params.id, candidaturaId]
@@ -4250,6 +4271,8 @@ router.post('/obras/:id/candidatura/:candidaturaId/pintor-responder', autenticar
       // aceite, que é irreversível (casa e dispara contrato).
       const suspensao = await estaSuspenso(req.usuario.id)
       if (suspensao) return sair('ROLLBACK', 403, corpoContaSuspensa(suspensao))
+      // Prazo vencido (utils/demandaAberta): o aceite casaria num pedido vencido — 409, nada gravado.
+      if (await prazoVencido(client, 'obras', obra_id)) return sair('ROLLBACK', 409, ERRO_PRAZO_VENCIDO_PROFISSIONAL)
       await client.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
       // O aceite já casa o profissional com a obra (ver POST .../responder).
       await client.query(
@@ -5002,15 +5025,17 @@ router.post('/reparos/:id/estender', autenticar, async (req, res) => {
          marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL,
          escolha_aviso_24h_em = NULL, escolha_aviso_2h_em = NULL, escolha_expirou_em = NULL,
          ultima_extensao_em = NOW(), ultima_extensao_horas = $5::numeric
-       FROM (SELECT id, escolha_expirou_em IS NOT NULL AS expirou_antes FROM reparos WHERE id = $2) a
+       FROM (SELECT id, escolha_expirou_em IS NOT NULL AS expirou_antes, expira_em > NOW() AS vivo_antes FROM reparos WHERE id = $2) a
        WHERE reparos.id = a.id AND reparos.id = $2 AND ${sqlDonoDaPessoa('criado_por', '$3')}
          AND NOT COALESCE(
                ultima_extensao_em > NOW() - ($4::numeric * INTERVAL '1 minute')
                AND ultima_extensao_horas = $5::numeric, FALSE)
-       RETURNING reparos.expira_em, a.expirou_antes`,
+       RETURNING reparos.expira_em, a.expirou_antes, a.vivo_antes`,
       [cap.rows[0].novo_expira_em, req.params.id, req.usuario.id, DEDUPE_ESTENDER_REPARO_MINUTOS, horas]
     )
     if (upd.rows[0]?.expirou_antes) avisarPrazoEstendido('reparos', req.params.id, req.usuario.id)
+    // Ainda NÃO vencido: push neutro aos interessados ativos (ver POST /obras/:id/estender).
+    else if (upd.rows[0]?.vivo_antes) avisarPrazoAumentado('reparos', req.params.id, req.usuario.id)
 
     // rowCount = 0 → o predicado de dedupe barrou (retry do mesmo horas na janela). Não é erro: o
     // cliente pediu um estado que o servidor já tem, então devolve o prazo ATUAL como sucesso, com
@@ -5162,6 +5187,7 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
              r.expira_em, r.status, r.criado_em, r.prazo_atendimento_horas,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              (r.status = 'aberta' AND (CASE WHEN r.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('r.')} ELSE r.expira_em END) <= NOW()) AS expirada,
+             ${sqlSituacaoPainel('r', sqlLimiteChegada('r.'))} AS situacao_painel,
              (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) AS total_interessados,
              ${sqlEscolhidoNome('reparos', 'r')} AS escolhido_nome,
              ${sqlEscolhidoEm('reparos', 'r')} AS escolhido_em
@@ -5664,6 +5690,8 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
       if (int.status !== 'pendente') {
         return res.status(409).json({ erro: 'Esta proposta não está mais disponível para aceite.' })
       }
+      // Prazo vencido (utils/demandaAberta): 409 antes de qualquer escrita — o dono aumenta o prazo.
+      if (await prazoVencido(pool, 'reparos', reparo_id)) return res.status(409).json(ERRO_PRAZO_VENCIDO)
       const jaAceito = await pool.query(
         `SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND status = 'aceito' AND id != $2`,
         [req.params.id, interesse_id]
@@ -5792,6 +5820,8 @@ router.post('/reparos/:id/interesse/:interesse_id/prestador-responder', autentic
       // 'contraproposta' continuam liberados para o suspenso encerrar a negociação.
       const suspensao = await estaSuspenso(req.usuario.id)
       if (suspensao) return sair('ROLLBACK', 403, corpoContaSuspensa(suspensao))
+      // Prazo vencido (utils/demandaAberta): o aceite casaria num pedido vencido — 409, nada gravado.
+      if (await prazoVencido(client, 'reparos', reparo_id)) return sair('ROLLBACK', 409, ERRO_PRAZO_VENCIDO_PROFISSIONAL)
       await client.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
       // O aceite já casa o prestador com o reparo (ver POST .../responder).
       await client.query(

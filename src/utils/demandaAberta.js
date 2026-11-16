@@ -21,4 +21,23 @@ const travarDemandaAberta = async (client, tabela, id) => {
   return { demanda: r.rows[0] }
 }
 
-module.exports = { ERRO_PEDIDO_INDISPONIVEL, travarDemandaAberta }
+// PRAZO VENCIDO (dono, 16/11/2026 — 4DXCJ): pedido ainda 'aberta' com expira_em no passado. Aceitar
+// uma proposta ali casava o profissional num pedido já vencido, e o app desfazia a escolha no mesmo
+// segundo (POST /:id/expirar-match — a proposta ia a 'expirado'). Os QUATRO aceites (dono em
+// …/responder; profissional em …/prestador-responder e …/pintor-responder) perguntam aqui ANTES de
+// gravar qualquer coisa: vencido → 409 PRAZO_VENCIDO, nada muda; o dono aumenta o prazo e escolhe.
+// Relógio do banco (NOW()), o mesmo que os crons e o expirar-match leem.
+const MSG_PRAZO_VENCIDO_DONO = 'O prazo deste pedido venceu. Aumente o prazo para escolher este profissional.'
+const MSG_PRAZO_VENCIDO_PROFISSIONAL = 'O prazo deste pedido venceu. O cliente precisa aumentar o prazo antes de fechar com você.'
+const erroPrazoVencido = (mensagem = MSG_PRAZO_VENCIDO_DONO) => ({ erro: mensagem, codigo: 'PRAZO_VENCIDO', mensagem })
+const ERRO_PRAZO_VENCIDO = Object.freeze(erroPrazoVencido())
+const ERRO_PRAZO_VENCIDO_PROFISSIONAL = Object.freeze(erroPrazoVencido(MSG_PRAZO_VENCIDO_PROFISSIONAL))
+// true só para pedido 'aberta', SEM profissional escolhido e com expira_em < NOW().
+const prazoVencido = async (db, tabela, id) => {
+  if (!NAO_ENCONTRADA[tabela]) throw new Error(`prazoVencido: tabela inválida ${tabela}`)
+  const r = await db.query(
+    `SELECT (status = 'aberta' AND match_usuario_id IS NULL AND expira_em < NOW()) AS vencido FROM ${tabela} WHERE id = $1`, [id])
+  return !!r.rows[0]?.vencido
+}
+
+module.exports = { ERRO_PEDIDO_INDISPONIVEL, travarDemandaAberta, ERRO_PRAZO_VENCIDO, ERRO_PRAZO_VENCIDO_PROFISSIONAL, prazoVencido }
