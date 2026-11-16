@@ -1,6 +1,6 @@
 const { pool } = require('../utils/supabase')
 const { TZ_AGENDA } = require('../utils/agendamento')
-const { entregarPushEEmail, entregarLembrete, semSobreposicao, semPushAtivo } = require('./alertaService')
+const { entregarPushEEmail, entregarLembrete, semSobreposicao, semPushAtivo, enviarPushNotificacao } = require('./alertaService')
 
 // Demanda ABERTA, sem profissional escolhido e com interessados PENDENTES (interesse_reparos /
 // candidaturas com status 'pendente' — o profissional espera o dono; 'contraproposta_dono' é o
@@ -31,6 +31,10 @@ const { entregarPushEEmail, entregarLembrete, semSobreposicao, semPushAtivo } = 
 //       'pendente': o dono ainda pode aceitar, e estendendo o prazo a demanda volta ao feed.
 //   (4) avisarPrazoEstendido — chamada por POST /…/estender quando a demanda já tinha passado
 //       por (3): cada interessado pendente sabe que o prazo foi aumentado e o interesse vale.
+//   (5) avisarPrazoAumentado — chamada por POST /…/estender quando a demanda AINDA NÃO tinha
+//       vencido (expira_em > NOW() antes do UPDATE): cada interessado ATIVO ('pendente' ou
+//       'contraproposta_dono') recebe UM push neutro, SEM e-mail — "ficou aberto até dd/mm".
+//       (4) e (5) nunca saem juntos: (4) exige o aviso de vencimento já enviado.
 // (2) e (3) são eventos críticos: push + e-mail sempre (entregarPushEEmail). O
 // expira_em entra em `data` para o dedupe do e-mail (hash de título+corpo+data) distinguir um
 // ciclo do outro depois de uma extensão.
@@ -219,8 +223,39 @@ const avisarPrazoEstendido = async (tabela, demandaId, atorId) => {
   }
 }
 
+// (5) Prazo aumentado ANTES de vencer (dono, 16/11/2026): push neutro, sem e-mail, a cada
+// interessado ainda ativo. Fire-and-forget depois do UPDATE do /estender; nunca lança. O dia é o
+// do novo expira_em em São Paulo. Quem estendeu (atorId) nunca recebe. Devolve quantos pushes saíram.
+const STATUS_ATIVOS_PRAZO = ['pendente', 'contraproposta_dono']
+const TITULO_PRAZO_AUMENTADO = '⏰ Prazo aumentado'
+const FMT_DIA_MES_SP = new Intl.DateTimeFormat('pt-BR', { timeZone: TZ_AGENDA, day: '2-digit', month: '2-digit' })
+const corpoPrazoAumentado = (titulo, expiraEm) => `"${titulo}" ficou aberto até ${FMT_DIA_MES_SP.format(new Date(expiraEm))}. Sua proposta continua valendo.`
+const avisarPrazoAumentado = async (tabela, demandaId, atorId) => {
+  try {
+    const lado = LADOS.find(l => l.tabela === tabela)
+    const d = (await pool.query(`SELECT id, titulo, expira_em FROM ${lado.tabela} WHERE id = $1`, [demandaId])).rows[0]
+    if (!d || !d.expira_em) return 0
+    const pros = (await pool.query(
+      `SELECT DISTINCT u.id, u.push_token FROM ${lado.interesse} x JOIN usuarios u ON u.id = x.usuario_id
+        WHERE x.${lado.coluna} = $1 AND x.status = ANY($2::text[]) AND u.push_token IS NOT NULL`,
+      [d.id, STATUS_ATIVOS_PRAZO])).rows
+    let enviados = 0
+    for (const p of pros) {
+      if (atorId && String(p.id) === String(atorId)) continue
+      const r = await enviarPushNotificacao(p.push_token, TITULO_PRAZO_AUMENTADO, corpoPrazoAumentado(d.titulo, d.expira_em),
+        { ...dataDono(lado, lado.tipoProEstendido, d), prazo_estendido: true }, p.id)
+      if (r === 'enviado') enviados++
+    }
+    console.log(`[EscolhaPendente] prazo aumentado (antes de vencer) ${lado.tabela} ${d.id} → ${enviados}/${pros.length} push(es) a interessados ativos`)
+    return enviados
+  } catch (err) {
+    console.error(`[EscolhaPendente] prazo aumentado ${tabela} ${demandaId}:`, err.message)
+    return 0
+  }
+}
+
 module.exports = {
-  verificarEscolhaPendente, avisarPrazoEstendido, LEMBRETE_CARENCIA_HORAS, EXPIROU_JANELA_HORAS,
+  verificarEscolhaPendente, avisarPrazoEstendido, avisarPrazoAumentado, TITULO_PRAZO_AUMENTADO, corpoPrazoAumentado, LEMBRETE_CARENCIA_HORAS, EXPIROU_JANELA_HORAS,
   // Para o teste das bandas (scripts/testar-escolha-pendente.js): só SQL, nada roda.
   LADOS, MARCO_PRIMEIRO, MARCO_FINAL, sqlBanda, sqlJanelaMarco, rotuloRestante,
 }

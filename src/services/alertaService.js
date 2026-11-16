@@ -9,6 +9,8 @@ const SQL_ZONA_DA_OBRA = sqlZonaSegura('obras.prazo_timezone')
 // D78: o reparo também guarda a zona do dono (reparos.prazo_timezone) para a faixa "Hoje".
 const SQL_ZONA_DO_REPARO = sqlZonaSegura('reparos.prazo_timezone')
 const { MARCA } = require('../utils/marca')
+// Retrato da saída por ATRASO na folha de desistências do dono (utils/desistencias).
+const { registrarDesistenciaSnapshot, MOTIVO_ATRASO_CHEGADA } = require('../utils/desistencias')
 const { normalizar, sqlNormalizarCidade } = require('../utils/localidade')
 // Emoji e rótulo por categoria (cópia verbatim das listas do app): o push "novo serviço" /
 // "nova obra" mostra o mesmo emoji do chip que o prestador vê no feed, e o rótulo acentuado
@@ -3211,7 +3213,32 @@ const ROTULOS_MATCH_DESFEITO = {
 // falta "não marcou horário" (registrarFaltaSemHorario) — um push por fato, não dois. Nesse caso
 // o DONO recebe o texto de "não marcou horário" (utils/reaberturaMatch: escolha outro interessado
 // ou defina nova data — as propostas dos concorrentes voltaram a valer), com o mesmo data.tipo.
-const notificarMatchDesfeito = async (tabela, demanda, { somenteDono = false } = {}) => {
+// atraso (dono, 16/11/2026): o cron tirou o escolhido porque ele NÃO CHEGOU no prazo combinado
+// (nem "sem horário", nem isento). O DONO recebe o texto próprio — "<primeiro nome> não chegou no
+// prazo combinado" / "Escolha outro profissional…" — com o mesmo data.tipo e motivo
+// 'atraso_chegada'; o aviso do profissional não muda. nomeProfissional vem do retrato gravado por
+// registrarAtrasoChegada (sem nome: "O profissional").
+const tituloDonoAtraso = (nome) => `⏰ ${primeiroNomeProfissional(nome)} não chegou no prazo combinado`
+const corpoDonoAtraso = (titulo) => `Escolha outro profissional para "${titulo}".`
+// Grava a saída por atraso como uma desistência (tabela desistencias, motivo 'atraso_chegada', com
+// o retrato nome curto/foto do profissional) para o app do dono mostrar a MESMA folha das demais
+// desistências — a proposta dele virou 'expirado', que a folha não lê. Chamado pelos dois crons do
+// cronômetro DEPOIS do un-match commitado, uma vez por un-match (o UPDATE do cron é o claim).
+// Nunca lança (não pode derrubar o cron). Devolve { nome } (para o push do dono) ou null.
+const registrarAtrasoChegada = async (tabela, demanda) => {
+  const usuarioId = demanda.match_usuario_id
+  if (!usuarioId) return null
+  try {
+    const u = (await pool.query(`SELECT id, nome, foto_url FROM usuarios WHERE id = $1`, [usuarioId])).rows[0] || { id: usuarioId }
+    await registrarDesistenciaSnapshot(pool, { tabela, demandaId: demanda.id, usuario: u, motivo: MOTIVO_ATRASO_CHEGADA })
+    console.log(`[MatchDesfeito] ${tabela} ${demanda.id}: saída por atraso de ${usuarioId} gravada em desistencias`)
+    return { nome: u.nome || null }
+  } catch (err) {
+    console.error(`[MatchDesfeito] ${tabela} ${demanda.id}: falha ao gravar a saída por atraso:`, err.message)
+    return null
+  }
+}
+const notificarMatchDesfeito = async (tabela, demanda, { somenteDono = false, atraso = false, nomeProfissional = null } = {}) => {
   const { chave, profissional, artigo, volta } = ROTULOS_MATCH_DESFEITO[tabela]
   const alvos = [demanda.criado_por, somenteDono ? null : demanda.match_usuario_id].filter(Boolean)
   if (alvos.length === 0) return
@@ -3225,12 +3252,13 @@ const notificarMatchDesfeito = async (tabela, demanda, { somenteDono = false } =
     const paraDono = u.id === demanda.criado_por
     const via = await entregarPushEEmail({
       usuario_id: u.id, ...u,
-      titulo: paraDono && somenteDono ? TITULO_DONO_SEM_HORARIO : '⏰ Prazo expirado!',
+      titulo: paraDono && somenteDono ? TITULO_DONO_SEM_HORARIO : paraDono && atraso ? tituloDonoAtraso(nomeProfissional) : '⏰ Prazo expirado!',
       corpo: paraDono
         ? (somenteDono ? corpoDonoSemHorario(demanda.titulo)
+           : atraso ? corpoDonoAtraso(demanda.titulo)
                        : `O ${profissional} não chegou a tempo para "${demanda.titulo}". ${artigo} está disponível novamente.`)
         : `O prazo para chegar em "${demanda.titulo}" acabou. ${volta} para o feed.`,
-      data: { tipo: 'match_expirado', [chave]: demanda.id, match_feito_em: demanda.match_feito_em || null },
+      data: { tipo: 'match_expirado', [chave]: demanda.id, match_feito_em: demanda.match_feito_em || null, ...(paraDono && atraso && !somenteDono ? { motivo: MOTIVO_ATRASO_CHEGADA } : {}) },
       rotulo: `match expirado ${tabela} ${demanda.id}`,
     })
     console.log(`[MatchDesfeito] ${tabela} ${demanda.id} → ${paraDono ? 'dono' : 'profissional'} via ${via}`)
@@ -3721,8 +3749,12 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
       for (const c of candidatos.rows) {
         if (!atualizados.has(c.id)) continue
         const semHorario = nuncaPropos(c)
+        // Atraso de verdade (havia compromisso e ele não chegou): vira desistência na folha do
+        // dono ANTES do push, e o push do dono leva o nome dele. A falta segue como sempre, abaixo.
+        const atraso = !semHorario && !isentoPorRecusa(c)
+        const retrato = atraso ? await registrarAtrasoChegada('reparos', c) : null
         try {
-          await notificarMatchDesfeito('reparos', c, { somenteDono: semHorario })
+          await notificarMatchDesfeito('reparos', c, { somenteDono: semHorario, atraso, nomeProfissional: retrato?.nome })
         } catch (err) {
           console.error(`[CronômetroReparos] falha ao notificar match desfeito ${c.id}:`, err.message)
         }
@@ -3871,8 +3903,11 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
       for (const c of candidatos.rows) {
         if (!atualizados.has(c.id)) continue
         const semHorario = nuncaPropos(c)
+        // Atraso de verdade → desistência 'atraso_chegada' + push próprio ao dono (ver o cron de reparos).
+        const atraso = !semHorario && !isentoPorRecusa(c)
+        const retrato = atraso ? await registrarAtrasoChegada('obras', c) : null
         try {
-          await notificarMatchDesfeito('obras', c, { somenteDono: semHorario })
+          await notificarMatchDesfeito('obras', c, { somenteDono: semHorario, atraso, nomeProfissional: retrato?.nome })
         } catch (err) {
           console.error(`[CronômetroObras] falha ao notificar match desfeito ${c.id}:`, err.message)
         }
@@ -4115,6 +4150,8 @@ const autoEncerrarPendentes = async () => {
 }
 
 module.exports = {
+  // Saída por atraso (cronômetro): retrato em desistencias + textos do push do dono.
+  notificarMatchDesfeito, registrarAtrasoChegada, tituloDonoAtraso, corpoDonoAtraso,
   semSobreposicao,
   // Cancelamento de match (cancelamentoMatchService): falta por usuário e reanúncio da demanda.
   registrarFaltaUsuario,
