@@ -34,7 +34,8 @@ const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaCon
 // Cancelamento justo de match pelas partes (antecedência, acordo mútuo, falta no tardio) —
 // substitui o uso de POST /:id/expirar-match por dono/profissional.
 const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQL_LIMPAR_MATCH,
-        desfazerMatchesPorExclusao, avisarMatchesDesfeitosPorExclusao } = require('../services/cancelamentoMatchService')
+        desfazerMatchesPorExclusao, avisarMatchesDesfeitosPorExclusao,
+        pedidoCancelamentoParaApp, semColunasPedidoCancelamentoParaApp } = require('../services/cancelamentoMatchService')
 // Propostas rebaixadas pelo match voltam a valer quando a demanda retorna ao feed (regra única).
 const { sqlRestaurarPropostas, SQL_MARCAR_REABERTURA } = require('../utils/reaberturaMatch')
 // Exclusão de conta: registro em contas_excluidas (utils/contasExcluidas).
@@ -6919,6 +6920,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // interessados_ativos (ainda na disputa): SÓ dono (utils/desistencias); null para os demais.
     const desistencias = ehDono ? await listarDesistencias('reparos', req.params.id) : null
     const interessados_ativos = ehDono ? await contarInteressadosAtivos('reparos', req.params.id) : null
+    // PALIATIVO app 1.2.2/1.2.3: as colunas do pedido de acordo não vão ao app (ninguém abaixo as lê).
+    semColunasPedidoCancelamentoParaApp('reparos', reparo)
     res.json({
       reparo,
       // conta_id / sou_escolhido / sou_dono — identidade por pessoa (identidadeNaDemanda).
@@ -6929,7 +6932,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       desistencias,
       interessados_ativos,
       // Pedido de acordo de cancelamento vigente (quem, motivo, expira_em) — só dono e prestador do match.
-      pedido_cancelamento: pedidoCancelamento(reparo, req.usuario.id, ehDono),
+      // PALIATIVO app 1.2.2/1.2.3 (cancelamentoMatchService): sai null, e o reparo sem cancelamento_pedido_*.
+      pedido_cancelamento: pedidoCancelamentoParaApp('reparos', reparo, req.usuario.id, ehDono),
       // A partir de quando o dono pode desfazer a escolha (POST /reparos/dono/:id/desfazer-match).
       desfazer_liberado_em,
       // Lembretes "Agende seu atendimento" já enviados ao prestador deste match e o próximo devido.
