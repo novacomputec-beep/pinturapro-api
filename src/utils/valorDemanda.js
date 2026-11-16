@@ -76,7 +76,61 @@ const migrarValorACombinar = async (client) => {
   return corrigidos
 }
 
+// ─── COMPATIBILIDADE COM O APP JÁ INSTALADO (16/11/2026) ─────────────────────────────────────────
+// As versões do app em campo não conhecem valor_a_combinar e podem quebrar com valor NULL. O BANCO
+// continua com NULL (a invariante acima não muda); só a RESPOSTA ao app troca: em todo objeto com
+// valor_a_combinar === true, o valor do PEDIDO (chaves `valor` / `valor_estimado`) que estiver
+// null/undefined sai como '0.01' — texto, como o pg devolve qualquer numeric ("150.00"), e o
+// mesmo número que esses pedidos tinham antes da coluna existir. valor_a_combinar: true segue no
+// objeto: o app novo mostra o chip e ignora o 0,01. valor_proposto (a proposta do profissional) e
+// valor_acordado NÃO são tocados. Só troca chave que JÁ existe no objeto.
+// O PAINEL não passa por aqui (ehRotaDoPainel): lá o valor segue null, ao lado de valor_acordado.
+const VALOR_COMPAT_APP = '0.01'
+const CAMPOS_VALOR_DO_PEDIDO = ['valor', 'valor_estimado']
+const PROFUNDIDADE_MAX = 8
+// Percorre listas e objetos simples (linhas do pg, corpos montados pelas rotas) e corrige NO LUGAR.
+const protegerValorParaApp = (dado, nivel = 0) => {
+  if (dado === null || typeof dado !== 'object' || nivel > PROFUNDIDADE_MAX) return dado
+  if (Array.isArray(dado)) { for (const item of dado) protegerValorParaApp(item, nivel + 1); return dado }
+  if (dado instanceof Date || Buffer.isBuffer(dado)) return dado
+  if (dado.valor_a_combinar === true) {
+    for (const campo of CAMPOS_VALOR_DO_PEDIDO) {
+      if (campo in dado && (dado[campo] === null || dado[campo] === undefined)) dado[campo] = VALOR_COMPAT_APP
+    }
+  }
+  for (const chave of Object.keys(dado)) {
+    const v = dado[chave]
+    if (v !== null && typeof v === 'object') protegerValorParaApp(v, nivel + 1)
+  }
+  return dado
+}
+// Rotas do PAINEL (caminho relativo ao router montado em /api): /admin/*, as listas e filas de
+// aprovação do painel e o CRUD de obra do painel (POST /obras, PUT|DELETE /obras/:id).
+const ehRotaDoPainel = (req) => {
+  const caminho = String(req?.path || '')
+  const metodo = String(req?.method || 'GET').toUpperCase()
+  const partes = caminho.split('/').filter(Boolean) // '/obras/admin' → ['obras', 'admin']
+  if (partes[0] === 'admin' || partes[0] === 'obras-aprovacao') return true
+  if ((partes[0] === 'obras' || partes[0] === 'reparos') && partes[1] === 'admin') return true
+  if (partes[0] === 'reparos' && partes[1] === 'aprovacao') return true
+  if (partes[0] === 'obras' && partes.length === 1 && metodo === 'POST') return true
+  if (partes[0] === 'obras' && partes.length === 2 && (metodo === 'PUT' || metodo === 'DELETE')) return true
+  return false
+}
+// Middleware do router do app (routes/index.js, antes de qualquer rota): embrulha res.json.
+// Nunca derruba a resposta — falha na troca devolve o corpo como veio.
+const middlewareValorParaApp = function valorACombinarParaApp(req, res, next) {
+  if (ehRotaDoPainel(req)) return next()
+  const jsonOriginal = res.json.bind(res)
+  res.json = (corpo) => {
+    try { protegerValorParaApp(corpo) } catch (err) { console.error('[valor a combinar] compat do app falhou:', err.message) }
+    return jsonOriginal(corpo)
+  }
+  next()
+}
+
 module.exports = {
+  protegerValorParaApp, ehRotaDoPainel, middlewareValorParaApp, VALOR_COMPAT_APP,
   validarValorDemanda, MENSAGEM_VALOR_OBRIGATORIO, CODIGO_VALOR_OBRIGATORIO, ERRO_VALOR_OBRIGATORIO,
   resolverValorDemanda, exigirValorPropostaSeACombinar, migrarValorACombinar,
   MENSAGEM_VALOR_PROPOSTA_OBRIGATORIO, ERRO_VALOR_PROPOSTA_OBRIGATORIO, ROTULO_VALOR_A_COMBINAR, MARCADOR_BACKFILL,
