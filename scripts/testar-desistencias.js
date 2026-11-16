@@ -122,11 +122,11 @@ const main = async () => {
   const mapa = await desistenciaRecentePorDemanda('reparos', [D(1), D(2), D(4), D(1)])
   ok(Object.keys(mapa).sort().join() === [D(1), D(2)].sort().join(), 'mapa só das demandas com desistência (ids repetidos/sem desistência ignorados)', Object.keys(mapa))
   ok(mapa[D(2)].nome === 'Hudson' && mapa[D(2)].motivo_texto === 'Não consegue no horário' && mapa[D(2)].acordo === true, 'reparo 2: a MAIS RECENTE (Hudson 15:40, não Beto 15:30)', mapa[D(2)])
-  ok(JSON.stringify(Object.keys(mapa[D(1)])) === JSON.stringify(['id', 'nome', 'foto_url', 'cancelado_em', 'motivo_texto', 'acordo']), 'formato resumido: id, nome, foto_url, cancelado_em, motivo_texto, acordo', Object.keys(mapa[D(1)]))
+  ok(JSON.stringify(Object.keys(mapa[D(1)])) === JSON.stringify(['id', 'nome', 'foto_url', 'cancelado_em', 'motivo', 'motivo_texto', 'acordo']), 'formato resumido: id, nome, foto_url, cancelado_em, motivo, motivo_texto, acordo', Object.keys(mapa[D(1)]))
   ok(JSON.stringify(await desistenciaRecentePorDemanda('obras', [])) === '{}', 'lista vazia → {} sem consulta')
   const linhas = [{ id: D(1), match_usuario_id: null }, { id: D(2), match_usuario_id: U(2) }, { id: D(4), match_usuario_id: null }]
   await anexarDesistenciaRecente('reparos', linhas)
-  ok(linhas[0].desistencia_recente?.nome === 'Hudson' && linhas[1].desistencia_recente === null && linhas[2].desistencia_recente === null,
+  ok(linhas[0].desistencia_recente?.nome === 'Hudson' && typeof linhas[0].desistencia_recente.motivo === 'string' && linhas[1].desistencia_recente === null && linhas[2].desistencia_recente === null,
      'anexar: item só na demanda SEM match com desistência; com match ou sem desistência → null', linhas.map(l => l.desistencia_recente && l.desistencia_recente.nome))
   const obrasLinhas = [{ id: D(3), match_usuario_id: null }]
   await anexarDesistenciaRecente('obras', obrasLinhas)

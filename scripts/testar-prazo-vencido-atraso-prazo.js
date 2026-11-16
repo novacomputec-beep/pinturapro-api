@@ -244,7 +244,11 @@ const main = async () => {
   }
   const recente = (await db.query(`SELECT id, match_usuario_id FROM reparos WHERE id = $1`, [D(20)])).rows
   await Des.anexarDesistenciaRecente('reparos', recente)
-  ok(recente[0].desistencia_recente?.motivo_texto === 'Não chegou no prazo combinado', 'reparos: desistencia_recente da lista do dono traz o atraso', recente[0].desistencia_recente)
+  ok(recente[0].desistencia_recente?.motivo === 'atraso_chegada' && recente[0].desistencia_recente.motivo_texto === 'Não chegou no prazo combinado',
+     "reparos: desistencia_recente (/minhas) traz motivo 'atraso_chegada' + o texto", recente[0].desistencia_recente)
+  const recenteObra = (await db.query(`SELECT id, match_usuario_id FROM obras WHERE id = $1`, [D(22)])).rows
+  await Des.anexarDesistenciaRecente('obras', recenteObra)
+  ok(recenteObra[0].desistencia_recente?.motivo === 'atraso_chegada', "obras: desistencia_recente (/minhas) traz motivo 'atraso_chegada'", recenteObra[0].desistencia_recente)
   const f = (await db.query(`SELECT usuario_id, tabela, motivo FROM faltas_profissional ORDER BY tabela`)).rows
   ok(f.length - faltasAntes === 3 && f.filter(x => x.usuario_id === CARMEN).length === 2 && f.filter(x => x.usuario_id === OUTRO && x.motivo === 'não marcou horário').length === 1,
      'faltas iguais às de antes: 1 por atraso em cada demanda da Carmen + "não marcou horário" do outro', f)
@@ -286,8 +290,22 @@ const main = async () => {
   await demanda('reparos', 33, 'Vencido calado', `now() - INTERVAL '1 hour'`)
   await proposta('reparos', 33, CARMEN, 'pendente')
   limpar()
-  await chamar(E.reparos, { usuario: usuarioDono, params: { id: D(33) }, body: { horas: 24 } }); await assentar()
+  const rv = await chamar(E.reparos, { usuario: usuarioDono, params: { id: D(33) }, body: { horas: 24 } }); await assentar()
   ok(pushes.length === 0 && emails.length === 0, 'vencido sem aviso de vencimento: nada sai', pushes.map(p => p.title))
+  // O diálogo PRAZO_VENCIDO do app manda o dono para cá: pedido VENCIDO é aceito e ganha prazo a partir de AGORA.
+  ok(rv.status === 200 && new RealDate(rv.body.expira_em).getTime() === T0 + 24 * 3600000 && new RealDate((await linha('reparos', 33)).expira_em).getTime() === T0 + 24 * 3600000,
+     'reparos: /estender aceita pedido já vencido — novo prazo = agora + horas', rv.body)
+  // caminho inteiro do diálogo, nos dois lados: 409 PRAZO_VENCIDO → /estender → o MESMO aceite passa
+  for (const [t, n] of [['reparos', 35], ['obras', 36]]) {
+    await demanda(t, n, `Dialogo ${t}`, `now() - INTERVAL '3 hours'`)
+    const idP = await proposta(t, n, CARMEN)
+    const a1 = await chamar(H[t], { usuario: usuarioDono, params: pAceite(t, n, idP), body: { action: 'aceitar' } })
+    const ex = await chamar(E[t], { usuario: usuarioDono, params: { id: D(n) }, body: { horas: 24 } }); await assentar()
+    const a2 = await chamar(H[t], { usuario: usuarioDono, params: pAceite(t, n, idP), body: { action: 'aceitar' } }); await assentar()
+    ok(a1.status === 409 && a1.body.codigo === 'PRAZO_VENCIDO' && ex.status === 200 && new RealDate(ex.body.expira_em).getTime() >= T0 + 24 * 3600000
+       && a2.status === 200 && (await linha(t, n)).match_usuario_id === CARMEN,
+       `${t}: vencido há 3h → 409 PRAZO_VENCIDO → /estender 200 → aceite passa`, [a1.status, ex.status, ex.body.expira_em, a2.status])
+  }
   // vivo sem interessado ativo → nada
   await demanda('reparos', 34, 'Vivo sozinho', `now() + INTERVAL '5 hours'`)
   await proposta('reparos', 34, CONC, 'recusado')
