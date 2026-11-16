@@ -65,8 +65,8 @@ const main = async () => {
       rodada int, status text DEFAULT 'pendente', status_antes_match text, criado_em timestamptz DEFAULT now()`
   await db.exec(`
     CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, cpf_cnpj text, suspenso_em timestamptz);
-    CREATE TABLE reparos (${colsDemanda});
-    CREATE TABLE obras (${colsDemanda});
+    CREATE TABLE reparos (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda});
+    CREATE TABLE obras (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda});
     CREATE TABLE interesse_reparos (${colsProposta('reparo_id')});
     CREATE TABLE candidaturas (${colsProposta('obra_id')});
     CREATE TABLE tentativas_contato (id bigserial PRIMARY KEY, usuario_id uuid, tipo text, demanda_id uuid, campo text, conta boolean, criado_em timestamptz DEFAULT now());

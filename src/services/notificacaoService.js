@@ -51,7 +51,7 @@ const notificarNovaObra = async (pool, obra) => {
     await enviarNotificacao(
       tokens,
       '🏠 Nova obra disponível!',
-      `${obra.titulo} — R$ ${Number(obra.valor).toLocaleString('pt-BR')} em ${obra.cidade}`,
+      `${obra.titulo} — ${Number(obra.valor) > 0 ? `R$ ${Number(obra.valor).toLocaleString('pt-BR')}` : 'Valor a combinar'} em ${obra.cidade}`,
       { tipo: 'nova_obra', obra_id: obra.id }
     )
 

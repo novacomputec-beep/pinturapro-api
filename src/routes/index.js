@@ -103,7 +103,7 @@ const { podeObras, podeServicos, capacidadesDaPessoa } = require('../utils/capac
 // Aviso "fora da sua área": migração de boot e o teto diário por pessoa (config do painel).
 const { migrarAvisosForaDaArea, lerLimiteAvisosForaDaArea, gravarLimiteAvisosForaDaArea } = require('../utils/avisosForaDaArea')
 // Valor da demanda obrigatório e > 0 ao criar e ao editar ("Informe quanto quer pagar").
-const { validarValorDemanda, MENSAGEM_VALOR_OBRIGATORIO } = require('../utils/valorDemanda')
+const { validarValorDemanda, MENSAGEM_VALOR_OBRIGATORIO, resolverValorDemanda, exigirValorPropostaSeACombinar, migrarValorACombinar } = require('../utils/valorDemanda')
 // Aviso de demanda nova por distância: migração de boot e o raio que o app manda no feed (só registro).
 const { migrarAvisosPorDistancia, registrarRaioEscolhido } = require('../utils/avisosPorDistancia')
 // GET /prestador/oportunidades-resumo: contagem de demandas abertas ao alcance do profissional.
@@ -727,6 +727,10 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS ultima_extensao_horas NUMERIC`)
     // Aumento ÚNICO de oferta pelo dono (POST /obras/:id/aumentar-valor): NULL = nunca aumentado.
     await client.query(`ALTER TABLE obras   ADD COLUMN IF NOT EXISTS valor_aumentado_em TIMESTAMPTZ`)
+    // "Valor a combinar" (utils/valorDemanda): coluna valor_a_combinar nas duas tabelas, valor passa
+    // a aceitar NULL e a correção ÚNICA dos pedidos abertos com valor <= 1,00.
+    const valoresACombinar = await migrarValorACombinar(client)
+    for (const v of valoresACombinar) console.log(`[migration] valor a combinar: ${v.tabela} ${v.id} "${v.titulo}" (valor era ${v.valor_antes})`)
     // Instante em que o push "nova obra/novo serviço disponível" foi disparado. NULL = ainda
     // não avisado. Escrito UMA vez pelo claim atômico de POST /:id/midias-prontas (o app
     // chama ao terminar o último upload); sem backfill, sem default, sem constraint.
@@ -2861,7 +2865,7 @@ const comNivel = (av) => (av ? { nota: av.nota, nivel: NIVEIS[av.nota] || null, 
 router.get('/obras/meus-contratos', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.bairro, o.uf,
+      `SELECT o.id, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade, o.bairro, o.uf,
               o.match_feito_em, o.status,
               u.id AS dono_id, u.nome AS dono_nome, u.telefone AS dono_telefone,
               (SELECT url FROM midias WHERE obra_id = o.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) AS foto_capa,
@@ -2905,7 +2909,7 @@ router.get('/obras/meus-contratos', autenticar, async (req, res) => {
 router.get('/obras/meus-contratos-dono', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.bairro, o.uf,
+      `SELECT o.id, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade, o.bairro, o.uf,
               o.match_feito_em, o.status,
               u.id AS prestador_id,
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
@@ -2987,7 +2991,8 @@ router.post('/obras/dono', autenticar, exigirNaoSuspenso, async (req, res) => {
     // Valor obrigatório e > 0 (utils/valorDemanda): sem isto a obra era gravada e publicada com
     // o que viesse — vazio, 0 ou negativo. Depois da moderação, para o anúncio continuar
     // recebendo a mensagem (e o aviso ao moderador) dele.
-    const valorObra = validarValorDemanda(req.body.valor)
+    // "Valor a combinar" (valor_a_combinar=true): valor NULL e a flag gravada (resolverValorDemanda).
+    const valorObra = resolverValorDemanda(req.body, 'valor')
     if (valorObra.erro) return res.status(400).json(valorObra)
     const valor = valorObra.valor
     // Bloqueio de pedidos novos (utils/responsabilidade): 2 propostas de horário de profissional
@@ -3025,14 +3030,14 @@ router.post('/obras/dono', autenticar, exigirNaoSuspenso, async (req, res) => {
     // do dia local (mesmo motivo documentado em JANELAS_CHEGADA).
     // A zona entra como PARÂMETRO ($21), nunca interpolada: o valor vem do cliente.
     const result = await pool.query(
-      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, coordenadas_origem, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar, prazo_modo, prazo_timezone)
+      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, coordenadas_origem, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar, prazo_modo, prazo_timezone, valor_a_combinar)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
                CASE WHEN $20::text = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia('$21::text')} ELSE $10::timestamptz END,
-               $11,$12,$13,$14,$15,$16,$17,'rascunho',true,'pendente',$18,$19,$20,$21)
+               $11,$12,$13,$14,$15,$16,$17,'rascunho',true,'pendente',$18,$19,$20,$21,$22::boolean)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao, prazoModo, prazoZona]
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao, prazoModo, prazoZona, valorObra.valor_a_combinar]
     )
     let obra = result.rows[0]
     // Especialidades inferidas do título + descrição (utils/especialidadesInferidas): gravadas já na
@@ -3235,12 +3240,15 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
       return res.status(400).json({ erro: 'Filtro inválido' })
     }
     const result = await pool.query(`
-      SELECT o.id, o.titulo, o.categoria, o.valor, o.cidade, o.uf, o.bairro,
+      SELECT o.id, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade, o.uf, o.bairro,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status,
              o.criado_em, o.horas_para_expirar, o.prazo_modo,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              (o.status = 'aberta' AND (CASE WHEN o.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('o.')} ELSE o.expira_em END) <= NOW()) AS expirada,
              ${sqlSituacaoPainel('o', sqlLimiteChegada('o.'))} AS situacao_painel,
+             -- Valor COMBINADO (utils/valorAcordado): o da candidatura escolhida; NULL sem escolhido.
+             -- Em pedido "valor a combinar" (valor NULL) é o único preço que existe.
+             (SELECT ${sqlValorAcordadoObra('ca', 'o')} FROM candidaturas ca WHERE ca.obra_id = o.id AND ca.status = 'aceito' LIMIT 1) AS valor_acordado,
              (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) AS total_candidaturas,
              ${sqlEscolhidoNome('obras', 'o')} AS escolhido_nome,
              ${sqlEscolhidoEm('obras', 'o')} AS escolhido_em
@@ -3570,6 +3578,7 @@ const avaliarAumentoValor = async (lado, id, donoId, valorNovo = null) => {
   const atual = await pool.query(
     `SELECT d.status, d.status_aprovacao, d.match_usuario_id, d.valor_aumentado_em, d.alerta_enviado_em,
             d.${lado.colunaValor} AS valor_atual,
+            COALESCE(d.valor_a_combinar, false) AS valor_a_combinar,
             d.expira_em <= NOW() AS expirada,
             EXISTS (${lado.aceito}) AS tem_aceito,
             EXISTS (${lado.vivo})   AS tem_interessado,
@@ -3586,7 +3595,11 @@ const avaliarAumentoValor = async (lado, id, donoId, valorNovo = null) => {
   const valorAtual = Number(d.valor_atual ?? 0)
   let rejeicao = null
 
-  if (d.status !== 'aberta' || d.status_aprovacao !== 'aprovada' || d.expirada) {
+  // "Valor a combinar": não existe oferta para aumentar — primeira regra, com mensagem própria
+  // (e pode_aumentar_valor = false nos detalhes, pelo mesmo caminho).
+  if (d.valor_a_combinar) {
+    rejeicao = { status: 409, codigo: 'VALOR_A_COMBINAR', mensagem: 'Este pedido está com valor a combinar: não há oferta para aumentar. Cada profissional informa o preço na proposta.' }
+  } else if (d.status !== 'aberta' || d.status_aprovacao !== 'aprovada' || d.expirada) {
     rejeicao = { status: 409, codigo: 'DEMANDA_INATIVA', mensagem: 'Só é possível aumentar a oferta de uma demanda aberta, aprovada e dentro do prazo' }
   } else if (valorNovo !== null && !(valorNovo >= valorMinimoAumento(valorAtual))) {
     const valorMinimo = valorMinimoAumento(valorAtual)
@@ -4079,6 +4092,9 @@ router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssin
     await client.query('BEGIN')
     const { demanda, recusa } = await travarDemandaAberta(client, 'obras', req.params.id)
     if (recusa) { await client.query('ROLLBACK'); return res.status(recusa.status).json(recusa.corpo) }
+    // Obra "valor a combinar": quem dá o preço é o profissional — valor_proposto obrigatório e > 0.
+    const semValorObra = await exigirValorPropostaSeACombinar(client, 'obras', req.params.id, valor_proposto)
+    if (semValorObra) { await client.query('ROLLBACK'); return res.status(400).json(semValorObra) }
     const existente = await client.query(
       `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
       [req.params.id, req.usuario.id]
@@ -4695,7 +4711,8 @@ router.post('/reparos/dono', autenticar, exigirNaoSuspenso, async (req, res) => 
     // Valor obrigatório e > 0 (utils/valorDemanda). Até 09/11/2026 o corpo ia direto ao INSERT:
     // serviço sem valor, com 0 ou '' era gravado e publicado (caso "Depilação na cera", valor 0).
     // Depois da moderação, para o anúncio continuar recebendo a mensagem dele.
-    const valorServico = validarValorDemanda(req.body.valor_estimado)
+    // "Valor a combinar" (valor_a_combinar=true): valor_estimado NULL e a flag gravada.
+    const valorServico = resolverValorDemanda(req.body, 'valor_estimado')
     if (valorServico.erro) return res.status(400).json(valorServico)
     const valor_estimado = valorServico.valor
     // cidade — presença apenas, mesmo estilo do titulo. Sem cidade a linha era gravada e o
@@ -4764,14 +4781,14 @@ router.post('/reparos/dono', autenticar, exigirNaoSuspenso, async (req, res) => 
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam o reparo já criado em vez de inserir duplicata. Sem chave (NULL) → insert normal.
     const result = await pool.query(
-      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id, prazo_modo, prazo_timezone, categorias, local_atendimento)
+      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id, prazo_modo, prazo_timezone, categorias, local_atendimento, valor_a_combinar)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',
                CASE WHEN $18::text = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia('$19::text')} ELSE $10::timestamptz END,
-               $11,$12,$13,$14,$15,$16,$17,$18,$19,$20::text[],$21::text)
+               $11,$12,$13,$14,$15,$16,$17,$18,$19,$20::text[],$21::text,$22::boolean)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoriaPrincipal, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo, prazoZona, listaCategorias, localAtendimento.valor]
+      [req.usuario.id, titulo, categoriaPrincipal, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo, prazoZona, listaCategorias, localAtendimento.valor, valorServico.valor_a_combinar]
     )
     res.status(201).json(result.rows[0])
     // ESTE e o unico envio que dispara no fluxo real, e por isso ele FICA. O INSERT acima
@@ -5183,11 +5200,13 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
     // escolhido_nome/escolhido_em: profissional escolhido (match OU interesse 'aceito' —
     // utils/profissionalEscolhido), NULL quando não há. Mesma definição de GET /obras/admin.
     const result = await pool.query(`
-      SELECT r.id, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.cidade, r.uf, r.bairro,
+      SELECT r.id, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.valor_a_combinar, r.cidade, r.uf, r.bairro,
              r.expira_em, r.status, r.criado_em, r.prazo_atendimento_horas,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              (r.status = 'aberta' AND (CASE WHEN r.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('r.')} ELSE r.expira_em END) <= NOW()) AS expirada,
              ${sqlSituacaoPainel('r', sqlLimiteChegada('r.'))} AS situacao_painel,
+             -- Valor COMBINADO: o do interesse escolhido (ver GET /obras/admin).
+             (SELECT ${sqlValorAcordadoReparo('ia', 'r')} FROM interesse_reparos ia WHERE ia.reparo_id = r.id AND ia.status = 'aceito' LIMIT 1) AS valor_acordado,
              (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) AS total_interessados,
              ${sqlEscolhidoNome('reparos', 'r')} AS escolhido_nome,
              ${sqlEscolhidoEm('reparos', 'r')} AS escolhido_em
@@ -5213,7 +5232,7 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
              -- match do reparo é de uma conta DELA — o app não precisa comparar ids de conta.
              ir.usuario_id AS conta_id,
              COALESCE(${sqlProfissionalDaPessoa('r.match_usuario_id', '$1')}, false) AS match_da_pessoa,
-             r.id as reparo_id, r.titulo, r.categoria, r.categorias, r.descricao, r.valor_estimado,
+             r.id as reparo_id, r.titulo, r.categoria, r.categorias, r.descricao, r.valor_estimado, r.valor_a_combinar,
              r.cidade, r.bairro, r.latitude, r.longitude, r.expira_em, r.status as reparo_status, r.prazo_atendimento_horas,
              r.match_usuario_id, r.match_feito_em,
              -- Encerramento assimétrico: só o PRESTADOR cria solicitação pendente. O dono não
@@ -5278,7 +5297,7 @@ router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
   try {
     if (req.usuario.role !== 'prestador') return res.status(403).json({ erro: 'Acesso restrito a prestadores' })
     const result = await pool.query(
-      `SELECT r.id, r.titulo, r.categoria, r.categorias, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
+      `SELECT r.id, r.titulo, r.categoria, r.categorias, r.descricao, r.valor_estimado, r.valor_a_combinar, r.cidade, r.bairro, r.uf,
               r.match_feito_em, r.status,
               u.id AS dono_id, u.nome AS dono_nome, u.telefone AS dono_telefone,
               (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) AS foto_capa,
@@ -5314,7 +5333,7 @@ router.get('/reparos/meus-contratos', autenticar, async (req, res) => {
 router.get('/reparos/meus-contratos-dono', autenticar, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT r.id, r.titulo, r.categoria, r.categorias, r.descricao, r.valor_estimado, r.cidade, r.bairro, r.uf,
+      `SELECT r.id, r.titulo, r.categoria, r.categorias, r.descricao, r.valor_estimado, r.valor_a_combinar, r.cidade, r.bairro, r.uf,
               r.match_feito_em, r.status,
               u.id AS prestador_id,
               u.nome AS prestador_nome, u.telefone AS prestador_telefone,
@@ -5368,7 +5387,7 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPod
     const params = [req.usuario.id]
 
     let query = `
-      SELECT r.id, r.titulo, r.categoria, r.categorias, r.local_atendimento, r.valor_estimado, r.cidade, r.bairro, r.uf,
+      SELECT r.id, r.titulo, r.categoria, r.categorias, r.local_atendimento, r.valor_estimado, r.valor_a_combinar, r.cidade, r.bairro, r.uf,
              r.latitude, r.longitude, r.coordenadas_origem,
              -- prazo_atendimento_horas (D81): o card do feed no app lê exatamente este campo
              -- para a faixa de urgência ("🔴 URGENTE / Atender em até Nh") e devolve null
@@ -5493,6 +5512,9 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
     await client.query('BEGIN')
     const { demanda, recusa } = await travarDemandaAberta(client, 'reparos', req.params.id)
     if (recusa) { await client.query('ROLLBACK'); return res.status(recusa.status).json(recusa.corpo) }
+    // Serviço "valor a combinar": quem dá o preço é o profissional — valor_proposto obrigatório e > 0.
+    const semValorReparo = await exigirValorPropostaSeACombinar(client, 'reparos', req.params.id, valor_proposto)
+    if (semValorReparo) { await client.query('ROLLBACK'); return res.status(400).json(semValorReparo) }
     const existente = await client.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
     if (existente.rows.length > 0) { await client.query('ROLLBACK'); return res.status(409).json(req.contaLogada ? ERRO_PROPOSTA_OUTRO_PERFIL : { erro: 'Você já demonstrou interesse neste serviço' }) }
     const result = await client.query(

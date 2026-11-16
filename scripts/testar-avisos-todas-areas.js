@@ -253,7 +253,7 @@ const main = async () => {
      'obra: título e corpo (emoji da categoria da obra, bairro, valor)', avo && { titulo: avo.title, corpo: avo.body })
   ok(avo && avo.data.tipo === 'nova_obra' && avo.data.obra_id === D(2) && avo.data.fora_da_area === true, 'obra: data nova_obra + fora_da_area', avo?.data)
   const m = alerta.mensagemForaDaArea(alerta.LADOS_FORA_AREA.find(l => l.tabela === 'reparos'), { id: D(1), titulo: 'Sem bairro nem valor', cidade: 'Uberlândia', bairro: ' ', valor: null, categoria: 'faxina', categorias: ['faxina'] })
-  ok(m.corpo === '🧹 Sem bairro nem valor. Sabe fazer ou conhece quem faz? Toque para ver.', 'corpo sem bairro e sem valor não deixa separador sobrando', m.corpo)
+  ok(m.corpo === '🧹 Sem bairro nem valor · Valor a combinar. Sabe fazer ou conhece quem faz? Toque para ver.', 'corpo sem bairro não deixa separador sobrando; pedido sem valor sai "Valor a combinar" (16/11/2026)', m.corpo)
 
   // ═══ 5. Horário de silêncio (08–20h de São Paulo) ═════════════════════════════════════════
   await fixarAgora('2026-11-11T01:30:00Z') // terça, 22:30 em São Paulo

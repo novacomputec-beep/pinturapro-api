@@ -128,8 +128,8 @@ const main = async () => {
     CREATE TABLE tentativas_contato (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), usuario_id uuid, criado_em timestamptz DEFAULT now());
     CREATE TABLE push_entregas (tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(), primeira_tentativa_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);
-    CREATE TABLE reparos (${colsDemanda});
-    CREATE TABLE obras (${colsDemanda});
+    CREATE TABLE reparos (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda});
+    CREATE TABLE obras (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda});
     CREATE TABLE interesse_reparos (${colsProposta('reparo_id')});
     CREATE TABLE candidaturas (${colsProposta('obra_id')});
     CREATE TABLE perguntas_demanda (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tipo text, demanda_id uuid, autor_id uuid, pergunta text, resposta text, criado_em timestamptz DEFAULT now(), respondido_em timestamptz);

@@ -102,8 +102,8 @@ const main = async () => {
       foto_url text, logradouro text, numero text, bairro text, senha_hash text, boas_vindas_exibida boolean, token_version int DEFAULT 1, verificacao_status text, referencias text,
       especialidades text[], uf text);
     ALTER TABLE usuarios ADD COLUMN avisos_todas_areas boolean NOT NULL DEFAULT true; -- preferência do aviso "fora da sua área" (migração de boot)
-    CREATE TABLE reparos (${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
-    CREATE TABLE obras (${colsDemanda}, valor numeric, horas_para_expirar numeric, metragem numeric, prazo_execucao_dias int);
+    CREATE TABLE reparos (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
+    CREATE TABLE obras (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, valor numeric, horas_para_expirar numeric, metragem numeric, prazo_execucao_dias int);
     CREATE TABLE candidaturas (${colsProposta('obra_id')});
     CREATE TABLE interesse_reparos (${colsProposta('reparo_id')});
     CREATE UNIQUE INDEX candidaturas_aceito_unica_idx ON candidaturas (obra_id) WHERE status = 'aceito';
