@@ -48,9 +48,10 @@ const minhas = async (req, res) => {
               -- Agendamento: de quem é a proposta pendente (vez de quem responder) e a rodada.
               o.chegada_proposta_por, o.chegada_pendente_rodada,
               -- "Expirada" não é status no banco: é uma obra NÃO encerrada cujo expira_em já
-              -- passou. Mesma expressão de GET /obras/minhas e GET /obras/:id, calculada no SQL
-              -- (relógio do servidor) para o app não comparar expira_em com o relógio do aparelho.
-              (o.status <> 'encerrada' AND o.expira_em <= NOW()) AS obra_expirada
+              -- passou, calculada no SQL (relógio do servidor) para o app não comparar expira_em
+              -- com o relógio do aparelho. Com profissional escolhido NUNCA é expirada (dono,
+              -- 17/11/2026, caso 3529D): expira_em é só o prazo de ESCOLHA — como GET /obras/minhas.
+              (o.status <> 'encerrada' AND o.match_usuario_id IS NULL AND o.expira_em <= NOW()) AS obra_expirada
        FROM candidaturas c
        JOIN obras o ON c.obra_id = o.id
        -- Por PESSOA (Fase 2b): candidaturas de QUALQUER conta profissional do mesmo CPF.

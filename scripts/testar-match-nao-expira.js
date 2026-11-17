@@ -3,8 +3,10 @@
 // expira_em é só o prazo de ESCOLHA. Reparo/obra 'aberta' com match_usuario_id e expira_em no
 // passado continua em "Em aberto" (GET /reparos/minhas e /obras/minhas: fora de `historico`, com
 // expirada = false) e, no painel (GET /reparos/admin e /obras/admin), fica no filtro 'abertas'
-// com situacao_painel = 'aberta' e expirada = false. SEM match, tudo como antes: vencido vai
-// para o histórico / 'canceladas' como 'expirada'.
+// com situacao_painel = 'aberta' e expirada = false. Do lado do PROFISSIONAL escolhido, o mesmo:
+// GET /reparos/meus-interesses mantém o serviço em `ativos` com reparo_expirada = false e
+// GET /candidaturas/minhas devolve obra_expirada = false. SEM match, tudo como antes: vencido
+// vai para o histórico / 'canceladas' como 'expirada'.
 // Rotas REAIS sobre o ESQUEMA DE PRODUÇÃO (scripts/fixtures/esquema-producao.sql, PGlite).
 //   npm i -D @electric-sql/pglite && node scripts/testar-match-nao-expira.js
 process.env.JWT_SECRET = 'segredo-de-teste'
@@ -74,6 +76,7 @@ const chamar = async (metodo, caminho, { usuario, query = {} } = {}) => {
 const DONO = { id: U(900), role: 'dono_obra' }
 const ADM = { id: U(901), role: 'admin' }
 const PROF = { id: U(1), role: 'prestador' }
+const OUTRO = { id: U(2), role: 'prestador' }
 
 const main = async () => {
   db = new PGlite()
@@ -82,7 +85,7 @@ const main = async () => {
   const usr = (u, nome) => db.query(
     `INSERT INTO usuarios (id, nome, email, role, cidade, uf, cpf_cnpj, ativo) VALUES ($1, $2, $3, $4, 'Patos de Minas', 'MG', $5, true)`,
     [u.id, nome, `${nome.toLowerCase()}@x.invalid`, u.role, u.id.slice(-11)])
-  await usr(DONO, 'Dono'); await usr(ADM, 'Admin'); await usr(PROF, 'Emilyn')
+  await usr(DONO, 'Dono'); await usr(ADM, 'Admin'); await usr(PROF, 'Emilyn'); await usr(OUTRO, 'Outro')
 
   // expira = expressão SQL do expira_em; extra = colunas a mais (valores JS).
   const pedido = (t, n, titulo, expira, extra = {}) => {
@@ -137,6 +140,41 @@ const main = async () => {
     ok(fi[D(base + 5)]?.situacao_painel === 'encerrada' && !ab[D(base + 5)] && !ca[D(base + 5)], `${t}/admin: encerrado com profissional só em 'finalizadas', situacao_painel encerrada`)
     const inv = await chamar('get', `/${t}/admin`, { usuario: ADM, query: { filtro: 'toString' } })
     ok(inv.status === 400, `${t}/admin: filtro inválido → 400`, inv.status)
+
+    // ---- LADO DO PROFISSIONAL (a Emilyn do 3529D): GET /reparos/meus-interesses e /candidaturas/minhas ----
+    const [tp, fk] = t === 'reparos' ? ['interesse_reparos', 'reparo_id'] : ['candidaturas', 'obra_id']
+    const proposta = (n, u, status) => db.query(`INSERT INTO ${tp} (${fk}, usuario_id, status, valor_proposto) VALUES ($1, $2, $3, 80)`, [D(base + n), u.id, status])
+    await proposta(1, PROF, 'aceito'); await proposta(2, PROF, 'aceito'); await proposta(3, PROF, 'pendente')
+    await proposta(4, PROF, 'pendente'); await proposta(5, PROF, 'aceito')
+    await proposta(1, OUTRO, 'recusado') // concorrente rebaixado pelo match do pedido 1
+    if (t === 'reparos') {
+      const mi = await chamar('get', '/reparos/meus-interesses', { usuario: PROF })
+      const at = Object.fromEntries((mi.body.ativos || []).map(x => [x.reparo_id, x]))
+      const hi = Object.fromEntries((mi.body.historico || []).map(x => [x.reparo_id, x]))
+      ok(mi.status === 200, 'GET /reparos/meus-interesses 200', mi.body?.erro)
+      for (const [n, rot] of [[1, 'tipo 3529D'], [2, 'match sem horário']]) {
+        ok(!!at[D(n)] && !hi[D(n)] && at[D(n)].reparo_expirada === false && at[D(n)].match_da_pessoa === true,
+          `meus-interesses (escolhida): ${rot} com expira_em vencido fica em ativos, reparo_expirada=false`, at[D(n)] && [at[D(n)].reparo_expirada, at[D(n)].match_da_pessoa])
+      }
+      ok(!!hi[D(3)] && !at[D(3)] && hi[D(3)].reparo_expirada === true, 'meus-interesses: SEM match e vencido continua no histórico, reparo_expirada=true', hi[D(3)]?.reparo_expirada)
+      ok(!!at[D(4)] && at[D(4)].reparo_expirada === false, 'meus-interesses: sem match no prazo fica em ativos')
+      ok(!!hi[D(5)] && hi[D(5)].reparo_expirada === false, 'meus-interesses: encerrado fica no histórico, reparo_expirada=false')
+      const mo = await chamar('get', '/reparos/meus-interesses', { usuario: OUTRO })
+      const hio = (mo.body.historico || []).find(x => x.reparo_id === D(1))
+      ok(!!hio && !(mo.body.ativos || []).some(x => x.reparo_id === D(1)) && hio.reparo_expirada === false,
+        'meus-interesses (concorrente recusado no pedido com match): segue no histórico pelo status do interesse', hio && [hio.status, hio.reparo_expirada])
+    } else {
+      const mc = await chamar('get', '/candidaturas/minhas', { usuario: PROF })
+      const c = Object.fromEntries((mc.body.candidaturas || []).map(x => [x.obra_id, x]))
+      ok(mc.status === 200 && Object.keys(c).length === 5, 'GET /candidaturas/minhas 200 com as 5 candidaturas', mc.body?.erro || Object.keys(c).length)
+      for (const [n, rot] of [[1, 'tipo 3529D'], [2, 'match sem horário']]) {
+        ok(c[D(base + n)]?.obra_expirada === false && c[D(base + n)].match_da_pessoa === true,
+          `candidaturas/minhas (escolhido): ${rot} com expira_em vencido tem obra_expirada=false`, c[D(base + n)] && [c[D(base + n)].obra_expirada, c[D(base + n)].match_da_pessoa])
+      }
+      ok(c[D(base + 3)]?.obra_expirada === true, 'candidaturas/minhas: SEM match e vencida continua obra_expirada=true', c[D(base + 3)]?.obra_expirada)
+      ok(c[D(base + 4)]?.obra_expirada === false, 'candidaturas/minhas: sem match no prazo, obra_expirada=false')
+      ok(c[D(base + 5)]?.obra_expirada === false && c[D(base + 5)].obra_status === 'encerrada', 'candidaturas/minhas: encerrada, obra_expirada=false')
+    }
   }
 
   console.log(falhas === 0 ? '\nTUDO OK' : `\n${falhas} FALHA(S)`)
