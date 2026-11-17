@@ -185,13 +185,16 @@ const avisar = async (usuarioId, { titulo, corpo, data, rotulo, botaoEmail = nul
 
 // Cancelamentos do usuário (como quem cancelou) em 90 dias, nos dois lados; no 3º, aviso.
 // "Desfazer escolha" (desfazerEscolhaService, cancelado_motivo 'escolha_desfeita') e "escolher
-// outro" ('escolheu_outro') são saídas sancionadas antes de qualquer horário e NÃO contam.
+// outro" ('escolheu_outro') são saídas sancionadas antes de qualquer horário e NÃO contam. A
+// TROCA de profissional pelo dono com o atendimento em andamento ('trocado_pelo_cliente') também
+// não conta (dono, 17/11/2026); o CANCELAMENTO nessa fase ('cancelado_pelo_cliente') conta.
+const MOTIVOS_QUE_NAO_CONTAM = ['escolha_desfeita', 'escolheu_outro', 'trocado_pelo_cliente']
 const avisarCancelamentosFrequentes = async (usuarioId) => {
   try {
     const r = await pool.query(
-      `SELECT (SELECT COUNT(*) FROM candidaturas WHERE cancelado_por = $1 AND cancelado_em > NOW() - ($2::int * INTERVAL '1 day') AND COALESCE(cancelado_motivo, '') NOT IN ('escolha_desfeita', 'escolheu_outro'))
-            + (SELECT COUNT(*) FROM interesse_reparos WHERE cancelado_por = $1 AND cancelado_em > NOW() - ($2::int * INTERVAL '1 day') AND COALESCE(cancelado_motivo, '') NOT IN ('escolha_desfeita', 'escolheu_outro')) AS n`,
-      [usuarioId, JANELA_CANCELAMENTOS_DIAS]
+      `SELECT (SELECT COUNT(*) FROM candidaturas WHERE cancelado_por = $1 AND cancelado_em > NOW() - ($2::int * INTERVAL '1 day') AND COALESCE(cancelado_motivo, '') <> ALL($3::text[]))
+            + (SELECT COUNT(*) FROM interesse_reparos WHERE cancelado_por = $1 AND cancelado_em > NOW() - ($2::int * INTERVAL '1 day') AND COALESCE(cancelado_motivo, '') <> ALL($3::text[])) AS n`,
+      [usuarioId, JANELA_CANCELAMENTOS_DIAS, MOTIVOS_QUE_NAO_CONTAM]
     )
     const n = Number(r.rows[0]?.n || 0)
     if (n !== AVISO_CANCELAMENTOS_N) return n
@@ -308,10 +311,12 @@ const sqlEncerradoPeloClienteEmAndamento = (p) => `CASE
 const SQL_LIMPAR_CONCLUSAO = `encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL,
        lembrete_encerramento_30m_em = NULL, lembrete_encerramento_2h_em = NULL, lembrete_conclusao_em = NULL`
 // Contato do suporte para o botão do e-mail (https://wa.me/55…, mailto:…, página de ajuda).
-// Variável de ambiente SUPORTE_CONTATO_URL; sem ela o e-mail sai sem o botão.
+// Variável de ambiente SUPORTE_CONTATO_URL; sem ela (ou com valor que não é https:// nem mailto:)
+// vale o padrão abaixo — o botão SEMPRE aparece (dono, 17/11/2026).
+const SUPORTE_CONTATO_URL_PADRAO = 'mailto:novacomputec@gmail.com'
 const botaoSuporte = () => {
   const url = String(process.env.SUPORTE_CONTATO_URL || '').trim()
-  return /^(https:\/\/|mailto:)/i.test(url) ? { url, texto: `Não foi isso que aconteceu? Fale com o ${MARCA}` } : null
+  return { url: /^(https:\/\/|mailto:)/i.test(url) ? url : SUPORTE_CONTATO_URL_PADRAO, texto: `Não foi isso que aconteceu? Fale com o ${MARCA}` }
 }
 const AVISO_EM_ANDAMENTO = {
   trocado: (titulo) => ({ titulo: 'Pedido trocado pelo cliente', corpo: `O cliente decidiu trocar de profissional no pedido "${titulo}". Isso não conta como falta para você.` }),
@@ -368,9 +373,13 @@ const cancelarEmAndamento = async ({ lado, d, donoId, modo, motivo = null, detal
     rotulo: `${modo} em andamento ${lado.tipo} ${d.id}`,
     botaoEmail: botaoSuporte(),
   }, { ator: donoId })
-  if (encerrar) avisarPedidoCanceladoPeloDono(lado.tabela, d.id, { excluirUsuarioId: profissionalId }).catch(() => {})
-  else reanunciarDemanda(lado.tabela, d.id).catch(() => {})
-  avisarCancelamentosFrequentes(donoId)
+  if (encerrar) {
+    avisarPedidoCanceladoPeloDono(lado.tabela, d.id, { excluirUsuarioId: profissionalId }).catch(() => {})
+    // Só o CANCELAMENTO conta nos cancelamentos frequentes do dono; a troca não conta nem dispara o aviso.
+    avisarCancelamentosFrequentes(donoId)
+  } else {
+    reanunciarDemanda(lado.tabela, d.id).catch(() => {})
+  }
   return { ok: true, encerrada: encerrar, modo }
 }
 

@@ -193,9 +193,10 @@ const main = async () => {
          && p.status === 'cancelado' && p.cancelado_motivo === 'cancelado_pelo_cliente' && p.cancelado_por === DONO.id && pc.status === 'recusado' && pun.faltas === 0 && pun.eventos === 0
          && !(d.prestadores_bloqueados || []).includes(EMILYN.id),
          `${t}: dono CANCELA em andamento (${rot}) → pedido cancelado, proposta cancelado_pelo_cliente, sem falta nem lista negra`, [r.status, r.body.modo, d.status, p.cancelado_motivo])
-      ok(ph && ph.title === CANCELA.titulo && ph.body === CANCELA.corpo(tit) && ph.data.em_andamento === 'cancelado' && em && em.assunto === CANCELA.titulo && em.texto.includes(CANCELA.corpo(tit)) && !em.html && !em.texto.includes(BOTAO)
+      ok(ph && ph.title === CANCELA.titulo && ph.body === CANCELA.corpo(tit) && ph.data.em_andamento === 'cancelado' && em && em.assunto === CANCELA.titulo && em.texto.includes(CANCELA.corpo(tit))
+         && em.html && em.html.includes(BOTAO) && em.html.includes('href="mailto:novacomputec@gmail.com"') && em.texto.includes(`${BOTAO}: mailto:novacomputec@gmail.com`)
          && contextos[0]?.origem === 'cancelamento_em_andamento',
-         `${t}: push + e-mail com título e texto exatos (cancelamento); sem SUPORTE_CONTATO_URL o e-mail sai sem botão; origem cancelamento_em_andamento`, ph && [ph.title, ph.body, !!em?.html])
+         `${t}: push + e-mail com título e texto exatos (cancelamento); SEM SUPORTE_CONTATO_URL o botão aparece com o contato padrão; origem cancelamento_em_andamento`, ph && [ph.title, ph.body, !!em?.html])
     }
 
     // ═══ CANCELAMENTO pela rota de cancelar o pedido (DELETE /:tabela/dono/:id) ═══
@@ -241,6 +242,41 @@ const main = async () => {
     ok(r.status === 409 && r.body.codigo === 'DEMANDA_FECHADA' && rDel7.status === 409 && (await linha(t, base + 7)).status === 'encerrada' && (await proposta(t, base + 7, EMILYN)).status === 'aceito',
        `${t}: pedido ENCERRADO não entra (409) — nem troca nem cancelamento`, [r.status, r.body.codigo, rDel7.status])
   }
+
+  // ═══ botão do suporte: variável inválida também cai no contato padrão ═══
+  process.env.SUPORTE_CONTATO_URL = 'javascript:alert(1)'
+  await pedido('reparos', 60, 'Variável inválida', 'andamento')
+  zerar()
+  await chamar('post', '/reparos/:id/cancelar-match', { usuario: DONO, params: { id: D(60) }, body: { motivo: 'outro' } })
+  const eInv = emails.find(x => x.para === 'emilyn@x.invalid')
+  ok(eInv && eInv.html.includes('href="mailto:novacomputec@gmail.com"') && !eInv.html.includes('javascript:'), 'SUPORTE_CONTATO_URL que não é https:// nem mailto: → contato padrão no botão')
+  delete process.env.SUPORTE_CONTATO_URL
+
+  // ═══ "cancelamentos frequentes" do dono: a TROCA em andamento não conta; o CANCELAMENTO conta ═══
+  // Dona nova (Maria), com push: o aviso sai no 3º cancelamento que conta em 90 dias.
+  await q(`UPDATE usuarios SET push_token = 'ExponentPushToken[maria]' WHERE id = $1`, [OUTRO_DONO.id])
+  const daMaria = { criado_por: OUTRO_DONO.id }
+  const frequentes = () => pushes.filter(x => x.to === 'ExponentPushToken[maria]' && x.data?.tipo === 'cancelamentos_frequentes')
+  const acao = async (t, n, body) => {
+    await pedido(t, n, `Maria ${n}`, 'andamento', daMaria)
+    return chamar('post', `/${t}/:id/cancelar-match`, { usuario: OUTRO_DONO, params: { id: D(n) }, body })
+  }
+  zerar()
+  const c1 = await acao('reparos', 71, { motivo: 'nao_preciso' })                     // cancelamento 1 (conta)
+  const t1 = await acao('reparos', 72, { motivo: 'outro' })                           // troca (não conta)
+  const t2 = await acao('obras', 73, { motivo: 'imprevisto' })                        // troca (não conta)
+  const c2 = await acao('obras', 74, { motivo: 'imprevisto', manter_aberta: false })  // cancelamento 2 (conta)
+  const t3 = await acao('reparos', 75, { motivo: 'outro' })                           // troca (não conta)
+  ok([c1, c2].every(x => x.body.modo === 'cancelado') && [t1, t2, t3].every(x => x.body.modo === 'trocado') && frequentes().length === 0,
+     '2 cancelamentos + 3 trocas em andamento: nenhum aviso de cancelamentos frequentes (as trocas não contam)', frequentes().length)
+  const c3 = await chamar('delete', '/reparos/dono/:id', { usuario: OUTRO_DONO, params: { id: (await pedido('reparos', 76, 'Maria 76', 'andamento', daMaria), D(76)) } })
+  ok(c3.status === 200 && frequentes().length === 1 && frequentes()[0].data.total === 3, '3º CANCELAMENTO em andamento (pelo DELETE do pedido): o aviso sai, contando 3', frequentes().map(x => x.data.total))
+  const t4 = await acao('reparos', 77, { motivo: 'outro' })
+  ok(t4.body.modo === 'trocado' && frequentes().length === 1, 'troca depois disso não dispara o aviso de novo')
+  await pedido('reparos', 78, 'Maria 78', 'match', daMaria)
+  const comum = await chamar('post', '/reparos/:id/cancelar-match', { usuario: OUTRO_DONO, params: { id: D(78) }, body: { motivo: 'imprevisto' } })
+  const nMaria = (await q(`SELECT (SELECT count(*)::int FROM interesse_reparos WHERE cancelado_por = $1 AND cancelado_motivo <> 'trocado_pelo_cliente') + (SELECT count(*)::int FROM candidaturas WHERE cancelado_por = $1 AND cancelado_motivo <> 'trocado_pelo_cliente') AS n`, [OUTRO_DONO.id])).rows[0].n
+  ok(comum.status === 200 && nMaria === 4 && frequentes().length === 1, 'cancelamento comum (fora da fase) continua contando como antes: 4º não repete o aviso', [nMaria, frequentes().length])
 
   // ═══ guarda de versão 1.2.4 (paliativo do pedido de acordo) intacta ═══
   const req = (v) => ({ get: (h) => (String(h).toLowerCase() === 'x-app-version' ? v : undefined) })
