@@ -1,0 +1,101 @@
+// Robô de WhatsApp — Etapa 1 (dono, 17/11/2026). Constantes e funções puras, sem banco e sem rede.
+//
+// O robô roda num serviço SEPARADO da Railway (src/whatsapp/worker.js): a API só insere linhas em
+// whatsapp_mensagens (services/whatsappFilaService) e quem envia é o worker. Redeploy da API não
+// derruba a conexão do WhatsApp.
+const TZ = 'America/Sao_Paulo'
+// Janela de envio: 08:00 (inclusive) até 21:00 (exclusive), horário de São Paulo.
+const HORA_INICIO = 8
+const HORA_FIM = 21
+// 1 mensagem a cada 20–40 s, sorteado a cada envio.
+const INTERVALO_MIN_MS = 20000
+const INTERVALO_MAX_MS = 40000
+// Sem nada para enviar, o worker olha a fila de novo depois disto.
+const ESPERA_FILA_VAZIA_MS = 5000
+const MAX_TENTATIVAS = 3
+const ESPERA_ENTRE_TENTATIVAS_MIN = 5
+// Vários itens pendentes da mesma pessoa viram UMA mensagem (até este tanto por vez).
+const MAX_ITENS_POR_MENSAGEM = 10
+
+const STATUS = ['fila', 'enviada', 'entregue', 'lida', 'respondida', 'falha', 'sem_whatsapp', 'saiu']
+
+// Tipos de mensagem. Etapa 1 não tem gatilho de produto: só o 'teste' do painel. Cada tipo novo
+// entra AQUI (com padrao: false) e ganha uma chave liga/desliga em configuracoes.
+const TIPOS = {
+  teste: { rotulo: 'Mensagem de teste (painel)', padrao: true },
+}
+const CHAVE_PAUSADO = 'whatsapp_pausado'
+const chaveTipo = (tipo) => `whatsapp_tipo_${tipo}`
+
+// Chave do pg_advisory_lock que garante UM worker conectado por vez (duas conexões com a mesma
+// sessão derrubam uma à outra).
+const CHAVE_LOCK = 734001
+
+// Arquivos de que o worker depende — os "Watch Paths" do serviço na Railway. O teste
+// scripts/testar-whatsapp-fila.js percorre os require() a partir de worker.js e falha se algum
+// módulo importado ficar fora desta lista.
+const WATCH_PATHS = [
+  'src/whatsapp/**',
+  'src/utils/supabase.js',
+  'src/utils/auditoriaDemanda.js',
+  'package.json',
+  'package-lock.json',
+]
+
+// Telefone em E.164 do Brasil (+55DDDNÚMERO) ou null. Aceita com/sem +55, com máscara.
+const normalizarTelefone = (bruto) => {
+  let d = String(bruto ?? '').replace(/\D/g, '')
+  if (!d) return null
+  d = d.replace(/^0+/, '')
+  if (d.length === 10 || d.length === 11) d = `55${d}`
+  if (!/^55\d{10,11}$/.test(d)) return null
+  return `+${d}`
+}
+
+// O WhatsApp identifica muitos números brasileiros SEM o nono dígito (e o cadastro tem com).
+// Devolve as formas E.164 equivalentes de um número: com e sem o 9 depois do DDD.
+const variantesTelefone = (e164) => {
+  const t = normalizarTelefone(e164)
+  if (!t) return []
+  const d = t.slice(1)
+  const saida = [t]
+  if (d.length === 13 && d[4] === '9') saida.push(`+${d.slice(0, 4)}${d.slice(5)}`)
+  if (d.length === 12) saida.push(`+${d.slice(0, 4)}9${d.slice(4)}`)
+  return saida
+}
+
+// TRAVA DE TESTE (WHATSAPP_SOMENTE_PARA). O worker NÃO envia nada sem ela:
+//   ausente / vazia / inválida → modo 'ausente' (nada sai);
+//   'TODOS'                    → modo 'todos' (aberto a todos — tem de ser explícito);
+//   um ou mais números (vírgula) → modo 'lista' (só esses números recebem).
+const lerTrava = (env = process.env) => {
+  const bruto = String(env.WHATSAPP_SOMENTE_PARA ?? '').trim()
+  if (!bruto) return { modo: 'ausente', numeros: [], texto: '' }
+  if (bruto.toUpperCase() === 'TODOS') return { modo: 'todos', numeros: [], texto: 'TODOS' }
+  const partes = bruto.split(',').map(s => s.trim()).filter(Boolean)
+  const numeros = partes.map(normalizarTelefone)
+  if (numeros.length === 0 || numeros.some(n => !n)) return { modo: 'ausente', numeros: [], texto: bruto }
+  return { modo: 'lista', numeros, texto: numeros.join(',') }
+}
+const travaPermite = (trava, telefone) =>
+  trava.modo === 'todos' || (trava.modo === 'lista' && trava.numeros.includes(telefone))
+
+const horaEmSaoPaulo = (data) =>
+  Number(new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', hourCycle: 'h23' }).format(data))
+const dentroDaJanela = (data = new Date()) => {
+  const h = horaEmSaoPaulo(data)
+  return h >= HORA_INICIO && h < HORA_FIM
+}
+
+const intervaloMs = (sorteio = Math.random) =>
+  Math.floor(INTERVALO_MIN_MS + sorteio() * (INTERVALO_MAX_MS - INTERVALO_MIN_MS + 1))
+
+// "SAIR" (qualquer caixa, com acento/pontuação/espaços em volta) = pedido de saída.
+const ehPedidoDeSaida = (texto) =>
+  String(texto ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z]/g, '').toUpperCase() === 'SAIR'
+
+module.exports = {
+  TZ, HORA_INICIO, HORA_FIM, INTERVALO_MIN_MS, INTERVALO_MAX_MS, ESPERA_FILA_VAZIA_MS, MAX_TENTATIVAS,
+  ESPERA_ENTRE_TENTATIVAS_MIN, MAX_ITENS_POR_MENSAGEM, STATUS, TIPOS, CHAVE_PAUSADO, chaveTipo, CHAVE_LOCK,
+  WATCH_PATHS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela, intervaloMs, ehPedidoDeSaida,
+}

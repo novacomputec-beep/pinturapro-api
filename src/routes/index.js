@@ -1878,6 +1878,16 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
       await client.query('ROLLBACK TO SAVEPOINT caixa_preta')
       console.error('[migration] caixa-preta (eventos_demanda) NÃO instalada:', err.message)
     }
+    // Robô de WhatsApp — Etapa 1 (src/whatsapp/migracao): tabelas novas + usuarios.whatsapp_avisos.
+    // Tudo aditivo; nada do app lê. SAVEPOINT: falha aqui só deixa a aba do painel sem dados.
+    await client.query('SAVEPOINT robo_whatsapp')
+    try {
+      await require('../whatsapp/migracao').migrarWhatsapp(client)
+      await client.query('RELEASE SAVEPOINT robo_whatsapp')
+    } catch (err) {
+      await client.query('ROLLBACK TO SAVEPOINT robo_whatsapp')
+      console.error('[migration] robô de WhatsApp NÃO instalado:', err.message)
+    }
     await client.query('COMMIT')
     console.log('[migration] colunas verificadas com sucesso')
   } catch (err) {
@@ -10795,6 +10805,9 @@ router.post('/admin/canal/convites/enviar', autenticar, exigirAdmin, async (req,
     res.status(500).json({ erro: 'Erro ao enviar convites' })
   }
 })
+
+// Aba "WhatsApp" do painel (robô — Etapa 1): /admin/whatsapp/* (status+QR, pausa, contadores, lista, tipos, teste).
+router.use(require('./adminWhatsapp'))
 
 module.exports = router
 module.exports.migracaoPronta = migracaoPronta
