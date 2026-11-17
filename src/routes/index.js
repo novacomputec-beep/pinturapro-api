@@ -2821,9 +2821,9 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
         -- passou — vale em qualquer status vivo (inclusive 'rascunho', que também tem
         -- expira_em desde a criação). Calculado no SQL (relógio do servidor) para o cliente
         -- não precisar comparar expira_em com o relógio do aparelho.
-        -- Com pintor casado vale o limite de chegada (tolerância/extensão — sqlLimiteChegada),
-        -- a MESMA expressão de GET /obras/:id: a lista não mostra "Expirado" com o match vivo.
-        (o.status <> 'encerrada' AND (CASE WHEN o.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('o.')} ELSE o.expira_em END) <= NOW()) AS expirada,
+        -- Com pintor escolhido NUNCA é "Expirado" na lista (dono, 17/11/2026): expira_em é só o
+        -- prazo de ESCOLHA; depois do match quem cuida de atraso/falta são os crons de chegada.
+        (o.status <> 'encerrada' AND o.match_usuario_id IS NULL AND o.expira_em <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
         -- Conta 'pendente' E 'contraproposta_dono': uma obra em negociação (contraproposta
         -- enviada, aguardando o pintor) continua tendo interessado, e antes aparecia como zero.
@@ -2849,7 +2849,9 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
     // cancelado_em, motivo_texto, acordo }) nas obras SEM match; null nas demais (utils/desistencias).
     await anexarDesistenciaRecente('obras', result.rows)
     const agora = new Date()
-    const eArquivada = o => o.status === 'encerrada' || (o.expira_em && new Date(o.expira_em) < agora)
+    // Com profissional escolhido (match_usuario_id) a obra NUNCA é arquivada por expira_em: ele é
+    // só o prazo de escolha — caso 3529D (17/11/2026), aberto com chegada confirmada e no Histórico.
+    const eArquivada = o => o.status === 'encerrada' || (!o.match_usuario_id && o.expira_em && new Date(o.expira_em) < agora)
     const obras     = result.rows.filter(o => !eArquivada(o))
     const historico = result.rows.filter(o =>  eArquivada(o))
     res.json({ obras, historico, page, limit })
@@ -3213,17 +3215,27 @@ router.get('/obras', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigi
 // situacao_painel (GET /obras/admin e /reparos/admin; dono, 16/11/2026): o que o painel deve
 // MOSTRAR, ao lado do status real (que continua em `status`). 'expirada' não é status no banco;
 // aqui vira 'expirada' quando:
-//   - o pedido segue 'aberta' com o prazo vencido (sem escolhido: expira_em; com escolhido: o
-//     limite de chegada — a mesma conta do campo `expirada`, que fica como está); ou
+//   - o pedido segue 'aberta' SEM profissional escolhido e com expira_em vencido; ou
 //   - foi cancelado/encerrado SEM profissional escolhido DEPOIS de expira_em (encerrado_em >
 //     expira_em): venceu e só então foi fechado (ex.: 4DXCJ, cancelado 1h16 depois do prazo).
-// Encerrado COM profissional (serviço feito) nunca vira 'expirada': ali expira_em passar é normal.
-// Nos demais casos, situacao_painel = status.
-const sqlSituacaoPainel = (a, limiteChegada) => `CASE
-    WHEN ${a}.status = 'aberta' AND (CASE WHEN ${a}.match_usuario_id IS NOT NULL THEN ${limiteChegada} ELSE ${a}.expira_em END) <= NOW() THEN 'expirada'
+// COM profissional escolhido (match_usuario_id) NUNCA vira 'expirada' (dono, 17/11/2026, caso
+// 3529D): expira_em é só o prazo de ESCOLHA; aberto ou encerrado, ali ele passar é normal. O campo
+// `expirada` e os filtros 'abertas'/'canceladas' das duas listas seguem a mesma regra
+// (sqlExpiradaPainel / sqlFiltroPainel). Nos demais casos, situacao_painel = status.
+const sqlExpiradaPainel = (a) => `(${a}.status = 'aberta' AND ${a}.match_usuario_id IS NULL AND ${a}.expira_em <= NOW())`
+const sqlSituacaoPainel = (a) => `CASE
+    WHEN ${sqlExpiradaPainel(a)} THEN 'expirada'
     WHEN ${a}.status IN ('cancelada', 'encerrada', 'expirada') AND ${a}.match_usuario_id IS NULL
          AND ${a}.encerrado_em IS NOT NULL AND ${a}.encerrado_em > ${a}.expira_em THEN 'expirada'
     ELSE ${a}.status END`
+// WHERE das listas do painel por filtro; null = filtro inválido. Aberto COM escolhido fica em
+// 'abertas' mesmo com expira_em no passado (antes caía em 'canceladas', a aba das expiradas).
+const sqlFiltroPainel = (a, filtro) => {
+  if (filtro === 'finalizadas') return `${a}.status = 'encerrada'`
+  if (filtro === 'canceladas') return `(${a}.status IN ('cancelada', 'expirada') OR ${sqlExpiradaPainel(a)})`
+  if (filtro === 'abertas') return `${a}.status = 'aberta' AND ${a}.status_aprovacao = 'aprovada' AND (${a}.match_usuario_id IS NOT NULL OR ${a}.expira_em > NOW())`
+  return null
+}
 
 // Painel admin — lista obras por situação (abertas / finalizadas / canceladas-expiradas).
 // O GET /obras público é o feed do pintor: só devolve obras abertas/aprovadas/não
@@ -3238,23 +3250,15 @@ const sqlSituacaoPainel = (a, limiteChegada) => `CASE
 router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
   try {
     const filtro = req.query.filtro || 'finalizadas'
-    let where
-    if (filtro === 'finalizadas') {
-      where = `o.status = 'encerrada'`
-    } else if (filtro === 'canceladas') {
-      where = `(o.status IN ('cancelada', 'expirada') OR (o.status = 'aberta' AND o.expira_em <= NOW()))`
-    } else if (filtro === 'abertas') {
-      where = `o.status = 'aberta' AND o.status_aprovacao = 'aprovada' AND o.expira_em > NOW()`
-    } else {
-      return res.status(400).json({ erro: 'Filtro inválido' })
-    }
+    const where = sqlFiltroPainel('o', filtro)
+    if (!where) return res.status(400).json({ erro: 'Filtro inválido' })
     const result = await pool.query(`
       SELECT o.id, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade, o.uf, o.bairro,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status,
              o.criado_em, o.horas_para_expirar, o.prazo_modo,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
-             (o.status = 'aberta' AND (CASE WHEN o.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('o.')} ELSE o.expira_em END) <= NOW()) AS expirada,
-             ${sqlSituacaoPainel('o', sqlLimiteChegada('o.'))} AS situacao_painel,
+             ${sqlExpiradaPainel('o')} AS expirada,
+             ${sqlSituacaoPainel('o')} AS situacao_painel,
              -- Valor COMBINADO (utils/valorAcordado): o da candidatura escolhida; NULL sem escolhido.
              -- Em pedido "valor a combinar" (valor NULL) é o único preço que existe.
              (SELECT ${sqlValorAcordadoObra('ca', 'o')} FROM candidaturas ca WHERE ca.obra_id = o.id AND ca.status = 'aceito' LIMIT 1) AS valor_acordado,
@@ -4659,8 +4663,9 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
         -- "Expirado" não é status no banco: é um reparo NÃO encerrado cujo expira_em já
         -- passou — vale em qualquer status vivo. Calculado no SQL (relógio do servidor)
         -- para o cliente não precisar comparar expira_em com o relógio do aparelho.
-        -- Com prestador casado vale o limite de chegada (sqlLimiteChegada), como em GET /reparos/:id.
-        (r.status <> 'encerrada' AND (CASE WHEN r.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('r.')} ELSE r.expira_em END) <= NOW()) AS expirada,
+        -- Com prestador escolhido NUNCA é "Expirado" na lista (dono, 17/11/2026): expira_em é só
+        -- o prazo de ESCOLHA; depois do match quem cuida de atraso/falta são os crons de chegada.
+        (r.status <> 'encerrada' AND r.match_usuario_id IS NULL AND r.expira_em <= NOW()) AS expirada,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         -- Conta 'pendente' E 'contraproposta_dono': um reparo em negociação (contraproposta
         -- enviada, aguardando o prestador) continua tendo interessado, e antes aparecia como zero.
@@ -4686,7 +4691,9 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
     // cancelado_em, motivo_texto, acordo }) nos reparos SEM match; null nos demais (utils/desistencias).
     await anexarDesistenciaRecente('reparos', result.rows)
     const agora = new Date()
-    const eArquivado = r => r.status === 'encerrada' || (r.expira_em && new Date(r.expira_em) < agora)
+    // Com profissional escolhido (match_usuario_id) o reparo NUNCA é arquivado por expira_em: ele é
+    // só o prazo de escolha — caso 3529D (17/11/2026), aberto com chegada confirmada e no Histórico.
+    const eArquivado = r => r.status === 'encerrada' || (!r.match_usuario_id && r.expira_em && new Date(r.expira_em) < agora)
     const reparos   = result.rows.filter(r => !eArquivado(r))
     const historico = result.rows.filter(r =>  eArquivado(r))
     res.json({ reparos, historico, page, limit })
@@ -5197,16 +5204,8 @@ router.post('/reparos/aprovacao/:id/recusar', autenticar, exigirAdmin, async (re
 router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
   try {
     const filtro = req.query.filtro || 'finalizadas'
-    let where
-    if (filtro === 'finalizadas') {
-      where = `r.status = 'encerrada'`
-    } else if (filtro === 'canceladas') {
-      where = `(r.status IN ('cancelada', 'expirada') OR (r.status = 'aberta' AND r.expira_em <= NOW()))`
-    } else if (filtro === 'abertas') {
-      where = `r.status = 'aberta' AND r.status_aprovacao = 'aprovada' AND r.expira_em > NOW()`
-    } else {
-      return res.status(400).json({ erro: 'Filtro inválido' })
-    }
+    const where = sqlFiltroPainel('r', filtro)
+    if (!where) return res.status(400).json({ erro: 'Filtro inválido' })
     // Dono (nome/email/telefone), criado_em e prazo (prazo_atendimento_horas + expira_em) só
     // aqui, no endpoint admin: o feed público GET /reparos não expõe contato do dono ao app.
     // escolhido_nome/escolhido_em: profissional escolhido (match OU interesse 'aceito' —
@@ -5215,8 +5214,8 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
       SELECT r.id, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.valor_a_combinar, r.cidade, r.uf, r.bairro,
              r.expira_em, r.status, r.criado_em, r.prazo_atendimento_horas,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
-             (r.status = 'aberta' AND (CASE WHEN r.match_usuario_id IS NOT NULL THEN ${sqlLimiteChegada('r.')} ELSE r.expira_em END) <= NOW()) AS expirada,
-             ${sqlSituacaoPainel('r', sqlLimiteChegada('r.'))} AS situacao_painel,
+             ${sqlExpiradaPainel('r')} AS expirada,
+             ${sqlSituacaoPainel('r')} AS situacao_painel,
              -- Valor COMBINADO: o do interesse escolhido (ver GET /obras/admin).
              (SELECT ${sqlValorAcordadoReparo('ia', 'r')} FROM interesse_reparos ia WHERE ia.reparo_id = r.id AND ia.status = 'aceito' LIMIT 1) AS valor_acordado,
              (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) AS total_interessados,
