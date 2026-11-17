@@ -5265,9 +5265,10 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
              -- Agendamento: de quem é a proposta pendente (vez de quem responder) e a rodada.
              r.chegada_proposta_por, r.chegada_pendente_rodada,
              -- "Expirado" não é status no banco: é um reparo NÃO encerrado cujo expira_em já
-             -- passou. Mesma expressão de GET /reparos/minhas e GET /reparos/:id, calculada no
-             -- SQL (relógio do servidor) para o app não depender do relógio do aparelho.
-             (r.status <> 'encerrada' AND r.expira_em <= NOW()) AS reparo_expirada,
+             -- passou, calculado no SQL (relógio do servidor) para o app não depender do relógio
+             -- do aparelho. Com profissional escolhido NUNCA é expirado (dono, 17/11/2026, caso
+             -- 3529D): expira_em é só o prazo de ESCOLHA — mesma regra de GET /reparos/minhas.
+             (r.status <> 'encerrada' AND r.match_usuario_id IS NULL AND r.expira_em <= NOW()) AS reparo_expirada,
              (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM interesse_reparos ir
       JOIN reparos r ON ir.reparo_id = r.id
@@ -5282,13 +5283,16 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
     // até o dono encerrar. O segundo é o reparo estar fora de jogo — 'cancelada' e
     // 'expirada' contam junto com 'encerrada'; sem elas um reparo vencido voltava para
     // ativos assim que o status saía de 'aberta'. A checagem por data continua valendo
-    // só enquanto o status ainda é 'aberta', para o vencimento que ninguém processou.
+    // só enquanto o status ainda é 'aberta', para o vencimento que ninguém processou — e só
+    // SEM profissional escolhido: com match, expira_em (prazo de escolha) no passado é normal
+    // e o serviço segue em ativos para o escolhido (caso 3529D, 17/11/2026). Os demais
+    // interessados de um reparo com match já saem pelo status do interesse ('recusado').
     const INTERESSE_MORTO = ['recusado', 'expirado', 'cancelado']
     const REPARO_MORTO    = ['encerrada', 'cancelada', 'expirada']
     const eArquivado = item =>
       INTERESSE_MORTO.includes(item.status) ||
       REPARO_MORTO.includes(item.reparo_status) ||
-      (item.reparo_status === 'aberta' && item.expira_em && new Date(item.expira_em) < agora)
+      (item.reparo_status === 'aberta' && !item.match_usuario_id && item.expira_em && new Date(item.expira_em) < agora)
     // Coordenadas exatas só no reparo em que a pessoa é o match E já há horário combinado
     // (utils/privacidadeDemanda); nos demais, arredondadas.
     for (const item of result.rows) {
