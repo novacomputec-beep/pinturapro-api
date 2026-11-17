@@ -84,6 +84,8 @@ const migrarWhatsapp = async (client) => {
       atualizado_em   TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`)
   await client.query(`INSERT INTO whatsapp_estado (id) VALUES (1) ON CONFLICT (id) DO NOTHING`)
+  // Desde quando a conexão atual está aberta (o worker grava; NULL fora de 'conectado').
+  await client.query(`ALTER TABLE whatsapp_estado ADD COLUMN IF NOT EXISTS conectado_em TIMESTAMPTZ`)
 
   // Opt-out: "SAIR" no WhatsApp desliga. Default true (constante → ALTER instantâneo).
   await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS whatsapp_avisos BOOLEAN NOT NULL DEFAULT true`)

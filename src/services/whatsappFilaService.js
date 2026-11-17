@@ -14,6 +14,8 @@ const { TIPOS, normalizarTelefone } = require('../whatsapp/config')
 const enfileirar = async ({ tipo, usuarioId = null, telefone = null, texto, refTabela = null, refId = null, chaveDedupe = null } = {}, db = pool) => {
   try {
     if (!Object.prototype.hasOwnProperty.call(TIPOS, tipo)) return { ok: false, motivo: 'tipo_desconhecido' }
+    // Tipo que o painel já lista mas ainda não tem gatilho: nada entra na fila.
+    if (!TIPOS[tipo].implementado) return { ok: false, motivo: 'tipo_nao_implementado' }
     const corpo = String(texto ?? '').trim()
     if (!corpo) return { ok: false, motivo: 'texto_vazio' }
     let destino = normalizarTelefone(telefone)
