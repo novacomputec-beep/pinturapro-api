@@ -13,6 +13,14 @@ const { sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
 // compromissos_nao_cumpridos_90d / cumpriu_todos do candidato (utils/responsabilidade), como em GET /obras/:id.
 const { sqlCompromissosNaoCumpridos90d, sqlCumpriuTodos } = require('../utils/responsabilidade')
 
+// Mesma expressão de GET /reparos/meus-interesses (services/cancelamentoMatchService
+// .sqlEncerradoPeloClienteEmAndamento). Literal aqui: aquele serviço importa alertaService, que
+// este controller já importa — repetir duas linhas evita um ciclo de require.
+const SQL_ENCERRADO_PELO_CLIENTE = `CASE
+    WHEN c.status = 'cancelado' AND c.cancelado_motivo = 'trocado_pelo_cliente' THEN 'trocado'
+    WHEN c.status = 'cancelado' AND c.cancelado_motivo = 'cancelado_pelo_cliente' THEN 'cancelado'
+    ELSE NULL END`
+
 const minhas = async (req, res) => {
   try {
     const page   = parseInt(req.query.page)  || 1
@@ -25,6 +33,9 @@ const minhas = async (req, res) => {
               -- match da obra é de uma conta DELA — o app não precisa comparar ids de conta.
               c.usuario_id AS conta_id,
               COALESCE(${sqlProfissionalDaPessoa('o.match_usuario_id', '$1')}, false) AS match_da_pessoa,
+              -- 'trocado' | 'cancelado' quando o CLIENTE trocou de profissional ou cancelou com o
+              -- atendimento em andamento (sem falta para o profissional); null nos demais casos.
+              ${SQL_ENCERRADO_PELO_CLIENTE} AS encerrado_pelo_cliente_em_andamento,
               o.id as obra_id, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade, o.status as obra_status,
               o.match_usuario_id, o.match_feito_em,
               -- Encerramento assimétrico: só o PINTOR cria solicitação pendente. O dono não

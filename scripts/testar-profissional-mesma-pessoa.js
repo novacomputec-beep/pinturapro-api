@@ -184,9 +184,9 @@ const main = async () => {
     CREATE TABLE obras (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, valor numeric, horas_para_expirar numeric, metragem numeric, prazo_execucao_dias int);
     CREATE TABLE reparos (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
     CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, status text DEFAULT 'pendente', valor_proposto numeric,
-      valor_contraproposta numeric, mensagem text, referencias text, rodada int DEFAULT 1, criado_em timestamptz DEFAULT now());
+      valor_contraproposta numeric, mensagem text, referencias text, rodada int DEFAULT 1, criado_em timestamptz DEFAULT now(), cancelado_motivo text);
     CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, status text DEFAULT 'pendente', valor_proposto numeric,
-      valor_contraproposta numeric, mensagem text, rodada int DEFAULT 1, criado_em timestamptz DEFAULT now());
+      valor_contraproposta numeric, mensagem text, rodada int DEFAULT 1, criado_em timestamptz DEFAULT now(), cancelado_motivo text);
     CREATE TABLE midias (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, url text, ordem int);
     CREATE TABLE midias_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, url text, ordem int);
     CREATE TABLE avaliacoes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), contrato_tipo text, contrato_id uuid, avaliador_id uuid, avaliado_id uuid, estrelas int, etiquetas text[], criado_em timestamptz DEFAULT now());
