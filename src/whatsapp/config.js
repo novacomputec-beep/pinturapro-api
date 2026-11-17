@@ -19,10 +19,17 @@ const MAX_ITENS_POR_MENSAGEM = 10
 
 const STATUS = ['fila', 'enviada', 'entregue', 'lida', 'respondida', 'falha', 'sem_whatsapp', 'saiu']
 
-// Tipos de mensagem. Etapa 1 não tem gatilho de produto: só o 'teste' do painel. Cada tipo novo
-// entra AQUI (com padrao: false) e ganha uma chave liga/desliga em configuracoes.
+// Tipos de mensagem, na ordem em que a aba do painel mostra (GET /admin/whatsapp/tipos devolve
+// sempre estes slugs). Etapa 1 não tem gatilho de produto: só o 'teste' está implementado; os
+// outros quatro já existem para o painel (implementado: false) e NÃO entram na fila
+// (services/whatsappFilaService recusa). Cada tipo tem a chave liga/desliga em configuracoes;
+// `padrao` vale enquanto a chave não existir.
 const TIPOS = {
-  teste: { rotulo: 'Mensagem de teste (painel)', padrao: true },
+  pergunta_sem_resposta: { rotulo: 'Pergunta sem resposta', padrao: false, implementado: false },
+  prazo_acabando: { rotulo: 'Prazo acabando', padrao: false, implementado: false },
+  escolhido: { rotulo: 'Profissional escolhido', padrao: false, implementado: false },
+  horario_aguardando: { rotulo: 'Horário aguardando resposta', padrao: false, implementado: false },
+  teste: { rotulo: 'Mensagem de teste (painel)', padrao: true, implementado: true },
 }
 const CHAVE_PAUSADO = 'whatsapp_pausado'
 const chaveTipo = (tipo) => `whatsapp_tipo_${tipo}`

@@ -19,6 +19,14 @@ const gravarConfig = (chave, valor) => pool.query(
    INSERT INTO configuracoes (chave, valor) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM upd)`,
   [chave, valor])
 
+// "Pergunta sem resposta · 3529D “Entregar panfletos 1000 unidades”" — sem pedido, só o rótulo do tipo.
+const resumoDaMensagem = (tipo, codigo, titulo) => {
+  const rotulo = TIPOS[tipo]?.rotulo || tipo
+  const t = String(titulo || '').trim()
+  const pedido = [codigo, t ? `“${t.length > 40 ? `${t.slice(0, 39)}…` : t}”` : ''].filter(Boolean).join(' ')
+  return pedido ? `${rotulo} · ${pedido}` : rotulo
+}
+
 const responderErro = (res, rotulo, err) => {
   console.error(`[admin/whatsapp/${rotulo}]`, err.message)
   res.status(500).json({ erro: 'Erro no robô de WhatsApp' })
@@ -28,7 +36,7 @@ const responderErro = (res, rotulo, err) => {
 router.get('/admin/whatsapp/status', autenticar, exigirSuperAdmin, async (req, res) => {
   try {
     const e = await pool.query(
-      `SELECT conexao, qr, qr_em, numero, trava, heartbeat_em, ultimo_envio_em, ultimo_erro, comando,
+      `SELECT conexao, qr, qr_em, numero, trava, heartbeat_em, ultimo_envio_em, ultimo_erro, comando, conectado_em,
               (heartbeat_em IS NOT NULL AND heartbeat_em > NOW() - INTERVAL '${WORKER_VIVO_SEGUNDOS} seconds') AS worker_vivo
          FROM whatsapp_estado WHERE id = 1`)
     const linha = e.rows[0] || {}
@@ -41,6 +49,8 @@ router.get('/admin/whatsapp/status', autenticar, exigirSuperAdmin, async (req, r
       conexao: vivo ? linha.conexao : 'desligado',
       qr: vivo && linha.conexao === 'aguardando_qr' ? linha.qr : null,
       qr_em: linha.qr_em || null,
+      // Desde quando a conexão atual está aberta; null se não está conectado agora.
+      conectado_em: vivo && linha.conexao === 'conectado' ? (linha.conectado_em || null) : null,
       numero: linha.numero || null,
       trava: linha.trava || null,
       envio_liberado: !!linha.trava,
@@ -116,19 +126,39 @@ router.get('/admin/whatsapp/mensagens', autenticar, exigirSuperAdmin, async (req
     if (digitos) where.push(`m.telefone LIKE ${p(`%${digitos}%`)}`)
     if (de) where.push(`(m.criado_em AT TIME ZONE '${TZ}')::date >= ${p(de)}::date`)
     if (ate) where.push(`(m.criado_em AT TIME ZONE '${TZ}')::date <= ${p(ate)}::date`)
+    // Pedido da mensagem: ref_tabela 'reparos' | 'obras' aponta direto; 'perguntas_demanda' aponta
+    // a pergunta, que leva ao pedido. codigo = código curto; papel = lado de quem RECEBE no pedido
+    // ('dono' se a conta criou o pedido, senão 'profissional'); sem pedido, vale o tipo da conta.
     const r = await pool.query(
       `SELECT m.id, m.tipo, m.status, m.usuario_id, u.nome AS usuario_nome, m.telefone, m.texto, m.ref_tabela, m.ref_id,
               m.wa_jid, m.wa_message_id, m.agrupada_em, m.tentativas, m.erro, m.criado_em, m.proxima_tentativa_em,
               m.enviada_em, m.entregue_em, m.lida_em, m.respondida_em,
+              COALESCE(rp.codigo_publico, ob.codigo_publico) AS codigo,
+              COALESCE(rp.titulo, ob.titulo) AS _titulo,
+              CASE WHEN COALESCE(rp.criado_por, ob.criado_por) = m.usuario_id THEN 'dono'
+                   WHEN COALESCE(rp.id, ob.id) IS NOT NULL AND u.role = 'prestador' THEN 'profissional'
+                   WHEN u.role = 'dono_obra' THEN 'dono'
+                   WHEN u.role = 'prestador' THEN 'profissional'
+                   ELSE NULL END AS papel,
               COUNT(*) OVER()::int AS _total
-         FROM whatsapp_mensagens m LEFT JOIN usuarios u ON u.id = m.usuario_id
+         FROM whatsapp_mensagens m
+         LEFT JOIN usuarios u ON u.id = m.usuario_id
+         LEFT JOIN perguntas_demanda pq ON m.ref_tabela = 'perguntas_demanda' AND pq.id = m.ref_id
+         LEFT JOIN reparos rp ON rp.id = COALESCE(pq.demanda_id, m.ref_id)
+         LEFT JOIN obras ob ON ob.id = COALESCE(pq.demanda_id, m.ref_id)
         ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
         ORDER BY m.criado_em DESC, m.id DESC
         LIMIT ${p(limit)}::int OFFSET ${p((page - 1) * limit)}::int`,
       params)
     const total = r.rows[0]?._total || 0
-    r.rows.forEach(l => delete l._total)
-    res.json({ mensagens: r.rows, total, page, limit })
+    const mensagens = r.rows.map(({ _total, _titulo, ...l }) => ({
+      ...l,
+      // resumo: detalhe curto para a linha da lista — tipo + pedido (código e título), quando há.
+      resumo: resumoDaMensagem(l.tipo, l.codigo, _titulo),
+      // resposta: o que a pessoa respondeu a ESTA mensagem — só na Etapa 2 (casamento das recebidas).
+      resposta: null,
+    }))
+    res.json({ mensagens, total, page, limit })
   } catch (err) { responderErro(res, 'mensagens', err) }
 })
 
@@ -136,7 +166,8 @@ router.get('/admin/whatsapp/mensagens', autenticar, exigirSuperAdmin, async (req
 router.get('/admin/whatsapp/tipos', autenticar, exigirSuperAdmin, async (req, res) => {
   try {
     const config = await lerConfig(pool)
-    res.json({ tipos: Object.entries(TIPOS).map(([tipo, def]) => ({ tipo, rotulo: def.rotulo, ligado: config.tipos[tipo] })) })
+    // Sempre os mesmos slugs, na ordem de config.TIPOS; implementado = já tem gatilho de envio.
+    res.json({ tipos: Object.entries(TIPOS).map(([tipo, def]) => ({ tipo, rotulo: def.rotulo, ligado: config.tipos[tipo], implementado: !!def.implementado })) })
   } catch (err) { responderErro(res, 'tipos', err) }
 })
 

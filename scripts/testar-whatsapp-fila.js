@@ -304,6 +304,49 @@ const main = async () => {
   st = await chamar('get', '/admin/whatsapp/status')
   ok(st.body.worker_vivo === false && st.body.conexao === 'desligado', 'worker sem batimento há 10 min: status mostra desligado')
 
+  // ---------- campos da aba do painel (17/11/2026) ----------
+  const tg2 = await chamar('get', '/admin/whatsapp/tipos')
+  ok(JSON.stringify(tg2.body.tipos.map(x => [x.tipo, x.implementado])) === JSON.stringify([['pergunta_sem_resposta', false], ['prazo_acabando', false], ['escolhido', false], ['horario_aguardando', false], ['teste', true]])
+     && tg2.body.tipos.every(x => typeof x.rotulo === 'string' && typeof x.ligado === 'boolean') && tg2.body.tipos.filter(x => x.ligado).map(x => x.tipo).join() === 'teste',
+     '/tipos devolve sempre os 5 slugs, na ordem, com implementado (só teste = true) e só teste ligado', tg2.body.tipos.map(x => [x.tipo, x.implementado, x.ligado]))
+  const ni = await enfileirar({ tipo: 'pergunta_sem_resposta', telefone: TESTE, texto: 'x' }, shim)
+  ok(ni.ok === false && ni.motivo === 'tipo_nao_implementado', 'tipo ainda não implementado não entra na fila', ni)
+
+  const { SQL_GRAVAR_ESTADO } = require(path.join(REPO, 'src/whatsapp/worker'))
+  const gravar = (conexao) => q(SQL_GRAVAR_ESTADO, [conexao, null, '+5534900000000', TESTE])
+  await gravar('conectando')
+  const semConexao2 = (await chamar('get', '/admin/whatsapp/status')).body
+  await gravar('conectado')
+  const c1 = (await chamar('get', '/admin/whatsapp/status')).body
+  await q(`UPDATE whatsapp_estado SET conectado_em = conectado_em - INTERVAL '1 hour'`)
+  await gravar('conectado')
+  const c2 = (await chamar('get', '/admin/whatsapp/status')).body
+  await gravar('conectando'); await gravar('conectado')
+  const c3 = (await chamar('get', '/admin/whatsapp/status')).body
+  ok('conectado_em' in semConexao2 && semConexao2.conectado_em === null && c1.conectado_em && c2.conectado_em
+     && Math.abs(new Date(c1.conectado_em) - new Date(c2.conectado_em) - 3600000) < 5000 && new Date(c3.conectado_em) - new Date(c2.conectado_em) > 3500000,
+     '/status: conectado_em nulo fora de conectado, mantido entre batimentos e renovado ao reconectar', [semConexao2.conectado_em, c1.conectado_em, c2.conectado_em, c3.conectado_em])
+
+  await limpar()
+  await q(`INSERT INTO usuarios (id, nome, email, role, telefone, cpf_cnpj, ativo) VALUES ($1, 'emilyn', 'emilyn@x.invalid', 'prestador', '11987654321', '00000000004', true)`, [U(4)])
+  const R1 = 'dddddddd-0000-4000-8000-000000000001', P1 = 'eeeeeeee-0000-4000-8000-000000000001'
+  await q(`INSERT INTO reparos (id, titulo, criado_por, status, codigo_publico) VALUES ($1, 'Entregar panfletos 1000 unidades em todos os bairros da cidade', $2, 'aberta', '3529D')`, [R1, U(1)])
+  await q(`INSERT INTO perguntas_demanda (id, tipo, demanda_id, autor_id, pergunta) VALUES ($1, 'reparo', $2, $3, 'Qual o bairro?')`, [P1, R1, U(4)])
+  const ins = (tipo, usuario, tabela, ref, texto) => q(`INSERT INTO whatsapp_mensagens (tipo, usuario_id, telefone, texto, ref_tabela, ref_id) VALUES ($1, $2, $3, $4, $5, $6)`, [tipo, usuario, TESTE, texto, tabela, ref])
+  await ins('pergunta_sem_resposta', U(1), 'perguntas_demanda', P1, 'Você tem uma pergunta sem resposta')
+  await ins('escolhido', U(4), 'reparos', R1, 'Você foi escolhida')
+  await ins('teste', U(3), null, null, 'Teste com conta')
+  await ins('teste', null, null, null, 'Teste sem conta')
+  const lm = (await chamar('get', '/admin/whatsapp/mensagens')).body
+  const por = Object.fromEntries(lm.mensagens.map(x => [x.texto, x]))
+  const m1 = por['Você tem uma pergunta sem resposta'], m2 = por['Você foi escolhida'], m3 = por['Teste com conta'], m4 = por['Teste sem conta']
+  ok(lm.total === 4 && m1.papel === 'dono' && m1.codigo === '3529D' && m1.usuario_nome === 'ana' && m2.papel === 'profissional' && m2.codigo === '3529D' && m2.usuario_nome === 'emilyn',
+     '/mensagens: papel (dono/profissional pela relação com o pedido), codigo e usuario_nome — via pedido e via pergunta', [m1.papel, m1.codigo, m2.papel, m2.codigo])
+  ok(m3.papel === 'dono' && m3.codigo === null && m4.papel === null && m4.codigo === null && m4.usuario_nome === null, '/mensagens: sem pedido, papel vem do tipo da conta; sem conta, null')
+  ok(m1.resumo === 'Pergunta sem resposta · 3529D “Entregar panfletos 1000 unidades em tod…”' && m2.resumo.startsWith('Profissional escolhido · 3529D') && m4.resumo === 'Mensagem de teste (painel)'
+     && lm.mensagens.every(x => 'resposta' in x && x.resposta === null && !('_titulo' in x) && !('_total' in x)),
+     '/mensagens: resumo curto (tipo · código “título”) e resposta = null até a Etapa 2', [m1.resumo, m4.resumo])
+
   // ---------- Watch Paths da Railway ----------
   const visto = new Set()
   const andar = (arq) => {

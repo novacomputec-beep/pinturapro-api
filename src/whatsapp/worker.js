@@ -23,12 +23,17 @@ const dormir = (ms) => new Promise(resolve => {
 })
 
 // O worker escreve o que a aba do painel lê (GET /admin/whatsapp/status).
-const gravarEstado = (estado, trava) => pool.query(
+const SQL_GRAVAR_ESTADO =
   `UPDATE whatsapp_estado
       SET conexao = $1, qr = $2,
+          -- conectado_em: início da conexão ATUAL (as colunas à direita leem a linha antiga).
+          conectado_em = CASE WHEN $1::text <> 'conectado' THEN NULL
+                              WHEN conexao = 'conectado' THEN COALESCE(conectado_em, NOW())
+                              ELSE NOW() END,
           qr_em = CASE WHEN $2::text IS NULL THEN NULL WHEN qr IS DISTINCT FROM $2::text THEN NOW() ELSE qr_em END,
           numero = $3, trava = $4, heartbeat_em = NOW(), atualizado_em = NOW()
-    WHERE id = 1`,
+    WHERE id = 1`
+const gravarEstado = (estado, trava) => pool.query(SQL_GRAVAR_ESTADO,
   [estado.conexao, estado.qr || null, estado.numero || null, trava.modo === 'ausente' ? null : trava.texto])
   .catch(err => console.error('[whatsapp] falha ao gravar estado:', err.message))
 
@@ -129,4 +134,4 @@ if (require.main === module) {
   iniciar().catch(err => { console.error('[whatsapp] falha ao iniciar:', err); process.exit(1) })
 }
 
-module.exports = { iniciar }
+module.exports = { iniciar, SQL_GRAVAR_ESTADO }
