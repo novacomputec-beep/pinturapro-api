@@ -30,7 +30,8 @@
 const { pool } = require('../utils/supabase')
 const { normalizarVersao, compararVersoes } = require('../utils/versaoApp')
 const { SQL_ZERAR_AGENDA, formatarDataHoraSP } = require('../utils/agendamento')
-const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunciarDemanda, contatoDaPessoa, avisarPedidoCanceladoPeloDono } = require('./alertaService')
+const { entregarPushOuEmail, entregarPushEEmail, registrarFaltaUsuario, reanunciarDemanda, contatoDaPessoa, avisarPedidoCanceladoPeloDono,
+        inserirFalta, registrarAtrasoChegada, notificarMatchDesfeito, avaliarSuspensaoPorFaltas } = require('./alertaService')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
 // Reabertura: propostas rebaixadas pelo match voltam a valer e o aviso NEUTRO aos interessados fica
 // devido (SQL_MARCAR_REABERTURA → alertaService.avisarReabertura, o único que avisa).
@@ -83,7 +84,7 @@ const SQL_LIMPAR_MATCH = `match_feito_em = NULL, match_usuario_id = NULL,
 const carregar = async (lado, id, db = pool) => {
   if (!UUID_RE.test(String(id))) return null
   const r = await db.query(
-    `SELECT id, titulo, criado_por, match_usuario_id, status, a_caminho_em, chegada_prevista_em, chegada_confirmada_em, expira_em,
+    `SELECT id, titulo, criado_por, match_usuario_id, match_feito_em, status, a_caminho_em, chegada_prevista_em, chegada_confirmada_em, expira_em,
             COALESCE(${lado.janelaCol}, 720)::float AS janela_horas,
             CASE WHEN chegada_prevista_em IS NULL THEN NULL
                  ELSE EXTRACT(EPOCH FROM (chegada_prevista_em - NOW())) / 3600 END AS horas_ate_horario,
@@ -136,9 +137,11 @@ const guardar = async (lado, req, { permitirEmAndamento = false } = {}) => {
   return { d, papel }
 }
 
-const lerMotivo = (body) => {
+// extras: motivos aceitos só naquele caminho (ex.: 'nao_veio' com o atendimento em andamento).
+const lerMotivo = (body, extras = []) => {
   const motivo = typeof body?.motivo === 'string' ? body.motivo.trim() : ''
-  if (!MOTIVOS.includes(motivo)) return { erro: `motivo deve ser um de: ${MOTIVOS.join(', ')}` }
+  const aceitos = [...MOTIVOS, ...extras]
+  if (!aceitos.includes(motivo)) return { erro: `motivo deve ser um de: ${aceitos.join(', ')}` }
   const bruto = body?.detalhe
   if (bruto != null && typeof bruto !== 'string') return { erro: 'detalhe deve ser texto' }
   const detalhe = (bruto || '').trim().slice(0, DETALHE_MAX) || null
@@ -383,6 +386,73 @@ const cancelarEmAndamento = async ({ lado, d, donoId, modo, motivo = null, detal
   return { ok: true, encerrada: encerrar, modo }
 }
 
+// "PROFISSIONAL NÃO VEIO" com o atendimento em andamento (dono, 17/11/2026): a chegada foi
+// confirmada por engano e o dono corrige — POST /:tabela/:id/cancelar-match { motivo: 'nao_veio' },
+// só o dono, só nessa fase. É o MESMO desfecho do não comparecimento de sempre (cron do
+// cronômetro depois do "não veio" da vigia) e da correção manual do 3529D feita nesse dia:
+//   pedido reaberto com 24 h novas, match/chegada/agenda zerados, marcos e avisos de escolha
+//   rearmados, profissional na lista negra DESTE pedido, proposta dele 'expirado', propostas
+//   rebaixadas pelo match de volta ao que eram, FALTA de não comparecimento (sem
+//   compromisso_nao_cumprido), folha de atraso para o dono (desistencias 'atraso_chegada'),
+//   avaliação de suspensão (3 faltas em 90 dias) e o aviso padrão aos dois lados
+//   (notificarMatchDesfeito). Caixa-preta: app.origem = 'nao_veio_em_andamento'.
+// NÃO é cancelamento do dono: nada de cancelado_por, não conta em cancelamentos frequentes.
+const MOTIVO_NAO_VEIO = 'nao_veio'
+const NAO_VEIO_PRAZO_NOVO = '24 hours'
+const naoVeioEmAndamento = async ({ lado, d, donoId }) => {
+  const profissionalId = d.match_usuario_id
+  const auditoria = require('../utils/auditoriaDemanda')
+  const ctx = auditoria.contextoAtual() || {}
+  const desfeito = await auditoria.comOrigem({ origem: 'nao_veio_em_andamento', rota: ctx.rota || null, usuarioId: ctx.usuarioId || donoId }, async () => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const upd = await client.query(
+        `UPDATE ${lado.tabela} SET ${SQL_LIMPAR_MATCH}, ${SQL_LIMPAR_CONCLUSAO}, ${SQL_MARCAR_REABERTURA},
+                notif_5min_enviada = false,
+                marco_1_em = NULL, marco_2_em = NULL, marco_3_em = NULL,
+                escolha_aviso_24h_em = NULL, escolha_aviso_2h_em = NULL, escolha_expirou_em = NULL,
+                prestadores_bloqueados = CASE WHEN $2::uuid = ANY(COALESCE(prestadores_bloqueados, '{}')) THEN prestadores_bloqueados
+                                              ELSE array_append(COALESCE(prestadores_bloqueados, '{}'), $2::uuid) END,
+                expira_em = NOW() + INTERVAL '${NAO_VEIO_PRAZO_NOVO}'
+          WHERE id = $1 AND match_usuario_id = $2 AND chegada_confirmada_em IS NOT NULL AND status = 'aberta'
+          RETURNING id`,
+        [d.id, profissionalId]
+      )
+      if (upd.rowCount === 0) { await client.query('ROLLBACK'); return false }
+      await client.query(
+        `UPDATE ${lado.proposta.tabela} SET status = 'expirado'
+          WHERE ${lado.proposta.coluna} = $1 AND usuario_id = $2 AND status = 'aceito'`,
+        [d.id, profissionalId]
+      )
+      await restaurarPropostasRebaixadas(client, lado.tabela, d.id)
+      // Falta de não comparecimento (motivo NULL, como a do cron), na mesma transação do un-match.
+      await inserirFalta(client, lado.tabela, d.id, profissionalId)
+      await client.query('COMMIT')
+      return true
+    } catch (err) {
+      try { await client.query('ROLLBACK') } catch {}
+      throw err
+    } finally {
+      client.release()
+    }
+  })
+  if (!desfeito) return { ok: false }
+  console.log(`[CancelarMatch] ${lado.tipo} ${d.id} EM ANDAMENTO: "não veio" marcado pelo dono ${donoId} — falta para ${profissionalId}, pedido reaberto por ${NAO_VEIO_PRAZO_NOVO}`)
+  // Efeitos padrão do não comparecimento, na ordem do cron; nenhum deles derruba a resposta.
+  const antes = { id: d.id, titulo: d.titulo, criado_por: d.criado_por, match_usuario_id: profissionalId, match_feito_em: d.match_feito_em || null }
+  ;(async () => {
+    try {
+      const retrato = await registrarAtrasoChegada(lado.tabela, antes)
+      await notificarMatchDesfeito(lado.tabela, antes, { atraso: true, nomeProfissional: retrato?.nome })
+    } catch (err) {
+      console.error(`[CancelarMatch] avisos do "não veio" (${lado.tipo} ${d.id}):`, err.message)
+    }
+    await avaliarSuspensaoPorFaltas(profissionalId)
+  })().catch(() => {})
+  return { ok: true, encerrada: false, modo: MOTIVO_NAO_VEIO }
+}
+
 // DELETE /:tabela/dono/:id com profissional escolhido: só passa na fase em andamento (o resto
 // continua 409 MATCH_ATIVO na rota). Devolve null quando NÃO é o caso — a rota segue como antes.
 const cancelarPedidoEmAndamento = async (tabela, id, donoId) => {
@@ -511,8 +581,17 @@ const handlers = (tabela) => {
         if (simular) {
           return res.json({ ...classeEmAndamento, papel, falta: false, em_andamento: true, horario_texto: null, pedido_cancelamento: pedidoCancelamentoParaApp(tabela, d, req.usuario.id, undefined, req) })
         }
-        const lidoEA = lerMotivo(req.body)
+        const lidoEA = lerMotivo(req.body, [MOTIVO_NAO_VEIO])
         if (lidoEA.erro) return res.status(400).json({ erro: lidoEA.erro })
+        // "Profissional não veio": não comparecimento padrão (falta, lista negra, 24 h novas) — naoVeioEmAndamento.
+        if (lidoEA.motivo === MOTIVO_NAO_VEIO) {
+          const rNV = await naoVeioEmAndamento({ lado, d, donoId: req.usuario.id })
+          if (!rNV.ok) return res.status(409).json({ erro: 'O atendimento mudou enquanto você cancelava. Atualize a tela.', codigo: 'ESTADO_MUDOU' })
+          return res.json({
+            mensagem: 'Registrado que o profissional não veio. O pedido voltou a receber propostas.',
+            ...classeEmAndamento, falta: false, em_andamento: true, modo: MOTIVO_NAO_VEIO, falta_profissional: true, demanda_encerrada: false,
+          })
+        }
         const modo = lidoEA.motivo === 'nao_preciso' || req.body?.manter_aberta === false ? 'cancelado' : 'trocado'
         const rEA = await cancelarEmAndamento({ lado, d, donoId: req.usuario.id, modo, motivo: lidoEA.motivo, detalhe: lidoEA.detalhe })
         if (!rEA.ok) return res.status(409).json({ erro: 'O atendimento mudou enquanto você cancelava. Atualize a tela.', codigo: 'ESTADO_MUDOU' })
@@ -718,5 +797,5 @@ module.exports = {
   VERSAO_APP_COM_PEDIDO_CANCELAMENTO, appAntigoParaPedidoCancelamento, expirarPedidosCancelamento, cancelarPorAdmin,
   MOTIVO_CONTA_EXCLUIDA, desfazerMatchesPorExclusao, avisarMatchesDesfeitosPorExclusao,
   MOTIVO_TROCADO_PELO_CLIENTE, MOTIVO_CANCELADO_PELO_CLIENTE, sqlEncerradoPeloClienteEmAndamento,
-  cancelarEmAndamento, cancelarPedidoEmAndamento,
+  cancelarEmAndamento, cancelarPedidoEmAndamento, naoVeioEmAndamento, MOTIVO_NAO_VEIO,
 }
