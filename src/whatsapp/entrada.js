@@ -1,8 +1,9 @@
-// MENSAGENS RECEBIDAS. Etapa 1: guarda tudo em whatsapp_recebidas e trata o pedido de saída
-// ("SAIR"). Casar a resposta com a pergunta/pedido (mensagem_ref, status 'respondida') é Etapa 2.
+// MENSAGENS RECEBIDAS. O worker só GUARDA em whatsapp_recebidas e trata o pedido de saída
+// ("SAIR"). Casar a resposta com a pergunta e entregá-la no app é trabalho da API (Etapa 2 —
+// services/whatsappPerguntasService), que lê as linhas com processada_em NULL.
 const { normalizarTelefone, variantesTelefone, ehPedidoDeSaida } = require('./config')
 
-// msg = { id, jid, telefone, texto, quando } (contrato do adaptador). Devolve
+// msg = { id, jid, telefone, texto, quando, citada, midia } (contrato do adaptador). Devolve
 // { nova, saiu, usuarios } — nova = false quando o id já tinha sido gravado (reentrega).
 const registrarRecebida = async (db, msg) => {
   const telefone = normalizarTelefone(msg.telefone)
@@ -17,13 +18,18 @@ const registrarRecebida = async (db, msg) => {
     [msg.jid || null, formas])
   const usuarioId = dono.rows[0]?.usuario_id || null
 
+  // citada = id da mensagem que a pessoa citou ao responder; midia = 'audio' | 'imagem' | … (texto = NULL).
+  // O "SAIR" é resolvido aqui mesmo (processada_em já preenchido); o resto fica com processada_em
+  // NULL para a API casar com a pergunta (services/whatsappPerguntasService).
+  const saida = !msg.midia && ehPedidoDeSaida(msg.texto)
   const ins = await db.query(
-    `INSERT INTO whatsapp_recebidas (wa_message_id, wa_jid, telefone, usuario_id, texto, recebida_em)
-     VALUES ($1, $2, $3, $4::uuid, $5, COALESCE($6::timestamptz, NOW()))
+    `INSERT INTO whatsapp_recebidas (wa_message_id, wa_jid, telefone, usuario_id, texto, recebida_em, citada_wa_message_id, midia, processada_em, resultado)
+     VALUES ($1, $2, $3, $4::uuid, $5, COALESCE($6::timestamptz, NOW()), $7, $8, CASE WHEN $9::boolean THEN NOW() ELSE NULL END, CASE WHEN $9::boolean THEN 'saiu' ELSE NULL END)
      ON CONFLICT (wa_message_id) DO NOTHING RETURNING id`,
-    [String(msg.id), msg.jid || null, telefone, usuarioId, String(msg.texto ?? ''), msg.quando ? new Date(msg.quando).toISOString() : null])
+    [String(msg.id), msg.jid || null, telefone, usuarioId, String(msg.texto ?? ''), msg.quando ? new Date(msg.quando).toISOString() : null,
+     msg.citada || null, msg.midia || null, saida])
   if (ins.rows.length === 0) return { nova: false, saiu: false, usuarios: [] }
-  if (!ehPedidoDeSaida(msg.texto)) return { nova: true, saiu: false, usuarios: [] }
+  if (!saida) return { nova: true, saiu: false, usuarios: [] }
 
   // SAIR vale para o NÚMERO: todas as contas com este telefone (a mesma pessoa tem conta de
   // contratante e de profissional) e a conta para quem escrevemos neste destino. O cadastro

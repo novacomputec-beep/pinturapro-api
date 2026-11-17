@@ -10,7 +10,9 @@
 //   existeNoWhatsapp(telefoneE164)  → { existe, jid } — jid é o DESTINO REAL devolvido pelo
 //                                     WhatsApp (pode não ter o nono dígito); é para ele que se envia.
 //   enviarTexto(jid, texto)         → { id } — id da mensagem no WhatsApp.
-//   aoReceber(fn)                   → fn({ id, jid, telefone, texto, quando }) a cada mensagem recebida.
+//   aoReceber(fn)                   → fn({ id, jid, telefone, texto, quando, citada, midia }) a cada
+//                                     mensagem recebida. citada = id da mensagem que a pessoa citou
+//                                     (ou null); midia = 'audio' | 'imagem' | … (null quando é texto).
 //   aoAtualizarStatus(fn)           → fn({ id, status }) com status 'entregue' | 'lida'.
 //   aoMudarEstado(fn)               → fn(estado()) a cada mudança de conexão/QR.
 const METODOS = ['conectar', 'desconectar', 'estado', 'existeNoWhatsapp', 'enviarTexto', 'aoReceber', 'aoAtualizarStatus', 'aoMudarEstado']

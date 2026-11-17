@@ -827,6 +827,13 @@ const iniciarAgendador = () => {
   // match→prazo)): mesma cadência dos cronômetros, que leem o mesmo prazo. Fora do warm-up: o
   // lembrete fica devido até o prazo, então o primeiro tique de 1 min o pega.
   setInterval(job('lembrarPrazoChegada', () => { lembrarPrazoChegada() }), INTERVALO_CRONOMETRO)
+  // Robô de WhatsApp — Etapa 2 (services/whatsappPerguntasService). A API só põe na fila e lê o
+  // que chegou; quem fala com o WhatsApp é o worker (serviço separado).
+  //   1 min: pergunta sem resposta do dono há 30 min → fila (só com o tipo ligado no painel);
+  //   5 s:   resposta que o dono mandou pelo WhatsApp → entra pelo mesmo caminho do app.
+  const whatsappPerguntas = require('./src/services/whatsappPerguntasService')
+  setInterval(job('whatsappPerguntasSemResposta', whatsappPerguntas.semSobrepor('perguntas', () => whatsappPerguntas.enfileirarPerguntasSemResposta())), INTERVALO_CRONOMETRO)
+  setInterval(job('whatsappRecebidas', whatsappPerguntas.semSobrepor('recebidas', () => whatsappPerguntas.processarRecebidas({ responder: rotasApp.responderPergunta }))), 5 * 1000)
   // Agendamento livre: lembretes do horário aceito ao profissional (véspera 18:00, 2h antes, na
   // hora) e a vigia "o profissional veio?" ao dono (1h depois do horário). Mesma cadência dos
   // cronômetros; fora do warm-up pelo mesmo motivo do lembrete acima.

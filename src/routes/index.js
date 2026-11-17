@@ -3846,41 +3846,50 @@ const criarHandlerPergunta = (tabela) => async (req, res) => {
 // demanda; a pergunta precisa ser desta demanda. Responde UMA vez: o UPDATE exige
 // respondido_em IS NULL, e a segunda chamada (ou duas simultâneas) leva 409. Aviso ao autor
 // por push ou, sem token / push falho, e-mail em texto puro, fire-and-forget.
-const criarHandlerResposta = (tabela) => async (req, res) => {
+//
+// responderPergunta é a função INTERNA única: a rota do app (criarHandlerResposta) e o robô de
+// WhatsApp (services/whatsappPerguntasService — resposta que o dono manda pelo WhatsApp) passam
+// por ela, então as duas entradas têm as mesmas regras, o mesmo sanitizador e o mesmo aviso ao
+// profissional. Devolve { status, body } (o que a rota responde); lança só em erro inesperado.
+const responderPergunta = async ({ tabela, demandaId, perguntaId, usuarioId, resposta }) => {
   const lado = LADOS_PERGUNTA[tabela]
+  const lidoBruto = lerTextoPergunta(resposta, 'resposta', RESPOSTA_MAX)
+  if (lidoBruto.erro) return { status: 400, body: { erro: lidoBruto.erro } }
+  if (!UUID_RE.test(String(demandaId))) return { status: 404, body: { erro: lado.erro404 } }
+  if (!UUID_RE.test(String(perguntaId))) return { status: 404, body: { erro: 'Pergunta não encontrada' } }
+  const d = await pool.query(`SELECT titulo, criado_por FROM ${lado.tabela} WHERE id = $1`, [demandaId])
+  if (d.rows.length === 0) return { status: 404, body: { erro: lado.erro404 } }
+  const demanda = d.rows[0]
+  if (!(await ehMesmaPessoa(demanda.criado_por, usuarioId))) return { status: 403, body: { erro: 'Apenas o dono do pedido pode responder' } }
+  const existe = await pool.query(
+    `SELECT 1 FROM perguntas_demanda WHERE id = $1 AND tipo = $2 AND demanda_id = $3`,
+    [perguntaId, lado.tipo, demandaId]
+  )
+  if (existe.rows.length === 0) return { status: 404, body: { erro: 'Pergunta não encontrada' } }
+  const lido = aplicarDigitosPartidos(lidoBruto, await textosAnterioresAutor(lado, demandaId, usuarioId, 'dono'))
+  const upd = await pool.query(
+    `UPDATE perguntas_demanda SET resposta = $2, respondido_em = NOW()
+      WHERE id = $1 AND respondido_em IS NULL
+      RETURNING id, autor_id, pergunta, resposta, criado_em, respondido_em`,
+    [perguntaId, lido.texto]
+  )
+  if (upd.rowCount === 0) return { status: 409, body: { erro: 'Esta pergunta já foi respondida' } }
+  if (lido.removido) registrarTentativaContato({ usuario_id: usuarioId, tipo: `resposta_${lado.tipo}`, demanda_id: demandaId, campo: 'resposta', conta: lido.conta })
+  const { autor_id, ...pergunta } = upd.rows[0]
+  // Push + e-mail sempre (política de 29/10/2026). Fire-and-forget, como sempre foi.
+  avisarUsuario(autor_id, {
+    ator_id: usuarioId,
+    titulo: '💬 O cliente respondeu sua pergunta',
+    corpo: demanda.titulo,
+    data: { tipo: 'pergunta_respondida', [lado.chave]: demandaId, pergunta_id: pergunta.id },
+    rotulo: `resposta pergunta ${tabela} ${demandaId}`,
+  })
+  return { status: 200, body: { ...pergunta, minha: false } }
+}
+const criarHandlerResposta = (tabela) => async (req, res) => {
   try {
-    const lidoBruto = lerTextoPergunta(req.body?.resposta, 'resposta', RESPOSTA_MAX)
-    if (lidoBruto.erro) return res.status(400).json({ erro: lidoBruto.erro })
-    if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ erro: lado.erro404 })
-    if (!UUID_RE.test(String(req.params.pid))) return res.status(404).json({ erro: 'Pergunta não encontrada' })
-    const d = await pool.query(`SELECT titulo, criado_por FROM ${lado.tabela} WHERE id = $1`, [req.params.id])
-    if (d.rows.length === 0) return res.status(404).json({ erro: lado.erro404 })
-    const demanda = d.rows[0]
-    if (!(await ehMesmaPessoa(demanda.criado_por, req.usuario.id))) return res.status(403).json({ erro: 'Apenas o dono do pedido pode responder' })
-    const existe = await pool.query(
-      `SELECT 1 FROM perguntas_demanda WHERE id = $1 AND tipo = $2 AND demanda_id = $3`,
-      [req.params.pid, lado.tipo, req.params.id]
-    )
-    if (existe.rows.length === 0) return res.status(404).json({ erro: 'Pergunta não encontrada' })
-    const lido = aplicarDigitosPartidos(lidoBruto, await textosAnterioresAutor(lado, req.params.id, req.usuario.id, 'dono'))
-    const upd = await pool.query(
-      `UPDATE perguntas_demanda SET resposta = $2, respondido_em = NOW()
-        WHERE id = $1 AND respondido_em IS NULL
-        RETURNING id, autor_id, pergunta, resposta, criado_em, respondido_em`,
-      [req.params.pid, lido.texto]
-    )
-    if (upd.rowCount === 0) return res.status(409).json({ erro: 'Esta pergunta já foi respondida' })
-    if (lido.removido) registrarTentativaContato({ usuario_id: req.usuario.id, tipo: `resposta_${lado.tipo}`, demanda_id: req.params.id, campo: 'resposta', conta: lido.conta })
-    const { autor_id, ...pergunta } = upd.rows[0]
-    res.json({ ...pergunta, minha: false })
-    // Push + e-mail sempre (política de 29/10/2026).
-    avisarUsuario(autor_id, {
-      ator_id: req.usuario.id,
-      titulo: '💬 O cliente respondeu sua pergunta',
-      corpo: demanda.titulo,
-      data: { tipo: 'pergunta_respondida', [lado.chave]: req.params.id, pergunta_id: pergunta.id },
-      rotulo: `resposta pergunta ${tabela} ${req.params.id}`,
-    })
+    const r = await responderPergunta({ tabela, demandaId: req.params.id, perguntaId: req.params.pid, usuarioId: req.usuario.id, resposta: req.body?.resposta })
+    res.status(r.status).json(r.body)
   } catch (err) {
     console.error(`[Perguntas] resposta ${tabela} ${req.params.id}/${req.params.pid}:`, err.message)
     res.status(500).json({ erro: 'Erro ao responder a pergunta' })
@@ -10811,6 +10820,8 @@ router.use(require('./adminWhatsapp'))
 
 module.exports = router
 module.exports.migracaoPronta = migracaoPronta
+// Resposta do dono a uma pergunta — a mesma função da rota, usada pelo robô de WhatsApp (server.js).
+module.exports.responderPergunta = responderPergunta
 // Exportado para os jobs de server.js. Hoje é um repasse para invalidarCacheAssinatura —
 // mantido como nome estável porque server.js e várias rotas já chamam assim.
 module.exports.invalidarCachesUsuario = invalidarCachesUsuario
