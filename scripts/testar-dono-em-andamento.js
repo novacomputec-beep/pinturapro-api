@@ -289,6 +289,69 @@ const main = async () => {
   ok(s123.body.em_andamento === true && s123.body.pedido_cancelamento === null && s124.body.pedido_cancelamento && s124.body.pedido_cancelamento.por === 'profissional',
      'simular em andamento respeita a guarda: app < 1.2.4 não recebe o pedido de acordo; 1.2.4 recebe', [s123.body.pedido_cancelamento, s124.body.pedido_cancelamento?.por])
 
+  // ═══ "PROFISSIONAL NÃO VEIO" em andamento: o não comparecimento de sempre (como a correção do 3529D) ═══
+  const canceladosDoDono = async () => (await q(`SELECT (SELECT count(*)::int FROM interesse_reparos WHERE cancelado_por = $1) + (SELECT count(*)::int FROM candidaturas WHERE cancelado_por = $1) AS n`, [DONO.id])).rows[0].n
+  const faltasEmilyn = async () => (await q(`SELECT tabela, demanda_id, motivo FROM faltas_profissional WHERE usuario_id = $1 ORDER BY criado_em`, [EMILYN.id])).rows
+  ok((await faltasEmilyn()).length === 0, 'antes do "não veio": a profissional não tem falta nenhuma (trocas e cancelamentos acima não geraram)')
+  for (const [t, n, volta] of [['reparos', 81, 'O serviço voltou'], ['obras', 181, 'A obra voltou']]) {
+    const rota = `/${t}/:id/cancelar-match`, tit = `Não veio (${t})`
+    await pedido(t, n, tit, 'andamento', { prestadores_bloqueados: [CARLOS.id === EMILYN.id ? EMILYN.id : U(77)] })
+    let r = await chamar('post', rota, { usuario: EMILYN, params: { id: D(n) }, body: { motivo: 'nao_veio' } })
+    ok(r.status === 409 && r.body.codigo === 'A_CAMINHO', `${t}: o profissional não pode marcar "não veio" (409 A_CAMINHO)`, [r.status, r.body.codigo])
+    const antesCancelados = await canceladosDoDono(), antesFaltas = (await faltasEmilyn()).length
+    zerar()
+    r = await chamar('post', rota, { usuario: DONO, params: { id: D(n) }, body: { motivo: 'nao_veio' } })
+    const d = await linha(t, n), p = await proposta(t, n, EMILYN), pc = await proposta(t, n, CARLOS), fs2 = await faltasEmilyn()
+    const horas = (new Date(d.expira_em) - Date.now()) / 3600000
+    ok(r.status === 200 && r.body.modo === 'nao_veio' && r.body.em_andamento === true && r.body.falta_profissional === true && r.body.demanda_encerrada === false && r.body.falta === false,
+       `${t}: dono marca "não veio" em andamento → 200 modo nao_veio`, r.body)
+    ok(d.status === 'aberta' && d.status_aprovacao === 'aprovada' && d.match_usuario_id === null && d.match_feito_em === null && d.chegada_confirmada_em === null && d.chegada_declarada_em === null
+       && d.a_caminho_em === null && d.comparecimento_resposta === null && d.encerramento_solicitado_por === null && d.encerrado_em === null && d.notif_5min_enviada === false && d.aviso_reabertura_em
+       && horas > 23.9 && horas < 24.1,
+       `${t}: pedido reaberto e limpo, com 24 h novas de prazo`, [d.status, d.match_usuario_id, Math.round(horas * 10) / 10])
+    ok(d.prestadores_bloqueados.includes(EMILYN.id) && d.prestadores_bloqueados.length === 2 && p.status === 'expirado' && p.cancelado_por === null && p.cancelado_motivo === null && pc.status === 'pendente' && pc.status_antes_match === null,
+       `${t}: profissional na lista negra DESTE pedido; proposta dela expirado (sem cancelado_por); a do concorrente rebaixado volta a pendente`, [d.prestadores_bloqueados.length, p.status, pc.status])
+    const eventos = (await q(`SELECT count(*)::int AS n FROM eventos_responsabilidade`)).rows[0].n
+    const folha = (await q(`SELECT motivo, usuario_id, nome_curto FROM desistencias WHERE tabela = $1 AND demanda_id = $2`, [t, D(n)])).rows
+    ok(fs2.length === antesFaltas + 1 && fs2[fs2.length - 1].tabela === t && fs2[fs2.length - 1].demanda_id === D(n) && fs2[fs2.length - 1].motivo === null && eventos === 0
+       && folha.length === 1 && folha[0].motivo === 'atraso_chegada' && folha[0].usuario_id === EMILYN.id,
+       `${t}: 1 falta de não comparecimento (motivo padrão), SEM compromisso_nao_cumprido, e a folha de atraso para o dono`, [fs2.length, eventos, folha.map(x => x.motivo)])
+    const pp = pushes.find(x => x.to === 'ExponentPushToken[emilyn]'), ep = emails.find(x => x.para === 'emilyn@x.invalid'), ed = emails.find(x => x.para === 'luiz@x.invalid')
+    ok(pp && pp.title === '⏰ Prazo expirado!' && pp.body === `O prazo para chegar em "${tit}" acabou. ${volta} para o feed.` && pp.data.tipo === 'match_expirado' && !('em_andamento' in pp.data)
+       && ep && ep.assunto === '⏰ Prazo expirado!' && !ep.html && !ep.texto.includes('não conta como falta')
+       && ed && ed.assunto === '⏰ Emilyn não chegou no prazo combinado' && ed.texto.includes(`Escolha outro profissional para "${tit}".`),
+       `${t}: aviso PADRÃO de não comparecimento aos dois lados (não o texto "não conta como falta")`, pp && [pp.title, pp.body, ed?.assunto])
+    ok(contextos.length === 1 && contextos[0].origem === 'nao_veio_em_andamento' && contextos[0].rota === `POST /api${rota}` && contextos[0].usuarioId === DONO.id && (await canceladosDoDono()) === antesCancelados
+       && !pushes.some(x => x.data?.tipo === 'cancelamentos_frequentes'),
+       `${t}: caixa-preta com origem nao_veio_em_andamento; NÃO conta como cancelamento do dono`, [contextos[0]?.origem, antesCancelados])
+    if (t === 'reparos') {
+      const mi = await chamar('get', '/reparos/meus-interesses', { usuario: EMILYN })
+      const it = (mi.body.historico || []).find(x => x.reparo_id === D(n))
+      ok(it && it.status === 'expirado' && it.encerrado_pelo_cliente_em_andamento === null, 'reparos: no histórico dela é um não comparecimento comum (encerrado_pelo_cliente_em_andamento = null)', it && [it.status, it.encerrado_pelo_cliente_em_andamento])
+    }
+  }
+  // fora da fase o motivo não existe; e a 3ª falta suspende, como sempre.
+  await pedido('reparos', 82, 'Só escolhido', 'match')
+  let rf = await chamar('post', '/reparos/:id/cancelar-match', { usuario: DONO, params: { id: D(82) }, body: { motivo: 'nao_veio' } })
+  await pedido('reparos', 83, 'A caminho', 'a_caminho')
+  const rf2 = await chamar('post', '/reparos/:id/cancelar-match', { usuario: DONO, params: { id: D(83) }, body: { motivo: 'nao_veio' } })
+  ok(rf.status === 400 && /motivo deve ser um de: imprevisto, nao_preciso, nao_consigo_horario, outro$/.test(rf.body.erro) && rf2.status === 409 && rf2.body.codigo === 'A_CAMINHO'
+     && (await linha('reparos', 82)).match_usuario_id === EMILYN.id && (await faltasEmilyn()).length === 2,
+     'fora da fase em andamento "nao_veio" não é aceito (400 sem chegada/a caminho; 409 A_CAMINHO a caminho) e nada muda', [rf.status, rf.body.erro, rf2.status])
+  const suspensaAntes = (await q(`SELECT suspenso_em FROM usuarios WHERE id = $1`, [EMILYN.id])).rows[0].suspenso_em
+  await pedido('obras', 182, 'Terceira falta', 'andamento')
+  zerar()
+  rf = await chamar('post', '/obras/:id/cancelar-match', { usuario: DONO, params: { id: D(182) }, body: { motivo: 'nao_veio' } })
+  const susp = (await q(`SELECT suspenso_em, suspenso_motivo FROM usuarios WHERE id = $1`, [EMILYN.id])).rows[0]
+  ok(rf.status === 200 && suspensaAntes === null && susp.suspenso_em && /3 faltas/.test(susp.suspenso_motivo) && (await faltasEmilyn()).length === 3 && pushes.some(x => x.to === 'ExponentPushToken[emilyn]' && x.data?.tipo === 'conta_suspensa'),
+     '3ª falta em 90 dias pelo "não veio": a conta é suspensa e avisada, pela regra de sempre', [susp.suspenso_motivo])
+  // trocar e cancelar em andamento continuam SEM falta
+  await pedido('reparos', 84, 'Troca depois', 'andamento'); await pedido('reparos', 85, 'Cancela depois', 'andamento')
+  const tr = await chamar('post', '/reparos/:id/cancelar-match', { usuario: DONO, params: { id: D(84) }, body: { motivo: 'outro' } })
+  const ca = await chamar('post', '/reparos/:id/cancelar-match', { usuario: DONO, params: { id: D(85) }, body: { motivo: 'nao_preciso' } })
+  ok(tr.body.modo === 'trocado' && ca.body.modo === 'cancelado' && (await faltasEmilyn()).length === 3 && !(await linha('reparos', 84)).prestadores_bloqueados?.includes(EMILYN.id),
+     'trocar e cancelar em andamento seguem como estavam: sem falta e sem lista negra', [tr.body.modo, ca.body.modo, (await faltasEmilyn()).length])
+
   logOrig(falhas === 0 ? '\nTUDO OK' : `\n${falhas} FALHA(S)`)
   process.exit(falhas ? 1 : 0)
 }
