@@ -35,7 +35,8 @@ const { limparCamposEscrita, mascararLinha, mascararLista, registrarTentativaCon
 // substitui o uso de POST /:id/expirar-match por dono/profissional.
 const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQL_LIMPAR_MATCH,
         desfazerMatchesPorExclusao, avisarMatchesDesfeitosPorExclusao,
-        pedidoCancelamentoParaApp, semColunasPedidoCancelamentoParaApp } = require('../services/cancelamentoMatchService')
+        pedidoCancelamentoParaApp, semColunasPedidoCancelamentoParaApp,
+        cancelarPedidoEmAndamento, sqlEncerradoPeloClienteEmAndamento } = require('../services/cancelamentoMatchService')
 // "Liberar WhatsApp" (arte "Ela chegou? v2"): o dono libera o próprio número ao escolhido antes do "Estou a caminho".
 const { handler: liberarWhatsappHandler, whatsappLiberado, migrarWhatsappLiberado } = require('../services/liberarWhatsappService')
 // Propostas rebaixadas pelo match voltam a valer quando a demanda retorna ao feed (regra única).
@@ -3309,6 +3310,14 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
     // prazo vencido). Match ÓRFÃO (match_usuario_id sem candidatura aceita — proposta apagada
     // por limpeza, /match legado) não segura nada: é limpo no mesmo UPDATE e a exclusão segue.
     if (obra.rows[0].match_usuario_id && obra.rows[0].match_real) {
+      // EM ANDAMENTO (chegada confirmada, obra aberta): o dono pode cancelar — sem falta nem
+      // bloqueio para o profissional (cancelamentoMatchService.cancelarEmAndamento). Fora dessa
+      // fase devolve null e vale o 409 de sempre.
+      const emAndamento = await cancelarPedidoEmAndamento('obras', req.params.id, req.usuario.id)
+      if (emAndamento) {
+        if (!emAndamento.ok) return res.status(409).json({ erro: 'O atendimento mudou enquanto você cancelava. Atualize a tela.', codigo: 'ESTADO_MUDOU' })
+        return res.json({ mensagem: 'Obra removida com sucesso', em_andamento: true })
+      }
       return res.status(409).json({ erro: "Já existe um profissional escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
     }
     // encerrado_em: mesmo motivo do recusar acima — libera a obra cancelada para a limpeza
@@ -4869,6 +4878,12 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
     )
     if (reparo.rows.length === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
     if (reparo.rows[0].match_usuario_id && reparo.rows[0].match_real) {
+      // EM ANDAMENTO (chegada confirmada, serviço aberto): ver DELETE /obras/dono/:id.
+      const emAndamento = await cancelarPedidoEmAndamento('reparos', req.params.id, req.usuario.id)
+      if (emAndamento) {
+        if (!emAndamento.ok) return res.status(409).json({ erro: 'O atendimento mudou enquanto você cancelava. Atualize a tela.', codigo: 'ESTADO_MUDOU' })
+        return res.json({ mensagem: 'Serviço cancelado com sucesso', em_andamento: true })
+      }
       return res.status(409).json({ erro: "Já existe um profissional escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
     }
     if (reparo.rows[0].match_usuario_id) console.log(`[reparos/dono DELETE] ${req.params.id}: match órfão (${reparo.rows[0].match_usuario_id}) limpo na exclusão`)
@@ -5262,6 +5277,9 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
              -- match do reparo é de uma conta DELA — o app não precisa comparar ids de conta.
              ir.usuario_id AS conta_id,
              COALESCE(${sqlProfissionalDaPessoa('r.match_usuario_id', '$1')}, false) AS match_da_pessoa,
+             -- 'trocado' | 'cancelado' quando o CLIENTE trocou de profissional ou cancelou com o
+             -- atendimento em andamento (sem falta para o profissional); null nos demais casos.
+             ${sqlEncerradoPeloClienteEmAndamento('ir')} AS encerrado_pelo_cliente_em_andamento,
              r.id as reparo_id, r.titulo, r.categoria, r.categorias, r.descricao, r.valor_estimado, r.valor_a_combinar,
              r.cidade, r.bairro, r.latitude, r.longitude, r.expira_em, r.status as reparo_status, r.prazo_atendimento_horas,
              r.match_usuario_id, r.match_feito_em,

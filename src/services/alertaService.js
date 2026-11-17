@@ -2205,7 +2205,23 @@ const reivindicarEmailLembreteCiclo = async (demandaId, usuarioId, dia) => {
 // semPush: só o e-mail (quem chama já decidiu o push — ex.: avisarReabertura, que respeita o teto
 // diário de push). discriminador: entra no hash da chave do e-mail sem ir no data do push (ex.: o
 // instante da reabertura, para cada rodada ter o seu e-mail).
-const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, corpoEmail, data, rotulo, lembrete = false, emailCadaCiclo = false, semPush = false, discriminador = null }) => {
+// botaoEmail (opcional): { url, texto } — o e-mail sai também em HTML com um botão para esse link
+// (e o link em texto puro no fim). Só o e-mail muda; push e chave de dedupe são os mesmos.
+const htmlEmailAvisoComBotao = (nome, titulo, corpo, botao) => `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background: #E8833A; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
+          <h1 style="color: #0a0a0a; margin: 0;">${MARCA}</h1>
+        </div>
+        <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
+          ${String(nome || '').trim() ? `<h2>Olá, ${escaparHtml(String(nome).trim().split(/\s+/)[0])}!</h2>` : ''}
+          <p><strong>${escaparHtml(titulo)}</strong></p>
+          <p>${escaparHtml(corpo)}</p>
+          <p style="text-align: center; margin: 30px 0;">
+            <a href="${escaparHtml(botao.url)}" style="background: #E8833A; color: #000; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold;">${escaparHtml(botao.texto)}</a>
+          </p>
+        </div>
+      </div>`
+const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome, titulo, corpo, corpoEmail, data, rotulo, lembrete = false, emailCadaCiclo = false, semPush = false, discriminador = null, botaoEmail = null }) => {
   if (ehOProprioAutor({ usuario_id, ator_id, rotulo })) return 'autor'
   const vias = []
   try {
@@ -2235,7 +2251,12 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
       )
       if (claim.rowCount === 0) { vias.push('e-mail já enviado'); return vias.join('+') }
     }
-    await comTimeout(enviarEmailBrevo({ para: destino, assunto: titulo, texto: textoEmailAviso(nome, titulo, corpoEmail || corpo) }), EMAIL_ALERTAS_TIMEOUT_MS, `Brevo ${rotulo}`)
+    const comBotao = botaoEmail && botaoEmail.url && botaoEmail.texto ? botaoEmail : null
+    await comTimeout(enviarEmailBrevo({
+      para: destino, assunto: titulo,
+      texto: textoEmailAviso(nome, titulo, corpoEmail || corpo) + (comBotao ? `\n\n${comBotao.texto}: ${comBotao.url}` : ''),
+      ...(comBotao ? { html: htmlEmailAvisoComBotao(nome, titulo, corpoEmail || corpo, comBotao) } : {}),
+    }), EMAIL_ALERTAS_TIMEOUT_MS, `Brevo ${rotulo}`)
     vias.push('e-mail')
     return vias.join('+')
   } catch (err) {

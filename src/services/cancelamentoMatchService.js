@@ -83,7 +83,7 @@ const SQL_LIMPAR_MATCH = `match_feito_em = NULL, match_usuario_id = NULL,
 const carregar = async (lado, id, db = pool) => {
   if (!UUID_RE.test(String(id))) return null
   const r = await db.query(
-    `SELECT id, titulo, criado_por, match_usuario_id, status, a_caminho_em, chegada_prevista_em, expira_em,
+    `SELECT id, titulo, criado_por, match_usuario_id, status, a_caminho_em, chegada_prevista_em, chegada_confirmada_em, expira_em,
             COALESCE(${lado.janelaCol}, 720)::float AS janela_horas,
             CASE WHEN chegada_prevista_em IS NULL THEN NULL
                  ELSE EXTRACT(EPOCH FROM (chegada_prevista_em - NOW())) / 3600 END AS horas_ate_horario,
@@ -118,13 +118,18 @@ const pediuEuMesmo = (d, papel, usuarioId) =>
 const quemFala = (papel, lado) => (papel === 'dono' ? 'O cliente' : `O ${lado.profissional}`)
 
 // Guardas comuns às três rotas. Devolve { d, papel } ou { status, corpo } para responder.
-const guardar = async (lado, req) => {
+// permitirEmAndamento (só POST /cancelar-match): o DONO pode trocar de profissional ou cancelar
+// com o atendimento EM ANDAMENTO — chegada já confirmada (chegada_confirmada_em) e pedido ainda
+// aberto. Aí devolve { d, papel, emAndamento: true }. Para o profissional, e para o dono com
+// "a caminho" mas sem chegada confirmada, segue o 409 A_CAMINHO de sempre.
+const guardar = async (lado, req, { permitirEmAndamento = false } = {}) => {
   const d = await carregar(lado, req.params.id)
   if (!d) return { status: 404, corpo: { erro: lado.naoEncontrada } }
   const papel = await papelDe(d, req.usuario.id)
   if (!papel) return { status: 403, corpo: { erro: 'Só o cliente ou o profissional do atendimento podem cancelar' } }
   if (d.status !== 'aberta') return { status: 409, corpo: { erro: `${lado.artigo} não está mais em andamento`, codigo: 'DEMANDA_FECHADA' } }
   if (!d.match_usuario_id) return { status: 409, corpo: { erro: 'Não há atendimento combinado para cancelar', codigo: 'SEM_MATCH' } }
+  if (permitirEmAndamento && papel === 'dono' && d.chegada_confirmada_em) return { d, papel, emAndamento: true }
   if (d.a_caminho_em) {
     return { status: 409, corpo: { erro: 'O profissional já está a caminho: o cancelamento pelo app não é mais possível. Combine diretamente com ele.', codigo: 'A_CAMINHO' } }
   }
@@ -168,10 +173,11 @@ const contato = (usuarioId, db = pool) => contatoDaPessoa(usuarioId, db)
 // ambos: false → push ou, sem ele, e-mail (entregarPushOuEmail): só o aviso de cancelamentos
 // frequentes, que é penalidade/lembrete e não tem demanda.
 // ator: quem executou a ação — a guarda dos helpers nunca avisa o próprio autor (ator_id).
-const avisar = async (usuarioId, { titulo, corpo, data, rotulo }, { ambos = true, ator = null } = {}) => {
+// botaoEmail (opcional, só com ambos): { url, texto } — o e-mail ganha um botão (alertaService).
+const avisar = async (usuarioId, { titulo, corpo, data, rotulo, botaoEmail = null }, { ambos = true, ator = null } = {}) => {
   try {
     const u = await contato(usuarioId)
-    if (u) await (ambos ? entregarPushEEmail : entregarPushOuEmail)({ ...u, ator_id: ator, titulo, corpo, data, rotulo })
+    if (u) await (ambos ? entregarPushEEmail : entregarPushOuEmail)({ ...u, ator_id: ator, titulo, corpo, data, rotulo, ...(botaoEmail ? { botaoEmail } : {}) })
   } catch (err) {
     console.error(`[CancelarMatch] aviso ${rotulo}:`, err.message)
   }
@@ -276,6 +282,106 @@ const executar = async ({ lado, d, canceladoPor, atorId = canceladoPor, motivo, 
   if (encerrar) avisarPedidoCanceladoPeloDono(lado.tabela, d.id, { excluirUsuarioId: profissionalId }).catch(() => {})
   avisarCancelamentosFrequentes(canceladoPor)
   return { ok: true, encerrada: encerrar }
+}
+
+// ---------- dono troca de profissional / cancela com o atendimento EM ANDAMENTO (dono, 17/11/2026) ----------
+// Fase "em andamento": chegada confirmada (chegada_confirmada_em) e pedido ainda 'aberta'. Só o
+// DONO sai por aqui — POST /:tabela/:id/cancelar-match (troca: manter_aberta ≠ false e motivo ≠
+// 'nao_preciso'; cancelamento: o contrário) e DELETE /:tabela/dono/:id (cancelamento).
+// Para o profissional: SEM falta, SEM compromisso_nao_cumprido, SEM entrar em
+// prestadores_bloqueados. A proposta dele vira 'cancelado' com cancelado_por = dono e
+// cancelado_motivo = 'trocado_pelo_cliente' | 'cancelado_pelo_cliente' (é por esse motivo que o
+// histórico dele expõe encerrado_pelo_cliente_em_andamento); o motivo que o dono escolheu vai em
+// cancelado_detalhe. Caixa-preta: app.origem = 'troca_em_andamento' | 'cancelamento_em_andamento'
+// (a rota e o usuário continuam os da requisição).
+// TROCA: o pedido volta ao feed como em qualquer cancelamento que mantém aberto (prazo com piso
+// de 1 h, propostas rebaixadas pelo match voltam a valer, reanúncio). CANCELAMENTO: 'cancelada'.
+// O pedido de conclusão que o profissional tenha feito (encerramento_solicitado_*) e os lembretes
+// de conclusão são zerados: sem isso o cron fecharia sozinho um pedido que acabou de reabrir.
+const MOTIVO_TROCADO_PELO_CLIENTE = 'trocado_pelo_cliente'
+const MOTIVO_CANCELADO_PELO_CLIENTE = 'cancelado_pelo_cliente'
+// 'trocado' | 'cancelado' | null a partir da proposta — campo do histórico do profissional.
+const sqlEncerradoPeloClienteEmAndamento = (p) => `CASE
+    WHEN ${p}.status = 'cancelado' AND ${p}.cancelado_motivo = '${MOTIVO_TROCADO_PELO_CLIENTE}' THEN 'trocado'
+    WHEN ${p}.status = 'cancelado' AND ${p}.cancelado_motivo = '${MOTIVO_CANCELADO_PELO_CLIENTE}' THEN 'cancelado'
+    ELSE NULL END`
+const SQL_LIMPAR_CONCLUSAO = `encerramento_solicitado_por = NULL, encerramento_solicitado_em = NULL,
+       lembrete_encerramento_30m_em = NULL, lembrete_encerramento_2h_em = NULL, lembrete_conclusao_em = NULL`
+// Contato do suporte para o botão do e-mail (https://wa.me/55…, mailto:…, página de ajuda).
+// Variável de ambiente SUPORTE_CONTATO_URL; sem ela o e-mail sai sem o botão.
+const botaoSuporte = () => {
+  const url = String(process.env.SUPORTE_CONTATO_URL || '').trim()
+  return /^(https:\/\/|mailto:)/i.test(url) ? { url, texto: `Não foi isso que aconteceu? Fale com o ${MARCA}` } : null
+}
+const AVISO_EM_ANDAMENTO = {
+  trocado: (titulo) => ({ titulo: 'Pedido trocado pelo cliente', corpo: `O cliente decidiu trocar de profissional no pedido "${titulo}". Isso não conta como falta para você.` }),
+  cancelado: (titulo) => ({ titulo: 'Pedido cancelado pelo cliente', corpo: `O cliente cancelou o pedido "${titulo}". Isso não conta como falta para você.` }),
+}
+
+// d = linha de carregar() (ou { id, titulo, criado_por, match_usuario_id }); donoId = a conta do
+// dono que agiu; modo = 'trocado' | 'cancelado'. Devolve { ok, encerrada, modo } ou { ok: false }
+// quando o estado mudou na corrida.
+const cancelarEmAndamento = async ({ lado, d, donoId, modo, motivo = null, detalhe = null }) => {
+  if (!AVISO_EM_ANDAMENTO[modo]) throw new Error(`cancelarEmAndamento: modo inválido "${modo}"`)
+  const encerrar = modo === 'cancelado'
+  const profissionalId = d.match_usuario_id
+  const auditoria = require('../utils/auditoriaDemanda')
+  const ctx = auditoria.contextoAtual() || {}
+  const origem = encerrar ? 'cancelamento_em_andamento' : 'troca_em_andamento'
+  const desfeito = await auditoria.comOrigem({ origem, rota: ctx.rota || null, usuarioId: ctx.usuarioId || donoId }, async () => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const upd = await client.query(
+        `UPDATE ${lado.tabela} SET ${SQL_LIMPAR_MATCH}, ${SQL_LIMPAR_CONCLUSAO},
+                expira_em = GREATEST(expira_em, NOW() + INTERVAL '${PISO_PRAZO_RESTANTE}')
+                ${encerrar ? `, status = 'cancelada', status_aprovacao = 'cancelada', encerrado_em = COALESCE(encerrado_em, NOW())` : `, ${SQL_MARCAR_REABERTURA}`}
+          WHERE id = $1 AND match_usuario_id = $2 AND chegada_confirmada_em IS NOT NULL AND status = 'aberta'
+          RETURNING id`,
+        [d.id, profissionalId]
+      )
+      if (upd.rowCount === 0) { await client.query('ROLLBACK'); return false }
+      await client.query(
+        `UPDATE ${lado.proposta.tabela}
+            SET status = 'cancelado', cancelado_por = $3, cancelado_motivo = $4, cancelado_detalhe = $5,
+                cancelado_em = NOW(), cancelado_acordo = false
+          WHERE ${lado.proposta.coluna} = $1 AND usuario_id = $2 AND status = 'aceito'`,
+        [d.id, profissionalId, donoId, encerrar ? MOTIVO_CANCELADO_PELO_CLIENTE : MOTIVO_TROCADO_PELO_CLIENTE, motivo ? textoMotivo(motivo, detalhe) : null]
+      )
+      if (!encerrar) await restaurarPropostasRebaixadas(client, lado.tabela, d.id)
+      await client.query('COMMIT')
+      return true
+    } catch (err) {
+      try { await client.query('ROLLBACK') } catch {}
+      throw err
+    } finally {
+      client.release()
+    }
+  })
+  if (!desfeito) return { ok: false }
+  // Nada de registrarFaltaUsuario, compromisso_nao_cumprido nem prestadores_bloqueados aqui.
+  console.log(`[CancelarMatch] ${lado.tipo} ${d.id} EM ANDAMENTO: ${modo} pelo dono ${donoId}${motivo ? ` (${motivo})` : ''} — profissional ${profissionalId} sem falta e sem bloqueio`)
+  const texto = AVISO_EM_ANDAMENTO[modo](d.titulo)
+  avisar(profissionalId, {
+    ...texto,
+    data: { tipo: 'match_cancelado', [lado.chave]: d.id, por: 'dono', acordo: false, em_andamento: modo, ...(motivo ? { motivo } : {}) },
+    rotulo: `${modo} em andamento ${lado.tipo} ${d.id}`,
+    botaoEmail: botaoSuporte(),
+  }, { ator: donoId })
+  if (encerrar) avisarPedidoCanceladoPeloDono(lado.tabela, d.id, { excluirUsuarioId: profissionalId }).catch(() => {})
+  else reanunciarDemanda(lado.tabela, d.id).catch(() => {})
+  avisarCancelamentosFrequentes(donoId)
+  return { ok: true, encerrada: encerrar, modo }
+}
+
+// DELETE /:tabela/dono/:id com profissional escolhido: só passa na fase em andamento (o resto
+// continua 409 MATCH_ATIVO na rota). Devolve null quando NÃO é o caso — a rota segue como antes.
+const cancelarPedidoEmAndamento = async (tabela, id, donoId) => {
+  const lado = LADOS[tabela]
+  const d = await carregar(lado, id)
+  if (!d || d.status !== 'aberta' || !d.match_usuario_id || !d.chegada_confirmada_em) return null
+  if (!(await ehMesmaPessoa(d.criado_por, donoId))) return null
+  return cancelarEmAndamento({ lado, d, donoId, modo: 'cancelado' })
 }
 
 // ---------- exclusão de conta do profissional casado (dono, 11/11/2026) ----------
@@ -384,11 +490,29 @@ const handlers = (tabela) => {
   // POST /:tabela/:id/cancelar-match {motivo, detalhe?, manter_aberta?} [?simular=1]
   const cancelar = async (req, res) => {
     try {
-      const g = await guardar(lado, req)
+      const g = await guardar(lado, req, { permitirEmAndamento: true })
       if (g.status) return res.status(g.status).json(g.corpo)
       const { d, papel } = g
-      const classe = classificar(d)
       const simular = ['1', 'true'].includes(String(req.query.simular || '').toLowerCase())
+      // DONO com o atendimento EM ANDAMENTO (chegada confirmada): troca ou cancela sem falta para
+      // ninguém — cancelarEmAndamento. Responde no formato de sempre (tipo 'livre', falta false)
+      // mais em_andamento: true, para o app distinguir.
+      if (g.emAndamento) {
+        const classeEmAndamento = { tipo: 'livre', limite_horas: null, horas_ate_horario: null, horario: null, regra: 'em_andamento' }
+        if (simular) {
+          return res.json({ ...classeEmAndamento, papel, falta: false, em_andamento: true, horario_texto: null, pedido_cancelamento: pedidoCancelamentoParaApp(tabela, d, req.usuario.id, undefined, req) })
+        }
+        const lidoEA = lerMotivo(req.body)
+        if (lidoEA.erro) return res.status(400).json({ erro: lidoEA.erro })
+        const modo = lidoEA.motivo === 'nao_preciso' || req.body?.manter_aberta === false ? 'cancelado' : 'trocado'
+        const rEA = await cancelarEmAndamento({ lado, d, donoId: req.usuario.id, modo, motivo: lidoEA.motivo, detalhe: lidoEA.detalhe })
+        if (!rEA.ok) return res.status(409).json({ erro: 'O atendimento mudou enquanto você cancelava. Atualize a tela.', codigo: 'ESTADO_MUDOU' })
+        return res.json({
+          mensagem: rEA.encerrada ? 'Pedido cancelado.' : 'Profissional trocado. O pedido voltou a receber propostas.',
+          ...classeEmAndamento, falta: false, em_andamento: true, modo, demanda_encerrada: rEA.encerrada,
+        })
+      }
+      const classe = classificar(d)
       if (simular) {
         return res.json({ ...classe, papel, falta: classe.tipo === 'tardio', horario_texto: classe.horario ? formatarDataHoraSP(classe.horario) : null, pedido_cancelamento: pedidoCancelamentoParaApp(tabela, d, req.usuario.id, undefined, req) })
       }
@@ -584,4 +708,6 @@ module.exports = {
   pedidoCancelamentoParaApp, semColunasPedidoCancelamentoParaApp, OCULTAR_PEDIDO_CANCELAMENTO_NO_APP, COLUNAS_PEDIDO_CANCELAMENTO,
   VERSAO_APP_COM_PEDIDO_CANCELAMENTO, appAntigoParaPedidoCancelamento, expirarPedidosCancelamento, cancelarPorAdmin,
   MOTIVO_CONTA_EXCLUIDA, desfazerMatchesPorExclusao, avisarMatchesDesfeitosPorExclusao,
+  MOTIVO_TROCADO_PELO_CLIENTE, MOTIVO_CANCELADO_PELO_CLIENTE, sqlEncerradoPeloClienteEmAndamento,
+  cancelarEmAndamento, cancelarPedidoEmAndamento,
 }
