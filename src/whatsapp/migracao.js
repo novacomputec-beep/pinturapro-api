@@ -87,6 +87,24 @@ const migrarWhatsapp = async (client) => {
   // Desde quando a conexão atual está aberta (o worker grava; NULL fora de 'conectado').
   await client.query(`ALTER TABLE whatsapp_estado ADD COLUMN IF NOT EXISTS conectado_em TIMESTAMPTZ`)
 
+  // ETAPA 2 (pergunta sem resposta).
+  //   dados: o que o worker precisa para REDIGIR a mensagem na hora do envio (o texto depende de
+  //          quantas perguntas saem juntas e de ser a primeira mensagem da pessoa);
+  //   item_numero: o número (1–5) que a pergunta recebeu na mensagem agrupada — é por ele que a
+  //          resposta "2 sim…" acha a pergunta; NULL em mensagem de uma pergunta só;
+  //   resposta: o que a pessoa respondeu a esta mensagem (painel).
+  await client.query(`ALTER TABLE whatsapp_mensagens ADD COLUMN IF NOT EXISTS dados JSONB`)
+  await client.query(`ALTER TABLE whatsapp_mensagens ADD COLUMN IF NOT EXISTS item_numero INTEGER`)
+  await client.query(`ALTER TABLE whatsapp_mensagens ADD COLUMN IF NOT EXISTS resposta TEXT`)
+  //   citada_wa_message_id: mensagem que a pessoa citou ao responder; midia: 'audio', 'imagem'…
+  //   (NULL = texto); processada_em/resultado: a API (services/whatsappPerguntasService) casa a
+  //   resposta com a pergunta e marca aqui — o worker só guarda.
+  await client.query(`ALTER TABLE whatsapp_recebidas ADD COLUMN IF NOT EXISTS citada_wa_message_id TEXT`)
+  await client.query(`ALTER TABLE whatsapp_recebidas ADD COLUMN IF NOT EXISTS midia TEXT`)
+  await client.query(`ALTER TABLE whatsapp_recebidas ADD COLUMN IF NOT EXISTS processada_em TIMESTAMPTZ`)
+  await client.query(`ALTER TABLE whatsapp_recebidas ADD COLUMN IF NOT EXISTS resultado TEXT`)
+  await client.query(`CREATE INDEX IF NOT EXISTS whatsapp_recebidas_pendentes_idx ON whatsapp_recebidas (id) WHERE processada_em IS NULL`)
+
   // Opt-out: "SAIR" no WhatsApp desliga. Default true (constante → ALTER instantâneo).
   await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS whatsapp_avisos BOOLEAN NOT NULL DEFAULT true`)
 

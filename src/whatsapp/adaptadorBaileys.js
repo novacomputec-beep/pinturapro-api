@@ -19,10 +19,21 @@ const telefoneDoJid = (jid) => {
   const d = String(jid || '').split('@')[0].split(':')[0].replace(/\D/g, '')
   return d ? `+${d}` : null
 }
+const conteudo = (m) => m?.ephemeralMessage?.message || m?.viewOnceMessage?.message || m?.viewOnceMessageV2?.message || m
 const textoDaMensagem = (m) => {
-  const c = m?.ephemeralMessage?.message || m?.viewOnceMessage?.message || m
+  const c = conteudo(m)
   return c?.conversation || c?.extendedTextMessage?.text || ''
 }
+// 'audio' | 'imagem' | 'video' | 'documento' | 'figurinha' | 'outro' — null quando é texto.
+const MIDIAS = { audioMessage: 'audio', imageMessage: 'imagem', videoMessage: 'video', documentMessage: 'documento', documentWithCaptionMessage: 'documento',
+  stickerMessage: 'figurinha', ptvMessage: 'video', contactMessage: 'outro', contactsArrayMessage: 'outro', locationMessage: 'outro', liveLocationMessage: 'outro' }
+const midiaDaMensagem = (m) => {
+  const c = conteudo(m) || {}
+  for (const chave of Object.keys(MIDIAS)) if (c[chave]) return MIDIAS[chave]
+  return textoDaMensagem(m) ? null : 'outro'
+}
+// Id da mensagem citada (a pessoa respondeu "em cima" de uma mensagem nossa).
+const citadaDaMensagem = (m) => conteudo(m)?.extendedTextMessage?.contextInfo?.stanzaId || null
 const segundos = (ts) => {
   const n = ts && typeof ts === 'object' && typeof ts.toNumber === 'function' ? ts.toNumber() : Number(ts)
   return Number.isFinite(n) && n > 0 ? new Date(n * 1000) : new Date()
@@ -98,6 +109,9 @@ const criarAdaptadorBaileys = ({ db, log = console } = {}) => {
       for (const m of messages || []) {
         const k = m.key || {}
         if (k.fromMe || !k.remoteJid || !k.id || !m.message) continue
+        // Reação, edição/apagamento e avisos de protocolo não são mensagens da pessoa.
+        const c = conteudo(m.message) || {}
+        if (c.protocolMessage || c.reactionMessage || c.pollUpdateMessage || c.keepInChatMessage || c.editedMessage) continue
         const jid = k.remoteJid
         if (lib.isJidGroup(jid) || lib.isJidBroadcast(jid) || jid === 'status@broadcast' || lib.isJidNewsletter?.(jid)) continue
         // Conversa identificada por LID: o número vem em remoteJidAlt (quando o WhatsApp informa).
@@ -105,6 +119,7 @@ const criarAdaptadorBaileys = ({ db, log = console } = {}) => {
         emitir(ouvintes.receber, {
           id: k.id, jid: jidNumero || jid, telefone: jidNumero ? telefoneDoJid(jidNumero) : null,
           texto: textoDaMensagem(m.message), quando: segundos(m.messageTimestamp),
+          citada: citadaDaMensagem(m.message), midia: midiaDaMensagem(m.message),
         })
       }
     })
@@ -155,4 +170,4 @@ const criarAdaptadorBaileys = ({ db, log = console } = {}) => {
   }
 }
 
-module.exports = { criarAdaptadorBaileys, telefoneDoJid, textoDaMensagem }
+module.exports = { criarAdaptadorBaileys, telefoneDoJid, textoDaMensagem, midiaDaMensagem, citadaDaMensagem }

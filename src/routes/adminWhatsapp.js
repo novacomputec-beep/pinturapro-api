@@ -5,7 +5,7 @@ const express = require('express')
 const router = express.Router()
 const { autenticar, exigirSuperAdmin } = require('../middlewares/auth')
 const { pool } = require('../utils/supabase')
-const { TIPOS, STATUS, CHAVE_PAUSADO, chaveTipo, TZ, dentroDaJanela, normalizarTelefone, HORA_INICIO, HORA_FIM } = require('../whatsapp/config')
+const { TIPOS, STATUS, CHAVE_PAUSADO, chaveTipo, TZ, dentroDaJanela, normalizarTelefone, HORA_INICIO, HORA_FIM, TIPO_RESPOSTA, ROTULO_RESPOSTA } = require('../whatsapp/config')
 const { lerConfig } = require('../whatsapp/fila')
 const { enfileirar } = require('../services/whatsappFilaService')
 
@@ -21,7 +21,7 @@ const gravarConfig = (chave, valor) => pool.query(
 
 // "Pergunta sem resposta · 3529D “Entregar panfletos 1000 unidades”" — sem pedido, só o rótulo do tipo.
 const resumoDaMensagem = (tipo, codigo, titulo) => {
-  const rotulo = TIPOS[tipo]?.rotulo || tipo
+  const rotulo = TIPOS[tipo]?.rotulo || (tipo === TIPO_RESPOSTA ? ROTULO_RESPOSTA : tipo)
   const t = String(titulo || '').trim()
   const pedido = [codigo, t ? `“${t.length > 40 ? `${t.slice(0, 39)}…` : t}”` : ''].filter(Boolean).join(' ')
   return pedido ? `${rotulo} · ${pedido}` : rotulo
@@ -132,7 +132,7 @@ router.get('/admin/whatsapp/mensagens', autenticar, exigirSuperAdmin, async (req
     const r = await pool.query(
       `SELECT m.id, m.tipo, m.status, m.usuario_id, u.nome AS usuario_nome, m.telefone, m.texto, m.ref_tabela, m.ref_id,
               m.wa_jid, m.wa_message_id, m.agrupada_em, m.tentativas, m.erro, m.criado_em, m.proxima_tentativa_em,
-              m.enviada_em, m.entregue_em, m.lida_em, m.respondida_em,
+              m.enviada_em, m.entregue_em, m.lida_em, m.respondida_em, m.item_numero, m.resposta,
               COALESCE(rp.codigo_publico, ob.codigo_publico) AS codigo,
               COALESCE(rp.titulo, ob.titulo) AS _titulo,
               CASE WHEN COALESCE(rp.criado_por, ob.criado_por) = m.usuario_id THEN 'dono'
@@ -155,8 +155,8 @@ router.get('/admin/whatsapp/mensagens', autenticar, exigirSuperAdmin, async (req
       ...l,
       // resumo: detalhe curto para a linha da lista — tipo + pedido (código e título), quando há.
       resumo: resumoDaMensagem(l.tipo, l.codigo, _titulo),
-      // resposta: o que a pessoa respondeu a ESTA mensagem — só na Etapa 2 (casamento das recebidas).
-      resposta: null,
+      // resposta: o que a pessoa respondeu a ESTA mensagem pelo WhatsApp (null se não respondeu).
+      resposta: l.resposta ?? null,
     }))
     res.json({ mensagens, total, page, limit })
   } catch (err) { responderErro(res, 'mensagens', err) }

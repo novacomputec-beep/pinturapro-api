@@ -20,17 +20,30 @@ const MAX_ITENS_POR_MENSAGEM = 10
 const STATUS = ['fila', 'enviada', 'entregue', 'lida', 'respondida', 'falha', 'sem_whatsapp', 'saiu']
 
 // Tipos de mensagem, na ordem em que a aba do painel mostra (GET /admin/whatsapp/tipos devolve
-// sempre estes slugs). Etapa 1 não tem gatilho de produto: só o 'teste' está implementado; os
-// outros quatro já existem para o painel (implementado: false) e NÃO entram na fila
-// (services/whatsappFilaService recusa). Cada tipo tem a chave liga/desliga em configuracoes;
-// `padrao` vale enquanto a chave não existir.
+// sempre estes slugs). Implementados: 'teste' (painel) e, desde a Etapa 2, 'pergunta_sem_resposta'
+// (services/whatsappPerguntasService). Os demais já existem para o painel (implementado: false)
+// e NÃO entram na fila (services/whatsappFilaService recusa). Cada tipo tem a chave liga/desliga
+// em configuracoes; `padrao` vale enquanto a chave não existir.
+//   limitePorPessoa: no máximo UMA mensagem desses tipos por pessoa a cada INTERVALO_PESSOA_HORAS.
 const TIPOS = {
-  pergunta_sem_resposta: { rotulo: 'Pergunta sem resposta', padrao: false, implementado: false },
+  pergunta_sem_resposta: { rotulo: 'Pergunta sem resposta', padrao: false, implementado: true, limitePorPessoa: true },
   prazo_acabando: { rotulo: 'Prazo acabando', padrao: false, implementado: false },
   escolhido: { rotulo: 'Profissional escolhido', padrao: false, implementado: false },
   horario_aguardando: { rotulo: 'Horário aguardando resposta', padrao: false, implementado: false },
   teste: { rotulo: 'Mensagem de teste (painel)', padrao: true, implementado: true },
 }
+// Tipo INTERNO (fora do painel de tipos): a resposta automática do robô a quem escreveu
+// ("✅ Pronto!…", "Não entendi…"). Sai na frente da fila e fora da janela 08–21h (a pessoa acabou
+// de escrever), mas continua atrás da trava de teste, da pausa global e do intervalo de 20–40 s.
+// Não enviada em RESPOSTA_VALIDADE_MIN minutos, é descartada (resposta atrasada confunde).
+const TIPO_RESPOSTA = 'resposta'
+const ROTULO_RESPOSTA = 'Resposta automática'
+const RESPOSTA_VALIDADE_MIN = 15
+// Etapa 2 — pergunta sem resposta.
+const INTERVALO_PESSOA_HORAS = 3          // no máximo uma mensagem por pessoa a cada 3 h
+const MAX_PERGUNTAS_POR_MENSAGEM = 5      // perguntas agrupadas numa mensagem (numeradas 1–5)
+const ESPERA_PERGUNTA_MIN = 30            // minutos sem resposta do dono até avisar
+const IDADE_MAXIMA_PERGUNTA_HORAS = 24    // pergunta mais velha que isso não gera aviso
 const CHAVE_PAUSADO = 'whatsapp_pausado'
 const chaveTipo = (tipo) => `whatsapp_tipo_${tipo}`
 
@@ -84,8 +97,10 @@ const lerTrava = (env = process.env) => {
   if (numeros.length === 0 || numeros.some(n => !n)) return { modo: 'ausente', numeros: [], texto: bruto }
   return { modo: 'lista', numeros, texto: numeros.join(',') }
 }
+// Compara nas duas grafias (com e sem o nono dígito): a resposta automática vai para o número
+// como o WhatsApp o informa, que costuma vir sem o 9.
 const travaPermite = (trava, telefone) =>
-  trava.modo === 'todos' || (trava.modo === 'lista' && trava.numeros.includes(telefone))
+  trava.modo === 'todos' || (trava.modo === 'lista' && variantesTelefone(telefone).some(t => trava.numeros.some(n => variantesTelefone(n).includes(t))))
 
 const horaEmSaoPaulo = (data) =>
   Number(new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', hourCycle: 'h23' }).format(data))
@@ -104,5 +119,7 @@ const ehPedidoDeSaida = (texto) =>
 module.exports = {
   TZ, HORA_INICIO, HORA_FIM, INTERVALO_MIN_MS, INTERVALO_MAX_MS, ESPERA_FILA_VAZIA_MS, MAX_TENTATIVAS,
   ESPERA_ENTRE_TENTATIVAS_MIN, MAX_ITENS_POR_MENSAGEM, STATUS, TIPOS, CHAVE_PAUSADO, chaveTipo, CHAVE_LOCK,
+  TIPO_RESPOSTA, ROTULO_RESPOSTA, RESPOSTA_VALIDADE_MIN, INTERVALO_PESSOA_HORAS, MAX_PERGUNTAS_POR_MENSAGEM,
+  ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS,
   WATCH_PATHS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela, intervaloMs, ehPedidoDeSaida,
 }
