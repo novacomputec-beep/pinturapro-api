@@ -7625,7 +7625,8 @@ router.post('/verificacao/:id/aprovar', autenticar, exigirAdmin, async (req, res
 // `assinatura_herdada` e o MESMO payload do login (usuario, assinatura, token, contas) via
 // montarSessao — o app entra no perfil novo sem pedir senha de novo. A rota antiga
 // /auth/contas/reparador continua casando aqui.
-const PRECO_PRESTADOR = { pintor: { anual: 999.00, mensal: 99.90 }, reparador: { anual: 499.00, mensal: 49.90 } }
+// Preço único para todo profissional (dono, 18/11/2026): R$ 49,90 / R$ 499,00.
+const PRECO_PRESTADOR = { pintor: { anual: 499.00, mensal: 49.90 }, reparador: { anual: 499.00, mensal: 49.90 } }
 router.post('/auth/contas/:tipo', autenticar, async (req, res) => {
   let client
   try {

@@ -375,9 +375,8 @@ const cadastrar = async (req, res) => {
       )
       console.log(`[CADASTRO][${ts}] ✓ assinatura gratuita criada`)
     } else if (role === 'prestador') {
-      const valorMensal = tipo_prestador === 'pintor'
-        ? (planoEscolhido === 'anual' ? 999.00 : 99.90)
-        : (planoEscolhido === 'anual' ? 499.00 : 49.90)
+      // Preço único para todo profissional (dono, 18/11/2026): R$ 49,90 / R$ 499,00.
+      const valorMensal = planoEscolhido === 'anual' ? 499.00 : 49.90
       if (lancamentoGratis && semDocs) {
         // Janela de lançamento + verificação adiada: não há o que aguardar, a assinatura já
         // nasce 'ativa' (feed liberado). A idoneidade é cobrada na proposta, não aqui.
