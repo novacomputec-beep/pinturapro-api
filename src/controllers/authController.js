@@ -375,9 +375,8 @@ const cadastrar = async (req, res) => {
       )
       console.log(`[CADASTRO][${ts}] ✓ assinatura gratuita criada`)
     } else if (role === 'prestador') {
-      const valorMensal = tipo_prestador === 'pintor'
-        ? (planoEscolhido === 'anual' ? 999.00 : 99.90)
-        : (planoEscolhido === 'anual' ? 499.00 : 49.90)
+      // Preço único para todo profissional (dono, 18/11/2026): R$ 49,90 / R$ 499,00.
+      const valorMensal = planoEscolhido === 'anual' ? 499.00 : 49.90
       if (lancamentoGratis && semDocs) {
         // Janela de lançamento + verificação adiada: não há o que aguardar, a assinatura já
         // nasce 'ativa' (feed liberado). A idoneidade é cobrada na proposta, não aqui.
@@ -945,7 +944,19 @@ const atualizarPerfil = async (req, res) => {
         return res.status(400).json({ erro: 'Escolha ao menos um local de atendimento: na casa do cliente ou no seu local', codigo: 'LOCAL_ATENDIMENTO_OBRIGATORIO' })
       }
     }
-    if (!mexeNome && !mexeTelefone && !mexeCidade && !mexeUf && !mexeEspecialidades && !mexeAvisos && !mexeCasa && !mexeProprio) {
+    // anos_experiencia (0–60) e tamanho_equipe (1–50): só conta de PROFISSIONAL. Em qualquer outra
+    // conta a chave é ignorada, como sempre foi (dono que mandar só isso segue recebendo "Nenhum
+    // campo para atualizar"). Só inteiro de verdade: '5' (texto), 2.5, null e true são 400.
+    const ehPrestador = req.usuario.role === 'prestador'
+    const mexeAnos = ehPrestador && Object.prototype.hasOwnProperty.call(req.body, 'anos_experiencia')
+    const mexeEquipe = ehPrestador && Object.prototype.hasOwnProperty.call(req.body, 'tamanho_equipe')
+    if (mexeAnos && !(Number.isInteger(req.body.anos_experiencia) && req.body.anos_experiencia >= 0 && req.body.anos_experiencia <= 60)) {
+      return res.status(400).json({ erro: 'Anos de experiência deve ser um número inteiro entre 0 e 60', codigo: 'ANOS_EXPERIENCIA_INVALIDO' })
+    }
+    if (mexeEquipe && !(Number.isInteger(req.body.tamanho_equipe) && req.body.tamanho_equipe >= 1 && req.body.tamanho_equipe <= 50)) {
+      return res.status(400).json({ erro: 'Tamanho da equipe deve ser um número inteiro entre 1 e 50', codigo: 'TAMANHO_EQUIPE_INVALIDO' })
+    }
+    if (!mexeNome && !mexeTelefone && !mexeCidade && !mexeUf && !mexeEspecialidades && !mexeAvisos && !mexeCasa && !mexeProprio && !mexeAnos && !mexeEquipe) {
       return res.status(400).json({ erro: 'Nenhum campo para atualizar' })
     }
 
@@ -980,16 +991,20 @@ const atualizarPerfil = async (req, res) => {
               especialidades = CASE WHEN $8::boolean THEN $9::text[] ELSE especialidades END,
               avisos_todas_areas = CASE WHEN $10::boolean THEN $11::boolean ELSE avisos_todas_areas END,
               atende_casa_cliente = CASE WHEN $12::boolean THEN $13::boolean ELSE atende_casa_cliente END,
-              atende_local_proprio = CASE WHEN $14::boolean THEN $15::boolean ELSE atende_local_proprio END
+              atende_local_proprio = CASE WHEN $14::boolean THEN $15::boolean ELSE atende_local_proprio END,
+              anos_experiencia = CASE WHEN $16::boolean THEN $17::int ELSE anos_experiencia END,
+              tamanho_equipe = CASE WHEN $18::boolean THEN $19::int ELSE tamanho_equipe END
         WHERE id = $7
-        RETURNING id, nome, email, telefone, cidade, uf, foto_url, especialidades, avisos_todas_areas, atende_casa_cliente, atende_local_proprio`,
+        RETURNING id, nome, email, telefone, cidade, uf, foto_url, especialidades, avisos_todas_areas, atende_casa_cliente, atende_local_proprio, anos_experiencia, tamanho_equipe`,
       [mexeNome, mexeNome ? nome.trim() : null,
        mexeTelefone, mexeTelefone ? telefone : null,
        cidade || '', uf || '', req.usuario.id,
        mexeEspecialidades, especialidadesValidadas,
        mexeAvisos, mexeAvisos ? req.body.avisos_todas_areas : null,
        mexeCasa, mexeCasa ? req.body.atende_casa_cliente : null,
-       mexeProprio, mexeProprio ? req.body.atende_local_proprio : null]
+       mexeProprio, mexeProprio ? req.body.atende_local_proprio : null,
+       mexeAnos, mexeAnos ? req.body.anos_experiencia : null,
+       mexeEquipe, mexeEquipe ? req.body.tamanho_equipe : null]
     )
     const salvo = result.rows[0]
     // Especialidades mudam as CAPACIDADES (reparador que marca/tira especialidade de obra, pintor

@@ -29,14 +29,13 @@ const limparCpfCnpj = (str) => {
 // Tabela de preços da assinatura — FONTE ÚNICA, em centavos. Usada tanto para COBRAR
 // (criarAssinatura) quanto para VALIDAR o valor pago no webhook, para que os dois lados
 // nunca divirjam. Devolve null quando o tier não é mapeável (não dá para cobrar às cegas).
-//   prestador+reparador → 4.990 / 49.900   |   prestador+pintor → 9.990 / 99.900
-//   demais papéis (dono/assinante genérico) → 9.990 / 99.900
+//   prestador (QUALQUER tipo: reparador, pintor, …) → 4.990 / 49.900 — preço único (dono, 18/11/2026)
+//   prestador sem tipo → null   |   demais papéis (dono/assinante genérico) → 9.990 / 99.900
 const precoAssinaturaCentavos = (role, tipoPrestador, plano) => {
   const anual = plano === 'anual'
   if (role === 'prestador') {
-    if (tipoPrestador === 'reparador') return anual ? 49900 : 4990
-    if (tipoPrestador === 'pintor')    return anual ? 99900 : 9990
-    return null // tier não mapeado
+    if (!tipoPrestador) return null // sem tipo: não cobra às cegas
+    return anual ? 49900 : 4990
   }
   return anual ? 99900 : 9990
 }
