@@ -4,3 +4,6 @@ node_modules/
 .env
 .env.*
 !.env.example
+
+# Auditorias e cópias de segurança locais (dados de produção — nunca commitar)
+audit/
