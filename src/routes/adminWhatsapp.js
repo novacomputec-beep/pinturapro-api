@@ -5,7 +5,8 @@ const express = require('express')
 const router = express.Router()
 const { autenticar, exigirSuperAdmin } = require('../middlewares/auth')
 const { pool } = require('../utils/supabase')
-const { TIPOS, STATUS, CHAVE_PAUSADO, chaveTipo, TZ, dentroDaJanela, normalizarTelefone, HORA_INICIO, HORA_FIM, TIPO_RESPOSTA, ROTULO_RESPOSTA } = require('../whatsapp/config')
+const { TIPOS, STATUS, CHAVE_PAUSADO, chaveTipo, TZ, dentroDaJanela, normalizarTelefone, HORA_INICIO, HORA_FIM, TIPO_RESPOSTA, ROTULO_RESPOSTA,
+        TIPO_AVULSA, MAX_TEXTO_AVULSA, DEDUPE_AVULSA_HORAS, variantesTelefone, lerTrava, travaPermite } = require('../whatsapp/config')
 const { lerConfig } = require('../whatsapp/fila')
 const { enfileirar } = require('../services/whatsappFilaService')
 const { simularPergunta } = require('../services/whatsappPerguntasService')
@@ -33,10 +34,11 @@ const resumoDaMensagem = (tipo, codigo, titulo) => {
 //   enviada      → as linhas com o mesmo wa_message_id;
 //   ainda na fila → o lote que vai sair junto (mesmo tipo, telefone e conta — a regra de fila.js);
 //   não saiu (falha, sem_whatsapp, saiu) → as linhas encerradas juntas (mesmo UPDATE: atualizado_em igual);
-//   resposta automática e simulação → sempre sozinhas.
+//   resposta automática, simulação e avulsa (tipos "sozinho") → sempre sozinhas.
+const TIPOS_SOZINHOS = [TIPO_RESPOSTA, ...Object.keys(TIPOS).filter(t => TIPOS[t].sozinho)]
 const sqlGrupo = (m) => `CASE
     WHEN ${m}.wa_message_id IS NOT NULL THEN 'w:' || ${m}.wa_message_id
-    WHEN COALESCE(${m}.sandbox, false) OR ${m}.tipo = '${TIPO_RESPOSTA}' THEN 'i:' || ${m}.id::text
+    WHEN COALESCE(${m}.sandbox, false) OR ${m}.tipo IN (${TIPOS_SOZINHOS.map(t => `'${t}'`).join(', ')}) THEN 'i:' || ${m}.id::text
     WHEN ${m}.status = 'fila' THEN 'f:' || ${m}.tipo || ':' || ${m}.telefone || ':' || COALESCE(${m}.usuario_id::text, '')
     ELSE 'x:' || ${m}.tipo || ':' || ${m}.telefone || ':' || COALESCE(${m}.usuario_id::text, '') || ':' || ${m}.status || ':' || ${m}.atualizado_em::text END`
 // Status da mensagem = o mais adiantado entre os itens (uma pergunta respondida de duas → respondida).
@@ -225,7 +227,8 @@ router.get('/admin/whatsapp/tipos', autenticar, exigirSuperAdmin, async (req, re
     const config = await lerConfig(pool)
     // Sempre os mesmos slugs, na ordem de config.TIPOS; implementado = já tem gatilho de envio;
     // dica = linha de ajuda embaixo do rótulo (null quando o tipo não tem).
-    res.json({ tipos: Object.entries(TIPOS).map(([tipo, def]) => ({ tipo, rotulo: def.rotulo, dica: def.dica || null, ligado: config.tipos[tipo], implementado: !!def.implementado })) })
+    // Tipo sempreLigado (avulsa) não tem chave: fica fora da lista.
+    res.json({ tipos: Object.entries(TIPOS).filter(([, def]) => !def.sempreLigado).map(([tipo, def]) => ({ tipo, rotulo: def.rotulo, dica: def.dica || null, ligado: config.tipos[tipo], implementado: !!def.implementado })) })
   } catch (err) { responderErro(res, 'tipos', err) }
 })
 
@@ -233,7 +236,7 @@ router.get('/admin/whatsapp/tipos', autenticar, exigirSuperAdmin, async (req, re
 router.put('/admin/whatsapp/tipos', autenticar, exigirSuperAdmin, async (req, res) => {
   try {
     const { tipo, ligado } = req.body || {}
-    if (typeof tipo !== 'string' || !Object.prototype.hasOwnProperty.call(TIPOS, tipo)) return res.status(400).json({ erro: 'tipo desconhecido' })
+    if (typeof tipo !== 'string' || !Object.prototype.hasOwnProperty.call(TIPOS, tipo) || TIPOS[tipo].sempreLigado) return res.status(400).json({ erro: 'tipo desconhecido' })
     if (typeof ligado !== 'boolean') return res.status(400).json({ erro: 'ligado deve ser true ou false' })
     await gravarConfig(chaveTipo(tipo), ligado ? 'true' : 'false')
     res.json({ tipo, ligado })
@@ -257,6 +260,62 @@ router.post('/admin/whatsapp/teste', autenticar, exigirSuperAdmin, async (req, r
     if (!r.ok) return res.status(400).json({ erro: `Não entrou na fila: ${r.motivo}` })
     res.json({ id: r.id, telefone: r.telefone, mensagem: 'Mensagem de teste na fila.' })
   } catch (err) { responderErro(res, 'teste', err) }
+})
+
+// "+55 34 *****-1747": DDD e os 4 últimos dígitos; o resto não sai na resposta.
+const mascararTelefone = (e164) => {
+  const d = String(e164 || '').replace(/\D/g, '')
+  return d.length < 12 ? '' : `+${d.slice(0, 2)} ${d.slice(2, 4)} ${'*'.repeat(d.length - 8)}-${d.slice(-4)}`
+}
+
+// POST /admin/whatsapp/avulsa { codigo, texto } — UMA mensagem escrita à mão para o DONO do pedido
+// (reparo ou obra) com esse código curto. Tipo 'avulsa': sempre ligado (fora do liga/desliga por
+// tipo), mas atrás da pausa global, da janela 08–21h e da trava de teste; o worker confere o número
+// no WhatsApp (onWhatsApp) e envia para o JID devolvido. O texto sai EXATAMENTE como veio (até
+// ${MAX_TEXTO_AVULSA} caracteres). O mesmo texto para a mesma pessoa não entra de novo em 24 h → 409.
+// Devolve { para, telefone (mascarado), status }. A resposta da pessoa fica na lista de mensagens.
+router.post('/admin/whatsapp/avulsa', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const codigo = String(req.body?.codigo ?? '').trim().replace(/^#/, '').toUpperCase()
+    const texto = typeof req.body?.texto === 'string' ? req.body.texto.trim() : ''
+    if (!codigo) return res.status(400).json({ erro: 'Informe o código do pedido.' })
+    if (!texto) return res.status(400).json({ erro: 'Informe o texto da mensagem.' })
+    if (texto.length > MAX_TEXTO_AVULSA) return res.status(400).json({ erro: `O texto tem ${texto.length} caracteres; o máximo é ${MAX_TEXTO_AVULSA}.` })
+    const d = await pool.query(
+      `SELECT d.tabela, d.id, d.criado_por, u.nome, u.telefone, u.whatsapp_avisos
+         FROM (SELECT 'reparos' AS tabela, id, criado_por, codigo_publico FROM reparos
+               UNION ALL
+               SELECT 'obras', id, criado_por, codigo_publico FROM obras) d
+         LEFT JOIN usuarios u ON u.id = d.criado_por
+        WHERE upper(d.codigo_publico) = $1
+        LIMIT 1`, [codigo])
+    const pedido = d.rows[0]
+    if (!pedido) return res.status(404).json({ erro: `Nenhum pedido com o código ${codigo}.` })
+    const para = pedido.nome || null
+    const destino = normalizarTelefone(pedido.telefone)
+    if (!destino) return res.status(422).json({ erro: 'O dono deste pedido não tem telefone válido no cadastro.', para })
+    const telefone = mascararTelefone(destino)
+    if (pedido.whatsapp_avisos === false) return res.status(409).json({ erro: 'Esta pessoa pediu para não receber mensagens do robô (SAIR).', para, telefone, status: 'saiu' })
+    const e = await pool.query(`SELECT trava FROM whatsapp_estado WHERE id = 1`)
+    const trava = lerTrava({ WHATSAPP_SOMENTE_PARA: e.rows[0]?.trava || '' })
+    if (trava.modo === 'ausente') return res.status(409).json({ erro: 'O robô está sem a trava WHATSAPP_SOMENTE_PARA (ou ainda não iniciou): nada pode ser enviado.', para, telefone })
+    if (!travaPermite(trava, destino)) return res.status(409).json({ erro: 'A trava de teste (WHATSAPP_SOMENTE_PARA) não libera o número desta pessoa.', para, telefone })
+    // Mesmo texto para a mesma pessoa (conta ou número) nas últimas 24 h; a que não saiu
+    // (falha, sem WhatsApp) não conta — dá para tentar de novo.
+    const rep = await pool.query(
+      `SELECT id, status FROM whatsapp_mensagens
+        WHERE tipo = $1 AND texto = $2 AND (usuario_id = $3::uuid OR telefone = ANY($4::text[]))
+          AND criado_em > NOW() - INTERVAL '${DEDUPE_AVULSA_HORAS} hours'
+          AND status NOT IN ('falha', 'sem_whatsapp', 'saiu')
+        ORDER BY id DESC LIMIT 1`, [TIPO_AVULSA, texto, pedido.criado_por, variantesTelefone(destino)])
+    if (rep.rows.length) return res.status(409).json({ erro: `Esta mesma mensagem já foi para esta pessoa nas últimas ${DEDUPE_AVULSA_HORAS} h.`, id: rep.rows[0].id, para, telefone, status: 'duplicada' })
+    const r = await enfileirar({ tipo: TIPO_AVULSA, usuarioId: pedido.criado_por, telefone: destino, texto, refTabela: pedido.tabela, refId: pedido.id })
+    if (!r.ok) return res.status(400).json({ erro: `Não entrou na fila: ${r.motivo}`, para, telefone })
+    const config = await lerConfig(pool)
+    const quando = config.pausado ? 'O robô está pausado: sai quando for retomado.'
+      : dentroDaJanela(new Date()) ? 'Sai em instantes.' : `Fora do horário de envio: sai a partir das ${String(HORA_INICIO).padStart(2, '0')}h.`
+    res.json({ id: r.id, codigo, para, telefone, status: 'fila', mensagem: `Mensagem na fila. ${quando}` })
+  } catch (err) { responderErro(res, 'avulsa', err) }
 })
 
 // POST /admin/whatsapp/simular-pergunta — põe UMA "pergunta sem resposta" SIMULADA na fila para o
