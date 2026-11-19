@@ -1,10 +1,21 @@
 #!/usr/bin/env node
 // Testa as BANDAS proporcionais dos avisos "Seu pedido vai expirar" (escolhaPendenteService):
-// avalia o SQL real de sqlJanelaMarco contra linhas sintéticas (VALUES) no Postgres — só SELECT,
-// nenhuma tabela é lida ou escrita. Precisa de DATABASE_URL no ambiente ou .env no cwd.
-//   node scripts/testar-escolha-pendente.js
-require('dotenv').config()
-const { pool } = require('../src/utils/supabase')
+// avalia o SQL real de sqlJanelaMarco contra linhas sintéticas (VALUES) num Postgres em memória
+// (PGlite, esquema de produção) — só SELECT; não precisa de DATABASE_URL.
+//   npm i -D @electric-sql/pglite && node scripts/testar-escolha-pendente.js
+const fs = require('fs')
+const path = require('path')
+const Module = require('module')
+const { PGlite } = require('@electric-sql/pglite') // npm i -D @electric-sql/pglite (não vai para produção)
+const db = new PGlite()
+const pronto = db.exec(fs.readFileSync(path.join(__dirname, 'fixtures/esquema-producao.sql'), 'utf8'))
+const consultar = async (sql, params) => { await pronto; const r = await db.query(sql, params); if (r.rowCount === undefined) r.rowCount = r.affectedRows || r.rows.length; return r }
+const pool = { query: consultar, connect: async () => ({ query: consultar, release() {} }), on() {}, end: async () => {} }
+const origLoad = Module._load
+Module._load = function (request) {
+  if (/(^|[\\/])supabase$/.test(request)) return { pool }
+  return origLoad.apply(this, arguments)
+}
 const S = require('../src/services/escolhaPendenteService')
 
 const H = 3600

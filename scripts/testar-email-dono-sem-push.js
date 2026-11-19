@@ -4,8 +4,9 @@
 // push_token ou com desinstalado_em) → e-mail a cada ciclo, até 6/dia por demanda × dono (SP),
 // chaves 'aviso:lembrete#AAAAMMDD#k' (fora do teto dos e-mails de demanda nova). Depois roda os
 // três crons de verdade (perguntas sem resposta, responda o horário, escolha pendente diário)
-// com um dono sem token, num Postgres em memória (PGlite), com Expo/Brevo falsos.
+// com um dono sem token, num Postgres em memória (PGlite) com o ESQUEMA DE PRODUÇÃO, Expo/Brevo falsos.
 //   npm i -D @electric-sql/pglite && node scripts/testar-email-dono-sem-push.js
+const fs = require('fs')
 const path = require('path')
 const Module = require('module')
 const REPO = path.join(__dirname, '..')
@@ -21,9 +22,12 @@ class FakeExpo {
   async getPushNotificationReceiptsAsync() { return {} }
 }
 let db
+// rowCount como o driver `pg` da produção (o PGlite devolve affectedRows): o código lê rowCount.
+const comRowCount = (r) => { if (r && r.rowCount === undefined) r.rowCount = r.affectedRows || (r.rows ? r.rows.length : 0); return r }
+const consultar = async (sql, params) => comRowCount(await db.query(sql, params))
 const shim = {
-  query: (sql, params) => db.query(sql, params),
-  connect: async () => ({ query: (sql, params) => db.query(sql, params), release() {} }),
+  query: consultar,
+  connect: async () => ({ query: consultar, release() {} }),
   on() {},
 }
 const origLoad = Module._load
@@ -54,28 +58,18 @@ const ok = (c, rot, extra) => { if (!c) falhas++; console.log(`${c ? 'OK  ' : 'F
 
 const main = async () => {
   db = new PGlite()
-  const colsDemanda = `id uuid PRIMARY KEY, titulo text, criado_por uuid, status text, status_aprovacao text, match_usuario_id uuid,
-      match_feito_em timestamptz, expira_em timestamptz, criado_em timestamptz, publicado_em timestamptz,
-      chegada_prevista_em timestamptz, chegada_pendente_em timestamptz, chegada_proposta_em timestamptz, chegada_proposta_por uuid,
-      lembrete_resposta_ultimo_em timestamptz, lembrete_resposta_ciclo int NOT NULL DEFAULT 0,
-      lembrete_perguntas_ultimo_em timestamptz, lembrete_perguntas_ciclo int NOT NULL DEFAULT 0,
-      escolha_lembrete_em timestamptz, escolha_aviso_24h_em timestamptz, escolha_aviso_2h_em timestamptz, escolha_expirou_em timestamptz`
+  // ESQUEMA DE PRODUÇÃO (sem chaves): as UNIQUE que o código usa em ON CONFLICT entram aqui.
+  await db.exec(fs.readFileSync(path.join(REPO, 'scripts/fixtures/esquema-producao.sql'), 'utf8'))
   await db.exec(`
-    CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, push_token text, desinstalado_em timestamptz);
-    CREATE TABLE reparos (${colsDemanda});
-    CREATE TABLE obras (${colsDemanda});
-    CREATE TABLE perguntas_demanda (id uuid PRIMARY KEY, tipo text, demanda_id uuid, autor_id uuid, pergunta text, resposta text,
-      criado_em timestamptz DEFAULT now(), respondido_em timestamptz, UNIQUE (tipo, demanda_id, autor_id));
-    CREATE TABLE interesse_reparos (reparo_id uuid, usuario_id uuid, status text, criado_em timestamptz);
-    CREATE TABLE candidaturas (obra_id uuid, usuario_id uuid, status text, criado_em timestamptz);
-    CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
+    CREATE UNIQUE INDEX email_alertas_teste_key ON email_alertas (tipo, demanda_id, usuario_id);
+    CREATE UNIQUE INDEX perguntas_demanda_teste_key ON perguntas_demanda (tipo, demanda_id, autor_id);
     SET search_path = public, pg_catalog;
   `)
   await fixarAgora(0)
-  await db.query(`INSERT INTO usuarios VALUES ($1, 'Dono Com Push', 'com@x.invalid', 'ExponentPushToken[com]', NULL)`, [U(10)])
-  await db.query(`INSERT INTO usuarios VALUES ($1, 'Dono Sem Token', 'sem@x.invalid', NULL, NULL)`, [U(11)])
-  await db.query(`INSERT INTO usuarios VALUES ($1, 'Dono Desinstalado', 'des@x.invalid', 'ExponentPushToken[des]', now() - INTERVAL '1 day')`, [U(12)])
-  await db.query(`INSERT INTO usuarios VALUES ($1, 'Prof', 'prof@x.invalid', 'ExponentPushToken[prof]', NULL)`, [U(1)])
+  await db.query(`INSERT INTO usuarios (id, nome, email, push_token, desinstalado_em) VALUES ($1, 'Dono Com Push', 'com@x.invalid', 'ExponentPushToken[com]', NULL)`, [U(10)])
+  await db.query(`INSERT INTO usuarios (id, nome, email, push_token, desinstalado_em) VALUES ($1, 'Dono Sem Token', 'sem@x.invalid', NULL, NULL)`, [U(11)])
+  await db.query(`INSERT INTO usuarios (id, nome, email, push_token, desinstalado_em) VALUES ($1, 'Dono Desinstalado', 'des@x.invalid', 'ExponentPushToken[des]', now() - INTERVAL '1 day')`, [U(12)])
+  await db.query(`INSERT INTO usuarios (id, nome, email, push_token, desinstalado_em) VALUES ($1, 'Prof', 'prof@x.invalid', 'ExponentPushToken[prof]', NULL)`, [U(1)])
   const A = require(path.join(REPO, 'src/services/alertaService'))
   const E = require(path.join(REPO, 'src/services/escolhaPendenteService'))
   const dono = async (n) => (await db.query(`SELECT id, push_token, desinstalado_em, email, nome FROM usuarios WHERE id = $1`, [U(n)])).rows[0]
@@ -147,7 +141,7 @@ const main = async () => {
   // G3) escolha pendente diário, outra demanda do mesmo dono (2 interessados há 7h, prazo em 5 dias)
   await db.query(`INSERT INTO reparos (id, titulo, criado_por, status, status_aprovacao, expira_em, criado_em)
                   VALUES ($1, 'Muro', $2, 'aberta', 'aprovada', now() + INTERVAL '5 days', now() - INTERVAL '8 hours')`, [D(21), U(11)])
-  await db.query(`INSERT INTO interesse_reparos VALUES ($1, $2, 'pendente', now() - INTERVAL '7 hours'), ($1, $3, 'pendente', now() - INTERVAL '6 hours')`, [D(21), U(1), U(10)])
+  await db.query(`INSERT INTO interesse_reparos (reparo_id, usuario_id, status, criado_em) VALUES ($1, $2, 'pendente', now() - INTERVAL '7 hours'), ($1, $3, 'pendente', now() - INTERVAL '6 hours')`, [D(21), U(1), U(10)])
   await E.verificarEscolhaPendente()
   const ch21 = await chaves(D(21), U(11))
   ok(emailsPara('sem@x.invalid') === 7 && JSON.stringify(ch21) === JSON.stringify(['aviso:lembrete#20261105#1']), 'escolha pendente diário: e-mail com chave numerada (#1 nesta demanda)', [emailsPara('sem@x.invalid'), ch21])

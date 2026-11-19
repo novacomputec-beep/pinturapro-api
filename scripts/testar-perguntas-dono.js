@@ -2,8 +2,9 @@
 // Testa, em GET /obras/:id e GET /reparos/:id, a autoria das perguntas para o DONO
 // (autor_id, autor_nome, autor_candidato) e a pergunta de cada candidato/interessado na lista do
 // dono (pergunta_id, pergunta, resposta); para profissionais a pergunta segue anônima.
-// SQL REAL em Postgres em memória (PGlite); handlers chamados direto.
+// SQL REAL em Postgres em memória (PGlite) com o ESQUEMA DE PRODUÇÃO; handlers chamados direto.
 //   npm i -D @electric-sql/pglite && node scripts/testar-perguntas-dono.js
+const fs = require('fs')
 const path = require('path')
 const Module = require('module')
 const REPO = path.join(__dirname, '..')
@@ -52,36 +53,15 @@ const semAutor = (p) => !('autor_id' in p) && !('autor_nome' in p) && !('autor_c
 
 const main = async () => {
   db = new PGlite()
-  await db.exec(`
-    CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, role text, tipo_prestador text, cidade text, bairro text, foto_url text,
-      anos_experiencia int, especialidades text[], tamanho_equipe text, embaixador boolean DEFAULT false, logradouro text, numero text, telefone text, push_token text);
-    CREATE TABLE assinaturas (usuario_id uuid, status text, proximo_vencimento timestamptz);
-    CREATE TABLE avaliacoes (avaliado_id uuid, estrelas int);
-    CREATE TABLE obras (id uuid PRIMARY KEY, titulo text, descricao text, criado_por uuid, status text DEFAULT 'aberta', status_aprovacao text DEFAULT 'aprovada',
-      match_usuario_id uuid, a_caminho_em timestamptz, valor numeric, horas_para_expirar int, publicado_em timestamptz, criado_em timestamptz DEFAULT now(),
-      expira_em timestamptz DEFAULT now() + interval '10 days', valor_aumentado_em timestamptz, alerta_enviado_em timestamptz,
-      chegada_prevista_em timestamptz, prazo_chegada_extra_em timestamptz, endereco_obra text, ponto_referencia text,
-      sugestoes_horario_dono int DEFAULT 0, sugestoes_horario_profissional int DEFAULT 0);
-    CREATE TABLE reparos (id uuid PRIMARY KEY, titulo text, descricao text, criado_por uuid, status text DEFAULT 'aberta', status_aprovacao text DEFAULT 'aprovada',
-      match_usuario_id uuid, a_caminho_em timestamptz, valor_estimado numeric, prazo_atendimento_horas int, criado_em timestamptz DEFAULT now(),
-      expira_em timestamptz DEFAULT now() + interval '10 days', valor_aumentado_em timestamptz, alerta_enviado_em timestamptz,
-      chegada_prevista_em timestamptz, prazo_chegada_extra_em timestamptz, endereco_reparo text, ponto_referencia text,
-      sugestoes_horario_dono int DEFAULT 0, sugestoes_horario_profissional int DEFAULT 0);
-    CREATE TABLE midias (id serial, obra_id uuid, url text, ordem int);
-    CREATE TABLE midias_reparos (id serial, reparo_id uuid, url text, ordem int);
-    CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, status text DEFAULT 'pendente', valor_oferta numeric,
-      mensagem_oferta text, valor_proposto numeric, mensagem text, valor_contraproposta numeric, criado_em timestamptz DEFAULT now());
-    CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, status text DEFAULT 'pendente', mensagem text,
-      valor_proposto numeric, valor_contraproposta numeric, rodada int DEFAULT 1, criado_em timestamptz DEFAULT now());
-    CREATE TABLE perguntas_demanda (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tipo text, demanda_id uuid, autor_id uuid, pergunta text, resposta text,
-      criado_em timestamptz DEFAULT now(), respondido_em timestamptz, UNIQUE (tipo, demanda_id, autor_id));
-    CREATE TABLE push_entregas (tipo text, demanda_id uuid, usuario_id uuid, resultado text);
-    CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid);
-  `)
+  // ESQUEMA DE PRODUÇÃO; os DEFAULTs abaixo são só do teste (pedido aberto, aprovado, com 10 dias).
+  await db.exec(fs.readFileSync(path.join(REPO, 'scripts/fixtures/esquema-producao.sql'), 'utf8'))
+  for (const t of ['obras', 'reparos']) {
+    await db.exec(`ALTER TABLE ${t} ALTER COLUMN status SET DEFAULT 'aberta', ALTER COLUMN status_aprovacao SET DEFAULT 'aprovada', ALTER COLUMN expira_em SET DEFAULT now() + interval '10 days'`)
+  }
   const nomes = { [U(1)]: 'Dona Maria', [U(2)]: 'Pintor Alfa', [U(3)]: 'Pintor Beta', [U(4)]: 'Pintor Gama', [U(5)]: 'Pintor Delta', [U(6)]: 'Reparador Um', [U(7)]: 'Reparador Dois', [U(8)]: 'Outro Dono', [U(9)]: 'Admin' }
   for (const u of [DONO, PINTOR_A, PINTOR_B, PINTOR_C, PINTOR_D, REP_A, REP_B, OUTRO_DONO, ADMIN]) {
     await db.query(`INSERT INTO usuarios (id, nome, role, tipo_prestador, cidade, bairro, telefone) VALUES ($1, $2, $3, $4, 'Uberlândia', 'Centro', '34999990000')`, [u.id, nomes[u.id], u.role, u.tipo_prestador || null])
-    await db.query(`INSERT INTO assinaturas VALUES ($1, 'ativa', NULL)`, [u.id])
+    await db.query(`INSERT INTO assinaturas (usuario_id, status, proximo_vencimento) VALUES ($1, 'ativa', NULL)`, [u.id])
   }
   // Obra do dono: A pergunta+candidata (pendente), B só pergunta, C pergunta + candidatura recusada, D só candidata.
   await db.query(`INSERT INTO obras (id, titulo, descricao, criado_por, valor, horas_para_expirar) VALUES ($1, 'Pintar sala', 'Sala 20m²', $2, 1500, 240)`, [D(1), DONO.id])

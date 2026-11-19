@@ -10,9 +10,12 @@ const REPO = path.join(__dirname, '..')
 const { PGlite } = require('@electric-sql/pglite') // npm i -D @electric-sql/pglite (não vai para produção)
 
 let db = null
+// rowCount como o driver `pg` da produção (o PGlite devolve affectedRows): o código lê rowCount.
+const comRowCount = (r) => { if (r && r.rowCount === undefined) r.rowCount = r.affectedRows || (r.rows ? r.rows.length : 0); return r }
+const consultar = async (sql, params) => comRowCount(await db.query(sql, params))
 const shim = {
-  query: (sql, params) => { if (!db) throw new Error('sem banco (boot)'); return db.query(sql, params) },
-  connect: async () => { if (!db) throw new Error('sem banco (boot)'); return { query: (sql, params) => db.query(sql, params), release() {} } },
+  query: (sql, params) => { if (!db) throw new Error('sem banco (boot)'); return consultar(sql, params) },
+  connect: async () => { if (!db) throw new Error('sem banco (boot)'); return { query: consultar, release() {} } },
   on() {},
 }
 const origLoad = Module._load

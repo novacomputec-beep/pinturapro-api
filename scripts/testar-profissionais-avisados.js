@@ -1,11 +1,22 @@
 #!/usr/bin/env node
 // Testa contarProfissionaisAvisados (src/utils/profissionaisAvisados) com o SQL REAL, dentro de
-// uma transação desfeita no fim (BEGIN … ROLLBACK): nada fica gravado. Precisa de DATABASE_URL
-// no ambiente ou .env no cwd. Os ids são UUIDs fixos que nunca existem em produção; as linhas em
+// uma transação desfeita no fim (BEGIN … ROLLBACK): nada fica gravado. Roda num Postgres em memória
+// (PGlite, esquema de produção) — não precisa de DATABASE_URL. Os ids são UUIDs fixos que nunca existem em produção; as linhas em
 // push_entregas / email_alertas não têm FK para a demanda, então não é preciso criar reparo/obra.
-//   node scripts/testar-profissionais-avisados.js
-require('dotenv').config()
-const { pool } = require('../src/utils/supabase')
+//   npm i -D @electric-sql/pglite && node scripts/testar-profissionais-avisados.js
+const fs = require('fs')
+const path = require('path')
+const Module = require('module')
+const { PGlite } = require('@electric-sql/pglite') // npm i -D @electric-sql/pglite (não vai para produção)
+const db = new PGlite()
+const pronto = db.exec(fs.readFileSync(path.join(__dirname, 'fixtures/esquema-producao.sql'), 'utf8'))
+const consultar = async (sql, params) => { await pronto; const r = await db.query(sql, params); if (r.rowCount === undefined) r.rowCount = r.affectedRows || r.rows.length; return r }
+const pool = { query: consultar, connect: async () => ({ query: consultar, release() {} }), on() {}, end: async () => {} }
+const origLoad = Module._load
+Module._load = function (request) {
+  if (/(^|[\\/])supabase$/.test(request)) return { pool }
+  return origLoad.apply(this, arguments)
+}
 const { contarProfissionaisAvisados } = require('../src/utils/profissionaisAvisados')
 
 const U = (n) => `aaaaaaaa-0000-4000-8000-${String(n).padStart(12, '0')}`
