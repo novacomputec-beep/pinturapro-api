@@ -56,7 +56,7 @@ const ok = (c, rot, extra) => { if (!c) falhas++; console.log(`${c ? 'OK  ' : 'F
 
 const main = async () => {
   db = new PGlite()
-  const colsDemanda = `id uuid PRIMARY KEY, titulo text, criado_por uuid, status text DEFAULT 'aberta', status_aprovacao text DEFAULT 'aprovada',
+  const colsDemanda = `id uuid PRIMARY KEY, codigo_publico text, titulo text, criado_por uuid, status text DEFAULT 'aberta', status_aprovacao text DEFAULT 'aprovada',
       match_usuario_id uuid, match_feito_em timestamptz, expira_em timestamptz, criado_em timestamptz DEFAULT now(), publicado_em timestamptz,
       notif_5min_enviada boolean DEFAULT false, marco_1_em timestamptz, marco_2_em timestamptz, marco_3_em timestamptz,
       escolha_aviso_24h_em timestamptz, escolha_aviso_2h_em timestamptz, escolha_expirou_em timestamptz,
