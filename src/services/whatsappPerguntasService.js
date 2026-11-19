@@ -25,7 +25,7 @@
 const { pool } = require('../utils/supabase')
 const { comOrigem } = require('../utils/auditoriaDemanda')
 const { enfileirar } = require('./whatsappFilaService')
-const { lerConfig, sqlPerguntaPendente, TIPO_PERGUNTA } = require('../whatsapp/fila')
+const { lerConfig, sqlPerguntaPendente, TIPO_PERGUNTA, TIPO_INTERESSADO } = require('../whatsapp/fila')
 const { TIPO_RESPOSTA, ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela } = require('../whatsapp/config')
 const T = require('../whatsapp/textos')
 
@@ -138,8 +138,47 @@ const escolherPergunta = (rec, pendentes) => {
   return { duvida: numeros.length ? T.textoNaoEntendi(numeros) : T.TEXTO_NAO_ENTENDI_SEM_NUMERO }
 }
 
+// 'novo_interessado' (19/11/2026): a escolha do profissional é feita no app — quem responde ao
+// aviso recebe "Para escolher o profissional, toque no link acima 👆" e a resposta fica na linha
+// (painel). Vale quando a pessoa CITOU o aviso, ou quando ela não tem pergunta esperando
+// resposta e a última mensagem que mandamos a ela foi um aviso ainda sem resposta (o robô
+// responde UMA vez por aviso: depois de 'respondida', não puxa conversa).
+// Devolve true se tratou a mensagem.
+const responderAvisoDeInteressado = async (db, rec, formas, { soCitada }) => {
+  let aviso = null
+  if (rec.citada_wa_message_id) {
+    const c = await db.query(
+      `SELECT id, usuario_id, wa_message_id FROM whatsapp_mensagens
+        WHERE tipo = $1 AND wa_message_id = $2 AND (wa_jid = $3 OR telefone = ANY($4::text[]))
+        ORDER BY (agrupada_em IS NULL) DESC, id LIMIT 1`,
+      [TIPO_INTERESSADO, rec.citada_wa_message_id, rec.wa_jid, formas])
+    aviso = c.rows[0] || null
+  }
+  if (!aviso && !soCitada) {
+    const u = await db.query(
+      `SELECT id, usuario_id, wa_message_id, tipo, status FROM whatsapp_mensagens
+        WHERE tipo <> $1 AND wa_message_id IS NOT NULL AND agrupada_em IS NULL AND (wa_jid = $2 OR telefone = ANY($3::text[]))
+          AND enviada_em > NOW() - INTERVAL '${VALIDADE_RESPOSTA_DIAS} days'
+        ORDER BY enviada_em DESC, id DESC LIMIT 1`,
+      [TIPO_RESPOSTA, rec.wa_jid, formas])
+    const ultima = u.rows[0]
+    if (ultima && ultima.tipo === TIPO_INTERESSADO && ['enviada', 'entregue', 'lida'].includes(ultima.status)) aviso = ultima
+  }
+  if (!aviso) return false
+  if (!rec.midia && !String(rec.texto || '').trim()) { await concluir(db, rec, 'ignorada (vazia)', aviso.id); return true }
+  await db.query(
+    `UPDATE whatsapp_mensagens SET status = 'respondida', respondida_em = NOW(), resposta = $3, atualizado_em = NOW()
+      WHERE tipo = $1 AND wa_message_id = $2 AND status IN ('enviada', 'entregue', 'lida')`,
+    [TIPO_INTERESSADO, aviso.wa_message_id, rec.midia ? `(${rec.midia})` : String(rec.texto).trim().slice(0, MAX_RESPOSTA_SIMULACAO)])
+  await responderAutomatico(db, rec, aviso.usuario_id, T.TEXTO_RESPOSTA_INTERESSADO)
+  await concluir(db, rec, 'interessado (link)', aviso.id)
+  return true
+}
+
 const processarUma = async (db, rec, responder) => {
   const formas = variantesTelefone(rec.telefone)
+  // Citou um aviso de novo interessado: é dele a resposta, mesmo havendo pergunta pendente.
+  if (await responderAvisoDeInteressado(db, rec, formas, { soCitada: true })) return
   // Perguntas que mandamos para este destino, ainda sem resposta (a mais recente primeiro).
   const pend = await db.query(
     `SELECT m.id, m.usuario_id, m.wa_message_id, m.item_numero, m.dados, m.sandbox, pq.id AS pergunta_id, pq.tipo AS pergunta_tipo, pq.demanda_id
@@ -153,7 +192,10 @@ const processarUma = async (db, rec, responder) => {
     [TIPO_PERGUNTA, rec.wa_jid, formas])
   const pendentes = pend.rows
   // Sem pergunta nossa esperando resposta: a mensagem fica guardada e o robô não puxa conversa.
-  if (pendentes.length === 0) return concluir(db, rec, 'sem_pergunta_pendente')
+  if (pendentes.length === 0) {
+    if (await responderAvisoDeInteressado(db, rec, formas, { soCitada: false })) return
+    return concluir(db, rec, 'sem_pergunta_pendente')
+  }
   const dono = pendentes[0].usuario_id
 
   if (rec.midia) {

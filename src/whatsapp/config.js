@@ -20,13 +20,16 @@ const MAX_ITENS_POR_MENSAGEM = 10
 const STATUS = ['fila', 'enviada', 'entregue', 'lida', 'respondida', 'falha', 'sem_whatsapp', 'saiu']
 
 // Tipos de mensagem, na ordem em que a aba do painel mostra (GET /admin/whatsapp/tipos devolve
-// sempre estes slugs). Implementados: 'teste' (painel) e, desde a Etapa 2, 'pergunta_sem_resposta'
-// (services/whatsappPerguntasService). Os demais já existem para o painel (implementado: false)
+// sempre estes slugs). Implementados: 'teste' (painel), 'pergunta_sem_resposta' (Etapa 2,
+// services/whatsappPerguntasService) e 'novo_interessado' (19/11/2026,
+// services/whatsappInteressadosService). Os demais já existem para o painel (implementado: false)
 // e NÃO entram na fila (services/whatsappFilaService recusa). Cada tipo tem a chave liga/desliga
 // em configuracoes; `padrao` vale enquanto a chave não existir.
-//   limitePorPessoa: no máximo UMA mensagem desses tipos por pessoa a cada INTERVALO_PESSOA_HORAS.
+//   limitePorPessoa: no máximo UMA mensagem desses tipos (somados) por pessoa a cada INTERVALO_PESSOA_HORAS.
+//   dica: linha de ajuda que o painel mostra embaixo do rótulo (opcional).
 const TIPOS = {
   pergunta_sem_resposta: { rotulo: 'Pergunta sem resposta', padrao: false, implementado: true, limitePorPessoa: true },
+  novo_interessado: { rotulo: '🙋 Novo interessado', dica: 'Só para quem está sem notificação', padrao: false, implementado: true, limitePorPessoa: true },
   prazo_acabando: { rotulo: 'Prazo acabando', padrao: false, implementado: false },
   escolhido: { rotulo: 'Profissional escolhido', padrao: false, implementado: false },
   horario_aguardando: { rotulo: 'Horário aguardando resposta', padrao: false, implementado: false },
@@ -44,6 +47,10 @@ const INTERVALO_PESSOA_HORAS = 3          // no máximo uma mensagem por pessoa 
 const MAX_PERGUNTAS_POR_MENSAGEM = 5      // perguntas agrupadas numa mensagem (numeradas 1–5)
 const ESPERA_PERGUNTA_MIN = 30            // minutos sem resposta do dono até avisar
 const IDADE_MAXIMA_PERGUNTA_HORAS = 24    // pergunta mais velha que isso não gera aviso
+// Novo interessado (dono SEM push): espera para juntar os interesses da pessoa numa mensagem só.
+const ESPERA_INTERESSADO_MIN = 15
+const IDADE_MAXIMA_INTERESSADO_HORAS = 24 // interesse mais velho que isso não gera aviso
+const MAX_INTERESSADOS_POR_MENSAGEM = 50
 const CHAVE_PAUSADO = 'whatsapp_pausado'
 const chaveTipo = (tipo) => `whatsapp_tipo_${tipo}`
 
@@ -120,6 +127,6 @@ module.exports = {
   TZ, HORA_INICIO, HORA_FIM, INTERVALO_MIN_MS, INTERVALO_MAX_MS, ESPERA_FILA_VAZIA_MS, MAX_TENTATIVAS,
   ESPERA_ENTRE_TENTATIVAS_MIN, MAX_ITENS_POR_MENSAGEM, STATUS, TIPOS, CHAVE_PAUSADO, chaveTipo, CHAVE_LOCK,
   TIPO_RESPOSTA, ROTULO_RESPOSTA, RESPOSTA_VALIDADE_MIN, INTERVALO_PESSOA_HORAS, MAX_PERGUNTAS_POR_MENSAGEM,
-  ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS,
+  ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, ESPERA_INTERESSADO_MIN, IDADE_MAXIMA_INTERESSADO_HORAS, MAX_INTERESSADOS_POR_MENSAGEM,
   WATCH_PATHS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela, intervaloMs, ehPedidoDeSaida,
 }

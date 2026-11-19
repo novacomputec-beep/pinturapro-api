@@ -168,8 +168,9 @@ router.get('/admin/whatsapp/mensagens', autenticar, exigirSuperAdmin, async (req
 router.get('/admin/whatsapp/tipos', autenticar, exigirSuperAdmin, async (req, res) => {
   try {
     const config = await lerConfig(pool)
-    // Sempre os mesmos slugs, na ordem de config.TIPOS; implementado = já tem gatilho de envio.
-    res.json({ tipos: Object.entries(TIPOS).map(([tipo, def]) => ({ tipo, rotulo: def.rotulo, ligado: config.tipos[tipo], implementado: !!def.implementado })) })
+    // Sempre os mesmos slugs, na ordem de config.TIPOS; implementado = já tem gatilho de envio;
+    // dica = linha de ajuda embaixo do rótulo (null quando o tipo não tem).
+    res.json({ tipos: Object.entries(TIPOS).map(([tipo, def]) => ({ tipo, rotulo: def.rotulo, dica: def.dica || null, ligado: config.tipos[tipo], implementado: !!def.implementado })) })
   } catch (err) { responderErro(res, 'tipos', err) }
 })
 
