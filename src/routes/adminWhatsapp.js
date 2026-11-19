@@ -28,6 +28,27 @@ const resumoDaMensagem = (tipo, codigo, titulo) => {
   return pedido ? `${rotulo} · ${pedido}` : rotulo
 }
 
+// MENSAGEM DE VERDADE × LINHA DE ITEM. whatsapp_mensagens tem uma linha por ITEM (pergunta,
+// interesse…); vários itens da pessoa saem numa mensagem só. O painel mostra e conta MENSAGENS:
+//   enviada      → as linhas com o mesmo wa_message_id;
+//   ainda na fila → o lote que vai sair junto (mesmo tipo, telefone e conta — a regra de fila.js);
+//   não saiu (falha, sem_whatsapp, saiu) → as linhas encerradas juntas (mesmo UPDATE: atualizado_em igual);
+//   resposta automática e simulação → sempre sozinhas.
+const sqlGrupo = (m) => `CASE
+    WHEN ${m}.wa_message_id IS NOT NULL THEN 'w:' || ${m}.wa_message_id
+    WHEN COALESCE(${m}.sandbox, false) OR ${m}.tipo = '${TIPO_RESPOSTA}' THEN 'i:' || ${m}.id::text
+    WHEN ${m}.status = 'fila' THEN 'f:' || ${m}.tipo || ':' || ${m}.telefone || ':' || COALESCE(${m}.usuario_id::text, '')
+    ELSE 'x:' || ${m}.tipo || ':' || ${m}.telefone || ':' || COALESCE(${m}.usuario_id::text, '') || ':' || ${m}.status || ':' || ${m}.atualizado_em::text END`
+// Status da mensagem = o mais adiantado entre os itens (uma pergunta respondida de duas → respondida).
+const sqlOrdemStatus = (m) => `(CASE ${m}.status WHEN 'respondida' THEN 5 WHEN 'lida' THEN 4 WHEN 'entregue' THEN 3 WHEN 'enviada' THEN 2 ELSE 1 END)`
+const NOME_DO_ITEM = { novo_interessado: 'interessados', pergunta_sem_resposta: 'perguntas' }
+// "🙋 Novo interessado · 5 interessados · AAAA1 “título”" (vários pedidos: "… em 2 pedidos").
+const resumoDoGrupo = (tipo, n, pedidos, codigo, titulo) => {
+  const varios = pedidos > 1
+  const base = resumoDaMensagem(tipo, varios ? null : codigo, varios ? null : titulo).split(' · ')
+  return [base[0], `${n} ${NOME_DO_ITEM[tipo] || 'itens'}${varios ? ` em ${pedidos} pedidos` : ''}`, ...base.slice(1)].join(' · ')
+}
+
 const responderErro = (res, rotulo, err) => {
   console.error(`[admin/whatsapp/${rotulo}]`, err.message)
   res.status(500).json({ erro: 'Erro no robô de WhatsApp' })
@@ -42,7 +63,7 @@ router.get('/admin/whatsapp/status', autenticar, exigirSuperAdmin, async (req, r
          FROM whatsapp_estado WHERE id = 1`)
     const linha = e.rows[0] || {}
     const config = await lerConfig(pool)
-    const fila = await pool.query(`SELECT COUNT(*)::int AS n FROM whatsapp_mensagens WHERE status = 'fila'`)
+    const fila = await pool.query(`SELECT COUNT(DISTINCT ${sqlGrupo('m')})::int AS n FROM whatsapp_mensagens m WHERE m.status = 'fila'`)
     const vivo = !!linha.worker_vivo
     res.json({
       worker_vivo: vivo,
@@ -84,14 +105,20 @@ router.post('/admin/whatsapp/desconectar', autenticar, exigirSuperAdmin, async (
 })
 
 // GET /admin/whatsapp/contadores — por status e por tipo: hoje (dia de São Paulo) e últimos 7 dias.
+// Conta MENSAGENS (sqlGrupo), não linhas de item: 5 interessados numa mensagem = 1 enviada.
 router.get('/admin/whatsapp/contadores', autenticar, exigirSuperAdmin, async (req, res) => {
   try {
     const r = await pool.query(
-      `SELECT tipo, status,
+      `WITH msgs AS (
+         SELECT MIN(m.tipo) AS tipo, MIN(m.criado_em) AS criado_em,
+                (ARRAY_AGG(m.status ORDER BY ${sqlOrdemStatus('m')} DESC, m.atualizado_em DESC, m.id DESC))[1] AS status
+           FROM whatsapp_mensagens m
+          GROUP BY ${sqlGrupo('m')}
+         HAVING MIN(m.criado_em) > NOW() - INTERVAL '7 days')
+       SELECT tipo, status,
               COUNT(*) FILTER (WHERE (criado_em AT TIME ZONE '${TZ}')::date = (NOW() AT TIME ZONE '${TZ}')::date)::int AS hoje,
               COUNT(*)::int AS sete_dias
-         FROM whatsapp_mensagens
-        WHERE criado_em > NOW() - INTERVAL '7 days'
+         FROM msgs
         GROUP BY tipo, status`)
     const zero = () => Object.fromEntries(STATUS.map(s => [s, 0]))
     const hoje = zero(), seteDias = zero(), porTipo = {}
@@ -121,19 +148,41 @@ router.get('/admin/whatsapp/mensagens', autenticar, exigirSuperAdmin, async (req
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50))
     const where = [], params = []
     const p = (v) => { params.push(v); return `$${params.length}` }
-    if (status) where.push(`m.status = ${p(status)}`)
+    if (status) where.push(`m._status = ${p(status)}`)
     if (tipo) where.push(`m.tipo = ${p(String(tipo))}`)
     const digitos = String(telefone || '').replace(/\D/g, '')
     if (digitos) where.push(`m.telefone LIKE ${p(`%${digitos}%`)}`)
     if (de) where.push(`(m.criado_em AT TIME ZONE '${TZ}')::date >= ${p(de)}::date`)
     if (ate) where.push(`(m.criado_em AT TIME ZONE '${TZ}')::date <= ${p(ate)}::date`)
+    // UMA linha por mensagem de verdade (sqlGrupo). A linha mostrada é a "dona" (a que guarda o
+    // texto que saiu; na fila, o item mais antigo); status = o mais adiantado entre os itens;
+    // itens_count = quantos itens a mensagem carrega; pedidos_count = em quantos pedidos;
+    // resposta = a mais recente; a de cada item está em itens[].
     // Pedido da mensagem: ref_tabela 'reparos' | 'obras' aponta direto; 'perguntas_demanda' aponta
     // a pergunta, que leva ao pedido. codigo = código curto; papel = lado de quem RECEBE no pedido
     // ('dono' se a conta criou o pedido, senão 'profissional'); sem pedido, vale o tipo da conta.
     const r = await pool.query(
-      `SELECT m.id, m.tipo, m.status, m.usuario_id, u.nome AS usuario_nome, m.telefone, m.texto, m.ref_tabela, m.ref_id,
+      `WITH itens AS (SELECT i.*, ${sqlGrupo('i')} AS _grupo FROM whatsapp_mensagens i),
+       marcadas AS (
+         SELECT i.*,
+                ROW_NUMBER() OVER (PARTITION BY i._grupo ORDER BY (i.agrupada_em IS NULL) DESC, i.id) AS _n,
+                (COUNT(*) OVER g)::int AS itens_count,
+                FIRST_VALUE(i.status) OVER (PARTITION BY i._grupo ORDER BY ${sqlOrdemStatus('i')} DESC, i.atualizado_em DESC, i.id DESC) AS _status,
+                FIRST_VALUE(i.resposta) OVER (PARTITION BY i._grupo ORDER BY (i.resposta IS NULL), i.respondida_em DESC NULLS LAST, i.id DESC) AS _resposta,
+                MAX(i.entregue_em) OVER g AS _entregue_em, MAX(i.lida_em) OVER g AS _lida_em, MAX(i.respondida_em) OVER g AS _respondida_em
+           FROM itens i
+         WINDOW g AS (PARTITION BY i._grupo))
+       SELECT m.id, m.tipo, m._status AS status, m.usuario_id, u.nome AS usuario_nome, m.telefone, m.texto, m.ref_tabela, m.ref_id,
               m.wa_jid, m.wa_message_id, m.agrupada_em, m.tentativas, m.erro, m.criado_em, m.proxima_tentativa_em,
-              m.enviada_em, m.entregue_em, m.lida_em, m.respondida_em, m.item_numero, m.resposta, m.sandbox,
+              m.enviada_em, m._entregue_em AS entregue_em, m._lida_em AS lida_em, m._respondida_em AS respondida_em,
+              m.item_numero, m._resposta AS resposta, m.sandbox, m.itens_count,
+              (SELECT COUNT(DISTINCT COALESCE(pq2.demanda_id, x.ref_id))::int
+                 FROM itens x LEFT JOIN perguntas_demanda pq2 ON x.ref_tabela = 'perguntas_demanda' AND pq2.id = x.ref_id
+                WHERE x._grupo = m._grupo) AS pedidos_count,
+              -- itens: cada item da mensagem, na ordem em que saiu (a resposta de cada pergunta fica aqui).
+              (SELECT json_agg(json_build_object('id', x.id, 'ref_tabela', x.ref_tabela, 'ref_id', x.ref_id, 'item_numero', x.item_numero,
+                                                 'status', x.status, 'resposta', x.resposta, 'respondida_em', x.respondida_em) ORDER BY x.id)
+                 FROM itens x WHERE x._grupo = m._grupo) AS itens,
               COALESCE(rp.codigo_publico, ob.codigo_publico) AS codigo,
               -- Simulação não tem pedido: o título de mentira vem dos dados da própria linha.
               COALESCE(rp.titulo, ob.titulo, CASE WHEN m.sandbox THEN m.dados->>'titulo' END) AS _titulo,
@@ -143,23 +192,29 @@ router.get('/admin/whatsapp/mensagens', autenticar, exigirSuperAdmin, async (req
                    WHEN u.role = 'prestador' THEN 'profissional'
                    ELSE NULL END AS papel,
               COUNT(*) OVER()::int AS _total
-         FROM whatsapp_mensagens m
+         FROM marcadas m
          LEFT JOIN usuarios u ON u.id = m.usuario_id
          LEFT JOIN perguntas_demanda pq ON m.ref_tabela = 'perguntas_demanda' AND pq.id = m.ref_id
          LEFT JOIN reparos rp ON rp.id = COALESCE(pq.demanda_id, m.ref_id)
          LEFT JOIN obras ob ON ob.id = COALESCE(pq.demanda_id, m.ref_id)
-        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+        WHERE m._n = 1${where.length ? ` AND ${where.join(' AND ')}` : ''}
         ORDER BY m.criado_em DESC, m.id DESC
         LIMIT ${p(limit)}::int OFFSET ${p((page - 1) * limit)}::int`,
       params)
     const total = r.rows[0]?._total || 0
-    const mensagens = r.rows.map(({ _total, _titulo, ...l }) => ({
-      ...l,
-      // resumo: detalhe curto para a linha da lista — tipo + pedido (código e título), quando há.
-      resumo: resumoDaMensagem(l.tipo, l.codigo, _titulo) + (l.sandbox ? ' (simulação)' : ''),
-      // resposta: o que a pessoa respondeu a ESTA mensagem pelo WhatsApp (null se não respondeu).
-      resposta: l.resposta ?? null,
-    }))
+    const mensagens = r.rows.map(({ _total, _titulo, ...l }) => {
+      const variosPedidos = l.itens_count > 1 && l.pedidos_count > 1
+      return {
+        ...l,
+        // Mensagem de vários pedidos não tem UM código.
+        codigo: variosPedidos ? null : l.codigo,
+        // resumo: detalhe curto para a linha da lista — tipo + pedido (código e título), quando há;
+        // mensagem com vários itens: "… · 5 interessados" / "… · 2 perguntas".
+        resumo: (l.itens_count > 1 ? resumoDoGrupo(l.tipo, l.itens_count, l.pedidos_count, l.codigo, _titulo) : resumoDaMensagem(l.tipo, l.codigo, _titulo)) + (l.sandbox ? ' (simulação)' : ''),
+        // resposta: o que a pessoa respondeu a ESTA mensagem pelo WhatsApp (null se não respondeu).
+        resposta: l.resposta ?? null,
+      }
+    })
     res.json({ mensagens, total, page, limit })
   } catch (err) { responderErro(res, 'mensagens', err) }
 })
