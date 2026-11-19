@@ -43,6 +43,7 @@ const { avisarRespostaFinalDono, aplicarCreditosPendentes } = require('./src/ser
 const { rodarBackfillEReanuncioUnico, rodarReanunciosUnicosPorObra } = require('./src/services/obrasInferidasService')
 // Resumo do dia ao admin às 18:00 SP (push + e-mail com o link da aba Canal do WhatsApp).
 const { enviarResumoDiaAdmin } = require('./src/services/resumoDiaAdminService')
+const { enviarResumoDiario } = require('./src/services/emailResumoDiarioService')
 // Mesmo caminho de e-mail do reset/link de assinatura (SMTP/nodemailer do authController).
 const { transporter } = require('./src/controllers/authController')
 const { MARCA } = require('./src/utils/marca')
@@ -879,6 +880,9 @@ const iniciarAgendador = () => {
   setInterval(job('avisarDonosProfissionalDesinstalou', () => { avisarDonosProfissionalDesinstalou() }), INTERVALO_CRONOMETRO)
   // Admin: "Resumo do dia pronto (N pedidos)" às 18:00 SP, 1x/dia (claim em configuracoes).
   setInterval(job('enviarResumoDiaAdmin', () => { enviarResumoDiaAdmin() }), INTERVALO_CRONOMETRO)
+  // Usuários: "Seu dia no ProTudo" às 19:00 SP, 1x/dia (claim em configuracoes) — UM e-mail por
+  // pessoa com os avisos do dia que não saíram por e-mail na hora (chave email_resumo_diario).
+  setInterval(job('enviarResumoDiario', () => { enviarResumoDiario() }), INTERVALO_CRONOMETRO)
   setInterval(job('deletarMidiasAntigas', () => { deletarMidiasAntigas() }), 24 * 60 * 60 * 1000)
   // Poda das tentativas de auth: a tabela acumula linhas de e-mails inexistentes, que é o
   // preço de contar TODOS (o que fecha o oráculo de existência de conta).

@@ -1558,6 +1558,26 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS push_recibos_demanda_idx ON push_recibos (demanda_id, enviado_em)`)
     await client.query(`CREATE INDEX IF NOT EXISTS push_recibos_usuario_idx ON push_recibos (usuario_id, enviado_em)`)
+    // Resumo diário por e-mail (services/emailResumoDiarioService): uma linha por aviso que deixou
+    // de sair por e-mail na hora (pessoa com push); o cron das 19:00 SP junta por pessoa, envia e
+    // apaga. usuario_id e demanda_id sem FK (polimórfico, como push_entregas). A chave nasce
+    // DESLIGADA: sem ela nada entra aqui.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS email_resumo_itens (
+        id             BIGSERIAL PRIMARY KEY,
+        usuario_id     UUID NOT NULL,
+        tipo           TEXT,
+        demanda_tabela TEXT,
+        demanda_id     UUID,
+        titulo         TEXT NOT NULL,
+        linha          TEXT,
+        criado_em      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+    await client.query(`CREATE INDEX IF NOT EXISTS email_resumo_itens_usuario_idx ON email_resumo_itens (usuario_id, criado_em)`)
+    await client.query(`INSERT INTO configuracoes (chave, valor)
+                        SELECT 'email_resumo_diario', 'false'
+                        WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = 'email_resumo_diario')`)
     // O UPDATE do recibo procura por ticket_id; parcial porque ticket com erro não tem id.
     await client.query(`CREATE INDEX IF NOT EXISTS push_recibos_ticket_idx ON push_recibos (ticket_id) WHERE ticket_id IS NOT NULL`)
     // A poda diária varre por idade.
@@ -8000,6 +8020,33 @@ router.post('/verificacao/modo-automatico', autenticar, exigirSuperAdmin, async 
     res.json({ mensagem: ativo ? 'Modo automático ativado' : 'Modo automático desativado', ativo })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao atualizar configuração' })
+  }
+})
+
+// Resumo diário por e-mail (services/emailResumoDiarioService) — liga/desliga. Mesma forma dos
+// toggles de aprovação automática: { ativo }. pendentes = itens na fila para as 19:00.
+router.get('/admin/email-resumo-diario', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT (SELECT valor FROM configuracoes WHERE chave = 'email_resumo_diario') AS valor,
+              (SELECT count(*)::int FROM email_resumo_itens) AS pendentes`)
+    res.json({ ativo: r.rows[0]?.valor === 'true', pendentes: r.rows[0]?.pendentes || 0, hora_envio: '19:00' })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar configuração' })
+  }
+})
+
+router.post('/admin/email-resumo-diario', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const { ativo } = req.body || {}
+    if (typeof ativo !== 'boolean') return res.status(400).json({ erro: 'ativo é obrigatório e deve ser true ou false' })
+    await pool.query(
+      `WITH upd AS (UPDATE configuracoes SET valor = $1, atualizado_em = NOW() WHERE chave = 'email_resumo_diario' RETURNING 1)
+       INSERT INTO configuracoes (chave, valor) SELECT 'email_resumo_diario', $1 WHERE NOT EXISTS (SELECT 1 FROM upd)`,
+      [ativo ? 'true' : 'false'])
+    res.json({ ativo })
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao gravar configuração' })
   }
 })
 

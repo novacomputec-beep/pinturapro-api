@@ -1,6 +1,7 @@
 const { pool } = require('../utils/supabase')
 const { ehMesmaPessoa } = require('../utils/tipoConta')
 const { enviarEmail } = require('../services/emailService')
+const { guardarParaOResumo } = require('../services/emailResumoDiarioService')
 
 // POST /mensagens — pintor envia dúvida sobre uma obra
 const enviar = async (req, res) => {
@@ -171,7 +172,7 @@ const responder = async (req, res) => {
 
     // Busca dados do autor e obra para o e-mail
     const dadosResult = await pool.query(
-      `SELECT u.nome, u.email, o.titulo
+      `SELECT u.id AS autor_id, u.nome, u.email, o.id AS obra_id, o.titulo
        FROM mensagens m
        JOIN usuarios u ON m.autor_id = u.id
        JOIN obras o ON m.obra_id = o.id
@@ -183,7 +184,11 @@ const responder = async (req, res) => {
     res.json(mensagem)
 
     // Notifica o pintor de forma assíncrona
-    if (dados?.email) {
+    // Quem tem push e a chave email_resumo_diario ligada recebe isto no resumo das 19:00.
+    if (dados?.email && !(await guardarParaOResumo({
+      usuario_id: dados.autor_id, tipo: 'duvida_respondida', demanda_tabela: 'obras', demanda_id: dados.obra_id,
+      titulo: 'Sua dúvida foi respondida', linha: `Resposta da equipe: ${resposta}`,
+    }))) {
       enviarEmail({
         para: dados.email,
         assunto: `Sua dúvida sobre "${dados.titulo}" foi respondida`,
