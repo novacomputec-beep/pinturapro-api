@@ -96,6 +96,10 @@ const migrarWhatsapp = async (client) => {
   await client.query(`ALTER TABLE whatsapp_mensagens ADD COLUMN IF NOT EXISTS dados JSONB`)
   await client.query(`ALTER TABLE whatsapp_mensagens ADD COLUMN IF NOT EXISTS item_numero INTEGER`)
   await client.query(`ALTER TABLE whatsapp_mensagens ADD COLUMN IF NOT EXISTS resposta TEXT`)
+  //   sandbox: SIMULAÇÃO do painel (POST /admin/whatsapp/simular-pergunta, 18/11/2026) — pergunta
+  //          de mentira, sem pedido nem pergunta de verdade (ref_id NULL). Sai e é respondida como
+  //          as outras, mas a resposta NÃO vai para o app: fica só em `resposta`, para o painel.
+  await client.query(`ALTER TABLE whatsapp_mensagens ADD COLUMN IF NOT EXISTS sandbox BOOLEAN NOT NULL DEFAULT false`)
   //   citada_wa_message_id: mensagem que a pessoa citou ao responder; midia: 'audio', 'imagem'…
   //   (NULL = texto); processada_em/resultado: a API (services/whatsappPerguntasService) casa a
   //   resposta com a pergunta e marca aqui — o worker só guarda.

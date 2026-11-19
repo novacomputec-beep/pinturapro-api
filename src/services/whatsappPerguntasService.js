@@ -16,11 +16,17 @@
 //   (`responder` = routes/index.responderPergunta: mesmas regras, sanitizador e aviso ao
 //   profissional), com a origem 'whatsapp' na caixa-preta (auditoriaDemanda.comOrigem → o
 //   set_config('app.origem', …, true) de toda escrita em pedidos feita ali dentro).
+//
+// SIMULAÇÃO — simularPergunta() (POST /admin/whatsapp/simular-pergunta, dono, 18/11/2026): UMA
+//   pergunta de mentira (whatsapp_mensagens.sandbox = true, sem pergunta nem pedido de verdade)
+//   para o número da trava de teste. A volta casa do mesmo jeito (citada / única / número), mas
+//   NADA vai para o app: a resposta fica só na linha (`resposta`, para o painel) e a pessoa
+//   recebe o "✅ Pronto!…" de sempre.
 const { pool } = require('../utils/supabase')
 const { comOrigem } = require('../utils/auditoriaDemanda')
 const { enfileirar } = require('./whatsappFilaService')
 const { lerConfig, sqlPerguntaPendente, TIPO_PERGUNTA } = require('../whatsapp/fila')
-const { TIPO_RESPOSTA, ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite } = require('../whatsapp/config')
+const { TIPO_RESPOSTA, ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela } = require('../whatsapp/config')
 const T = require('../whatsapp/textos')
 
 const MIDIAS_COM_RESPOSTA = ['audio', 'imagem', 'video', 'documento', 'figurinha']
@@ -77,6 +83,29 @@ const enfileirarPerguntasSemResposta = async (db = pool) => {
   return { enfileiradas }
 }
 
+// Dados de mentira da simulação (dono, 18/11/2026). Sem ids: não existe pedido nem pergunta.
+const SIMULACAO = { primeiro_nome: 'Luiz', nome_prof: 'Carlos', titulo: 'Teste do robô', pergunta: 'Tem tinta aí ou eu levo?' }
+const MAX_RESPOSTA_SIMULACAO = 1000
+
+// Põe UMA pergunta simulada na fila, para o número da trava de teste (o primeiro, se forem
+// vários). Devolve { ok, id, telefone, ja_na_fila, janela_aberta, pausado } ou { ok: false, status, erro }.
+const simularPergunta = async (db = pool, agora = new Date()) => {
+  const trava = await travaDoWorker(db)
+  if (trava.modo === 'ausente') return { ok: false, status: 409, erro: 'O robô está sem a trava WHATSAPP_SOMENTE_PARA (ou ainda não iniciou): nada pode ser enviado.' }
+  if (trava.modo !== 'lista') return { ok: false, status: 409, erro: 'A simulação só sai para o número da trava de teste, e a trava está em TODOS.' }
+  const config = await lerConfig(db)
+  if (!config.tipos[TIPO_PERGUNTA]) return { ok: false, status: 409, erro: 'O tipo "Pergunta sem resposta" está desligado no painel: ligue-o para a simulação sair.' }
+  const telefone = trava.numeros[0]
+  const extra = { janela_aberta: dentroDaJanela(agora), pausado: config.pausado }
+  // Uma simulação por vez na fila: clicar de novo não empilha mensagens.
+  const naFila = await db.query(`SELECT id FROM whatsapp_mensagens WHERE sandbox AND tipo = $1 AND status = 'fila' ORDER BY id LIMIT 1`, [TIPO_PERGUNTA])
+  if (naFila.rows.length) return { ok: true, id: naFila.rows[0].id, telefone, ja_na_fila: true, ...extra }
+  const dados = { ...SIMULACAO, sandbox: true }
+  const e = await enfileirar({ tipo: TIPO_PERGUNTA, telefone, texto: T.textoPerguntas([dados]), dados, sandbox: true }, db)
+  if (!e.ok) return { ok: false, status: 400, erro: `Não entrou na fila: ${e.motivo}` }
+  return { ok: true, id: e.id, telefone: e.telefone, ja_na_fila: false, ...extra }
+}
+
 // Resposta automática a quem escreveu (uma por mensagem recebida).
 const responderAutomatico = (db, rec, usuarioId, texto) => enfileirar({
   tipo: TIPO_RESPOSTA, usuarioId, telefone: rec.telefone, waJid: rec.wa_jid, texto, chaveDedupe: `resposta:${rec.id}`,
@@ -113,11 +142,12 @@ const processarUma = async (db, rec, responder) => {
   const formas = variantesTelefone(rec.telefone)
   // Perguntas que mandamos para este destino, ainda sem resposta (a mais recente primeiro).
   const pend = await db.query(
-    `SELECT m.id, m.usuario_id, m.wa_message_id, m.item_numero, m.dados, pq.id AS pergunta_id, pq.tipo AS pergunta_tipo, pq.demanda_id
-       FROM whatsapp_mensagens m JOIN perguntas_demanda pq ON pq.id = m.ref_id
+    `SELECT m.id, m.usuario_id, m.wa_message_id, m.item_numero, m.dados, m.sandbox, pq.id AS pergunta_id, pq.tipo AS pergunta_tipo, pq.demanda_id
+       FROM whatsapp_mensagens m LEFT JOIN perguntas_demanda pq ON pq.id = m.ref_id
       WHERE m.tipo = $1 AND m.status IN ('enviada', 'entregue', 'lida') AND m.wa_message_id IS NOT NULL
         AND (m.wa_jid = $2 OR m.telefone = ANY($3::text[]))
-        AND pq.respondido_em IS NULL
+        -- Simulação (sandbox) não tem pergunta no app: fica pendente até ser respondida aqui.
+        AND (m.sandbox OR (pq.id IS NOT NULL AND pq.respondido_em IS NULL))
         AND m.enviada_em > NOW() - INTERVAL '${VALIDADE_RESPOSTA_DIAS} days'
       ORDER BY m.enviada_em DESC, m.item_numero NULLS FIRST, m.id`,
     [TIPO_PERGUNTA, rec.wa_jid, formas])
@@ -139,6 +169,15 @@ const processarUma = async (db, rec, responder) => {
     return concluir(db, rec, 'nao_entendida')
   }
   const { alvo, texto } = escolha
+  // SIMULAÇÃO: nada vai para o app (não existe pergunta nem pedido) — a resposta fica só na linha,
+  // para o painel, e a pessoa recebe o "✅ Pronto!…" de sempre.
+  if (alvo.sandbox) {
+    await db.query(
+      `UPDATE whatsapp_mensagens SET status = 'respondida', respondida_em = NOW(), resposta = $2, atualizado_em = NOW() WHERE id = $1::bigint`,
+      [alvo.id, texto.slice(0, MAX_RESPOSTA_SIMULACAO)])
+    await responderAutomatico(db, rec, dono, T.textoEntregue(alvo.dados?.nome_prof || 'o profissional'))
+    return concluir(db, rec, 'entregue (simulação)', alvo.id)
+  }
   // A MESMA função da rota do app; origem 'whatsapp' na caixa-preta para o que ela escrever em pedidos.
   const r = await comOrigem({ origem: 'whatsapp', rota: 'whatsapp:resposta-pergunta', usuarioId: alvo.usuario_id }, () => responder({
     tabela: alvo.pergunta_tipo === 'obra' ? 'obras' : 'reparos', demandaId: alvo.demanda_id, perguntaId: alvo.pergunta_id,
@@ -185,4 +224,4 @@ const semSobrepor = (nome, fn) => {
   }
 }
 
-module.exports = { enfileirarPerguntasSemResposta, processarRecebidas, escolherPergunta, semSobrepor }
+module.exports = { enfileirarPerguntasSemResposta, processarRecebidas, escolherPergunta, semSobrepor, simularPergunta, SIMULACAO }
