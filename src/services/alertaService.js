@@ -27,6 +27,7 @@ const { invalidarCacheAssinatura } = require('../middlewares/auth')
 // importa o SDK e utils/marca — sem ciclo. Direto no Brevo (e não em emailService) para o
 // erro de cada envio chegar aqui e ser logado por destinatário.
 const { enviarEmail: enviarEmailBrevo } = require('./brevoService')
+const { guardarParaOResumo } = require('./emailResumoDiarioService')
 // A OUTRA conta da mesma pessoa (mesmo CPF normalizado do criador da demanda) fica fora de todo
 // público de notificação de demanda: broadcast de demanda nova / oferta aumentada / lembrete
 // (broadcastPaginado), repescagem por destinatário (reenviarEntregasFalhas) e e-mail de reserva
@@ -2174,9 +2175,12 @@ const entregarPushOuEmail = async ({ usuario_id, ator_id, push_token, email, nom
 //   'lembrete#AAAAMMDD#k' (k = 1..teto; a chave diária simples, se já saiu, conta no teto).
 //   Dono com push ativo segue no 1 e-mail/dia. Como toda chave 'aviso:%', esses e-mails ficam
 //   na reserva dos avisos críticos (fora do teto dos e-mails de demanda nova);
-//   boas-vindas e avisos/promoções do painel → só push (fora daqui).
+//   boas-vindas e avisos/promoções do painel → só push (fora daqui);
+//   RESUMO DIÁRIO (dono, 19/11/2026 — chave email_resumo_diario, padrão desligada): com a chave
+//   ligada, o e-mail de quem TEM push não sai na hora — entra no resumo das 19:00
+//   (services/emailResumoDiarioService). Quem não tem push segue recebendo na hora.
 // Nunca lança. Devolve as vias que saíram ('push+e-mail', 'push', 'e-mail', 'push+e-mail já
-// enviado', 'e-mail teto do dia', …), 'sem contato' ou 'falha'.
+// enviado', 'e-mail teto do dia', 'push+e-mail no resumo', …), 'sem contato' ou 'falha'.
 const UUID_RE_AVISO = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const hash8 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 8)
 const FMT_DIA_SP = new Intl.DateTimeFormat('en-CA', { timeZone: TZ_AGENDA, year: 'numeric', month: '2-digit', day: '2-digit' })
@@ -2226,9 +2230,13 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
   const vias = []
   try {
     const token = semPush ? null : (push_token || await tokenDaContaIrmaProfissional(usuario_id))
+    // pushSaiu: true/false quando houve tentativa de push AGORA; undefined = não houve (semPush ou
+    // sem token nesta conta) — aí o resumo diário consulta a pessoa (conta irmã com token).
+    let pushSaiu
     if (token) {
       const r = await enviarPushNotificacao(token, titulo, corpo, data, usuario_id)
-      if (r === 'enviado') vias.push('push')
+      pushSaiu = r === 'enviado'
+      if (pushSaiu) vias.push('push')
     }
     const destino = String(email || '').trim()
     if (!destino) return vias.length ? vias.join('+') : 'sem contato'
@@ -2251,6 +2259,17 @@ const entregarPushEEmail = async ({ usuario_id, ator_id, push_token, email, nome
       )
       if (claim.rowCount === 0) { vias.push('e-mail já enviado'); return vias.join('+') }
     }
+    // RESUMO DIÁRIO (configuracoes.email_resumo_diario — services/emailResumoDiarioService): quem TEM
+    // push não recebe este e-mail agora; ele vira uma linha do resumo das 19:00. Fica de fora (sai
+    // na hora, como sempre): quem não tem push, o push que acabou de falhar, o lembrete "a cada
+    // ciclo" do dono sem push ativo e os avisos de conta (aprovada/reprovada/suspensa/liberada).
+    // Vem DEPOIS do claim de dedupe: o mesmo aviso nunca entra duas vezes no resumo.
+    if (!emailCadaCiclo && await guardarParaOResumo({
+      usuario_id, tipo: evento || (lembrete ? 'lembrete' : ''),
+      demanda_tabela: UUID_RE_AVISO.test(demandaId) ? (data?.obra_id ? 'obras' : 'reparos') : null,
+      demanda_id: UUID_RE_AVISO.test(demandaId) ? demandaId : null,
+      titulo, linha: corpoEmail || corpo, temPush: pushSaiu,
+    })) { vias.push('e-mail no resumo'); return vias.join('+') }
     const comBotao = botaoEmail && botaoEmail.url && botaoEmail.texto ? botaoEmail : null
     await comTimeout(enviarEmailBrevo({
       para: destino, assunto: titulo,
