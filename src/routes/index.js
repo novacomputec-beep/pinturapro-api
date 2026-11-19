@@ -3284,7 +3284,7 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
     const where = sqlFiltroPainel('o', filtro)
     if (!where) return res.status(400).json({ erro: 'Filtro inválido' })
     const result = await pool.query(`
-      SELECT o.id, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade, o.uf, o.bairro,
+      SELECT o.id, o.codigo_publico, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade, o.uf, o.bairro,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status,
              o.criado_em, o.horas_para_expirar, o.prazo_modo,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
@@ -5265,7 +5265,7 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
     // escolhido_nome/escolhido_em: profissional escolhido (match OU interesse 'aceito' —
     // utils/profissionalEscolhido), NULL quando não há. Mesma definição de GET /obras/admin.
     const result = await pool.query(`
-      SELECT r.id, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.valor_a_combinar, r.cidade, r.uf, r.bairro,
+      SELECT r.id, r.codigo_publico, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.valor_a_combinar, r.cidade, r.uf, r.bairro,
              r.expira_em, r.status, r.criado_em, r.prazo_atendimento_horas,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              ${sqlExpiradaPainel('r')} AS expirada,
@@ -10094,7 +10094,7 @@ const PERIODO_FINALIZADAS_PADRAO = 'mes_atual'
 // ramo devolve a sua e NULL na outra: obra → horas_para_expirar + prazo_modo; reparo →
 // prazo_atendimento_horas. expira_em existe nas duas.
 const SQL_FINALIZADAS = `
-  SELECT 'obra'::text AS tipo, o.id, o.titulo, o.categoria, NULL::text[] AS categorias, o.cidade, o.uf, o.bairro,
+  SELECT 'obra'::text AS tipo, o.id, o.codigo_publico, o.titulo, o.categoria, NULL::text[] AS categorias, o.cidade, o.uf, o.bairro,
          o.criado_em, o.encerrado_em, o.expira_em, o.horas_para_expirar, o.prazo_modo,
          NULL AS prazo_atendimento_horas,
          d.nome AS dono_nome, d.email AS dono_email, d.telefone AS dono_telefone,
@@ -10106,7 +10106,7 @@ const SQL_FINALIZADAS = `
     LEFT JOIN candidaturas cd ON cd.obra_id = o.id AND cd.status = 'aceito'
    WHERE o.status = 'encerrada'
   UNION ALL
-  SELECT 'reparo'::text AS tipo, r.id, r.titulo, r.categoria, r.categorias, r.cidade, r.uf, r.bairro,
+  SELECT 'reparo'::text AS tipo, r.id, r.codigo_publico, r.titulo, r.categoria, r.categorias, r.cidade, r.uf, r.bairro,
          r.criado_em, r.encerrado_em, r.expira_em, NULL AS horas_para_expirar, NULL AS prazo_modo,
          r.prazo_atendimento_horas,
          d.nome AS dono_nome, d.email AS dono_email, d.telefone AS dono_telefone,
@@ -10135,7 +10135,7 @@ router.get('/admin/finalizadas', autenticar, exigirAdmin, async (req, res) => {
     // paginação. NULLS LAST porque em DESC o padrão do Postgres é NULLS FIRST — sem isso
     // uma linha sem data iria para o topo do painel.
     const lista = await pool.query(
-      `SELECT f.tipo, f.id, f.titulo, f.categoria, f.categorias, f.cidade, f.uf, f.bairro,
+      `SELECT f.tipo, f.id, f.codigo_publico, f.titulo, f.categoria, f.categorias, f.cidade, f.uf, f.bairro,
               f.criado_em, f.encerrado_em, f.expira_em,
               f.horas_para_expirar, f.prazo_modo, f.prazo_atendimento_horas,
               f.dono_nome, f.dono_email, f.dono_telefone,
