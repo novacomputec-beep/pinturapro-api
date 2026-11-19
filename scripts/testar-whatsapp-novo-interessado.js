@@ -143,14 +143,14 @@ const main = async () => {
   e = await SI.enfileirarNovosInteressados(shim)
   let l = await fila()
   ok(e.enfileiradas === 1 && l.length === 1 && l[0].tipo === 'novo_interessado' && l[0].usuario_id === DONO && l[0].telefone === TESTE && l[0].ref_tabela === 'reparos' && l[0].ref_id === R1
-     && l[0].chave_dedupe === `interessado:reparos:${I(1)}` && l[0].dados.nome_prof === 'Carlos' && l[0].dados.primeiro_nome === 'Luiz' && l[0].dados.link === 'https://protudo.app.br/abrir/AAAA1',
+     && l[0].chave_dedupe === `interessado:reparos:${I(1)}` && l[0].dados.nome_prof === 'Carlos' && l[0].dados.primeiro_nome === 'Luiz' && l[0].dados.link === 'https://protudo.app.br/p/AAAA1',
      'só o interesse em pedido aberto de dono SEM push entra (não: dona com push, push na conta irmã, pedido com escolhido, cancelado, recusado, mais de 24 h)', l.map(x => x.chave_dedupe))
   e = await SI.enfileirarNovosInteressados(shim)
   ok(e.enfileiradas === 0 && (await fila()).length === 1, 'rodar de novo não duplica')
 
   // ═══════════ UM INTERESSE ═══════════
   let r = await passo(em(0))
-  const UM = `Oi, Luiz! 👋 Aqui é o *ProTudo*.\n🙋 *Carlos* se interessou pelo seu pedido *Entregar panfletos*.\n👉 Veja e escolha aqui: https://protudo.app.br/abrir/AAAA1\n${DICA}`
+  const UM = `Oi, Luiz! 👋 Aqui é o *ProTudo*.\n🙋 *Carlos* se interessou pelo seu pedido *Entregar panfletos*.\n👉 Veja e escolha aqui: https://protudo.app.br/p/AAAA1\n${DICA}`
   l = await fila()
   ok(r.enviou && f.enviados.length === 1 && f.enviados[0].jid === JID && f.enviados[0].texto === UM + SAIR, 'UM interesse: texto exato, com o rodapé do SAIR na primeira mensagem da pessoa', f.enviados[0]?.texto)
   ok(l[0].status === 'enviada' && l[0].texto === f.enviados[0].texto && l[0].wa_message_id === 'WA1' && l[0].item_numero === null, 'a linha guarda o texto que saiu')
@@ -183,7 +183,7 @@ const main = async () => {
   ok(!r.enviou && f.enviados.length === 3, 'limite: menos de 3 h desde a última mensagem para a pessoa → espera na fila', r.motivo)
   r = await passo(em(RODADA))
   l = await fila(`tipo = 'novo_interessado' AND ref_id = '${R2}'`)
-  ok(r.enviou && ultimo().texto === `Oi, Luiz! 👋 Aqui é o *ProTudo*.\n🙋 *3 profissionais* se interessaram pelo seu pedido *Pintar o portão*.\n👉 Veja e escolha aqui: https://protudo.app.br/abrir/BBBB2\n${DICA}`,
+  ok(r.enviou && ultimo().texto === `Oi, Luiz! 👋 Aqui é o *ProTudo*.\n🙋 *3 profissionais* se interessaram pelo seu pedido *Pintar o portão*.\n👉 Veja e escolha aqui: https://protudo.app.br/p/BBBB2\n${DICA}`,
      'VÁRIOS no mesmo pedido: UMA mensagem com "3 profissionais", sem o rodapé do SAIR (não é mais a primeira)', ultimo().texto)
   ok(l.length === 3 && l.every(x => x.status === 'enviada' && x.wa_message_id === ultimo().id) && l.filter(x => x.agrupada_em === null).length === 1, 'as 3 linhas saem na mesma mensagem (uma é a dona, as outras apontam para ela)')
 
@@ -195,7 +195,7 @@ const main = async () => {
   l = await fila(`chave_dedupe = 'interessado:obras:${I(22)}'`)
   ok(e.enfileiradas === 3 && l.length === 1 && l[0].ref_tabela === 'obras' && l[0].ref_id === O1, 'candidatura em obra entra como o interesse em serviço', e)
   r = await passo(em(2 * RODADA))
-  ok(r.enviou && ultimo().texto === `Oi, Luiz! 👋 Aqui é o *ProTudo*.\n🙋 Seus pedidos têm novos interessados:\n• *Entregar panfletos*: 2 interessados\n👉 https://protudo.app.br/abrir/AAAA1\n• *Pintar a sala*: 1 interessado\n👉 https://protudo.app.br/abrir/FFFF6\n${DICA}`,
+  ok(r.enviou && ultimo().texto === `Oi, Luiz! 👋 Aqui é o *ProTudo*.\n🙋 Seus pedidos têm novos interessados:\n• *Entregar panfletos*: 2 interessados\n👉 https://protudo.app.br/p/AAAA1\n• *Pintar a sala*: 1 interessado\n👉 https://protudo.app.br/p/FFFF6\n${DICA}`,
      'PEDIDOS DIFERENTES: uma linha por pedido, com a contagem e um link por pedido', ultimo().texto)
 
   // ═══════════ DEIXOU DE VALER ANTES DO ENVIO ═══════════
@@ -228,11 +228,11 @@ const main = async () => {
   r = await passo(NOITE)
   ok(e.enfileiradas === 1 && !r.enviou && r.motivo === 'fora_do_horario' && f.enviados.length === antes, '22h: fora da janela, fica na fila', r.motivo)
   r = await passo(MANHA)
-  ok(r.enviou && ultimo().texto === `Oi, Luiz! 👋 Aqui é o *ProTudo*.\n🙋 *Beto* se interessou pelo seu pedido *Entregar panfletos*.\n👉 Veja e escolha aqui: https://protudo.app.br/abrir/AAAA1\n${DICA}`,
+  ok(r.enviou && ultimo().texto === `Oi, Luiz! 👋 Aqui é o *ProTudo*.\n🙋 *Beto* se interessou pelo seu pedido *Entregar panfletos*.\n👉 Veja e escolha aqui: https://protudo.app.br/p/AAAA1\n${DICA}`,
      '08h do dia seguinte: sai', ultimo().texto)
 
   // ═══════════ TEXTOS (função pura) E PAINEL ═══════════
-  ok(T.linkAbrir('X1Y2Z') === 'https://protudo.app.br/abrir/X1Y2Z' && T.TEXTO_RESPOSTA_INTERESSADO === 'Para escolher o profissional, toque no link acima 👆', 'link do pedido e resposta do robô')
+  ok(T.linkAbrir('X1Y2Z') === 'https://protudo.app.br/p/X1Y2Z' && T.TEXTO_RESPOSTA_INTERESSADO === 'Para escolher o profissional, toque no link acima 👆', 'link do pedido e resposta do robô')
   const pilha = (m, c) => rotasAdmin.stack.find(x => x.route && x.route.path === c && x.route.methods[m]).route.stack
   const chamar = (m, c, query = {}) => new Promise(resolve => {
     const res = { statusCode: 200, status(s) { this.statusCode = s; return this }, json(b) { resolve({ status: this.statusCode, body: b }) } }
