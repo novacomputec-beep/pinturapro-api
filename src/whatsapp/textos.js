@@ -31,7 +31,8 @@ const textoPerguntas = (itens, { primeira = false } = {}) => {
 // Um interesse: nome do profissional. Vários no mesmo pedido: "{n} profissionais". Pedidos
 // diferentes: uma linha por pedido, cada um com o seu link.
 const DICA_NOTIFICACOES = '💡 _Dica: ative as notificações do ProTudo no celular para saber na hora._'
-const linkAbrir = (codigo) => `https://protudo.app.br/abrir/${codigo}`
+// Link do pedido = a página pública que já existe (routes/paginaPublica: protudo.app.br/p/<codigo>).
+const linkAbrir = (codigo) => `https://protudo.app.br/p/${codigo}`
 const textoInteressados = (itens, { primeira = false } = {}) => {
   const ola = `Oi, ${itens[0].primeiro_nome}! 👋 Aqui é o *ProTudo*.`
   const pedidos = []
