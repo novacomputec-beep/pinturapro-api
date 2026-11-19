@@ -21,9 +21,12 @@ class FakeExpo {
 }
 
 let db
+// rowCount como o driver `pg` da produção (o PGlite devolve affectedRows): o código lê rowCount.
+const comRowCount = (r) => { if (r && r.rowCount === undefined) r.rowCount = r.affectedRows || (r.rows ? r.rows.length : 0); return r }
+const consultar = async (sql, params) => comRowCount(await db.query(sql, params))
 const shim = {
-  query: (sql, params) => db.query(sql, params),
-  connect: async () => ({ query: (sql, params) => db.query(sql, params), release() {} }),
+  query: consultar,
+  connect: async () => ({ query: consultar, release() {} }),
   on() {},
 }
 const origLoad = Module._load
