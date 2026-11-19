@@ -11,6 +11,10 @@
 // ETAPA 2 — 'pergunta_sem_resposta': o texto é redigido AQUI, na hora do envio (textos.js), com
 // as perguntas que ainda estão sem resposta; a que o dono já respondeu no app (ou cujo pedido
 // fechou) sai da fila sem enviar.
+// SIMULAÇÃO (whatsapp_mensagens.sandbox — POST /admin/whatsapp/simular-pergunta): pergunta de
+// mentira, sem pergunta/pedido de verdade. Passa pelas MESMAS travas (trava de teste, pausa, janela
+// 08–21h, tipo ligado), menos o limite de 3 h por pessoa: não é barrada por ele nem conta para ele.
+// Sai sempre sozinha (nunca agrupada) e não "caduca" (não há pergunta no app para ser respondida).
 // `db` = pool (ou client); `agora` e `env` injetáveis para o teste.
 const { TIPOS, CHAVE_PAUSADO, chaveTipo, MAX_TENTATIVAS, ESPERA_ENTRE_TENTATIVAS_MIN, MAX_ITENS_POR_MENSAGEM,
         TIPO_RESPOSTA, RESPOSTA_VALIDADE_MIN, INTERVALO_PESSOA_HORAS, MAX_PERGUNTAS_POR_MENSAGEM,
@@ -78,14 +82,15 @@ const processarProxima = async ({ db, adaptador, agora = new Date(), env = proce
   // a fila: segue para a próxima.
   for (let volta = 0; volta < 50; volta++) {
     const prox = await db.query(
-      `SELECT m.id, m.tipo, m.usuario_id, m.telefone, m.wa_jid, m.tentativas, u.whatsapp_avisos
+      `SELECT m.id, m.tipo, m.usuario_id, m.telefone, m.wa_jid, m.tentativas, m.sandbox, u.whatsapp_avisos
          FROM whatsapp_mensagens m LEFT JOIN usuarios u ON u.id = m.usuario_id
         WHERE m.status = 'fila' AND m.enviando_em IS NULL AND m.tipo = ANY($1::text[])
           AND (m.proxima_tentativa_em IS NULL OR m.proxima_tentativa_em <= $2::timestamptz)
           -- No máximo uma mensagem por pessoa (telefone) a cada ${INTERVALO_PESSOA_HORAS} h, nos tipos limitados.
-          AND (m.tipo <> ALL($3::text[]) OR NOT EXISTS (
+          -- Simulação (sandbox) fica fora do limite: não é barrada e não conta.
+          AND (m.sandbox OR m.tipo <> ALL($3::text[]) OR NOT EXISTS (
                 SELECT 1 FROM whatsapp_mensagens x
-                 WHERE x.telefone = m.telefone AND x.tipo = ANY($3::text[])
+                 WHERE x.telefone = m.telefone AND x.tipo = ANY($3::text[]) AND NOT x.sandbox
                    AND x.enviada_em > $2::timestamptz - INTERVAL '${INTERVALO_PESSOA_HORAS} hours'))
         ORDER BY (m.tipo = $4) DESC, m.criado_em, m.id LIMIT 1`,
       [tipos, agoraIso, TIPOS_LIMITADOS, TIPO_RESPOSTA])
@@ -111,14 +116,16 @@ const processarProxima = async ({ db, adaptador, agora = new Date(), env = proce
 
     // Agrupa: os itens pendentes do MESMO tipo, da mesma pessoa, para o mesmo telefone.
     const grupo = await db.query(
-      `SELECT m.id, m.texto, m.dados, ${p.tipo === TIPO_PERGUNTA ? sqlPerguntaPendente('pq', '$4') : 'true'} AS vale
+      `SELECT m.id, m.texto, m.dados, ${p.tipo === TIPO_PERGUNTA ? `(m.sandbox OR ${sqlPerguntaPendente('pq', '$4')})` : 'true'} AS vale
          FROM whatsapp_mensagens m
          ${p.tipo === TIPO_PERGUNTA ? `LEFT JOIN perguntas_demanda pq ON pq.id = m.ref_id` : ''}
         WHERE m.status = 'fila' AND m.enviando_em IS NULL AND m.telefone = $1 AND m.tipo = $2
           AND m.usuario_id IS NOT DISTINCT FROM $3::uuid
           AND (m.proxima_tentativa_em IS NULL OR m.proxima_tentativa_em <= $4::timestamptz)
+          -- Simulação sai sozinha; as de verdade nunca levam uma simulação junto.
+          AND m.sandbox = $5::boolean AND ($5::boolean IS NOT TRUE OR m.id = $6::bigint)
         ORDER BY m.criado_em, m.id LIMIT 50`,
-      [p.telefone, p.tipo, p.usuario_id, agoraIso])
+      [p.telefone, p.tipo, p.usuario_id, agoraIso, p.sandbox === true, p.id])
     // Pergunta que o dono já respondeu no app (ou de pedido que fechou): sai da fila sem enviar.
     const caducas = grupo.rows.filter(l => !l.vale).map(l => l.id)
     if (caducas.length) await db.query(`DELETE FROM whatsapp_mensagens WHERE id = ANY($1::bigint[]) AND status = 'fila'`, [caducas])

@@ -8,6 +8,7 @@ const { pool } = require('../utils/supabase')
 const { TIPOS, STATUS, CHAVE_PAUSADO, chaveTipo, TZ, dentroDaJanela, normalizarTelefone, HORA_INICIO, HORA_FIM, TIPO_RESPOSTA, ROTULO_RESPOSTA } = require('../whatsapp/config')
 const { lerConfig } = require('../whatsapp/fila')
 const { enfileirar } = require('../services/whatsappFilaService')
+const { simularPergunta } = require('../services/whatsappPerguntasService')
 
 // Worker considerado vivo se bateu nos últimos 90 s (ele bate a cada 30 s).
 const WORKER_VIVO_SEGUNDOS = 90
@@ -132,9 +133,10 @@ router.get('/admin/whatsapp/mensagens', autenticar, exigirSuperAdmin, async (req
     const r = await pool.query(
       `SELECT m.id, m.tipo, m.status, m.usuario_id, u.nome AS usuario_nome, m.telefone, m.texto, m.ref_tabela, m.ref_id,
               m.wa_jid, m.wa_message_id, m.agrupada_em, m.tentativas, m.erro, m.criado_em, m.proxima_tentativa_em,
-              m.enviada_em, m.entregue_em, m.lida_em, m.respondida_em, m.item_numero, m.resposta,
+              m.enviada_em, m.entregue_em, m.lida_em, m.respondida_em, m.item_numero, m.resposta, m.sandbox,
               COALESCE(rp.codigo_publico, ob.codigo_publico) AS codigo,
-              COALESCE(rp.titulo, ob.titulo) AS _titulo,
+              -- Simulação não tem pedido: o título de mentira vem dos dados da própria linha.
+              COALESCE(rp.titulo, ob.titulo, CASE WHEN m.sandbox THEN m.dados->>'titulo' END) AS _titulo,
               CASE WHEN COALESCE(rp.criado_por, ob.criado_por) = m.usuario_id THEN 'dono'
                    WHEN COALESCE(rp.id, ob.id) IS NOT NULL AND u.role = 'prestador' THEN 'profissional'
                    WHEN u.role = 'dono_obra' THEN 'dono'
@@ -154,7 +156,7 @@ router.get('/admin/whatsapp/mensagens', autenticar, exigirSuperAdmin, async (req
     const mensagens = r.rows.map(({ _total, _titulo, ...l }) => ({
       ...l,
       // resumo: detalhe curto para a linha da lista — tipo + pedido (código e título), quando há.
-      resumo: resumoDaMensagem(l.tipo, l.codigo, _titulo),
+      resumo: resumoDaMensagem(l.tipo, l.codigo, _titulo) + (l.sandbox ? ' (simulação)' : ''),
       // resposta: o que a pessoa respondeu a ESTA mensagem pelo WhatsApp (null se não respondeu).
       resposta: l.resposta ?? null,
     }))
@@ -199,6 +201,23 @@ router.post('/admin/whatsapp/teste', autenticar, exigirSuperAdmin, async (req, r
     if (!r.ok) return res.status(400).json({ erro: `Não entrou na fila: ${r.motivo}` })
     res.json({ id: r.id, telefone: r.telefone, mensagem: 'Mensagem de teste na fila.' })
   } catch (err) { responderErro(res, 'teste', err) }
+})
+
+// POST /admin/whatsapp/simular-pergunta — põe UMA "pergunta sem resposta" SIMULADA na fila para o
+// número da trava de teste (services/whatsappPerguntasService.simularPergunta): dados de mentira,
+// sandbox = true, sem pedido nem pergunta de verdade. A resposta dada pelo WhatsApp NÃO vai para o
+// app — aparece só aqui, na lista de mensagens. Respeita a janela 08–21h; fora do limite de 3 h.
+router.post('/admin/whatsapp/simular-pergunta', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const r = await simularPergunta(pool)
+    if (!r.ok) return res.status(r.status).json({ erro: r.erro })
+    const quando = r.pausado ? 'O robô está pausado: sai quando for retomado.'
+      : r.janela_aberta ? 'Sai em instantes.' : `Fora do horário de envio: sai a partir das ${String(HORA_INICIO).padStart(2, '0')}h.`
+    res.json({
+      id: r.id, telefone: r.telefone, sandbox: true, ja_na_fila: r.ja_na_fila, janela_aberta: r.janela_aberta, pausado: r.pausado,
+      mensagem: `${r.ja_na_fila ? 'Já havia uma pergunta simulada na fila.' : 'Pergunta simulada na fila.'} ${quando}`,
+    })
+  } catch (err) { responderErro(res, 'simular-pergunta', err) }
 })
 
 module.exports = router
