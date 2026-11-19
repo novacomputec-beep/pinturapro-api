@@ -306,9 +306,9 @@ const main = async () => {
 
   // ---------- campos da aba do painel (17/11/2026) ----------
   const tg2 = await chamar('get', '/admin/whatsapp/tipos')
-  ok(JSON.stringify(tg2.body.tipos.map(x => [x.tipo, x.implementado])) === JSON.stringify([['pergunta_sem_resposta', true], ['prazo_acabando', false], ['escolhido', false], ['horario_aguardando', false], ['teste', true]])
+  ok(JSON.stringify(tg2.body.tipos.map(x => [x.tipo, x.implementado])) === JSON.stringify([['pergunta_sem_resposta', true], ['novo_interessado', true], ['prazo_acabando', false], ['escolhido', false], ['horario_aguardando', false], ['teste', true]])
      && tg2.body.tipos.every(x => typeof x.rotulo === 'string' && typeof x.ligado === 'boolean') && tg2.body.tipos.filter(x => x.ligado).map(x => x.tipo).join() === 'teste',
-     '/tipos devolve sempre os 5 slugs, na ordem, com implementado (pergunta_sem_resposta e teste) e só teste ligado por padrão', tg2.body.tipos.map(x => [x.tipo, x.implementado, x.ligado]))
+     '/tipos devolve sempre os 6 slugs, na ordem, com implementado (pergunta_sem_resposta, novo_interessado e teste) e só teste ligado por padrão', tg2.body.tipos.map(x => [x.tipo, x.implementado, x.ligado]))
   const ni = await enfileirar({ tipo: 'prazo_acabando', telefone: TESTE, texto: 'x' }, shim)
   ok(ni.ok === false && ni.motivo === 'tipo_nao_implementado', 'tipo ainda não implementado não entra na fila', ni)
 

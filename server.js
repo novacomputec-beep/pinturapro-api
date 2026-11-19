@@ -833,6 +833,9 @@ const iniciarAgendador = () => {
   //   5 s:   resposta que o dono mandou pelo WhatsApp → entra pelo mesmo caminho do app.
   const whatsappPerguntas = require('./src/services/whatsappPerguntasService')
   setInterval(job('whatsappPerguntasSemResposta', whatsappPerguntas.semSobrepor('perguntas', () => whatsappPerguntas.enfileirarPerguntasSemResposta())), INTERVALO_CRONOMETRO)
+  //   1 min: novo interessado em pedido de dono SEM push (15 min de espera para juntar) → fila.
+  const whatsappInteressados = require('./src/services/whatsappInteressadosService')
+  setInterval(job('whatsappNovosInteressados', whatsappPerguntas.semSobrepor('interessados', () => whatsappInteressados.enfileirarNovosInteressados())), INTERVALO_CRONOMETRO)
   setInterval(job('whatsappRecebidas', whatsappPerguntas.semSobrepor('recebidas', () => whatsappPerguntas.processarRecebidas({ responder: rotasApp.responderPergunta }))), 5 * 1000)
   // Agendamento livre: lembretes do horário aceito ao profissional (véspera 18:00, 2h antes, na
   // hora) e a vigia "o profissional veio?" ao dono (1h depois do horário). Mesma cadência dos

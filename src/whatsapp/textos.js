@@ -26,6 +26,36 @@ const textoPerguntas = (itens, { primeira = false } = {}) => {
   return primeira ? corpo + RODAPE_SAIR : corpo
 }
 
+// NOVO INTERESSADO (dono, 19/11/2026) — só para o dono SEM notificação no celular.
+// itens = [{ primeiro_nome, nome_prof, titulo, demanda_id, link }] (as `dados` das linhas da fila).
+// Um interesse: nome do profissional. Vários no mesmo pedido: "{n} profissionais". Pedidos
+// diferentes: uma linha por pedido, cada um com o seu link.
+const DICA_NOTIFICACOES = '💡 _Dica: ative as notificações do ProTudo no celular para saber na hora._'
+const linkAbrir = (codigo) => `https://protudo.app.br/abrir/${codigo}`
+const textoInteressados = (itens, { primeira = false } = {}) => {
+  const ola = `Oi, ${itens[0].primeiro_nome}! 👋 Aqui é o *ProTudo*.`
+  const pedidos = []
+  for (const i of itens) {
+    let p = pedidos.find(x => x.demanda_id === i.demanda_id)
+    if (!p) pedidos.push(p = { demanda_id: i.demanda_id, titulo: i.titulo, link: i.link, itens: [] })
+    p.itens.push(i)
+  }
+  let corpo
+  if (pedidos.length === 1) {
+    const p = pedidos[0]
+    const quem = p.itens.length === 1
+      ? `🙋 *${p.itens[0].nome_prof}* se interessou pelo seu pedido *${p.titulo}*.`
+      : `🙋 *${p.itens.length} profissionais* se interessaram pelo seu pedido *${p.titulo}*.`
+    corpo = `${ola}\n${quem}\n👉 Veja e escolha aqui: ${p.link}\n${DICA_NOTIFICACOES}`
+  } else {
+    const linhas = pedidos.map(p => `• *${p.titulo}*: ${p.itens.length} ${p.itens.length === 1 ? 'interessado' : 'interessados'}\n👉 ${p.link}`)
+    corpo = `${ola}\n🙋 Seus pedidos têm novos interessados:\n${linhas.join('\n')}\n${DICA_NOTIFICACOES}`
+  }
+  return primeira ? corpo + RODAPE_SAIR : corpo
+}
+// Resposta do robô a quem responde a um aviso de novo interessado (a escolha é feita no app).
+const TEXTO_RESPOSTA_INTERESSADO = 'Para escolher o profissional, toque no link acima 👆'
+
 // "1 ou 2", "1, 2 ou 3"…
 const listaNumeros = (numeros) => {
   const ns = [...numeros].sort((a, b) => a - b)
@@ -45,4 +75,5 @@ const lerNumeroInicial = (texto) => {
   return m ? { numero: Number(m[1]), resto: m[2].trim() } : null
 }
 
-module.exports = { RODAPE_SAIR, primeiroNome, textoPerguntas, textoNaoEntendi, TEXTO_NAO_ENTENDI_SEM_NUMERO, TEXTO_SO_ESCRITA, textoEntregue, textoNaoEntregue, lerNumeroInicial, listaNumeros }
+module.exports = { RODAPE_SAIR, primeiroNome, textoPerguntas, textoNaoEntendi, TEXTO_NAO_ENTENDI_SEM_NUMERO, TEXTO_SO_ESCRITA, textoEntregue, textoNaoEntregue, lerNumeroInicial, listaNumeros,
+  textoInteressados, linkAbrir, DICA_NOTIFICACOES, TEXTO_RESPOSTA_INTERESSADO }
