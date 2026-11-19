@@ -26,7 +26,7 @@ const { pool } = require('../utils/supabase')
 const { comOrigem } = require('../utils/auditoriaDemanda')
 const { enfileirar } = require('./whatsappFilaService')
 const { lerConfig, sqlPerguntaPendente, TIPO_PERGUNTA, TIPO_INTERESSADO } = require('../whatsapp/fila')
-const { TIPO_RESPOSTA, ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela } = require('../whatsapp/config')
+const { TIPO_RESPOSTA, TIPO_AVULSA, ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela } = require('../whatsapp/config')
 const T = require('../whatsapp/textos')
 
 const MIDIAS_COM_RESPOSTA = ['audio', 'imagem', 'video', 'documento', 'figurinha']
@@ -175,8 +175,48 @@ const responderAvisoDeInteressado = async (db, rec, formas, { soCitada }) => {
   return true
 }
 
+// 'avulsa' (19/11/2026): mensagem escrita à mão pelo painel. A resposta NÃO vai para o app nem
+// ganha resposta automática — fica na linha (`resposta`, painel), para quem escreveu ler. É dela:
+// (a) a mensagem que CITA a avulsa; (b) a que não cita nenhuma mensagem nossa de outro tipo quando
+// a ÚLTIMA coisa que mandamos a este destino foi a avulsa (assim a resposta a ela nunca é entregue
+// no app como resposta a uma pergunta antiga). Mensagens seguintes somam na mesma linha.
+// Devolve true se tratou a mensagem.
+const guardarRespostaDeAvulsa = async (db, rec, formas) => {
+  let alvo = null
+  if (rec.citada_wa_message_id) {
+    const c = await db.query(
+      `SELECT id, tipo FROM whatsapp_mensagens
+        WHERE wa_message_id = $1 AND (wa_jid = $2 OR telefone = ANY($3::text[]))
+        ORDER BY (agrupada_em IS NULL) DESC, id LIMIT 1`,
+      [rec.citada_wa_message_id, rec.wa_jid, formas])
+    if (c.rows[0] && c.rows[0].tipo !== TIPO_AVULSA) return false
+    alvo = c.rows[0] || null
+  }
+  if (!alvo) {
+    const u = await db.query(
+      `SELECT id, tipo FROM whatsapp_mensagens
+        WHERE tipo <> $1 AND wa_message_id IS NOT NULL AND agrupada_em IS NULL AND (wa_jid = $2 OR telefone = ANY($3::text[]))
+          AND enviada_em > NOW() - INTERVAL '${VALIDADE_RESPOSTA_DIAS} days'
+        ORDER BY enviada_em DESC, id DESC LIMIT 1`,
+      [TIPO_RESPOSTA, rec.wa_jid, formas])
+    if (u.rows[0]?.tipo !== TIPO_AVULSA) return false
+    alvo = u.rows[0]
+  }
+  if (!rec.midia && !String(rec.texto || '').trim()) { await concluir(db, rec, 'ignorada (vazia)', alvo.id); return true }
+  const texto = rec.midia ? `(${rec.midia})` : String(rec.texto).trim()
+  await db.query(
+    `UPDATE whatsapp_mensagens
+        SET status = 'respondida', respondida_em = NOW(), atualizado_em = NOW(),
+            resposta = left(CASE WHEN resposta IS NULL THEN $2 ELSE resposta || E'\n' || $2 END, ${MAX_RESPOSTA_SIMULACAO})
+      WHERE id = $1::bigint AND status IN ('enviada', 'entregue', 'lida', 'respondida')`,
+    [alvo.id, texto.slice(0, MAX_RESPOSTA_SIMULACAO)])
+  await concluir(db, rec, 'avulsa (guardada)', alvo.id)
+  return true
+}
+
 const processarUma = async (db, rec, responder) => {
   const formas = variantesTelefone(rec.telefone)
+  if (await guardarRespostaDeAvulsa(db, rec, formas)) return
   // Citou um aviso de novo interessado: é dele a resposta, mesmo havendo pergunta pendente.
   if (await responderAvisoDeInteressado(db, rec, formas, { soCitada: true })) return
   // Perguntas que mandamos para este destino, ainda sem resposta (a mais recente primeiro).

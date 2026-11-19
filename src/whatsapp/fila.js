@@ -18,6 +18,8 @@
 // mentira, sem pergunta/pedido de verdade. Passa pelas MESMAS travas (trava de teste, pausa, janela
 // 08–21h, tipo ligado), menos o limite de 3 h por pessoa: não é barrada por ele nem conta para ele.
 // Sai sempre sozinha (nunca agrupada) e não "caduca" (não há pergunta no app para ser respondida).
+// 'avulsa' (19/11/2026 — POST /admin/whatsapp/avulsa): escrita à mão no painel; sempre ligada (fora
+// do liga/desliga por tipo), sai sozinha com o texto exato e passa pelas demais travas.
 // `db` = pool (ou client); `agora` e `env` injetáveis para o teste.
 const { TIPOS, CHAVE_PAUSADO, chaveTipo, MAX_TENTATIVAS, ESPERA_ENTRE_TENTATIVAS_MIN, MAX_ITENS_POR_MENSAGEM,
         TIPO_RESPOSTA, RESPOSTA_VALIDADE_MIN, INTERVALO_PESSOA_HORAS, MAX_PERGUNTAS_POR_MENSAGEM, MAX_INTERESSADOS_POR_MENSAGEM,
@@ -35,7 +37,8 @@ const lerConfig = async (db) => {
   const mapa = Object.fromEntries(r.rows.map(l => [l.chave, l.valor]))
   const tipos = Object.fromEntries(Object.entries(TIPOS).map(([t, def]) => {
     const v = mapa[chaveTipo(t)]
-    return [t, v === undefined || v === null ? !!def.padrao : v === 'true']
+    // sempreLigado (avulsa): a chave por tipo não vale para ele.
+    return [t, def.sempreLigado ? true : v === undefined || v === null ? !!def.padrao : v === 'true']
   }))
   return { pausado: mapa[CHAVE_PAUSADO] === 'true', tipos, tiposLigados: Object.keys(tipos).filter(t => tipos[t]) }
 }
@@ -124,7 +127,7 @@ const processarProxima = async ({ db, adaptador, agora = new Date(), env = proce
     const p = prox.rows[0]
     if (!p) {
       if (!naJanela) return { enviou: false, motivo: 'fora_do_horario', falouComWhatsapp: false }
-      return { enviou: false, motivo: config.tiposLigados.length === 0 ? 'tipos_desligados' : 'fila_vazia', falouComWhatsapp: false }
+      return { enviou: false, motivo: config.tiposLigados.every(t => TIPOS[t].sempreLigado) ? 'tipos_desligados' : 'fila_vazia', falouComWhatsapp: false }
     }
     const ehResposta = p.tipo === TIPO_RESPOSTA
 
@@ -151,8 +154,10 @@ const processarProxima = async ({ db, adaptador, agora = new Date(), env = proce
           AND (m.proxima_tentativa_em IS NULL OR m.proxima_tentativa_em <= $4::timestamptz)
           -- Simulação sai sozinha; as de verdade nunca levam uma simulação junto.
           AND m.sandbox = $5::boolean AND ($5::boolean IS NOT TRUE OR m.id = $6::bigint)
+          -- Tipo "sozinho" (avulsa): cada linha é uma mensagem, com o texto como foi escrito.
+          AND ($7::boolean IS NOT TRUE OR m.id = $6::bigint)
         ORDER BY m.criado_em, m.id LIMIT ${MAX_INTERESSADOS_POR_MENSAGEM}`,
-      [p.telefone, p.tipo, p.usuario_id, agoraIso, p.sandbox === true, p.id])
+      [p.telefone, p.tipo, p.usuario_id, agoraIso, p.sandbox === true, p.id, !!TIPOS[p.tipo]?.sozinho])
     // Pergunta que o dono já respondeu no app (ou de pedido que fechou) e interesse que não vale
     // mais (pedido com escolhido/fechado/vencido, interesse cancelado, dono já com push): sai da
     // fila sem enviar.

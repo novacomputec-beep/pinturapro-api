@@ -34,7 +34,15 @@ const TIPOS = {
   escolhido: { rotulo: 'Profissional escolhido', padrao: false, implementado: false },
   horario_aguardando: { rotulo: 'Horário aguardando resposta', padrao: false, implementado: false },
   teste: { rotulo: 'Mensagem de teste (painel)', padrao: true, implementado: true },
+  // 'avulsa' (dono, 19/11/2026 — POST /admin/whatsapp/avulsa): mensagem escrita à mão pelo
+  // super-admin para o dono de UM pedido. sempreLigado = fora do liga/desliga por tipo (não aparece
+  // em /tipos); continua atrás da pausa global, da janela 08–21h e da trava de teste.
+  // sozinho = cada linha é UMA mensagem, com o texto exatamente como foi escrito (nunca agrupada).
+  avulsa: { rotulo: 'Mensagem avulsa (painel)', padrao: true, implementado: true, sempreLigado: true, sozinho: true },
 }
+const TIPO_AVULSA = 'avulsa'
+const MAX_TEXTO_AVULSA = 1000
+const DEDUPE_AVULSA_HORAS = 24            // o mesmo texto para a mesma pessoa não entra de novo antes disto
 // Tipo INTERNO (fora do painel de tipos): a resposta automática do robô a quem escreveu
 // ("✅ Pronto!…", "Não entendi…"). Sai na frente da fila e fora da janela 08–21h (a pessoa acabou
 // de escrever), mas continua atrás da trava de teste, da pausa global e do intervalo de 20–40 s.
@@ -126,7 +134,7 @@ const ehPedidoDeSaida = (texto) =>
 module.exports = {
   TZ, HORA_INICIO, HORA_FIM, INTERVALO_MIN_MS, INTERVALO_MAX_MS, ESPERA_FILA_VAZIA_MS, MAX_TENTATIVAS,
   ESPERA_ENTRE_TENTATIVAS_MIN, MAX_ITENS_POR_MENSAGEM, STATUS, TIPOS, CHAVE_PAUSADO, chaveTipo, CHAVE_LOCK,
-  TIPO_RESPOSTA, ROTULO_RESPOSTA, RESPOSTA_VALIDADE_MIN, INTERVALO_PESSOA_HORAS, MAX_PERGUNTAS_POR_MENSAGEM,
+  TIPO_RESPOSTA, ROTULO_RESPOSTA, RESPOSTA_VALIDADE_MIN, TIPO_AVULSA, MAX_TEXTO_AVULSA, DEDUPE_AVULSA_HORAS, INTERVALO_PESSOA_HORAS, MAX_PERGUNTAS_POR_MENSAGEM,
   ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, ESPERA_INTERESSADO_MIN, IDADE_MAXIMA_INTERESSADO_HORAS, MAX_INTERESSADOS_POR_MENSAGEM,
   WATCH_PATHS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela, intervaloMs, ehPedidoDeSaida,
 }
