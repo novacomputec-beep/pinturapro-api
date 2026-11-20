@@ -144,6 +144,8 @@ const { normalizarTelefoneWhatsapp, primeiroNome: primeiroNomeWhatsapp } = requi
 const { normalizarLocalAtendimento, aceitaLocalAtendimento, sqlAtendeLocal, migrarLocalAtendimento } = require('../utils/localAtendimento')
 // Dica "adicione uma foto ou vídeo" no aviso de pergunta nova ao dono (pedido sem mídia).
 const { TABELA_MIDIAS, dicaFoto } = require('../utils/dicaFoto')
+// Mídia depois da publicação: 409 em pedido finalizado e aviso a quem perguntou (services/avisoMidiaService).
+const { demandaFinalizada, ERRO_PEDIDO_FINALIZADO, migrarAvisoMidia, avisarMidiaAdicionada } = require('../services/avisoMidiaService')
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
@@ -989,6 +991,8 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     // usuarios.atende_casa_cliente / atende_local_proprio (DEFAULT true: ninguém muda), mais a
     // limpeza dos reparos sem categoria elegível. DEPOIS de reparos.categorias, que a limpeza lê.
     await migrarLocalAtendimento(client)
+    // Dedupe (10 min) do aviso "o cliente adicionou fotos ou vídeos" a quem perguntou.
+    await migrarAvisoMidia(client)
 
     // ---- Índices da auditoria de escala: cada um nomeia a query/job que serve ----
     // GET /obras (obrasController.listar): filtro `o.categoria = $n`. reparos já tinha
@@ -7051,10 +7055,11 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
   try {
     const { reparo_id, ordem } = req.body
     if (!req.file) return res.status(400).json({ erro: 'Arquivo não enviado' })
-    const reparoOwner = await pool.query(`SELECT criado_por FROM reparos WHERE id = $1`, [reparo_id])
+    const reparoOwner = await pool.query(`SELECT criado_por, status, status_aprovacao FROM reparos WHERE id = $1`, [reparo_id])
     if (reparoOwner.rows.length === 0 || !(await ehMesmaPessoa(reparoOwner.rows[0].criado_por, req.usuario.id))) {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
+    if (demandaFinalizada(reparoOwner.rows[0])) return res.status(409).json(ERRO_PEDIDO_FINALIZADO)
     const resultado = await uploadArquivo(req.file)
     const tipo = req.file.mimetype.startsWith('video/') ? 'video' : 'foto'
     const result = await pool.query(
@@ -7062,6 +7067,7 @@ router.post('/upload/reparo', autenticar, upload.single('arquivo'), async (req, 
       [reparo_id, tipo, resultado.secure_url, ordem || 1]
     )
     res.json(result.rows[0])
+    avisarMidiaAdicionada('reparos', reparo_id, req.usuario.id)
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao fazer upload' })
   }
@@ -7219,10 +7225,11 @@ router.post('/upload/reparo-url', autenticar, async (req, res) => {
   try {
     const { reparo_id, url, tipo = 'video', ordem = 1 } = req.body
     if (!reparo_id || !url) return res.status(400).json({ erro: 'reparo_id e url são obrigatórios' })
-    const reparoOwner = await pool.query(`SELECT criado_por FROM reparos WHERE id = $1`, [reparo_id])
+    const reparoOwner = await pool.query(`SELECT criado_por, status, status_aprovacao FROM reparos WHERE id = $1`, [reparo_id])
     if (reparoOwner.rows.length === 0 || !(await ehMesmaPessoa(reparoOwner.rows[0].criado_por, req.usuario.id))) {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
+    if (demandaFinalizada(reparoOwner.rows[0])) return res.status(409).json(ERRO_PEDIDO_FINALIZADO)
     // Idempotente por slot (reparo_id, ordem): um retry após resposta perdida
     // (ex.: Wi-Fi + dados móveis trocando a rota) substitui a mídia em vez de duplicar.
     const result = await pool.query(
@@ -7239,6 +7246,7 @@ router.post('/upload/reparo-url', autenticar, async (req, res) => {
       [reparo_id, tipo, url, ordem]
     )
     res.json(result.rows[0])
+    avisarMidiaAdicionada('reparos', reparo_id, req.usuario.id)
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao salvar mídia' })
   }
@@ -7249,10 +7257,11 @@ router.post('/upload/obra-url', autenticar, async (req, res) => {
   try {
     const { obra_id, url, tipo = 'video', ordem = 1 } = req.body
     if (!obra_id || !url) return res.status(400).json({ erro: 'obra_id e url são obrigatórios' })
-    const obraOwner = await pool.query(`SELECT criado_por FROM obras WHERE id = $1`, [obra_id])
+    const obraOwner = await pool.query(`SELECT criado_por, status, status_aprovacao FROM obras WHERE id = $1`, [obra_id])
     if (obraOwner.rows.length === 0 || !(await ehMesmaPessoa(obraOwner.rows[0].criado_por, req.usuario.id))) {
       return res.status(403).json({ erro: 'Sem permissão para esta ação' })
     }
+    if (demandaFinalizada(obraOwner.rows[0])) return res.status(409).json(ERRO_PEDIDO_FINALIZADO)
     // Idempotente por slot (obra_id, ordem): retry após resposta perdida substitui em vez de duplicar.
     const result = await pool.query(
       // Mesmo racional do /upload/reparo-url: mídia substituída vai para a fila de órfãs, e
@@ -7265,6 +7274,7 @@ router.post('/upload/obra-url', autenticar, async (req, res) => {
       [obra_id, tipo, url, ordem]
     )
     res.json(result.rows[0])
+    avisarMidiaAdicionada('obras', obra_id, req.usuario.id)
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao salvar mídia' })
   }
