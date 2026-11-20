@@ -142,6 +142,8 @@ const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinh
 const { SQL_PROMOCOES_DA_PESSOA, SQL_SYNC_PROMOCOES_POR_PESSOA } = require('../utils/promocoesPessoa')
 const { normalizarTelefoneWhatsapp, primeiroNome: primeiroNomeWhatsapp } = require('../utils/telefoneWhatsapp')
 const { normalizarLocalAtendimento, aceitaLocalAtendimento, sqlAtendeLocal, migrarLocalAtendimento } = require('../utils/localAtendimento')
+// Dica "adicione uma foto ou vídeo" no aviso de pergunta nova ao dono (pedido sem mídia).
+const { TABELA_MIDIAS, dicaFoto } = require('../utils/dicaFoto')
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
 // Mesma pessoa em duas contas (dono e profissional, mesmo CPF): não se candidata ao próprio
 // pedido (400 demanda_propria nos três POSTs de criação) e não o vê no feed (sqlNaoDemandaPropria).
@@ -3836,8 +3838,10 @@ const criarHandlerPergunta = (tabela) => async (req, res) => {
     if (await ehDemandaPropria(tabela, req.params.id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
     // "Aberta e sem match" = a mesma expressão dos feeds e do armamento de proximidade:
     // status aberta, aprovada, prazo vigente, match_usuario_id nulo.
+    // sem_midia + categorias (só reparo): para a dica de foto no aviso ao dono (utils/dicaFoto).
     const d = await pool.query(
-      `SELECT titulo, criado_por,
+      `SELECT titulo, criado_por,${tabela === 'reparos' ? ' categoria, categorias,' : ''}
+              NOT EXISTS (SELECT 1 FROM ${TABELA_MIDIAS[tabela]} m WHERE m.${lado.chave} = ${lado.tabela}.id) AS sem_midia,
               (status = 'aberta' AND status_aprovacao = 'aprovada' AND expira_em > NOW() AND match_usuario_id IS NULL) AS aberta
          FROM ${lado.tabela} WHERE id = $1`,
       [req.params.id]
@@ -3861,7 +3865,7 @@ const criarHandlerPergunta = (tabela) => async (req, res) => {
     avisarUsuario(demanda.criado_por, {
       ator_id: req.usuario.id,
       titulo: '❓ Nova pergunta sobre seu pedido',
-      corpo: `${demanda.titulo}: responda para atrair propostas`,
+      corpo: `${demanda.titulo}: responda para atrair propostas${dicaFoto(tabela, demanda, demanda.sem_midia)}`,
       data: { tipo: 'nova_pergunta', [lado.chave]: req.params.id, pergunta_id: ins.rows[0].id },
       rotulo: `pergunta ${tabela} ${req.params.id}`,
     })
