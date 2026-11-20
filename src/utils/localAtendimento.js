@@ -14,9 +14,14 @@ const { categoriasDoReparo } = require('./categoriasApp')
 // Slugs REAIS de CATEGORIAS_SERVICO (utils/categoriasApp): manicure/pedicure, cabelo, barbeiro,
 // maquiagem, sobrancelha, depilação, massagem, podólogo e pet. 'tatuagem' saiu (dono, 12/11/2026):
 // tatuagem é sempre no estúdio, a pergunta não faz sentido.
+// Ampliada (dono, 20/11/2026) com serviços que também podem ser na casa do cliente ou no local do
+// profissional: mecânica, borracheiro, lava-jato, informática, eletrônica, estofamento, costura,
+// chaveiro, filmagem/fotografia, confeiteiro, salgadeiro, artesanato e aluguel para festas.
 const CATEGORIAS_LOCAL_ATENDIMENTO = Object.freeze([
   'manicure', 'cabelo', 'barbeiro', 'maquiagem', 'design_sobrancelhas',
   'depilacao', 'massagem', 'podologo', 'pet',
+  'mecanica', 'borracheiro', 'lavajato', 'informatica', 'eletronica', 'estofamento', 'costura',
+  'chaveiro', 'filmagem_fotografia', 'confeiteiro', 'salgadeiro', 'artesanato', 'aluguel_festas',
 ])
 const LOCAIS_ATENDIMENTO = Object.freeze(['casa_cliente', 'local_profissional', 'tanto_faz'])
 

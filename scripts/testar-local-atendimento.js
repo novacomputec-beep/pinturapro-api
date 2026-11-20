@@ -250,8 +250,15 @@ const main = async () => {
 
   // ═══ 1. Constante e normalização ═══════════════════════════════════════════════════════════
   const slugsServico = new Set(require(path.join(REPO, 'src/utils/categoriasApp')).CATEGORIAS_SERVICO.map(c => c.slug))
-  ok(LA.CATEGORIAS_LOCAL_ATENDIMENTO.length === 9 && LA.CATEGORIAS_LOCAL_ATENDIMENTO.every(s => slugsServico.has(s)),
-     'CATEGORIAS_LOCAL_ATENDIMENTO: 9 slugs, todos existentes em CATEGORIAS_SERVICO', LA.CATEGORIAS_LOCAL_ATENDIMENTO)
+  const BELEZA_PET = ['manicure', 'cabelo', 'barbeiro', 'maquiagem', 'design_sobrancelhas', 'depilacao', 'massagem', 'podologo', 'pet']
+  const NOVAS = ['mecanica', 'borracheiro', 'lavajato', 'informatica', 'eletronica', 'estofamento', 'costura',
+                 'chaveiro', 'filmagem_fotografia', 'confeiteiro', 'salgadeiro', 'artesanato', 'aluguel_festas']
+  ok(LA.CATEGORIAS_LOCAL_ATENDIMENTO.length === 22 && new Set(LA.CATEGORIAS_LOCAL_ATENDIMENTO).size === 22 && LA.CATEGORIAS_LOCAL_ATENDIMENTO.every(s => slugsServico.has(s)),
+     'CATEGORIAS_LOCAL_ATENDIMENTO: 22 slugs sem repetição, todos existentes em CATEGORIAS_SERVICO', LA.CATEGORIAS_LOCAL_ATENDIMENTO)
+  ok(BELEZA_PET.every(s => LA.CATEGORIAS_LOCAL_ATENDIMENTO.includes(s)), 'as 9 de beleza/pet continuam na lista')
+  ok(NOVAS.every(s => LA.CATEGORIAS_LOCAL_ATENDIMENTO.includes(s) && LA.normalizarLocalAtendimento('local_profissional', [s]).valor === 'local_profissional'),
+     'as 13 novas (mecânica … aluguel para festas) aceitam local_atendimento', NOVAS.filter(s => !LA.CATEGORIAS_LOCAL_ATENDIMENTO.includes(s)))
+  ok(!!LA.normalizarLocalAtendimento('xyz', ['mecanica']).erro, 'categoria nova + valor inválido → erro')
   ok(!LA.CATEGORIAS_LOCAL_ATENDIMENTO.includes('tatuagem') && LA.normalizarLocalAtendimento('casa_cliente', ['tatuagem']).valor === null,
      'tatuagem fora da lista: casa_cliente em tatuagem → ignorado (NULL)')
   ok(LA.normalizarLocalAtendimento('casa_cliente', ['tatuagem', 'maquiagem']).valor === 'casa_cliente', 'tatuagem + maquiagem → aceito (maquiagem é elegível)')
