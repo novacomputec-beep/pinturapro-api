@@ -136,6 +136,23 @@ const main = async () => {
     let r = await subir(rota.nome, DONO, ...rota.corpo(id))
     ok(r.status === 200 && r.pushes.length === 0 && r.emails.length === 0, `${rota.nome}: sem perguntas → nenhum aviso`, { pushes: r.pushes.length, emails: r.emails.length })
 
+    // Com profissional escolhido (match, ou só a proposta aceita) → upload 200, nenhum aviso, nenhum claim.
+    const propostas = t === 'obras' ? 'candidaturas' : 'interesse_reparos'
+    id = await demanda(t, 'Com match', 'aberta', 'aprovada', `match_usuario_id = '${PRO_A}'`)
+    await pergunta(tipo, id, PRO_A); await pergunta(tipo, id, PRO_B); await pergunta(tipo, id, PRO_SEM_TOKEN)
+    r = await subir(rota.nome, DONO, ...rota.corpo(id))
+    ok(r.status === 200 && r.pushes.length === 0 && r.emails.length === 0, `${rota.nome}: com match + perguntas → mídia entra, nenhum aviso`, { status: r.status, pushes: r.pushes.length, emails: r.emails.length })
+    id = await demanda(t, 'Proposta aceita')
+    await db.query(`INSERT INTO ${propostas} (${chave}, usuario_id, status) VALUES ($1, $2, 'aceito')`, [id, PRO_A])
+    await pergunta(tipo, id, PRO_A); await pergunta(tipo, id, PRO_B)
+    r = await subir(rota.nome, DONO, ...rota.corpo(id))
+    ok(r.status === 200 && r.pushes.length === 0 && r.emails.length === 0, `${rota.nome}: proposta aceita (sem match) + perguntas → nenhum aviso`, { status: r.status, pushes: r.pushes.length })
+    ok((await db.query(`SELECT count(*)::int AS n FROM avisos_midia_adicionada WHERE demanda_id = $1`, [id])).rows[0].n === 0, `${rota.nome}: pedido com escolhido não gasta a janela`)
+    // Match desfeito: volta a avisar no próximo arquivo.
+    await db.query(`UPDATE ${propostas} SET status = 'recusado' WHERE ${chave} = $1`, [id])
+    r = await subir(rota.nome, DONO, ...rota.corpo(id, 2))
+    ok(para(r.pushes, PRO_A).length === 1 && para(r.pushes, PRO_B).length === 1, `${rota.nome}: sem escolhido de novo → avisa`, r.pushes.map(p => p.to))
+
     id = await demanda(t, 'Vazamento na pia')
     await pergunta(tipo, id, PRO_A); await pergunta(tipo, id, PRO_B); await pergunta(tipo, id, PRO_SEM_TOKEN)
     r = await subir(rota.nome, DONO, ...rota.corpo(id, 1))

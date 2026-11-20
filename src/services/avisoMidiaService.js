@@ -6,11 +6,14 @@
 //      que perguntou recebe UM push (sem push / push falho → e-mail: entregarPushOuEmail) que abre o
 //      detalhe do pedido. No máximo um aviso por profissional por pedido a cada 10 minutos — vários
 //      arquivos em sequência viram um aviso só. Sem pergunta, ninguém é avisado.
+//      Só em pedido SEM profissional escolhido (utils/profissionalEscolhido: sem match e sem
+//      proposta aceita) — com alguém escolhido os demais não têm mais o que ver ali (21/11/2026).
 // O claim é atômico em avisos_midia_adicionada (PK tabela + demanda + usuário): o INSERT pega quem
 // nunca foi avisado e o DO UPDATE ... WHERE só reabre quem foi avisado há mais de 10 minutos; duas
 // chamadas simultâneas (dois arquivos subindo juntos) não avisam em dobro.
 const { pool } = require('../utils/supabase')
 const { contatoDaPessoa, entregarPushOuEmail } = require('./alertaService')
+const { sqlSemProfissionalEscolhido } = require('../utils/profissionalEscolhido')
 
 const LADOS = Object.freeze({
   obras:   { tipo: 'obra',   chave: 'obra_id' },
@@ -48,7 +51,9 @@ const avisarMidiaAdicionada = async (tabela, demandaId, atorId = null) => {
     const claim = await pool.query(
       `INSERT INTO avisos_midia_adicionada (tabela, demanda_id, usuario_id)
        SELECT $1, p.demanda_id, p.autor_id FROM perguntas_demanda p
+         JOIN ${tabela} d ON d.id = p.demanda_id
         WHERE p.tipo = $2 AND p.demanda_id = $3::uuid
+          AND ${sqlSemProfissionalEscolhido(tabela, 'd')}
        ON CONFLICT (tabela, demanda_id, usuario_id) DO UPDATE SET enviado_em = NOW()
         WHERE avisos_midia_adicionada.enviado_em <= NOW() - INTERVAL '${JANELA_MINUTOS} minutes'
        RETURNING usuario_id`,
