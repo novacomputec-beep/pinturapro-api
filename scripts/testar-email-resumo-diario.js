@@ -84,6 +84,11 @@ const main = async () => {
   // O esquema de produção vem sem chaves: as UNIQUE que o código usa em ON CONFLICT entram aqui.
   await db.exec(`
     CREATE UNIQUE INDEX email_alertas_teste_key ON email_alertas (tipo, demanda_id, usuario_id);
+    -- As restrições de PRODUÇÃO de email_alertas (demanda_id NOT NULL e o CHECK de tipo): sem elas este
+    -- teste passava enquanto em produção o INSERT da linha do resumo e o do lembrete "a cada ciclo" do
+    -- dono sem push (aviso:lembrete#AAAAMMDD#k) falhavam sempre.
+    ALTER TABLE email_alertas ALTER COLUMN demanda_id SET NOT NULL;
+    ALTER TABLE email_alertas ADD CONSTRAINT email_alertas_tipo_check CHECK (${require(path.join(REPO, 'src/services/emailResumoDiarioService')).CHECK_TIPO_EMAIL_ALERTAS});
     CREATE UNIQUE INDEX configuracoes_teste_key ON configuracoes (chave);
     INSERT INTO configuracoes (chave, valor) VALUES ('email_resumo_diario', 'true'), ('grupos_relacionados_ativo', 'true');
     SET search_path = public, pg_catalog;
@@ -141,6 +146,14 @@ const main = async () => {
   const vc = await A.entregarLembrete({ usuario_id: DONO_SEM, push_token: null, email: 'donosem@x.invalid', nome: 'Dono Sem', emailCadaCiclo: true, titulo: '❓ 1 pergunta aguarda sua resposta', corpo: 'Responda.', data: { tipo: 'nova_pergunta', reparo_id: R3 }, rotulo: 'teste ciclo' })
   silenciar(false)
   ok(vc === 'e-mail' && para('donosem@x.invalid').length === 2 && (await itens(DONO_SEM)).length === 0, 'lembrete "a cada ciclo" do dono sem push: e-mail na hora', vc)
+  const chavesCiclo = async () => (await q(`SELECT tipo FROM email_alertas WHERE usuario_id = $1 AND demanda_id = $2 AND tipo LIKE 'aviso:lembrete#%' ORDER BY tipo`, [DONO_SEM, R3])).rows.map(x => x.tipo)
+  ok((await chavesCiclo()).length === 1 && /^aviso:lembrete#\d{8}#1$/.test((await chavesCiclo())[0]), 'a chave aviso:lembrete#AAAAMMDD#1 é gravada com o CHECK de produção (antes: recusada → "falha")', await chavesCiclo())
+  silenciar(true)
+  const ciclos = []
+  for (let k = 2; k <= 7; k++) ciclos.push(await A.entregarLembrete({ usuario_id: DONO_SEM, push_token: null, email: 'donosem@x.invalid', nome: 'Dono Sem', emailCadaCiclo: true, titulo: '❓ 1 pergunta aguarda sua resposta', corpo: 'Responda.', data: { tipo: 'nova_pergunta', reparo_id: R3 }, rotulo: 'teste ciclo' }))
+  silenciar(false)
+  ok(ciclos.slice(0, 5).every(x => x === 'e-mail') && ciclos[5] === 'e-mail teto do dia' && (await chavesCiclo()).length === 6 && para('donosem@x.invalid').length === 7,
+     'ciclos 2 a 6 saem (chaves #2…#6) e o 7º do dia para no teto de 6 por pedido', { ciclos, chaves: (await chavesCiclo()).length })
 
   v = await avisar(DONA_IRMA, 'novo_interesse', R4, '🙋 Novo interessado', 'Ana se interessou pelo seu pedido.')
   ok(v === 'push+e-mail no resumo' && para('donairma@x.invalid').length === 0 && (await itens(DONA_IRMA)).length === 1 && pushes.some(p => p.to === 'ExponentPushToken[irma]'),
@@ -179,12 +192,6 @@ const main = async () => {
   v = await avisar(PROF, 'interesse_aceito', R1, '✅ Proposta aceita', 'O dono aceitou sua proposta.')
   ok(v === 'push+e-mail no resumo' && (await itens(PROF)).length === 2, 'aviso do dia a dia ao profissional com push: resumo (2ª linha dele)', v)
 
-  // As DUAS restrições de produção que barravam a linha do resumo em email_alertas (demanda_id NOT NULL e o
-  // CHECK de tipo): sem elas este teste passava enquanto em produção o INSERT falhava sempre. Entram só AQUI
-  // porque a chave do lembrete "a cada ciclo" testada acima (aviso:lembrete#AAAAMMDD#k) também é recusada por
-  // esse CHECK em produção — defeito separado, relatado ao dono em 20/11/2026 e ainda não corrigido.
-  await db.exec(`ALTER TABLE email_alertas ALTER COLUMN demanda_id SET NOT NULL;
-                 ALTER TABLE email_alertas ADD CONSTRAINT email_alertas_tipo_check CHECK (${require(path.join(REPO, 'src/services/emailResumoDiarioService')).CHECK_TIPO_EMAIL_ALERTAS}) NOT VALID;`)
   // ═══════════ CRON ═══════════
   emails.length = 0
   await fixarAgora(8 * 60 + 59) // 18:59 SP

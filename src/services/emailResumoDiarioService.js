@@ -40,9 +40,13 @@ const SEM_PEDIDO = 'Sua conta'
 const DEMANDA_DO_RESUMO = '00000000-0000-0000-0000-000000000000'
 // CHECK de email_alertas.tipo — a ÚNICA definição (a migração de boot em routes/index.js e os testes
 // usam esta): demanda nova, lembrete por fatia / reanúncio, avisos 1:1 e a linha do resumo diário.
+// Avisos 1:1: 'aviso:<evento>#<hash8 | número>' e, desde 20/11/2026, um '#k' opcional no fim — é a
+// chave do lembrete "a cada ciclo" do dono sem push ativo ('aviso:lembrete#AAAAMMDD#k',
+// alertaService.reivindicarEmailLembreteCiclo), que o CHECK anterior recusava: o INSERT do claim
+// falhava e esse e-mail nunca saía.
 const CHECK_TIPO_EMAIL_ALERTAS = `tipo IN ('obra', 'reparo')
                                    OR tipo ~ '^(lembrete|reaberta)_(obra|reparo)(#[0-9]+)?$'
-                                   OR tipo ~ '^aviso:[a-z_]+#([0-9a-f]{8}|[0-9]+)$'
+                                   OR tipo ~ '^aviso:[a-z_]+#([0-9a-f]{8}|[0-9]+)(#[0-9]+)?$'
                                    OR tipo ~ '^resumo_diario#[0-9]{8}$'`
 
 // Erro de leitura (tabela ausente num teste de mini-esquema, banco fora) = desligado: vale o

@@ -1645,8 +1645,10 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
       // ('aviso:agendar#3'). jaAceita olha o padrão mais novo: CHECK antigo é recriado.
       // 20/11/2026: + a linha do resumo diário ('resumo_diario#AAAAMMDD', emailResumoDiarioService),
       // que o CHECK anterior recusava — o resumo nunca contava no teto. O texto do CHECK mora em
-      // CHECK_TIPO_EMAIL_ALERTAS; jaAceita olha o padrão mais novo.
-      const jaAceita = chksTipoEmail.rows.some(r => r.def.includes('resumo_diario'))
+      // CHECK_TIPO_EMAIL_ALERTAS; jaAceita olha o padrão mais novo. Mesmo dia, 2ª mudança: os avisos
+      // 1:1 ganham o '#k' opcional do lembrete "a cada ciclo" do dono sem push
+      // ('aviso:lembrete#AAAAMMDD#k'), também recusado até aqui.
+      const jaAceita = chksTipoEmail.rows.some(r => r.def.includes('|[0-9]+)(#[0-9]+)?$'))
       if (!jaAceita) {
         for (const r of chksTipoEmail.rows) {
           await client.query(`ALTER TABLE email_alertas DROP CONSTRAINT IF EXISTS ${client.escapeIdentifier(r.conname)}`)
