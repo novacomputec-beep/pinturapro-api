@@ -508,7 +508,8 @@ CREATE TABLE IF NOT EXISTS "push_entregas" (
   "resultado" text,
   "tentativas" integer DEFAULT 1 NOT NULL,
   "primeira_tentativa_em" timestamp with time zone DEFAULT now() NOT NULL,
-  "ultima_tentativa_em" timestamp with time zone DEFAULT now() NOT NULL
+  "ultima_tentativa_em" timestamp with time zone DEFAULT now() NOT NULL,
+  "resumo_em" timestamp with time zone
 );
 
 CREATE TABLE IF NOT EXISTS "push_recibos" (

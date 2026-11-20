@@ -121,7 +121,7 @@ const main = async () => {
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid, UNIQUE (dono_id, prestador_id));
     CREATE TABLE lembretes_push_enviados (tabela text, demanda_id uuid, usuario_id uuid, motivo text, enviado_em timestamptz NOT NULL DEFAULT now());
     CREATE TABLE avisos_acima_do_teto (tabela text, demanda_id uuid, usuario_id uuid, criado_em timestamptz NOT NULL DEFAULT now(), resumo_em timestamptz, PRIMARY KEY (tabela, demanda_id, usuario_id));
-    CREATE TABLE push_entregas (primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz, UNIQUE (tipo, demanda_id, usuario_id));
+    CREATE TABLE push_entregas (resumo_em timestamptz, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz, UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT '2026-11-10T15:00:00Z', UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz);
     INSERT INTO configuracoes (chave, valor) VALUES ('grupos_relacionados_ativo', 'true'), ('multiplas_contas', 'true');
@@ -227,7 +227,7 @@ const main = async () => {
   ok(av && av.data.tipo === 'novo_reparo' && av.data.reparo_id === D(1) && av.data.fora_da_area === true, 'data: mesmo tipo/id do aviso de serviço novo + fora_da_area', av?.data)
   // só push: nenhum e-mail a quem está fora da área, nada no teto do Brevo
   const emailados = (await db.query(`SELECT usuario_id FROM email_alertas WHERE demanda_id = $1`, [D(1)])).rows.map(x => x.usuario_id)
-  ok(igual(emailados, [RE.id, RG.id, PS.id, DR.id]) && emails.length === 4, 'e-mail só ao público NORMAL (4): o aviso fora da área é SÓ PUSH e não gasta o teto do Brevo', { email_alertas: emailados.length, enviados: emails.length })
+  ok(emailados.length === 0 && emails.length === 0, 'quem recebeu o push de demanda nova não recebe e-mail na hora; o aviso fora da área segue SÓ PUSH e não gasta o teto do Brevo', { email_alertas: emailados.length, enviados: emails.length })
   ok(!p.fora.some(x => x.to === tok(STOK.id)) && !emailados.includes(STOK.id), 'fora da área SEM token: não recebe nada (não há e-mail de reserva)')
   const log = (await db.query(`SELECT usuario_id FROM avisos_fora_area WHERE tabela = 'reparos' AND demanda_id = $1`, [D(1)])).rows.map(x => x.usuario_id)
   ok(igual(log, [RF.id, PN.id, TR.id]), 'avisos_fora_area registra os 3 envios (base do teto diário)', log.length)

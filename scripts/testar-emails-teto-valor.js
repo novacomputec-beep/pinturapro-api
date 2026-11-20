@@ -102,12 +102,12 @@ const main = async () => {
     CREATE TABLE assinaturas (usuario_id uuid, status text, proximo_vencimento timestamptz);
     CREATE TABLE reparos (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
     CREATE TABLE obras (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, valor numeric, horas_para_expirar numeric, metragem numeric, prazo_execucao_dias int, push_aprovada_enviado_em timestamptz, enviada_por_dono boolean);
-    CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, criado_em timestamptz DEFAULT now());
-    CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, criado_em timestamptz DEFAULT now());
+    CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, status text DEFAULT 'pendente', criado_em timestamptz DEFAULT now());
+    CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, status text DEFAULT 'pendente', criado_em timestamptz DEFAULT now());
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);
     CREATE TABLE lembretes_push_enviados (tabela text, demanda_id uuid, usuario_id uuid, motivo text, enviado_em timestamptz NOT NULL DEFAULT now());
     CREATE TABLE avisos_acima_do_teto (tabela text, demanda_id uuid, usuario_id uuid, criado_em timestamptz NOT NULL DEFAULT now(), resumo_em timestamptz, PRIMARY KEY (tabela, demanda_id, usuario_id));
-    CREATE TABLE push_entregas (primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
+    CREATE TABLE push_entregas (resumo_em timestamptz, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz);
     INSERT INTO configuracoes (chave, valor) VALUES ('grupos_relacionados_ativo', 'true');
@@ -143,16 +143,16 @@ const main = async () => {
   const enviar = async (fn) => { silenciar(true); emails.length = 0; const r = await fn(); await assentar(); silenciar(false); return r }
 
   // ═══ (A1) sobra do teto → sem token primeiro; corte marca a demanda ═══════════════════════
-  await encher(180)                       // 180 de 190 já gastos hoje
+  await encher(185)                       // 185 de 190 já gastos hoje
   await encher(40, 'aviso:qualquer#1')    // avisos críticos NÃO contam
   let o = await alerta.orcamentoEmailsDeDemanda()
-  ok(o.restante === 10 && o.restanteLembretes === 10, 'orçamento: 180 gastos → restam 10; linhas "aviso:" não contam', o)
+  ok(o.restante === 5 && o.restanteLembretes === 5, 'orçamento: 185 gastos → restam 5; linhas "aviso:" não contam', o)
   await reparo(D(1), 'Trocar tomada')
   await enviar(() => alerta.enviarEmailsNovaDemanda('reparos', D(1)))
   let r1 = await recebidos(D(1))
-  ok(r1.length === 10 && emails.length === 10, 'D1 com 20 elegíveis e 10 de orçamento: saem 10 (não zero, não todos)', { claims: r1.length, enviados: emails.length })
-  ok(SEM_TOKEN.every(id => r1.includes(id)), 'os 8 SEM token recebem primeiro', r1.filter(id => SEM_TOKEN.includes(id)).length)
-  ok(igual(r1.filter(id => COM_TOKEN.includes(id)), [U(1), U(2)]), 'as 2 vagas restantes vão aos com token, por id', r1.filter(id => COM_TOKEN.includes(id)).map(x => x.slice(-2)))
+  ok(r1.length === 5 && emails.length === 5, 'D1 com 8 elegíveis (os SEM token) e 5 de orçamento: saem 5 (não zero, não todos)', { claims: r1.length, enviados: emails.length })
+  ok(igual(r1, [...SEM_TOKEN].sort().slice(0, 5)), 'os 5 são SEM token, por id', r1.map(x => x.slice(-2)))
+  ok(r1.filter(id => COM_TOKEN.includes(id)).length === 0, 'quem TEM token instalado não recebe e-mail de demanda nova', r1.filter(id => COM_TOKEN.includes(id)).map(x => x.slice(-2)))
   ok(await pendente('reparos', D(1)) !== null, 'corte PARCIAL: D1 fica marcada (email_novo_pendente_em)')
   await fixarAgora('2026-11-10T16:00:00Z')
   await reparo(D(2), 'Instalar chuveiro')
@@ -161,7 +161,7 @@ const main = async () => {
      'D2 publicada com o teto ESGOTADO: zero e-mails hoje, mas fica marcada (antes era zero para sempre)')
   // mesmo dia: o cron não tem orçamento
   await enviar(() => alerta.enviarEmailsPendentesNovaDemanda())
-  ok(emails.length === 0 && (await recebidos(D(1))).length === 10, 'cron no MESMO dia: sem orçamento, nada sai', emails.length)
+  ok(emails.length === 0 && (await recebidos(D(1))).length === 5, 'cron no MESMO dia: sem orçamento, nada sai', emails.length)
 
   // ═══ (A2) dia seguinte: o que faltou sai, a partir das 08h, mais antiga primeiro ══════════
   await fixarAgora('2026-11-11T09:30:00Z') // quarta, 06:30 SP — orçamento novo, mas fora da janela
@@ -171,9 +171,9 @@ const main = async () => {
   await enviar(() => alerta.enviarEmailsPendentesNovaDemanda())
   r1 = await recebidos(D(1))
   const r2 = await recebidos(D(2))
-  ok(r1.length === 20 && igual(r1, [...COM_TOKEN, ...SEM_TOKEN]), 'D1: os 10 que faltavam receberam — 20 de 20, ninguém em dobro', r1.length)
-  ok(r2.length === 20, 'D2: os 20 receberam no dia seguinte', r2.length)
-  ok(emails.length === 30, 'dia seguinte: 30 e-mails (10 + 20), nenhum repetido', emails.length)
+  ok(r1.length === 8 && igual(r1, [...SEM_TOKEN]), 'D1: os 3 que faltavam receberam — 8 de 8 (todos os SEM token), ninguém em dobro', r1.length)
+  ok(r2.length === 8 && igual(r2, [...SEM_TOKEN]), 'D2: os 8 SEM token receberam no dia seguinte', r2.length)
+  ok(emails.length === 11, 'dia seguinte: 11 e-mails (3 + 8), nenhum repetido', emails.length)
   const ordem = (await db.query(`SELECT demanda_id, min(ctid::text) AS primeiro FROM email_alertas WHERE created_at = now() GROUP BY demanda_id`)).rows
   ok(await pendente('reparos', D(1)) === null && await pendente('reparos', D(2)) === null, 'as duas demandas saem da lista de pendentes', ordem.length)
   await enviar(() => alerta.enviarEmailsPendentesNovaDemanda())
@@ -191,11 +191,11 @@ const main = async () => {
   await db.query(`UPDATE reparos SET email_novo_pendente_em = now(), match_usuario_id = $2 WHERE id = $1`, [D(5), U(1)])
   ok((await recebidos(D(3))).length === 0 && (await recebidos(D(4))).length === 0, 'D3 e D4 publicadas com o teto esgotado: zero hoje')
   await fixarAgora('2026-11-13T12:00:00Z') // sexta 09:00
-  await encher(165)                         // hoje só restam 25
+  await encher(178)                         // hoje só restam 12
   await enviar(() => alerta.enviarEmailsPendentesNovaDemanda())
   const r3 = await recebidos(D(3)), r4 = await recebidos(D(4))
-  ok(r3.length === 20 && r4.length === 5, 'com 25 de orçamento: a mais ANTIGA (D3) recebe inteira e a mais nova (D4) fica com 5', { D3: r3.length, D4: r4.length })
-  ok(r4.every(id => SEM_TOKEN.includes(id)), 'os 5 da D4 são de quem NÃO tem token', r4.map(x => x.slice(-2)))
+  ok(r3.length === 8 && r4.length === 4, 'com 12 de orçamento: a mais ANTIGA (D3) recebe inteira (8) e a mais nova (D4) fica com 4', { D3: r3.length, D4: r4.length })
+  ok(r4.every(id => SEM_TOKEN.includes(id)), 'os 4 da D4 são de quem NÃO tem token', r4.map(x => x.slice(-2)))
   ok(await pendente('reparos', D(3)) === null && await pendente('reparos', D(4)) !== null, 'D3 quitada; D4 continua marcada para o dia seguinte')
   ok(await pendente('reparos', D(5)) === null && (await recebidos(D(5))).length === 0, 'demanda que já tem profissional perde a marca sem enviar nada')
 
@@ -215,10 +215,10 @@ const main = async () => {
   ok(emails.length === 0, 'sub-teto de lembretes esgotado (60): o próximo lembrete do dia não sai', emails.length)
   await reparo(D(8), 'Demanda nova no mesmo dia')
   await enviar(() => alerta.enviarEmailsNovaDemanda('reparos', D(8)))
-  ok((await recebidos(D(8))).length === 20 && await pendente('reparos', D(8)) === null,
-     'demanda NOVA no mesmo dia recebe os 20 e-mails: os lembretes não a deixam mais sem orçamento', (await recebidos(D(8))).length)
+  ok((await recebidos(D(8))).length === 8 && await pendente('reparos', D(8)) === null,
+     'demanda NOVA no mesmo dia recebe os 8 e-mails (SEM token): os lembretes não a deixam mais sem orçamento', (await recebidos(D(8))).length)
   o = await alerta.orcamentoEmailsDeDemanda()
-  ok(o.restante === 110 && o.restanteLembretes === 0 && alerta.EMAIL_ALERTAS_TETO_LEMBRETES === 60 && alerta.EMAIL_ALERTAS_TETO_DEMANDA === 190, 'orçamento ao fim: 80 gastos, lembretes zerados', o)
+  ok(o.restante === 122 && o.restanteLembretes === 0 && alerta.EMAIL_ALERTAS_TETO_LEMBRETES === 60 && alerta.EMAIL_ALERTAS_TETO_DEMANDA === 190, 'orçamento ao fim: 68 gastos, lembretes zerados', o)
 
   // ═══ (B) obra criada pelo PAINEL: carimbo no claim, sem segundo push ══════════════════════
   await fixarAgora('2026-11-16T15:00:00Z') // segunda 12:00
@@ -232,7 +232,7 @@ const main = async () => {
   const carimbo = (await db.query(`SELECT push_novo_enviado_em FROM obras WHERE id = $1`, [obraId])).rows[0]?.push_novo_enviado_em
   const pushNova = () => pushes.filter(p => p.data?.tipo === 'nova_obra' && p.data.obra_id === obraId && !p.data.fora_da_area)
   ok(pushNova().length === 3 && !!carimbo, 'obra do painel: push aos 3 pintores E push_novo_enviado_em carimbado', { pushes: pushNova().length, carimbo: !!carimbo })
-  ok((await recebidos(obraId, 'obra')).length === 3, 'obra do painel: o e-mail sai junto (antes só saía depois da rede de segurança)', (await recebidos(obraId, 'obra')).length)
+  ok((await recebidos(obraId, 'obra')).length === 0, 'obra do painel: os 3 pintores receberam o push → nenhum e-mail na hora', (await recebidos(obraId, 'obra')).length)
   await fixarAgora('2026-11-16T15:20:00Z') // 20 min depois: a rede de segurança roda
   silenciar(true)
   await alerta.enviarPushNovoPendente()

@@ -132,7 +132,7 @@ const main = async () => {
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz DEFAULT now());
     CREATE TABLE contratos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tipo text, demanda_id uuid, interesse_id uuid, valor_acordado numeric, criado_em timestamptz DEFAULT now());
     CREATE TABLE tentativas_contato (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), usuario_id uuid, criado_em timestamptz DEFAULT now());
-    CREATE TABLE push_entregas (tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(), primeira_tentativa_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
+    CREATE TABLE push_entregas (resumo_em timestamptz, tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(), primeira_tentativa_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);
     CREATE TABLE reparos (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda});
     CREATE TABLE obras (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda});

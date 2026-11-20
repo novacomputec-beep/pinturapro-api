@@ -195,7 +195,7 @@ const main = async () => {
     CREATE TABLE avisos_fora_area (tabela text, demanda_id uuid, usuario_id uuid, enviado_em timestamptz NOT NULL DEFAULT now());
     CREATE TABLE lembretes_push_enviados (tabela text, demanda_id uuid, usuario_id uuid, motivo text, enviado_em timestamptz NOT NULL DEFAULT now());
     CREATE TABLE avisos_acima_do_teto (tabela text, demanda_id uuid, usuario_id uuid, criado_em timestamptz NOT NULL DEFAULT now(), resumo_em timestamptz, PRIMARY KEY (tabela, demanda_id, usuario_id));
-    CREATE TABLE push_entregas (primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(),
+    CREATE TABLE push_entregas (resumo_em timestamptz, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(),
       criado_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz DEFAULT now());
@@ -329,7 +329,7 @@ const main = async () => {
   silenciar(false)
   ok(igual(pushHidraulica, [tok(DUR.id)]), 'DUO elegível nas DUAS contas no serviço: UM push, na conta do tipo nativo (reparador)', pushHidraulica)
   const emHid = (await db.query(`SELECT usuario_id FROM email_alertas WHERE tipo = 'reparo' AND demanda_id = $1`, [D(3)])).rows.map(x => x.usuario_id)
-  ok(igual(emHid, [DUR.id]) && emails.length === 1, 'DUO: UM e-mail do serviço (conta reparador)', { contas: emHid.length, enviados: emails.length })
+  ok(emHid.length === 0 && emails.length === 0, 'DUO recebeu o push do serviço: nenhum e-mail na hora (em nenhuma das duas contas)', { contas: emHid.length, enviados: emails.length })
   ok(pushObra.filter(t => [tok(DUP.id), tok(DUR.id)].includes(t)).join() === tok(DUP.id), 'DUO elegível nas DUAS contas na obra: UM push, na conta do tipo nativo (pintor)', pushObra)
   ok(pushObra.includes(tok(PP.id)) && !pushObra.includes(tok(PR.id)) && !pushObra.includes(tok(EST.id)), 'obra: PESSOA recebe UMA vez (pela conta pintor); estranho reparador não recebe', pushObra)
   // Só uma das contas com token: a pessoa recebe por ela.

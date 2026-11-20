@@ -138,7 +138,7 @@ const main = async () => {
     CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, criado_em timestamptz DEFAULT now());
     CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, criado_em timestamptz DEFAULT now());
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);
-    CREATE TABLE push_entregas (tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(),
+    CREATE TABLE push_entregas (resumo_em timestamptz, tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(),
       ultima_tentativa_em timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz);
@@ -205,7 +205,7 @@ const main = async () => {
   ok(quem(r.normal).includes('ROBR'), 'reparador com especialidade de obra a 26 km: pode_obras continua valendo, agora por distância')
   ok(!quem(r.normal).some(n => ['SUSP', 'SEMA', 'DESI', 'RELE', 'RFAX', 'CRIADOR'].includes(n)),
      'filtros mantidos: suspenso, sem assinatura, desinstalado, quem não pode obras e a conta do criador ficam de fora', quem(r.normal))
-  ok(igual(await emailados(D(1), 'obra'), ESPERADO_OBRA), 'E-MAIL nova obra: o MESMO público do push (por distância)', await emailados(D(1), 'obra'))
+  ok(igual(await emailados(D(1), 'obra'), ['DESI']), 'E-MAIL nova obra: só quem NÃO tem push entregável — DESI (desinstalado, no alcance por distância); quem recebeu o push não recebe e-mail na hora', await emailados(D(1), 'obra'))
   ok(igual(quem(r.fora), ['RLF']) , '"fora da sua área" continua por CIDADE: só o reparador de Lagoa Formosa', quem(r.fora))
 
   // demanda SEM coordenadas → recuo para a cidade, para todos
@@ -217,7 +217,7 @@ const main = async () => {
   await reparo(D(3), 'Trocar tomada', 'eletrica')
   r = await publicar('reparos', D(3))
   ok(igual(quem(r.normal), ['RELE']), 'push NOVO SERVIÇO (elétrica) em Lagoa Formosa: reparador de elétrica de Patos (25 km); o de faxina não (especialidade mantida)', quem(r.normal))
-  ok(igual(await emailados(D(3), 'reparo'), ['RELE']), 'e-mail do serviço: mesmo público', await emailados(D(3), 'reparo'))
+  ok((await emailados(D(3), 'reparo')).length === 0, 'e-mail do serviço: RELE recebeu o push → nenhum e-mail na hora', await emailados(D(3), 'reparo'))
 
   // ═══ 3. REANÚNCIO: mesmo alcance (cidade OU distância) e conta no teto ═════════════════════
   const reanunciar = async (id) => { silenciar(true); pushes.length = 0; emails.length = 0; await alerta.reanunciarDemanda('obras', id); await assentar(); silenciar(false); return pushes.filter(p => p.data?.reaberta) }
@@ -260,7 +260,7 @@ const main = async () => {
   r = await publicar('obras', D(6))
   ok(!quem(r.normal).includes('PAT') && quem(r.normal).includes('PAT30'), '16ª demanda: PAT (no teto) NÃO recebe push; os demais recebem normalmente', quem(r.normal))
   ok(igual(await acimaDoTeto(D(6)), ['PAT']), 'a demanda que passou do teto fica registrada para o resumo', await acimaDoTeto(D(6)))
-  ok((await emailados(D(6), 'obra')).includes('PAT'), 'o teto é só de PUSH: o e-mail da demanda continua indo')
+  ok(!(await emailados(D(6), 'obra')).includes('PAT'), 'acima do teto de push NÃO é "sem push": PAT tem token instalado → sem e-mail na hora (o pedido fica no push-resumo)')
   ok((await db.query(`SELECT count(*)::int AS n FROM push_entregas WHERE demanda_id = $1 AND usuario_id = $2`, [D(6), P.PAT.id])).rows[0].n === 0, 'sem linha em push_entregas para quem ficou acima do teto')
   // "fora da área" CONTA no teto e é limitado por ele
   // RLF (faxina, Lagoa Formosa) recebeu "fora da área" das 5 obras de hoje e do serviço de elétrica: 6.

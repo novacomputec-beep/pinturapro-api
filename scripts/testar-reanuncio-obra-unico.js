@@ -85,7 +85,7 @@ const main = async () => {
     CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, status text, criado_em timestamptz DEFAULT now());
     CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, criado_em timestamptz DEFAULT now());
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);
-    CREATE TABLE push_entregas (tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(),
+    CREATE TABLE push_entregas (resumo_em timestamptz, tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(),
       ultima_tentativa_em timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz);
@@ -141,13 +141,13 @@ const main = async () => {
   ok(pushes.every(p => p.title === '🏠 Nova obra disponível!' && p.body === '"Instalação de ponto de água e esgoto" em Niterói acabou de ser publicada! Categoria: Residencial.' && p.data?.tipo === 'nova_obra' && p.data?.obra_id === OBRA),
      'push: texto e data do aviso normal de obra nova (toque abre a obra)', pushes[0] && [pushes[0].title, pushes[0].body, pushes[0].data])
   const paraEmail = emails.map(e => e.para).sort()
-  ok(igual(paraEmail, ['enc@x.invalid', 'ped@x.invalid', 'semtoken@x.invalid']), 'e-mail: encanador, pedreiro e o sem token; pintor (já tinha e-mail) não', paraEmail)
+  ok(igual(paraEmail, ['semtoken@x.invalid']), 'e-mail: só o sem token — encanador e pedreiro receberam o push; pintor (já tinha e-mail) não', paraEmail)
   ok(emails.every(e => e.assunto === '⏳ Pedido ainda aberto: Instalação de ponto de água e esgoto'), 'e-mail: modelo normal (obra anunciada há > 6 h → texto "ainda aberto")', emails.map(e => e.assunto))
   const entregues = (await db.query(`SELECT usuario_id FROM push_entregas WHERE tipo = 'obra' AND demanda_id = $1 AND resultado = 'enviado' ORDER BY usuario_id`, [OBRA])).rows.map(r => r.usuario_id)
   ok(igual(entregues, [PINTOR, ENCANADOR, PEDREIRO].sort()), 'push_entregas: os novos registrados como num aviso normal (tipo obra)', entregues)
   const emailsObra = (await db.query(`SELECT count(*)::int AS n FROM email_alertas WHERE tipo = 'obra' AND demanda_id = $1`, [OBRA])).rows[0].n
-  ok(emailsObra === 4, 'email_alertas: 1 original + 3 novos (tipo obra)', emailsObra)
-  ok(logs.includes('[reanuncio] obra 3eab5c42: 2 push, 3 e-mail'), 'log: "[reanuncio] obra 3eab5c42: 2 push, 3 e-mail"', logs.filter(x => /reanuncio/.test(x)))
+  ok(emailsObra === 2, 'email_alertas: 1 original + 1 novo (tipo obra)', emailsObra)
+  ok(logs.includes('[reanuncio] obra 3eab5c42: 2 push, 1 e-mail'), 'log: "[reanuncio] obra 3eab5c42: 2 push, 1 e-mail"', logs.filter(x => /reanuncio/.test(x)))
   const c1 = await claim()
   ok(c1 && JSON.parse(c1.valor).push_enviados === 2, 'claim gravado em configuracoes com o resultado', c1 && c1.valor.slice(0, 80))
 
@@ -164,7 +164,7 @@ const main = async () => {
   pushes.length = 0; emails.length = 0; logs.length = 0
   await comLogs(() => O.rodarReanunciosUnicosPorObra([{ chave: 'teste_teto', obraId: OBRA2 }]))
   const resumo = (await db.query(`SELECT 1 FROM avisos_acima_do_teto WHERE demanda_id = $1 AND usuario_id = $2`, [OBRA2, PEDREIRO])).rows.length
-  ok(pushesDe('ped').length === 0 && resumo === 1 && emails.some(e => e.para === 'ped@x.invalid'), 'teto diário: pedreiro sem push (registrado para o resumo), e-mail sai', { pushPed: pushesDe('ped').length, resumo })
+  ok(pushesDe('ped').length === 0 && resumo === 1 && !emails.some(e => e.para === 'ped@x.invalid'), 'teto diário: pedreiro sem push (registrado para o push-resumo) e SEM e-mail na hora — ele tem token instalado', { pushPed: pushesDe('ped').length, resumo })
 
   // Obra que não está mais aberta/sem match: pula em silêncio.
   const OBRA3 = D(71)

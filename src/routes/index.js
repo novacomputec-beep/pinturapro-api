@@ -142,6 +142,8 @@ const { sqlTipoConta, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, tipoDaLinh
 const { SQL_PROMOCOES_DA_PESSOA, SQL_SYNC_PROMOCOES_POR_PESSOA } = require('../utils/promocoesPessoa')
 const { normalizarTelefoneWhatsapp, primeiroNome: primeiroNomeWhatsapp } = require('../utils/telefoneWhatsapp')
 const { normalizarLocalAtendimento, aceitaLocalAtendimento, sqlAtendeLocal, migrarLocalAtendimento } = require('../utils/localAtendimento')
+// CHECK de email_alertas.tipo (migração de boot) — definição única no serviço do resumo diário.
+const { CHECK_TIPO_EMAIL_ALERTAS } = require('../services/emailResumoDiarioService')
 // Dica "adicione uma foto ou vídeo" no aviso de pergunta nova ao dono (pedido sem mídia).
 const { TABELA_MIDIAS, dicaFoto } = require('../utils/dicaFoto')
 // Mídia depois da publicação: 409 em pedido finalizado e aviso a quem perguntou (services/avisoMidiaService).
@@ -1542,6 +1544,17 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     // Teto diário de pushes de demanda (utils/avisosPorDistancia.sqlPushesDeDemandaHoje): a contagem
     // "pushes desta pessoa hoje" roda para cada candidato do broadcast — por usuário e data.
     await client.query(`CREATE INDEX IF NOT EXISTS push_entregas_usuario_dia_idx ON push_entregas (usuario_id, primeira_tentativa_em)`)
+    // push_entregas.resumo_em (20/11/2026): claim de "este push de demanda nova já virou linha do
+    // resumo diário" (alertaService.guardarDemandaNovaNoResumo). Na PRIMEIRA vez (coluna ainda não
+    // existe) as linhas que já estão lá são marcadas: os pedidos anunciados antes desta versão não
+    // entram no resumo de uma vez só. Nos boots seguintes é no-op (não remarca nada).
+    const temResumoEm = await client.query(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'push_entregas' AND column_name = 'resumo_em'`)
+    if (temResumoEm.rows.length === 0) {
+      await client.query(`ALTER TABLE push_entregas ADD COLUMN resumo_em TIMESTAMPTZ`)
+      await client.query(`UPDATE push_entregas SET resumo_em = NOW() WHERE resumo_em IS NULL`)
+    }
     // Diagnóstico de push (utils/pushRecibos): uma linha por mensagem enviada ao Expo, com o
     // ticket do envio e o recibo consultado ~15 s depois (processarRecibos). Só observação —
     // nada no envio lê esta tabela. tipo = data.tipo do push; demanda_id = reparo_id/obra_id
@@ -1630,15 +1643,16 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
       // reanúncio caía na exceção) e os avisos 1:1 pós-match de entregarPushEEmail
       // ('aviso:<evento>#<hash8>') e os lembretes repetidos com chave numerada pelo ciclo
       // ('aviso:agendar#3'). jaAceita olha o padrão mais novo: CHECK antigo é recriado.
-      const jaAceita = chksTipoEmail.rows.some(r => r.def.includes('|[0-9]+)$'))
+      // 20/11/2026: + a linha do resumo diário ('resumo_diario#AAAAMMDD', emailResumoDiarioService),
+      // que o CHECK anterior recusava — o resumo nunca contava no teto. O texto do CHECK mora em
+      // CHECK_TIPO_EMAIL_ALERTAS; jaAceita olha o padrão mais novo.
+      const jaAceita = chksTipoEmail.rows.some(r => r.def.includes('resumo_diario'))
       if (!jaAceita) {
         for (const r of chksTipoEmail.rows) {
           await client.query(`ALTER TABLE email_alertas DROP CONSTRAINT IF EXISTS ${client.escapeIdentifier(r.conname)}`)
         }
         await client.query(`ALTER TABLE email_alertas ADD CONSTRAINT email_alertas_tipo_check
-                            CHECK (tipo IN ('obra', 'reparo')
-                                   OR tipo ~ '^(lembrete|reaberta)_(obra|reparo)(#[0-9]+)?$'
-                                   OR tipo ~ '^aviso:[a-z_]+#([0-9a-f]{8}|[0-9]+)$')`)
+                            CHECK (${CHECK_TIPO_EMAIL_ALERTAS})`)
         console.log(`[migration] email_alertas: CHECK de tipo recriado (removidos: ${chksTipoEmail.rows.map(r => r.conname).join(', ') || 'nenhum'})`)
       }
       await client.query('RELEASE SAVEPOINT chk_tipo_email')

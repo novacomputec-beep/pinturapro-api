@@ -167,7 +167,7 @@ const main = async () => {
     CREATE TABLE avisos_fora_area (tabela text, demanda_id uuid, usuario_id uuid, enviado_em timestamptz NOT NULL DEFAULT now());
     CREATE TABLE lembretes_push_enviados (tabela text, demanda_id uuid, usuario_id uuid, motivo text, enviado_em timestamptz NOT NULL DEFAULT now());
     CREATE TABLE avisos_acima_do_teto (tabela text, demanda_id uuid, usuario_id uuid, criado_em timestamptz NOT NULL DEFAULT now(), resumo_em timestamptz, PRIMARY KEY (tabela, demanda_id, usuario_id));
-    CREATE TABLE push_entregas (primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(),
+    CREATE TABLE push_entregas (resumo_em timestamptz, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(),
       criado_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz DEFAULT now());
@@ -241,10 +241,13 @@ const main = async () => {
   ok(igual(entregas, [P.id, RO.id, RONLY.id]), 'push_entregas da obra registra os 3 destinatários', entregas.length)
 
   emails.length = 0
+  // E-mail de demanda nova só a quem NÃO tem push entregável: simula o push falho dos 3 e desfaz depois.
+  await db.query(`UPDATE push_entregas SET resultado = 'falha' WHERE tipo = 'obra' AND demanda_id = $1`, [OBRA])
   await alerta.enviarEmailsNovaDemanda('obras', OBRA)
+  await db.query(`UPDATE push_entregas SET resultado = 'enviado' WHERE tipo = 'obra' AND demanda_id = $1`, [OBRA])
   await assentar()
   const paraQuem = ordenado((await db.query(`SELECT usuario_id FROM email_alertas WHERE demanda_id = $1 AND tipo = 'obra'`, [OBRA])).rows.map(r => r.usuario_id))
-  ok(igual(paraQuem, [P.id, RO.id, RONLY.id]), 'E-MAIL nova obra: MESMO público do push (predicado espelhado)', { reivindicados: paraQuem.length, enviados: emails.length })
+  ok(igual(paraQuem, [P.id, RO.id, RONLY.id]), 'E-MAIL nova obra com o push FALHO: MESMO público do push (predicado espelhado)', { reivindicados: paraQuem.length, enviados: emails.length })
   ok(emails.length === 3, 'e-mail nova obra: 3 envios', emails.length)
 
   pushes.length = 0

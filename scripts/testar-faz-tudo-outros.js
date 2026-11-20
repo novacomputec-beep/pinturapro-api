@@ -77,7 +77,7 @@ const main = async () => {
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid, UNIQUE (dono_id, prestador_id));
     CREATE TABLE lembretes_push_enviados (tabela text, demanda_id uuid, usuario_id uuid, motivo text, enviado_em timestamptz NOT NULL DEFAULT now());
     CREATE TABLE avisos_acima_do_teto (tabela text, demanda_id uuid, usuario_id uuid, criado_em timestamptz NOT NULL DEFAULT now(), resumo_em timestamptz, lembrete boolean NOT NULL DEFAULT false, PRIMARY KEY (tabela, demanda_id, usuario_id));
-    CREATE TABLE push_entregas (primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(),
+    CREATE TABLE push_entregas (resumo_em timestamptz, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, ultima_tentativa_em timestamptz DEFAULT now(),
       criado_em timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz DEFAULT now());
@@ -146,14 +146,14 @@ const main = async () => {
      { recebeu: paraQuem(), esperado: T(P, FTP, FT, FTPERTO) })
   emails.length = 0
   await quieto(() => alerta.enviarEmailsNovaDemanda('obras', OBRA))
-  ok(igual(await emailsDe('obra', OBRA), IDS(P, FTP, FT, FTPERTO, FTEMAIL)), 'E-MAIL nova obra: mesmo público + o faz-tudo sem token', (await emailsDe('obra', OBRA)).length)
+  ok((await emailsDe('obra', OBRA)).length === 0, 'E-MAIL nova obra: ninguém — quem recebeu o push não recebe e o faz-tudo SEM token (só "outros") nunca recebe este e-mail', (await emailsDe('obra', OBRA)).length)
 
   // ═══ 2. REPARO de elétrica ══════════════════════════════════════════════════════════════════
   pushes.length = 0
   await quieto(() => alerta.notificarPrestadoresSobreNovoReparo(R_ELE))
   ok(igual(paraQuem(), T(RS, FT, FTP, FTPERTO)), 'push NOVO SERVIÇO (elétrica): quem casa (RS) + faz-tudo — inclusive o pintor+outros, que não "pode serviços"; pintor puro NÃO', paraQuem())
   await quieto(() => alerta.enviarEmailsNovaDemanda('reparos', R_ELE))
-  ok(igual(await emailsDe('reparo', R_ELE), IDS(RS, FT, FTP, FTPERTO, FTEMAIL)), 'e-mail serviço de elétrica: RS + faz-tudo (com e sem token)', (await emailsDe('reparo', R_ELE)).length)
+  ok((await emailsDe('reparo', R_ELE)).length === 0, 'e-mail serviço de elétrica: ninguém — RS recebeu o push; faz-tudo (com ou sem token) nunca recebe este e-mail', (await emailsDe('reparo', R_ELE)).length)
 
   // ═══ 3. REPARO de faxina (ninguém "casa" além do faz-tudo; RFORA casa) ═════════════════════
   pushes.length = 0
@@ -165,7 +165,7 @@ const main = async () => {
   await quieto(() => alerta.notificarPrestadoresSobreNovoReparo(R_OUT))
   ok(igual(paraQuem(), T(RS, RFORA, FT, FTP, FTPERTO)), "push serviço só 'outros': todo reparador da cidade (RS, RFORA) + faz-tudo (inclusive o pintor+outros)", paraQuem())
   await quieto(() => alerta.enviarEmailsNovaDemanda('reparos', R_OUT))
-  ok(igual(await emailsDe('reparo', R_OUT), IDS(FT, FTP, FTPERTO, FTEMAIL)), "e-mail serviço só 'outros': só quem marcou 'outros' (como hoje) — RS e RFORA não", (await emailsDe('reparo', R_OUT)).length)
+  ok(igual(await emailsDe('reparo', R_OUT), IDS(FTEMAIL)), "e-mail serviço só 'outros': 'outros' é a categoria EXATA do pedido — só quem a marcou E não tem push (FTEMAIL); os que receberam o push, RS e RFORA não", (await emailsDe('reparo', R_OUT)).length)
 
   // ═══ 5. Reanúncio e oferta aumentada (mesmo broadcast) ══════════════════════════════════════
   pushes.length = 0; emails.length = 0

@@ -159,17 +159,37 @@ const main = async () => {
   await new Promise(r => setTimeout(r, 300))
   silenciar(false)
   const novos = para('profeletrica@x.invalid').slice(antes)
-  ok(novos.length === 1 && (await itens(PROF)).length === 0 && (await q(`SELECT 1 FROM email_alertas WHERE tipo = 'reparo' AND demanda_id = $1 AND usuario_id = $2`, [R1, PROF])).rows.length === 1,
-     'demanda nova ao profissional COM push: e-mail na hora, nada no resumo', novos.map(m => m.assunto))
+  const claimsR1 = async () => (await q(`SELECT 1 FROM email_alertas WHERE tipo = 'reparo' AND demanda_id = $1 AND usuario_id = $2`, [R1, PROF])).rows.length
+  ok(novos.length === 0 && (await itens(PROF)).length === 0 && await claimsR1() === 0,
+     'demanda nova ao profissional COM token, antes de o push sair: nenhum e-mail na hora e nada no resumo', novos.map(m => m.assunto))
+  // O push da demanda nova SAIU para ele: o pedido vira UMA linha do resumo das 19:00 (sem e-mail na hora).
+  await q(`INSERT INTO push_entregas (tipo, demanda_id, usuario_id, resultado) VALUES ('reparo', $1, $2, 'enviado')`, [R1, PROF])
+  silenciar(true)
+  await A.enviarEmailsNovaDemanda('reparos', R1)
+  await A.enviarEmailsNovaDemanda('reparos', R1) // de novo (cron do dia seguinte, categorias adicionadas): não duplica
+  await new Promise(r => setTimeout(r, 300))
+  silenciar(false)
+  const linhasR1 = (await itens(PROF))
+  ok(para('profeletrica@x.invalid').length === antes && await claimsR1() === 0 && linhasR1.length === 1,
+     'demanda nova a quem RECEBEU o push: sem e-mail na hora, UMA linha no resumo (repetir o caminho não duplica)', linhasR1.length)
+  const linhaR1 = (await q(`SELECT tipo, demanda_tabela, demanda_id, titulo, linha FROM email_resumo_itens WHERE usuario_id = $1`, [PROF])).rows[0]
+  ok(linhaR1 && linhaR1.tipo === 'novo_reparo' && linhaR1.demanda_tabela === 'reparos' && linhaR1.demanda_id === R1 && /Novo serviço disponível!$/.test(linhaR1.titulo) && /Uberlândia/.test(linhaR1.linha || ''),
+     'a linha do resumo leva o texto do aviso de demanda nova e o pedido (o resumo mostra o botão dele)', linhaR1)
 
   v = await avisar(PROF, 'interesse_aceito', R1, '✅ Proposta aceita', 'O dono aceitou sua proposta.')
-  ok(v === 'push+e-mail no resumo' && (await itens(PROF)).length === 1, 'aviso do dia a dia ao profissional com push: resumo', v)
+  ok(v === 'push+e-mail no resumo' && (await itens(PROF)).length === 2, 'aviso do dia a dia ao profissional com push: resumo (2ª linha dele)', v)
 
+  // As DUAS restrições de produção que barravam a linha do resumo em email_alertas (demanda_id NOT NULL e o
+  // CHECK de tipo): sem elas este teste passava enquanto em produção o INSERT falhava sempre. Entram só AQUI
+  // porque a chave do lembrete "a cada ciclo" testada acima (aviso:lembrete#AAAAMMDD#k) também é recusada por
+  // esse CHECK em produção — defeito separado, relatado ao dono em 20/11/2026 e ainda não corrigido.
+  await db.exec(`ALTER TABLE email_alertas ALTER COLUMN demanda_id SET NOT NULL;
+                 ALTER TABLE email_alertas ADD CONSTRAINT email_alertas_tipo_check CHECK (${require(path.join(REPO, 'src/services/emailResumoDiarioService')).CHECK_TIPO_EMAIL_ALERTAS}) NOT VALID;`)
   // ═══════════ CRON ═══════════
   emails.length = 0
   await fixarAgora(8 * 60 + 59) // 18:59 SP
   let r = await cron()
-  ok(r === null && emails.length === 0 && (await itens()).length === 6, '18:59: o cron não manda nada', [(await itens()).length])
+  ok(r === null && emails.length === 0 && (await itens()).length === 7, '18:59: o cron não manda nada', [(await itens()).length])
   const orcAntes = (await A.orcamentoEmailsDeDemanda()).restante
   await fixarAgora(9 * 60) // 19:00 SP
   r = await cron()

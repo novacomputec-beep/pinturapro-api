@@ -87,7 +87,7 @@ const main = async () => {
     CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, status text, criado_em timestamptz DEFAULT now());
     CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, criado_em timestamptz DEFAULT now());
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);
-    CREATE TABLE push_entregas (tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(),
+    CREATE TABLE push_entregas (resumo_em timestamptz, tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(),
       ultima_tentativa_em timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz);
@@ -148,7 +148,7 @@ const main = async () => {
   ok(igual(entregas, [PINTOR, ENCANADOR, PEDREIRO].sort()), 'push_entregas registra os 3 (conta em profissionais_avisados)')
   await quieto(() => A.enviarEmailsNovaDemanda('obras', D(1)))
   const paraEmail = emails.map(e => e.para).sort()
-  ok(igual(paraEmail, ['enc@x.invalid', 'ped@x.invalid', 'pintor@x.invalid', 'semtoken@x.invalid'].sort()), 'e-mail "Nova obra": genéricos + encanadores (inclusive o sem token); eletricista/faxina não', paraEmail)
+  ok(igual(paraEmail, ['semtoken@x.invalid']), 'e-mail "Nova obra": só o encanador SEM token (acrescentado pela inferência); os 3 que receberam o push não; eletricista/faxina não', paraEmail)
 
   // Obra sem ofício inferível: só o público genérico (comportamento de sempre)
   await criar(2, 'BR5V3', 'Obra comercial', 'Preciso de orçamento')
@@ -198,7 +198,7 @@ const main = async () => {
   const r1 = await quieto(() => O.reanunciarObraParaInferidos(D(1)))
   ok(r1.codigo === 'YS5XR' && igual(r1.slugs, ['hidraulica', 'alvenaria', 'pedreiro_servente']) && r1.push_enviados === 1 && igual(pushes.map(p => p.to), [tok('novo')]),
      'reanúncio YS5XR: SÓ o encanador novo recebe push (os já avisados e o público genérico não)', { r1, pushes: pushes.map(p => p.to) })
-  ok(igual(emails.map(e => e.para).sort(), ['novo@x.invalid']), 'reanúncio: e-mail só ao novo (os demais já têm claim em email_alertas)', emails.map(e => e.para))
+  ok(emails.length === 0, 'reanúncio: o encanador novo recebeu o push → nenhum e-mail na hora (os demais já têm claim)', emails.map(e => e.para))
   const r2 = await quieto(() => O.reanunciarObraParaInferidos(D(2)))
   ok(r2.pulado === 'sem especialidade inferida' && igual(r2.slugs, []), 'BR5V3 ("Obra comercial"): sem ofício inferível → pulado, ninguém avisado', r2)
   // rodarBackfillEReanuncioUnico: claim em configuracoes, roda uma vez e grava o resultado
