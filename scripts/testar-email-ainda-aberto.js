@@ -75,9 +75,10 @@ const main = async () => {
     CREATE TABLE assinaturas (usuario_id uuid, status text, proximo_vencimento timestamptz);
     CREATE TABLE reparos (${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
     CREATE TABLE obras (${colsDemanda}, valor numeric, horas_para_expirar numeric, metragem numeric, prazo_execucao_dias int, push_aprovada_enviado_em timestamptz, enviada_por_dono boolean);
-    CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, criado_em timestamptz DEFAULT now());
-    CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, criado_em timestamptz DEFAULT now());
+    CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, status text DEFAULT 'pendente', criado_em timestamptz DEFAULT now());
+    CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, status text DEFAULT 'pendente', criado_em timestamptz DEFAULT now());
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);
+    CREATE TABLE push_entregas (tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1, primeira_tentativa_em timestamptz NOT NULL DEFAULT now(), ultima_tentativa_em timestamptz NOT NULL DEFAULT now(), resumo_em timestamptz, UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz);
     INSERT INTO configuracoes (chave, valor) VALUES ('grupos_relacionados_ativo', 'true');

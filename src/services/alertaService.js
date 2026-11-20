@@ -27,7 +27,8 @@ const { invalidarCacheAssinatura } = require('../middlewares/auth')
 // importa o SDK e utils/marca — sem ciclo. Direto no Brevo (e não em emailService) para o
 // erro de cada envio chegar aqui e ser logado por destinatário.
 const { enviarEmail: enviarEmailBrevo } = require('./brevoService')
-const { guardarParaOResumo } = require('./emailResumoDiarioService')
+const { guardarParaOResumo, resumoLigado } = require('./emailResumoDiarioService')
+const { sqlSemProfissionalEscolhido } = require('../utils/profissionalEscolhido')
 // A OUTRA conta da mesma pessoa (mesmo CPF normalizado do criador da demanda) fica fora de todo
 // público de notificação de demanda: broadcast de demanda nova / oferta aumentada / lembrete
 // (broadcastPaginado), repescagem por destinatário (reenviarEntregasFalhas) e e-mail de reserva
@@ -930,7 +931,42 @@ const botaoEmailDemanda = (codigoPublico) => {
 }
 // colunaValor: lida como `valor` no SELECT da demanda — mensagemNovaObra/NovoReparo a ignoram;
 // o lembrete "ainda aberto" (lembrarDemandasSemResposta) a mostra no corpo.
-// somenteSemToken: false — demanda nova manda e-mail a todos os elegíveis (com e sem push_token).
+// E-MAIL DE DEMANDA NOVA (dono, 20/11/2026 — tipos 'obra' / 'reparo', inclusive o que ficou para o
+// dia seguinte, categorias adicionadas e obra recém-casada por inferência):
+//   - sai NA HORA só para quem NÃO tem push entregável: pessoa sem token instalado em nenhuma conta
+//     profissional (sem token ou desinstalado) ou cujo push DESTA demanda falhou (push_entregas com
+//     resultado diferente de 'enviado' e nenhum 'enviado') — sqlSemPushEntregavel;
+//   - nunca para quem só entra pelo faz-tudo ('outros' no perfil): esse recebe só o push
+//     (sqlCasaSemFazTudo);
+//   - ordem: especialidade EXATA do pedido primeiro, depois quem casa pelo grupo; quando o teto do
+//     dia corta, corta o grupo antes;
+//   - quem RECEBEU o push ('enviado') não recebe e-mail na hora: com a chave email_resumo_diario
+//     ligada o pedido vira uma linha no resumo das 19:00 (guardarDemandaNovaNoResumo); desligada, nada.
+// Antes (28/10/2026) ia a todo elegível, com ou sem token: uma demanda de ~280 elegíveis gastava
+// sozinha o teto de 190 e as demais do dia saíam com ZERO e-mails (caso U94JN, 20/11).
+// Lembrete "ainda aberto" e reanúncio NÃO mudam (somenteSemToken, como sempre).
+const sqlSemPushEntregavel = (pTipo, pDemanda) => `(
+           NOT EXISTS (SELECT 1 FROM usuarios tk
+                        WHERE ${sqlProfissionalDaPessoa('tk.id', 'u.id')}
+                          AND tk.push_token IS NOT NULL AND tk.desinstalado_em IS NULL)
+           OR (EXISTS (SELECT 1 FROM push_entregas pf
+                        WHERE pf.tipo = ${pTipo} AND pf.demanda_id = ${pDemanda} AND pf.resultado <> 'enviado'
+                          AND ${sqlProfissionalDaPessoa('pf.usuario_id', 'u.id')})
+               AND NOT EXISTS (SELECT 1 FROM push_entregas pk
+                                WHERE pk.tipo = ${pTipo} AND pk.demanda_id = ${pDemanda} AND pk.resultado = 'enviado'
+                                  AND ${sqlProfissionalDaPessoa('pk.usuario_id', 'u.id')})))`
+// Casa com a demanda SEM contar o faz-tudo: com lista de categorias (reparo), alguma em comum; sem
+// lista (obra, reparo sem categoria), a capacidade do lado — ou, na obra, uma especialidade inferida.
+const sqlCasaSemFazTudo = (tabela, pCategorias, pInferidas = null) => `(CASE
+           WHEN ${pCategorias}::text[] IS NOT NULL THEN COALESCE(u.especialidades && ${pCategorias}::text[], false)
+           ELSE (${tabela === 'obras' ? sqlPodeObras('u') : sqlPodeServicos('u')}${pInferidas ? ` OR COALESCE(u.especialidades && ${pInferidas}::text[], false)` : ''}) END)`
+// Categorias EXATAS do pedido (sem os grupos): as do reparo, sem 'outros' quando há outra; null na obra.
+const categoriasExatas = (tabela, demanda) => {
+  if (tabela !== 'reparos') return null
+  const lista = categoriasDoReparo(demanda)
+  const semOutros = lista.filter(s => s !== 'outros')
+  return semOutros.length > 0 ? semOutros : (lista.length > 0 ? lista : null)
+}
 const LADOS_EMAIL = {
   obras:   { tipo: 'obra',   publico: 'obras',   comCategoria: false, mensagem: mensagemNovaObra,   aba: 'Obras',    colunaValor: 'valor',          somenteSemToken: false },
   reparos: { tipo: 'reparo', publico: 'reparos', comCategoria: true,  mensagem: mensagemNovoReparo, aba: 'Serviços', colunaValor: 'valor_estimado', somenteSemToken: false },
@@ -1055,6 +1091,15 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
       paramsEmail.push(inferidasEmail, lado.inferidasSomente === true)
       sqlPublicoEmail = sqlPublicoProfissional('$1', { pSlugs: '$12', pSomente: '$13' })
     }
+    // Especialidade EXATA do pedido (ordem do e-mail de demanda nova; citada sempre, no SELECT).
+    paramsEmail.push(categoriasExatas(tabela, demanda))
+    const pExatas = `$${paramsEmail.length}`
+    // Demanda nova: só quem não tem push entregável e casa de verdade (sem o faz-tudo) — ver LADOS_EMAIL.
+    // Os demais tipos (lembrete, reanúncio) seguem como eram: instalado e, se pedido, sem token.
+    const sqlCanalEmail = ehDemandaNova
+      ? `AND ${sqlSemPushEntregavel('$9', '$5')}
+         AND ${sqlCasaSemFazTudo(tabela, '$4', inferidasEmail ? '$12' : null)}`
+      : 'AND u.desinstalado_em IS NULL'
     // Como no push: subconsulta = elegíveis, UMA linha por pessoa (DISTINCT ON).
     // Elegível = quem AINDA NÃO recebeu este e-mail (mesmo tipo, mesma demanda, por pessoa): é o
     // que permite reenviar "o que faltou" no dia seguinte sem gastar o corte com quem já recebeu.
@@ -1062,7 +1107,8 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
     // vai a quem não tem o push como alternativa; quem tem token já foi avisado por ele.
     const elegiveis = await client.query(
       `SELECT x.id, x.nome, x.email FROM (
-       SELECT DISTINCT ON (${SQL_PESSOA_DO_PUBLICO}) u.id, u.nome, u.email, u.push_token
+       SELECT DISTINCT ON (${SQL_PESSOA_DO_PUBLICO}) u.id, u.nome, u.email, u.push_token,
+              COALESCE(u.especialidades && ${pExatas}::text[], false) AS exata
        FROM usuarios u
        JOIN assinaturas a ON a.usuario_id = u.id
        WHERE ${sqlPublicoEmail}
@@ -1075,7 +1121,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          AND NOT EXISTS (SELECT 1 FROM email_alertas ja
                           WHERE ja.tipo = $9 AND ja.demanda_id = $5
                             AND ${sqlProfissionalDaPessoa('ja.usuario_id', 'u.id')})
-         AND u.desinstalado_em IS NULL
+         ${sqlCanalEmail}
          -- LUGAR: como no push — mesma cidade + UF ou até min(raio escolhido, 50 km) da demanda.
          AND ${sqlLugarEmail}
          AND ${sqlCasaCategorias('$4')}
@@ -1094,7 +1140,7 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
          AND ($8::text[] IS NULL OR NOT (COALESCE(u.especialidades && $8::text[], false) OR ${sqlFazTudo('u')}))
        ORDER BY ${sqlOrdemDaPessoa('$1')}
        ) x
-       ORDER BY (x.push_token IS NULL) DESC, x.id`,
+       ORDER BY ${ehDemandaNova ? 'x.exata DESC' : '(x.push_token IS NULL) DESC'}, x.id`,
       paramsEmail
     )
     if (elegiveis.rows.length === 0) {
@@ -1131,6 +1177,51 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
   }
 }
 
+// Quem RECEBEU o push de demanda nova (push_entregas 'enviado') ganha UMA linha do pedido no resumo
+// diário das 19:00 — só com a chave email_resumo_diario ligada e nunca para quem só entra pelo
+// faz-tudo. push_entregas.resumo_em é o claim (um statement só: marca e enfileira): a função roda de
+// novo no dia seguinte (o que ficou devido pelo teto), em categorias adicionadas e na inferência, e
+// ninguém ganha a mesma linha duas vezes. Com a chave desligada a marca é gravada do mesmo jeito —
+// ligar a chave depois não despeja pedidos antigos no resumo. Nunca lança; devolve quantos entraram.
+const guardarDemandaNovaNoResumo = async (tabela, demandaId) => {
+  const lado = LADOS_EMAIL[tabela]
+  if (!lado) return 0
+  try {
+    const dem = await pool.query(
+      `SELECT d.titulo, d.cidade, d.categoria${lado.comCategoria ? ', d.categorias' : ''}
+              ${tabela === 'obras' ? ', d.especialidades_inferidas' : ', NULL::text[] AS especialidades_inferidas'}
+         FROM ${tabela} d WHERE d.id = $1`, [demandaId])
+    if (dem.rows.length === 0) return 0
+    const demanda = dem.rows[0]
+    const { email: categorias } = await publicoDemanda(lado.comCategoria ? categoriasDoReparo(demanda) : null)
+    const inferidas = Array.isArray(demanda.especialidades_inferidas) && demanda.especialidades_inferidas.length > 0 ? demanda.especialidades_inferidas : null
+    const { titulo, corpo, data } = lado.mensagem(demanda, demandaId)
+    if (!(await resumoLigado())) {
+      // Chave desligada: só a marca (ver cabeçalho) — nada entra na fila.
+      await pool.query(
+        `UPDATE push_entregas SET resumo_em = NOW()
+          WHERE tipo = $1 AND demanda_id = $2::uuid AND resultado = 'enviado' AND resumo_em IS NULL`, [lado.tipo, demandaId])
+      return 0
+    }
+    const r = await pool.query(
+      `WITH marcados AS (
+         UPDATE push_entregas SET resumo_em = NOW()
+          WHERE tipo = $1 AND demanda_id = $2::uuid AND resultado = 'enviado' AND resumo_em IS NULL
+         RETURNING usuario_id)
+       INSERT INTO email_resumo_itens (usuario_id, tipo, demanda_tabela, demanda_id, titulo, linha)
+       SELECT u.id, $3, $4, $2::uuid, $5, $6
+         FROM marcados m JOIN usuarios u ON u.id = m.usuario_id
+        WHERE NULLIF(btrim(u.email), '') IS NOT NULL
+          AND ${sqlCasaSemFazTudo(tabela, '$7', '$8')}
+       RETURNING usuario_id`,
+      [lado.tipo, demandaId, data.tipo, tabela, titulo, corpo, categorias, inferidas])
+    return r.rows.length
+  } catch (err) {
+    console.error(`[EmailAlerta] ${lado.tipo} ${demandaId}: não foi possível guardar para o resumo diário:`, err.message)
+    return 0
+  }
+}
+
 // ladoOverride (opcional): o lembrete "ainda aberto" passa { tipo, mensagem, interesse } próprios
 // por cima do lado da tabela — mesmo público (sem token) MENOS quem já se manifestou na demanda,
 // mesmo claim em email_alertas (com o tipo dele), mesmo teto diário, mesmo HTML. Sem override:
@@ -1138,6 +1229,8 @@ const reivindicarEmailsNovaDemanda = async (tabela, demandaId, lado) => {
 const enviarEmailsNovaDemanda = async (tabela, demandaId, ladoOverride = null) => {
   const lado = LADOS_EMAIL[tabela] ? { ...LADOS_EMAIL[tabela], ...(ladoOverride || {}) } : null
   if (!lado) return
+  // Demanda nova: quem recebeu o push entra no resumo das 19:00 (não recebe e-mail na hora).
+  if (lado.tipo === LADOS_EMAIL[tabela].tipo) await guardarDemandaNovaNoResumo(tabela, demandaId)
   try {
     const fase1 = await reivindicarEmailsNovaDemanda(tabela, demandaId, lado)
     if (!fase1 || fase1.destinatarios.length === 0) return
@@ -1170,20 +1263,30 @@ const enviarEmailsNovaDemanda = async (tabela, demandaId, ladoOverride = null) =
 // Para quando o orçamento do dia acaba — o que sobrar continua marcado para o dia seguinte.
 // Guarda de sobreposição própria (um tique não começa com o anterior ainda enviando): o
 // semSobreposicao dos demais crons é definido mais abaixo no arquivo.
+// Pedido que ainda pode receber o e-mail atrasado: aberto, aprovado, no prazo e SEM profissional escolhido.
+const sqlPendenteViva = (tabela, a) => `COALESCE(${a}.status = 'aberta' AND ${a}.status_aprovacao = 'aprovada'
+                AND ${a}.expira_em > NOW() AND ${sqlSemProfissionalEscolhido(tabela, a)}, false)`
 let pendentesDoTetoEmExecucao = false
 const enviarEmailsPendentesNovaDemanda = async () => {
   if (pendentesDoTetoEmExecucao) return
   pendentesDoTetoEmExecucao = true
   try {
+    // Faxina ANTES de tudo (a qualquer hora, com ou sem orçamento): pedido cancelado, encerrado,
+    // vencido, fora da aprovação ou com profissional escolhido (match OU proposta aceita —
+    // utils/profissionalEscolhido) perde a marca de uma vez e nunca recebe o e-mail atrasado. Antes a
+    // marca só caía quando o laço chegava nela, e o laço para quando o orçamento do dia acaba.
+    for (const t of ['obras', 'reparos']) {
+      await pool.query(
+        `UPDATE ${t} d SET email_novo_pendente_em = NULL
+          WHERE d.email_novo_pendente_em IS NOT NULL AND NOT (${sqlPendenteViva(t, 'd')})`)
+    }
     const pendentes = await pool.query(
       `SELECT x.tabela, x.id, x.viva, (${SQL_JANELA_LEMBRETE}) AS na_janela FROM (
-         SELECT 'obras' AS tabela, id, email_novo_pendente_em AS desde,
-                (status = 'aberta' AND status_aprovacao = 'aprovada' AND match_usuario_id IS NULL AND expira_em > NOW()) AS viva
-           FROM obras WHERE email_novo_pendente_em IS NOT NULL
+         SELECT 'obras' AS tabela, d.id, d.email_novo_pendente_em AS desde, (${sqlPendenteViva('obras', 'd')}) AS viva
+           FROM obras d WHERE d.email_novo_pendente_em IS NOT NULL
          UNION ALL
-         SELECT 'reparos', id, email_novo_pendente_em,
-                (status = 'aberta' AND status_aprovacao = 'aprovada' AND match_usuario_id IS NULL AND expira_em > NOW())
-           FROM reparos WHERE email_novo_pendente_em IS NOT NULL) x
+         SELECT 'reparos', d.id, d.email_novo_pendente_em, (${sqlPendenteViva('reparos', 'd')})
+           FROM reparos d WHERE d.email_novo_pendente_em IS NOT NULL) x
         ORDER BY x.desde, x.id`
     )
     if (pendentes.rows.length === 0 || !pendentes.rows[0].na_janela) return
@@ -1333,7 +1436,7 @@ const sqlClaimLembrete = (lado) => `
          SET lembrete_enviado_em = NOW(), lembretes_enviados = d.lembretes_enviados + 1
         FROM (${sqlCalculoLembrete(lado)}) s
        WHERE d.id = s.id AND ${sqlFatiaDevida(lado)}
-   RETURNING ${COLUNAS_LEMBRETE(lado)}, s.fase`
+   RETURNING ${COLUNAS_LEMBRETE(lado)}, s.fase, (${SQL_JANELA_LEMBRETE}) AS na_janela`
 
 // Próximo lembrete previsto (só para prévia/admin; o claim não usa isto). Reproduz a regra em
 // JS a partir do que a subconsulta devolveu: fatia devida → agora; senão a próxima fatia ainda não
@@ -1728,6 +1831,14 @@ const lembrarDemandasSemResposta = semSobreposicao('lembrarDemandasSemResposta',
         // tipo do lembrete + número da fatia no claim de email_alertas (ver cabeçalho: o UNIQUE
         // é por fatia) e o `interesse` do lado (exclui quem já se manifestou; conta os
         // interessados para o texto). Já engole os próprios erros (só log).
+        // E-MAIL do lembrete só entre LEMBRETE_HORA_INICIO e LEMBRETE_HORA_FIM (São Paulo) — dono,
+        // 20/11/2026. A fase 'curta' (prazo ≤ 24h) lembra a qualquer hora e mandava e-mail de
+        // madrugada (03:20 e 06:46 em 19–20/11); o push dela segue como era, o e-mail fora da janela
+        // não sai (a fatia não é reposta). na_janela vem do próprio claim (relógio do banco, SQL_JANELA_LEMBRETE).
+        if (d.na_janela !== true) {
+          console.log(`[Lembrete] ${lado.tabela} ${d.id}: fora de ${LEMBRETE_HORA_INICIO}–${LEMBRETE_HORA_FIM}h (SP) — e-mail do lembrete não enviado`)
+          continue
+        }
         await enviarEmailsNovaDemanda(lado.tabela, d.id, { tipo: `${lado.tipoEmail}#${d.lembretes_enviados}`, mensagem: lado.mensagem, interesse: lado.interesse, somenteSemToken: true })
       }
     } catch (err) {
@@ -4230,6 +4341,7 @@ module.exports = {
   dispararPushNovoComClaim,
   enviarEmailsNovaDemanda,
   enviarEmailsPendentesNovaDemanda,
+  guardarDemandaNovaNoResumo,
   orcamentoEmailsDeDemanda,
   EMAIL_ALERTAS_TETO_LEMBRETES,
   montarEmailNovaDemanda,

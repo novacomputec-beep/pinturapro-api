@@ -10,7 +10,10 @@
 // CONTINUA IMEDIATO (nunca entra aqui):
 //   - qualquer e-mail a quem NÃO tem push (inclusive o lembrete "a cada ciclo" do dono sem push
 //     ativo e o aviso cujo push acabou de falhar);
-//   - demanda nova / reanúncio / lembrete "ainda aberto" ao profissional (enviarEmailsNovaDemanda);
+//   - reanúncio / lembrete "ainda aberto" ao profissional sem push (enviarEmailsNovaDemanda);
+//   - demanda NOVA a quem não tem push entregável (sem token, desinstalado ou push falho). Quem
+//     RECEBEU o push de demanda nova não recebe e-mail na hora: com a chave ligada o pedido entra
+//     aqui como uma linha (alertaService.guardarDemandaNovaNoResumo) — dono, 20/11/2026;
 //   - contrato em PDF, redefinição de senha, link para assinar, fim do período gratuito, convite do
 //     canal, conta excluída e pagamento recebido (não passam por entregarPushEEmail);
 //   - conta aprovada / reprovada / suspensa / liberada (TIPOS_IMEDIATOS).
@@ -33,6 +36,14 @@ const TEXTO_BOTAO = `Abrir o ${MARCA}`
 // Conta aprovada / reprovada / suspensa / liberada: sempre na hora.
 const TIPOS_IMEDIATOS = /^(verificacao_|conta_)/
 const SEM_PEDIDO = 'Sua conta'
+// Linha do resumo em email_alertas (conta no teto do dia): não pertence a uma demanda.
+const DEMANDA_DO_RESUMO = '00000000-0000-0000-0000-000000000000'
+// CHECK de email_alertas.tipo — a ÚNICA definição (a migração de boot em routes/index.js e os testes
+// usam esta): demanda nova, lembrete por fatia / reanúncio, avisos 1:1 e a linha do resumo diário.
+const CHECK_TIPO_EMAIL_ALERTAS = `tipo IN ('obra', 'reparo')
+                                   OR tipo ~ '^(lembrete|reaberta)_(obra|reparo)(#[0-9]+)?$'
+                                   OR tipo ~ '^aviso:[a-z_]+#([0-9a-f]{8}|[0-9]+)$'
+                                   OR tipo ~ '^resumo_diario#[0-9]{8}$'`
 
 // Erro de leitura (tabela ausente num teste de mini-esquema, banco fora) = desligado: vale o
 // comportamento antigo, o e-mail sai na hora.
@@ -156,8 +167,13 @@ const enviarResumosPendentes = async (dia, db = pool) => {
     try {
       await enviarEmail({ para: p.email, assunto: assuntoResumo(dia), html: htmlResumo(p.nome, dia, grupos), texto: textoResumo(p.nome, dia, grupos) })
       await db.query(`DELETE FROM email_resumo_itens WHERE id = ANY($1::bigint[])`, [ids])
-      // Conta no teto diário de e-mails (não é 'aviso:%').
-      await db.query(`INSERT INTO email_alertas (tipo, demanda_id, usuario_id) VALUES ($1, NULL, $2)`, [`resumo_diario#${dia.replace(/-/g, '')}`, p.usuario_id])
+      // Conta no teto diário de e-mails (não é 'aviso:%'). email_alertas.demanda_id é NOT NULL e o
+      // resumo não é de UMA demanda: vai o UUID nulo (DEMANDA_DO_RESUMO), e o UNIQUE (tipo, demanda,
+      // usuário) passa a valer "um resumo por conta por dia". O tipo é aceito pelo CHECK desde
+      // 20/11/2026 (CHECK_TIPO_EMAIL_ALERTAS) — antes este INSERT falhava sempre (demanda_id NULL e
+      // tipo fora do CHECK) e nenhum resumo contava no teto.
+      await db.query(`INSERT INTO email_alertas (tipo, demanda_id, usuario_id) VALUES ($1, $2::uuid, $3)
+                      ON CONFLICT (tipo, demanda_id, usuario_id) DO NOTHING`, [`resumo_diario#${dia.replace(/-/g, '')}`, DEMANDA_DO_RESUMO, p.usuario_id])
         .catch(err => console.error('[ResumoDiario] registro no teto:', err.message))
       enviados++
     } catch (err) {
@@ -184,4 +200,4 @@ const enviarResumoDiario = async () => {
   } finally { rodando = false }
 }
 
-module.exports = { CHAVE_LIGADO, HORA_ENVIO_SP, resumoLigado, guardarParaOResumo, enviarResumoDiario, enviarResumosPendentes, assuntoResumo }
+module.exports = { DEMANDA_DO_RESUMO, CHECK_TIPO_EMAIL_ALERTAS, CHAVE_LIGADO, HORA_ENVIO_SP, resumoLigado, guardarParaOResumo, enviarResumoDiario, enviarResumosPendentes, assuntoResumo }

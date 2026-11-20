@@ -65,7 +65,7 @@ const main = async () => {
     CREATE TABLE avisos_fora_area (tabela text, demanda_id uuid, usuario_id uuid, enviado_em timestamptz NOT NULL DEFAULT now());
     CREATE TABLE lembretes_push_enviados (tabela text, demanda_id uuid, usuario_id uuid, motivo text, enviado_em timestamptz NOT NULL DEFAULT now());
     CREATE TABLE avisos_acima_do_teto (tabela text, demanda_id uuid, usuario_id uuid, criado_em timestamptz NOT NULL DEFAULT now(), resumo_em timestamptz, PRIMARY KEY (tabela, demanda_id, usuario_id));
-    CREATE TABLE push_entregas (tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1,
+    CREATE TABLE push_entregas (resumo_em timestamptz, tipo text, demanda_id uuid, usuario_id uuid, resultado text, tentativas int DEFAULT 1,
       primeira_tentativa_em timestamptz DEFAULT now(), ultima_tentativa_em timestamptz DEFAULT now(), PRIMARY KEY (tipo, demanda_id, usuario_id));
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     CREATE TABLE configuracoes (chave text, valor text);
@@ -132,13 +132,13 @@ const main = async () => {
   ok(JSON.stringify(quem(pushes, 'to')) === JSON.stringify([4, 5]), 'push só a U4 e U5 (grupo novo, nunca avisados) — fora: já avisados, grupo antigo, sem token, suspenso, outra cidade, CPF do dono', quem(pushes, 'to'))
   ok(pushes[0]?.title === '⚡ Novo serviço disponível!' && /Troca de fiação.*Elétrica \+1/.test(pushes[0]?.body) && pushes[0]?.data.tipo === 'novo_reparo' && pushes[0]?.data.reparo_id === D(1),
      'texto = aviso de demanda nova (emoji da categoria principal, "Elétrica +1"), data novo_reparo', { title: pushes[0]?.title, body: pushes[0]?.body })
-  ok(JSON.stringify(quem(emails, 'para')) === JSON.stringify([4, 5, 7, 9]), 'e-mail a U4, U5, U7 (sem token) e U9 (push já registrado, e-mail não) — U1 barrado pelo UNIQUE, U2/U3 pelo grupo antigo', quem(emails, 'para'))
+  ok(JSON.stringify(quem(emails, 'para')) === JSON.stringify([7]), 'e-mail só a U7 (sem token) — U4/U5 acabaram de receber o push, U9 já tinha push registrado, U1 barrado pelo UNIQUE, U2/U3 pelo grupo antigo', quem(emails, 'para'))
   ok(emails[0]?.assunto === '⚡ Novo serviço disponível!', 'assunto do e-mail = título do push', emails[0]?.assunto)
   const entregas = await db.query(`SELECT usuario_id FROM push_entregas WHERE demanda_id = $1 ORDER BY usuario_id`, [D(1)])
   const ids = entregas.rows.map(x => Number(x.usuario_id.slice(-2)))
   ok(ids.join() === [1, 2, 4, 5, 9].join(), 'push_entregas ganhou U4 e U5 (edições futuras os veem como avisados)', ids)
   const ea = await db.query(`SELECT usuario_id FROM email_alertas WHERE demanda_id = $1 AND tipo = 'reparo'`, [D(1)])
-  ok(ea.rows.length === 5, "email_alertas com tipo 'reparo' para os 4 novos + U1", ea.rows.length)
+  ok(ea.rows.length === 2, "email_alertas com tipo 'reparo': U7 (novo, sem token) + U1 (original)", ea.rows.length)
 
   // --- remover eletrica: nada
   const p0 = pushes.length, e0 = emails.length
