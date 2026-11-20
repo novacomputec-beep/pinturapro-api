@@ -203,6 +203,26 @@ const main = async () => {
   ok(paraMortos === 0 && igual(await claims(casos.vivo), ordenado(['EX_DESI', 'EX_SEM', 'GR_SEM'])) && !(await pendente(casos.vivo)),
      '08:05: só o pedido vivo recebe (os 3 sem push entregável); os outros 6 pedidos, zero e-mails', { paraMortos, vivo: await claims(casos.vivo) })
 
+  // ═══ 4b. Ordem da fila: quem VENCE primeiro sai primeiro; a menos de 1h do fim, não sai ═══
+  await fixarAgora('2026-11-14T15:00:00Z') // sábado 12:00 — orçamento novo
+  await encher(187)                        // restam 3: dá para UM pedido (3 sem push cada)
+  const ANTIGA = D(30), RECENTE = D(31), QUASE = D(32)
+  await reparo(ANTIGA, 'Marcada há 3 dias, prazo longo')                                  // vence em 10 dias
+  await reparo(RECENTE, 'Marcada há 1 hora, vence hoje', { expira: '2026-11-14T20:00:00Z' }) // vence em 5 h
+  await reparo(QUASE, 'Vence em 30 minutos', { expira: '2026-11-14T15:30:00Z' })
+  await db.query(`UPDATE reparos SET push_novo_enviado_em = now() - interval '3 days', email_novo_pendente_em = now() - interval '3 days' WHERE id = $1`, [ANTIGA])
+  await db.query(`UPDATE reparos SET push_novo_enviado_em = now() - interval '1 hour', email_novo_pendente_em = now() - interval '1 hour' WHERE id = $1`, [RECENTE])
+  await db.query(`UPDATE reparos SET push_novo_enviado_em = now() - interval '2 days', email_novo_pendente_em = now() - interval '2 days' WHERE id = $1`, [QUASE])
+  await rodar(() => A.enviarEmailsPendentesNovaDemanda())
+  ok((await claims(RECENTE)).length === 3 && !(await pendente(RECENTE)) && emails.length === 3 && emails.every(e => /Marcada há 1 hora/.test(e.assunto)),
+     'orçamento para um pedido: sai o que VENCE primeiro (marcado há 1 h), não o marcado há mais tempo — antes o antigo passava na frente', { recente: (await claims(RECENTE)).length, emails: emails.map(e => e.assunto) })
+  ok((await claims(ANTIGA)).length === 0 && await pendente(ANTIGA), 'o de prazo longo espera a vez: zero hoje, continua marcado')
+  ok((await claims(QUASE)).length === 0 && await pendente(QUASE), 'a menos de 1 h do fim: pulado (não envia), mesmo sendo o primeiro da fila; segue marcado até vencer')
+  await fixarAgora('2026-11-15T15:00:00Z') // domingo 12:00 — orçamento novo, QUASE já venceu
+  await rodar(() => A.enviarEmailsPendentesNovaDemanda())
+  ok((await claims(ANTIGA)).length === 3 && !(await pendente(ANTIGA)) && (await claims(QUASE)).length === 0 && !(await pendente(QUASE)),
+     'dia seguinte: o de prazo longo recebe; o que venceu perdeu a marca sem nenhum e-mail', { antiga: (await claims(ANTIGA)).length, quase: (await claims(QUASE)).length })
+
   // ═══ 5. E-mail do lembrete só entre 08h e 20h (São Paulo) ══════════════════════════════════
   await db.query(`UPDATE reparos SET status = 'encerrada'`) // só os dois pedidos abaixo ficam abertos
   // Prazo de 12h (fase curta: lembra em W/3 e 2W/3, a qualquer hora). Criado às 23:00 → 1ª fatia às 03:00.

@@ -1256,7 +1256,11 @@ const enviarEmailsNovaDemanda = async (tabela, demandaId, ladoOverride = null) =
 // em reivindicarEmailsNovaDemanda): manda o que faltou quando há orçamento. Como o corte só
 // acontece com o teto do dia esgotado, na prática isto roda no DIA SEGUINTE; server.js chama este
 // cron no mesmo tique e ANTES dos lembretes, e os lembretes têm sub-teto próprio, então o que
-// ficou devido sai primeiro. Mais antiga primeiro; dentro de cada demanda, sem token primeiro.
+// ficou devido sai primeiro. ORDEM (dono, 20/11/2026): quem VENCE PRIMEIRO sai primeiro — antes era a
+// marca mais antiga, e os pedidos velhos de prazo longo gastavam o teto enquanto o recente, de prazo
+// curto, vencia sem e-mail (caso U94JN). Pedido a menos de HORAS_MINIMAS_EMAIL_PENDENTE do fim é
+// pulado (não dá tempo de alguém responder): fica marcado e a faxina o limpa quando vencer.
+// Dentro de cada demanda: especialidade exata primeiro, depois o grupo.
 // Só entre LEMBRETE_HORA_INICIO e LEMBRETE_HORA_FIM (São Paulo): o orçamento novo abre à
 // meia-noite, mas e-mail atrasado não precisa chegar de madrugada.
 // Demanda que deixou de estar aberta, aprovada, sem match e no prazo perde a marca sem envio.
@@ -1266,6 +1270,7 @@ const enviarEmailsNovaDemanda = async (tabela, demandaId, ladoOverride = null) =
 // Pedido que ainda pode receber o e-mail atrasado: aberto, aprovado, no prazo e SEM profissional escolhido.
 const sqlPendenteViva = (tabela, a) => `COALESCE(${a}.status = 'aberta' AND ${a}.status_aprovacao = 'aprovada'
                 AND ${a}.expira_em > NOW() AND ${sqlSemProfissionalEscolhido(tabela, a)}, false)`
+const HORAS_MINIMAS_EMAIL_PENDENTE = 1
 let pendentesDoTetoEmExecucao = false
 const enviarEmailsPendentesNovaDemanda = async () => {
   if (pendentesDoTetoEmExecucao) return
@@ -1281,13 +1286,14 @@ const enviarEmailsPendentesNovaDemanda = async () => {
           WHERE d.email_novo_pendente_em IS NOT NULL AND NOT (${sqlPendenteViva(t, 'd')})`)
     }
     const pendentes = await pool.query(
-      `SELECT x.tabela, x.id, x.viva, (${SQL_JANELA_LEMBRETE}) AS na_janela FROM (
-         SELECT 'obras' AS tabela, d.id, d.email_novo_pendente_em AS desde, (${sqlPendenteViva('obras', 'd')}) AS viva
+      `SELECT x.tabela, x.id, x.viva, (${SQL_JANELA_LEMBRETE}) AS na_janela,
+              (x.expira_em < NOW() + make_interval(hours => ${HORAS_MINIMAS_EMAIL_PENDENTE})) AS vence_logo FROM (
+         SELECT 'obras' AS tabela, d.id, d.email_novo_pendente_em AS desde, d.expira_em, (${sqlPendenteViva('obras', 'd')}) AS viva
            FROM obras d WHERE d.email_novo_pendente_em IS NOT NULL
          UNION ALL
-         SELECT 'reparos', d.id, d.email_novo_pendente_em, (${sqlPendenteViva('reparos', 'd')})
+         SELECT 'reparos', d.id, d.email_novo_pendente_em, d.expira_em, (${sqlPendenteViva('reparos', 'd')})
            FROM reparos d WHERE d.email_novo_pendente_em IS NOT NULL) x
-        ORDER BY x.desde, x.id`
+        ORDER BY x.expira_em, x.desde, x.id`
     )
     if (pendentes.rows.length === 0 || !pendentes.rows[0].na_janela) return
     let enviadas = 0
@@ -1296,6 +1302,7 @@ const enviarEmailsPendentesNovaDemanda = async () => {
         await pool.query(`UPDATE ${d.tabela} SET email_novo_pendente_em = NULL WHERE id = $1`, [d.id])
         continue
       }
+      if (d.vence_logo) continue // a menos de 1h do fim: não envia (segue marcado até vencer)
       if ((await orcamentoEmailsDeDemanda()).restante <= 0) break
       // adiado: texto "ainda aberto" (montarEmailNovaDemanda); tipo e claim seguem os de demanda nova.
       await enviarEmailsNovaDemanda(d.tabela, d.id, { adiado: true })
