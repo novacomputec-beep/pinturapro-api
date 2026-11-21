@@ -25,7 +25,7 @@ const CHAVE_GRUPOS_ATIVO = 'grupos_relacionados_ativo'
 const GRUPOS_RELACIONADOS = {
   'Consertos da casa':            ['eletrica', 'eletronica', 'climatizacao', 'hidraulica', 'alvenaria', 'gesseiro',
                                    'marcenaria', 'serralheria', 'vidraceiro', 'chaveiro', 'estofamento', 'montagem_moveis',
-                                   'seguranca_eletronica'],
+                                   'seguranca_eletronica', 'conserto_celular'],
   'Limpeza e jardim':             ['faxina', 'dedetizacao', 'jardineiro'],
   'Beleza':                       ['cabelo', 'manicure', 'maquiagem', 'barbeiro', 'depilacao', 'massagem', 'podologo',
                                    'design_sobrancelhas'],

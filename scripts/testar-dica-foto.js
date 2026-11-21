@@ -93,8 +93,8 @@ const main = async () => {
   const slugs = new Set(CATEGORIAS_SERVICO.map(c => c.slug))
   const ESPERADAS = ['hidraulica', 'eletrica', 'alvenaria', 'marcenaria', 'montagem_moveis', 'estofamento', 'vidraceiro',
                      'serralheria', 'gesseiro', 'climatizacao', 'eletronica', 'informatica', 'mecanica', 'jardineiro']
-  ok(DF.CATEGORIAS_PEDE_FOTO.length === 14 && new Set(DF.CATEGORIAS_PEDE_FOTO).size === 14 && DF.CATEGORIAS_PEDE_FOTO.every(s => slugs.has(s)),
-     'CATEGORIAS_PEDE_FOTO: 14 slugs sem repetição, todos existentes em CATEGORIAS_SERVICO', DF.CATEGORIAS_PEDE_FOTO)
+  ok(DF.CATEGORIAS_PEDE_FOTO.length === 15 && new Set(DF.CATEGORIAS_PEDE_FOTO).size === 15 && DF.CATEGORIAS_PEDE_FOTO.every(s => slugs.has(s)),
+     'CATEGORIAS_PEDE_FOTO: 15 slugs sem repetição, todos existentes em CATEGORIAS_SERVICO', DF.CATEGORIAS_PEDE_FOTO)
   ok(ESPERADAS.every(s => DF.CATEGORIAS_PEDE_FOTO.includes(s)), 'as 14 categorias pedidas estão na lista')
   ok(DF.DICA_FOTO === DICA, 'texto exato da dica', DF.DICA_FOTO)
   ok(DF.dicaFoto('reparos', ['manicure'], true) === '' && DF.dicaFoto('reparos', ['eletrica'], false) === '' && DF.dicaFoto('reparos', ['eletrica'], true) === DICA

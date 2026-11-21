@@ -21,6 +21,7 @@ const { mascararLista } = require('../utils/tentativasContato')
 const { ofuscarCoordenadasLista } = require('../utils/privacidadeDemanda')
 // Marca do dono no card (utils/responsabilidade): propostas de horário que ele deixou vencer em 90 dias.
 const { sqlClienteNaoRespondeu90d } = require('../utils/responsabilidade')
+const { sqlDonoOficial } = require('../utils/contaOficial')
 
 const listar = async (req, res) => {
   try {
@@ -36,6 +37,8 @@ const listar = async (req, res) => {
              COALESCE(o.especialidades_inferidas, '{}'::text[]) AS especialidades_inferidas,
              ${sqlTotalExtensaoObra('o.')} AS total_extensao_horas,
              ${sqlClienteNaoRespondeu90d('o.criado_por')} AS cliente_nao_respondeu_90d,
+             -- Obra da conta oficial do ProTudo (utils/contaOficial).
+             ${sqlDonoOficial('o.criado_por')} AS dono_oficial,
              0 as distancia_metros,
              (SELECT COUNT(*) FROM midias WHERE obra_id = o.id) as total_midias,
              (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_candidaturas,

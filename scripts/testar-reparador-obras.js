@@ -137,7 +137,7 @@ const main = async () => {
   ok(/inválida/.test(v.erro || ''), 'tipo NULL (legado): slug de obra continua recusado', v)
   v = esp.validarEspecialidades(['eletrica'], true, null)
   ok(!v.erro, 'tipo NULL (legado): lista de serviços como antes', v)
-  ok(esp.ESPECIALIDADES_REPARADOR.length === 63 && !OBRA4.some(s => esp.ESPECIALIDADES_REPARADOR.includes(s)),
+  ok(esp.ESPECIALIDADES_REPARADOR.length === 64 && !OBRA4.some(s => esp.ESPECIALIDADES_REPARADOR.includes(s)),
      'ESPECIALIDADES_REPARADOR (vocabulário de reparos.categoria) segue só com serviços (62) e SEM slug de obra', esp.ESPECIALIDADES_REPARADOR.length)
   ok(esp.ESPECIALIDADES_VALIDAS === esp.ESPECIALIDADES_REPARADOR, 'alias ESPECIALIDADES_VALIDAS intacto')
   ok(!Object.values(GRUPOS_RELACIONADOS).flat().some(s => OBRA4.includes(s)), 'GRUPOS_RELACIONADOS sem slug de obra (casamento de reparo não expande)')
@@ -152,7 +152,7 @@ const main = async () => {
       criado_em timestamptz DEFAULT now(), publicado_em timestamptz, a_caminho_em timestamptz, prestadores_bloqueados uuid[], codigo_publico text,
       push_novo_enviado_em timestamptz, email_novo_pendente_em timestamptz, valor_aumentado_em timestamptz, latitude numeric, longitude numeric, tags text[]`
   await db.exec(`
-    CREATE TABLE usuarios (id uuid PRIMARY KEY, latitude numeric, longitude numeric, raio_km_escolhido numeric, nome text, email text, telefone text, cidade text, uf text, role text, tipo_dono text, tipo_prestador text, cpf_cnpj text,
+    CREATE TABLE usuarios (oficial boolean NOT NULL DEFAULT false, id uuid PRIMARY KEY, latitude numeric, longitude numeric, raio_km_escolhido numeric, nome text, email text, telefone text, cidade text, uf text, role text, tipo_dono text, tipo_prestador text, cpf_cnpj text,
       ativo boolean DEFAULT true, push_token text, criado_em timestamptz DEFAULT now(), suspenso_em timestamptz, suspenso_motivo text, desinstalado_em timestamptz,
       foto_url text, senha_hash text, boas_vindas_exibida boolean DEFAULT false, token_version int NOT NULL DEFAULT 1, verificacao_status text DEFAULT 'aprovado',
       referencias jsonb, especialidades text[], anos_experiencia int, tamanho_equipe int, aceita_promocoes boolean, indicacao_pedida_em timestamptz);

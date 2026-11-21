@@ -4,6 +4,7 @@ const { pool } = require('../utils/supabase')
 const { invalidarCacheAssinatura } = require('../middlewares/auth')
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { MARCA } = require('../utils/marca')
+const { nomeUsaMarca, ERRO_NOME_RESERVADO } = require('../utils/contaOficial')
 const { validarEspecialidades } = require('../utils/especialidades')
 // pode_obras / pode_servicos / tem_candidaturas / tem_interesses das respostas de sessão e perfil
 // (Fases 2a e 2b — utils/capacidadeObras), por PESSOA: contas profissionais do mesmo CPF.
@@ -130,6 +131,11 @@ const cadastrar = async (req, res) => {
     if (nomePareceEmail(nome)) {
       console.log(`[CADASTRO][${ts}] ✗ 400 nome parece e-mail`)
       return res.status(400).json({ erro: ERRO_NOME_PARECE_EMAIL })
+    }
+    // "ProTudo" no nome é só da conta oficial (utils/contaOficial) — e nenhuma conta nasce oficial.
+    if (nomeUsaMarca(nome)) {
+      console.log(`[CADASTRO][${ts}] ✗ 400 nome reservado`)
+      return res.status(400).json(ERRO_NOME_RESERVADO)
     }
     if (!identidadeSocial && senha.length < 8) {
       console.log(`[CADASTRO][${ts}] ✗ 400 senha curta | len=${senha.length}`)
@@ -893,6 +899,11 @@ const atualizarPerfil = async (req, res) => {
     }
     if (mexeNome && nomePareceEmail(nome)) {
       return res.status(400).json({ erro: ERRO_NOME_PARECE_EMAIL })
+    }
+    // "ProTudo" no nome: só a conta oficial (usuarios.oficial). A consulta só roda quando o nome a usa.
+    if (mexeNome && nomeUsaMarca(nome)) {
+      const of = await pool.query('SELECT oficial FROM usuarios WHERE id = $1', [req.usuario.id])
+      if (of.rows[0]?.oficial !== true) return res.status(400).json(ERRO_NOME_RESERVADO)
     }
     const mexeTelefone = Object.prototype.hasOwnProperty.call(req.body, 'telefone')
 

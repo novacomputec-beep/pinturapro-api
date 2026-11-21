@@ -103,7 +103,7 @@ const main = async () => {
       valor_proposto numeric, valor_contraproposta numeric, valor_oferta numeric, mensagem text, mensagem_oferta text, referencias text, aprovado_por uuid, rodada int DEFAULT 1,
       criado_em timestamptz DEFAULT now(), cancelado_por uuid, cancelado_motivo text, cancelado_detalhe text, cancelado_em timestamptz, cancelado_acordo boolean DEFAULT false`
   await db.exec(`
-    CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, telefone text, cidade text, role text, tipo_dono text, tipo_prestador text, cpf_cnpj text,
+    CREATE TABLE usuarios (oficial boolean NOT NULL DEFAULT false, id uuid PRIMARY KEY, nome text, email text, telefone text, cidade text, role text, tipo_dono text, tipo_prestador text, cpf_cnpj text,
       ativo boolean DEFAULT true, push_token text, criado_em timestamptz DEFAULT now(), suspenso_em timestamptz, suspenso_motivo text, desinstalado_em timestamptz,
       foto_url text, logradouro text, numero text, bairro text, senha_hash text, boas_vindas_exibida boolean, token_version int DEFAULT 1, verificacao_status text, referencias text,
       especialidades text[], uf text);

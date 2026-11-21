@@ -154,7 +154,7 @@ const main = async () => {
   ok(/inválida/.test(v.erro || ''), 'pintor: slug fora das duas listas continua recusado', v)
   v = esp.validarEspecialidades(['pintor'], true, null)
   ok(/inválida/.test(v.erro || ''), 'tipo NULL: lista de sempre (slug de obra recusado)', v)
-  ok(esp.ESPECIALIDADES_REPARADOR.length === 63 && esp.ESPECIALIDADES_OBRA.length === 4, 'listas de base intactas (63 serviços, 4 de obra)')
+  ok(esp.ESPECIALIDADES_REPARADOR.length === 64 && esp.ESPECIALIDADES_OBRA.length === 4, 'listas de base intactas (64 serviços, 4 de obra)')
   const P = (tipo, e, role = 'prestador') => ({ role, tipo_prestador: tipo, especialidades: e })
   ok(cap.podeServicos(P('reparador', ['eletrica'])) && cap.podeServicos(P('reparador', ['pintor'])) && cap.podeServicos(P('reparador', null)),
      'podeServicos: reparador sempre (mesmo só com especialidade de obra ou sem lista)')
@@ -175,7 +175,7 @@ const main = async () => {
       chegada_janela text, chegada_prevista_em timestamptz, chegada_declarada_por uuid, chegada_declarada_em timestamptz, chegada_confirmada_em timestamptz,
       chegada_pendente_janela text, chegada_pendente_em timestamptz, chegada_recusada_em timestamptz, chegada_proposta_por uuid, chegada_pendente_rodada int DEFAULT 0`
   await db.exec(`
-    CREATE TABLE usuarios (id uuid PRIMARY KEY, latitude numeric, longitude numeric, raio_km_escolhido numeric, nome text, email text, telefone text, cidade text, uf text, role text, tipo_dono text, tipo_prestador text, cpf_cnpj text,
+    CREATE TABLE usuarios (oficial boolean NOT NULL DEFAULT false, id uuid PRIMARY KEY, latitude numeric, longitude numeric, raio_km_escolhido numeric, nome text, email text, telefone text, cidade text, uf text, role text, tipo_dono text, tipo_prestador text, cpf_cnpj text,
       ativo boolean DEFAULT true, push_token text, criado_em timestamptz DEFAULT now(), suspenso_em timestamptz, suspenso_motivo text, desinstalado_em timestamptz,
       foto_url text, senha_hash text, boas_vindas_exibida boolean DEFAULT false, token_version int NOT NULL DEFAULT 1, verificacao_status text DEFAULT 'aprovado',
       referencias jsonb, especialidades text[], anos_experiencia int, tamanho_equipe int, aceita_promocoes boolean, indicacao_pedida_em timestamptz);
