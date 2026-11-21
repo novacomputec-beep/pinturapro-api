@@ -644,6 +644,10 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS contrato_enviado BOOLEAN DEFAULT false`)
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS encerrado_em TIMESTAMPTZ`)
+    // Quem cancelou (dono, 21/11/2026): 'cliente' (DELETE /obras|reparos/dono/:id) ou 'admin'
+    // (POST /admin/:tabela/:id/cancelar). NULL nos demais caminhos e em todo o histórico (sem backfill).
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS cancelada_por TEXT`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS cancelada_por TEXT`)
     // Encerramento assimétrico: a chamada do PROFISSIONAL a /encerrar registra a solicitação,
     // e o DONO fecha de fato (o dono nunca solicita — encerrar, para ele, encerra na hora).
     // encerramento_solicitado_por IS NOT NULL É o estado pendente — sem status novo no banco:
@@ -3291,6 +3295,13 @@ const sqlSituacaoPainel = (a) => `CASE
     ELSE ${a}.status END`
 // WHERE das listas do painel por filtro; null = filtro inválido. Aberto COM escolhido fica em
 // 'abertas' mesmo com expira_em no passado (antes caía em 'canceladas', a aba das expiradas).
+// ORDER BY das listas do painel. 'canceladas' (dono, 21/11/2026): pelo instante em que o pedido saiu
+// do ar, mais recente primeiro — o fechamento (encerrado_em) do cancelado/recusado e, no que só
+// venceu (segue 'aberta', sem encerrado_em), o expira_em. Antes era só expira_em: o cancelado hoje
+// com prazo curto ficava abaixo dos de prazo longo. Demais filtros: a ordem de sempre.
+const sqlOrdemPainel = (a, filtro) => (filtro === 'canceladas'
+  ? `(CASE WHEN ${a}.status = 'aberta' THEN ${a}.expira_em ELSE COALESCE(${a}.encerrado_em, ${a}.expira_em) END) DESC NULLS LAST, ${a}.id DESC`
+  : `${a}.expira_em DESC NULLS LAST, ${a}.id DESC`)
 const sqlFiltroPainel = (a, filtro) => {
   if (filtro === 'finalizadas') return `${a}.status = 'encerrada'`
   if (filtro === 'canceladas') return `(${a}.status IN ('cancelada', 'expirada') OR ${sqlExpiradaPainel(a)})`
@@ -3320,6 +3331,8 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              ${sqlExpiradaPainel('o')} AS expirada,
              ${sqlSituacaoPainel('o')} AS situacao_painel,
+             -- Quem cancelou: 'cliente' | 'admin' | null (coluna cancelada_por; sem backfill).
+             o.cancelada_por,
              -- Valor COMBINADO (utils/valorAcordado): o da candidatura escolhida; NULL sem escolhido.
              -- Em pedido "valor a combinar" (valor NULL) é o único preço que existe.
              (SELECT ${sqlValorAcordadoObra('ca', 'o')} FROM candidaturas ca WHERE ca.obra_id = o.id AND ca.status = 'aceito' LIMIT 1) AS valor_acordado,
@@ -3329,7 +3342,7 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
       FROM obras o
       LEFT JOIN usuarios u ON u.id = o.criado_por
       WHERE ${where}
-      ORDER BY o.expira_em DESC NULLS LAST, o.id DESC
+      ORDER BY ${sqlOrdemPainel('o', filtro)}
       LIMIT 200
     `)
     res.json({ obras: result.rows })
@@ -3366,13 +3379,14 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
       const emAndamento = await cancelarPedidoEmAndamento('obras', req.params.id, req.usuario.id)
       if (emAndamento) {
         if (!emAndamento.ok) return res.status(409).json({ erro: 'O atendimento mudou enquanto você cancelava. Atualize a tela.', codigo: 'ESTADO_MUDOU' })
+        await pool.query(`UPDATE obras SET cancelada_por = 'cliente' WHERE id = $1 AND status = 'cancelada'`, [req.params.id])
         return res.json({ mensagem: 'Obra removida com sucesso', em_andamento: true })
       }
       return res.status(409).json({ erro: "Já existe um profissional escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
     }
     // encerrado_em: mesmo motivo do recusar acima — libera a obra cancelada para a limpeza
     // de mídia depois de 7 dias. COALESCE não reinicia contagem já iniciada.
-    await pool.query(`UPDATE obras SET status = 'cancelada', status_aprovacao = 'cancelada',
+    await pool.query(`UPDATE obras SET status = 'cancelada', status_aprovacao = 'cancelada', cancelada_por = 'cliente',
       encerrado_em = COALESCE(encerrado_em, NOW()), ${SQL_LIMPAR_MATCH} WHERE id = $1`, [req.params.id])
     // Obra aberta sem match cancelada: push aos interessados não recusados (segundo plano).
     if (obra.rows[0].status === 'aberta') avisarPedidoCanceladoPeloDono('obras', req.params.id).catch(() => {})
@@ -5025,6 +5039,7 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
       const emAndamento = await cancelarPedidoEmAndamento('reparos', req.params.id, req.usuario.id)
       if (emAndamento) {
         if (!emAndamento.ok) return res.status(409).json({ erro: 'O atendimento mudou enquanto você cancelava. Atualize a tela.', codigo: 'ESTADO_MUDOU' })
+        await pool.query(`UPDATE reparos SET cancelada_por = 'cliente' WHERE id = $1 AND status = 'cancelada'`, [req.params.id])
         return res.json({ mensagem: 'Serviço cancelado com sucesso', em_andamento: true })
       }
       return res.status(409).json({ erro: "Já existe um profissional escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
@@ -5041,7 +5056,7 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
     // pelo braço 'cancelada', e contratos/avaliações continuam com referente.
     // encerrado_em é o relógio desses 7 dias; COALESCE não reinicia contagem já iniciada.
     await pool.query(
-      `UPDATE reparos SET status = 'cancelada', status_aprovacao = 'cancelada',
+      `UPDATE reparos SET status = 'cancelada', status_aprovacao = 'cancelada', cancelada_por = 'cliente',
               encerrado_em = COALESCE(encerrado_em, NOW()), ${SQL_LIMPAR_MATCH}
         WHERE id = $1`,
       [req.params.id]
@@ -5393,6 +5408,8 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              ${sqlExpiradaPainel('r')} AS expirada,
              ${sqlSituacaoPainel('r')} AS situacao_painel,
+             -- Quem cancelou: 'cliente' | 'admin' | null (coluna cancelada_por; sem backfill).
+             r.cancelada_por,
              -- Valor COMBINADO: o do interesse escolhido (ver GET /obras/admin).
              (SELECT ${sqlValorAcordadoReparo('ia', 'r')} FROM interesse_reparos ia WHERE ia.reparo_id = r.id AND ia.status = 'aceito' LIMIT 1) AS valor_acordado,
              (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) AS total_interessados,
@@ -5401,7 +5418,7 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
       FROM reparos r
       LEFT JOIN usuarios u ON u.id = r.criado_por
       WHERE ${where}
-      ORDER BY r.expira_em DESC NULLS LAST, r.id DESC
+      ORDER BY ${sqlOrdemPainel('r', filtro)}
       LIMIT 200
     `)
     res.json({ reparos: result.rows })

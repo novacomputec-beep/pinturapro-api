@@ -76,8 +76,8 @@ const main = async () => {
       pedidos_atraso_usados int DEFAULT 0, prestadores_bloqueados uuid[]`
   await db.exec(`
     CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, push_token text, suspenso_em timestamptz, suspenso_motivo text, desinstalado_em timestamptz, role text, cpf_cnpj text);
-    CREATE TABLE reparos (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda});
-    CREATE TABLE obras (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda});
+    CREATE TABLE reparos (cancelada_por text, valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda});
+    CREATE TABLE obras (cancelada_por text, valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda});
     CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reparo_id uuid, usuario_id uuid, status text);
     CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), obra_id uuid, usuario_id uuid, status text);
     CREATE TABLE faltas_profissional (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), usuario_id uuid, tabela text, demanda_id uuid, motivo text, criado_em timestamptz DEFAULT now(), perdoada_em timestamptz, perdoada_por uuid);
