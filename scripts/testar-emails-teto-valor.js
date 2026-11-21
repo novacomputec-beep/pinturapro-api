@@ -97,7 +97,7 @@ const main = async () => {
       prestadores_bloqueados uuid[], codigo_publico text, push_novo_enviado_em timestamptz, email_novo_pendente_em timestamptz, tags text[], latitude numeric, longitude numeric,
       lembretes_enviados int DEFAULT 0, lembrete_enviado_em timestamptz, valor_aumentado_em timestamptz`
   await db.exec(`
-    CREATE TABLE usuarios (id uuid PRIMARY KEY, latitude numeric, longitude numeric, raio_km_escolhido numeric, nome text, email text, cidade text, uf text, role text, tipo_prestador text, cpf_cnpj text, ativo boolean DEFAULT true,
+    CREATE TABLE usuarios (oficial boolean NOT NULL DEFAULT false, id uuid PRIMARY KEY, latitude numeric, longitude numeric, raio_km_escolhido numeric, nome text, email text, cidade text, uf text, role text, tipo_prestador text, cpf_cnpj text, ativo boolean DEFAULT true,
       push_token text, suspenso_em timestamptz, desinstalado_em timestamptz, especialidades text[], indicacao_pedida_em timestamptz);
     CREATE TABLE assinaturas (usuario_id uuid, status text, proximo_vencimento timestamptz);
     CREATE TABLE reparos (valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
