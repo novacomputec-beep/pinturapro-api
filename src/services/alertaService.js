@@ -648,10 +648,10 @@ const mensagemNovoReparo = (reparo, reparoId) => {
   }
 }
 
-const notificarPintoresSobreNovaObra = async (obraId, { lote = [] } = {}) => {
+const notificarPintoresSobreNovaObra = async (obraId, { lote = [], aindaAbertoSeAntiga = false } = {}) => {
   try {
     const obraResult = await pool.query(
-      `SELECT titulo, cidade, uf, categoria, latitude, longitude, especialidades_inferidas FROM obras WHERE id = $1`,
+      `SELECT d.titulo, d.cidade, d.uf, d.categoria, d.latitude, d.longitude, d.especialidades_inferidas${sqlColunasAindaAberto('obras')} FROM obras d WHERE d.id = $1`,
       [obraId]
     )
     if (obraResult.rows.length === 0) return
@@ -676,7 +676,7 @@ const notificarPintoresSobreNovaObra = async (obraId, { lote = [] } = {}) => {
     // obra (porDistancia; sem coordenadas, a cidade). E teto de 15 pushes de demanda por dia.
     await broadcastPaginado({
       publico: 'obras', cidade: cidadeObra, uf: ufObra,
-      ...mensagemNovaObra(obra, obraId),
+      ...(aindaAbertoSeAntiga ? mensagemNovaOuAindaAberta('obras', obra, obraId) : mensagemNovaObra(obra, obraId)),
       rotulo: `nova obra ${obraId}`,
       entrega: { tipo: 'obra', demandaId: obraId },
       demanda: { tabela: 'obras', id: obraId },
@@ -693,10 +693,10 @@ const notificarPintoresSobreNovaObra = async (obraId, { lote = [] } = {}) => {
   }
 }
 
-const notificarPrestadoresSobreNovoReparo = async (reparoId, { lote = [] } = {}) => {
+const notificarPrestadoresSobreNovoReparo = async (reparoId, { lote = [], aindaAbertoSeAntiga = false } = {}) => {
   try {
     const reparoResult = await pool.query(
-      `SELECT titulo, cidade, uf, categoria, categorias, latitude, longitude FROM reparos WHERE id = $1`,
+      `SELECT d.titulo, d.cidade, d.uf, d.categoria, d.categorias, d.latitude, d.longitude${sqlColunasAindaAberto('reparos')} FROM reparos d WHERE d.id = $1`,
       [reparoId]
     )
     if (reparoResult.rows.length === 0) return
@@ -723,7 +723,7 @@ const notificarPrestadoresSobreNovoReparo = async (reparoId, { lote = [] } = {})
     // LUGAR e teto diário: como no lado obra (porDistancia / tetoDiario).
     await broadcastPaginado({
       publico: 'reparos', cidade: cidadeReparo, uf: ufReparo, categoria: categoriasDoReparo(reparo),
-      ...mensagemNovoReparo(reparo, reparoId),
+      ...(aindaAbertoSeAntiga ? mensagemNovaOuAindaAberta('reparos', reparo, reparoId) : mensagemNovoReparo(reparo, reparoId)),
       rotulo: `novo reparo ${reparoId}`,
       entrega: { tipo: 'reparo', demandaId: reparoId },
       demanda: { tabela: 'reparos', id: reparoId },
@@ -1445,6 +1445,25 @@ const sqlClaimLembrete = (lado) => `
        WHERE d.id = s.id AND ${sqlFatiaDevida(lado)}
    RETURNING ${COLUNAS_LEMBRETE(lado)}, s.fase, (${SQL_JANELA_LEMBRETE}) AS na_janela`
 
+// PRIMEIRO AVISO ATRASADO (dono, 21/11/2026): a rede de segurança (enviarPushNovoPendente) e a
+// repescagem por destinatário (reenviarEntregasFalhas) mandavam "Novo serviço disponível!" para
+// um pedido de dias atrás. Demanda com mais de HORAS_EMAIL_AINDA_ABERTO desde a âncora de
+// publicação (a mesma do lembrete: obras COALESCE(publicado_em, criado_em), reparos criado_em)
+// sai com o TEXTO do lembrete ("🔔 Ainda aberto: …"); o data segue o de demanda nova (mesmo toque,
+// mesmo registro em push_entregas). As rotas (create, aprovação, midias-prontas) não passam por aqui.
+// sqlColunasAindaAberto: o que o texto do lembrete precisa, para acrescentar a um SELECT com alias d.
+const sqlColunasAindaAberto = (tabela) => {
+  const lado = LADOS_LEMBRETE.find(l => l.tabela === tabela)
+  return `, d.${lado.colunaValor} AS valor, ${sqlInteressados(lado)} AS interessados,
+              (${lado.ancora} < NOW() - make_interval(hours => ${HORAS_EMAIL_AINDA_ABERTO})) AS antiga`
+}
+const mensagemNovaOuAindaAberta = (tabela, demanda, demandaId) => {
+  const nova = LADOS_EMAIL[tabela].mensagem(demanda, demandaId)
+  if (demanda.antiga !== true) return nova
+  const { titulo, corpo } = LADOS_LEMBRETE.find(l => l.tabela === tabela).mensagem(demanda, demandaId)
+  return { titulo, corpo, data: nova.data }
+}
+
 // Próximo lembrete previsto (só para prévia/admin; o claim não usa isto). Reproduz a regra em
 // JS a partir do que a subconsulta devolveu: fatia devida → agora; senão a próxima fatia ainda não
 // enviada (curta: W/3, 2W/3; diária: +1 dia), adiada para a janela 08–20h SP e para o gap mínimo.
@@ -1617,7 +1636,7 @@ const reenviarEntregasFalhas = async () => {
   for (const lado of LADOS_ENTREGA) {
     try {
       const candidatas = await pool.query(
-        `SELECT d.id, ${lado.colunas} FROM ${lado.tabela} d
+        `SELECT d.id, ${lado.colunas}${sqlColunasAindaAberto(lado.tabela)} FROM ${lado.tabela} d
           WHERE d.push_novo_enviado_em IS NOT NULL
             AND d.status = 'aberta' AND d.status_aprovacao = 'aprovada' AND d.expira_em > NOW()
             AND EXISTS (
@@ -1645,7 +1664,8 @@ const reenviarEntregasFalhas = async () => {
             [lado.tipo, d.id, MAX_TENTATIVAS_ENTREGA, JANELA_PUSH_NOVO_MIN]
           )
           if (alvos.rows.length === 0) continue
-          const { titulo, corpo, data } = lado.mensagem(d, d.id)
+          // Pedido com mais de 6h: texto "Ainda aberto" (mensagemNovaOuAindaAberta), nunca "Novo".
+          const { titulo, corpo, data } = mensagemNovaOuAindaAberta(lado.tabela, d, d.id)
           // Token null/não-Expo volta como 'invalido' do próprio lote — terminal, sai do sweep.
           const resultados = await enviarPushEmLoteDetalhado(alvos.rows, titulo, corpo, data)
           await registrarEntregas(lado.tipo, d.id, resultados)
@@ -1683,7 +1703,9 @@ const enviarPushNovoPendente = async () => {
         // Uma falha não derruba as demais candidatas do tique: loga e segue. A linha que
         // falhou continua NULL (ROLLBACK no helper) e volta a ser candidata no próximo tique.
         try {
-          await dispararPushNovoComClaim(lado.tabela, r.id, lado.notificar, { exigirPublicada: true, lote: pendentes.rows.slice(i + 1).map(ponto) })
+          // aindaAbertoSeAntiga: publicada há mais de 6h sai como "Ainda aberto", não como "Novo".
+          await dispararPushNovoComClaim(lado.tabela, r.id, (id, o) => lado.notificar(id, { ...o, aindaAbertoSeAntiga: true }),
+            { exigirPublicada: true, lote: pendentes.rows.slice(i + 1).map(ponto) })
         } catch (err) {
           console.error(`[PushNovoPendente] ${lado.tabela} ${r.id}: envio falhou, segue sem carimbo para nova tentativa:`, err.message)
         }
@@ -3435,18 +3457,31 @@ const notificarMatchDesfeito = async (tabela, demanda, { somenteDono = false, at
 // entrega: null (push_entregas é a entrega original; a repescagem reenviaria o texto errado);
 // e-mail de reserva com tipo próprio (reaberta_<tipo>), para o UNIQUE de email_alertas não
 // barrar quem recebeu o primeiro aviso. Só age se a demanda está aberta, sem match e no prazo.
+// TEXTO PRÓPRIO no push (dono, 21/11/2026): "🔁 Pedido disponível de novo: <título>" — o pedido não é
+// novo (caso WM4F2: 211 pessoas receberam "Novo serviço disponível!" de um pedido de 2 dias). Corpo,
+// data e público seguem os de sempre.
+// HORÁRIO: só entre 07:00 e 22:00 de São Paulo (SQL_FORA_SILENCIO). Fora disso nada sai (push nem
+// e-mail): a demanda fica marcada em reanuncio_pendente_em e enviarReanunciosAdiados a reanuncia no
+// 1º tique das 07:00 — se ainda estiver aberta, sem match e no prazo.
+const tituloReanuncio = (titulo) => `🔁 Pedido disponível de novo: ${titulo}`
 const reanunciarDemanda = async (tabela, demandaId) => {
   const lado = LADOS_EMAIL[tabela]
   const lembrete = LADOS_LEMBRETE.find(l => l.tabela === tabela)
   if (!lado || !lembrete) return
   try {
     const r = await pool.query(
-      `SELECT titulo, cidade, uf, categoria, latitude, longitude${lado.comCategoria ? ', categorias' : ''} FROM ${tabela}
+      `SELECT titulo, cidade, uf, categoria, latitude, longitude${lado.comCategoria ? ', categorias' : ''},
+              (${SQL_FORA_SILENCIO}) AS fora_silencio FROM ${tabela}
         WHERE id = $1 AND status = 'aberta' AND match_usuario_id IS NULL AND expira_em > NOW()`,
       [demandaId]
     )
     if (r.rows.length === 0) return
     const d = r.rows[0]
+    if (d.fora_silencio !== true) {
+      await pool.query(`UPDATE ${tabela} SET reanuncio_pendente_em = COALESCE(reanuncio_pendente_em, NOW()) WHERE id = $1`, [demandaId])
+      console.log(`[Reanuncio] ${tabela} ${demandaId}: silêncio 22:00–07:00 (SP) — adiado para as 07:00`)
+      return
+    }
     const cidade = normalizar(d.cidade)
     const uf = String(d.uf || '').trim().toUpperCase()
     if (!cidade || !uf) return
@@ -3454,7 +3489,7 @@ const reanunciarDemanda = async (tabela, demandaId) => {
     await broadcastPaginado({
       publico: lado.publico, cidade, uf,
       categoria: lado.comCategoria ? categoriasDoReparo(d) : null,
-      titulo: msg.titulo, corpo: msg.corpo, data: { ...msg.data, reaberta: true },
+      titulo: tituloReanuncio(d.titulo), corpo: msg.corpo, data: { ...msg.data, reaberta: true },
       rotulo: `reanúncio ${lado.tipo} ${demandaId}`,
       entrega: null,
       excluirManifestados: { interesse: lembrete.interesse, demandaId },
@@ -3469,6 +3504,23 @@ const reanunciarDemanda = async (tabela, demandaId) => {
     await enviarEmailsNovaDemanda(tabela, demandaId, { tipo: `reaberta_${lado.tipo}`, interesse: lembrete.interesse, somenteSemToken: false })
   } catch (err) {
     console.error(`[Reanuncio] ${tabela} ${demandaId}:`, err.message)
+  }
+}
+
+// Reanúncios adiados pelo silêncio noturno (reanuncio_pendente_em). Roda no tique de 1 min dos
+// cronômetros, junto de avisarReabertura. Claim atômico: limpa a marca fora do silêncio — ou a
+// qualquer hora quando a demanda deixou de valer (novo match, encerrada, vencida), e aí sem aviso
+// (reanunciarDemanda confere o estado de novo e não envia). Nunca lança.
+const enviarReanunciosAdiados = async (tabela) => {
+  try {
+    const claim = await pool.query(`
+      UPDATE ${tabela} d SET reanuncio_pendente_em = NULL
+       WHERE d.reanuncio_pendente_em IS NOT NULL
+         AND (NOT (d.status = 'aberta' AND d.match_usuario_id IS NULL AND d.expira_em > NOW()) OR ${SQL_FORA_SILENCIO})
+   RETURNING d.id`)
+    for (const d of claim.rows) await reanunciarDemanda(tabela, d.id)
+  } catch (err) {
+    console.error(`[Reanuncio] adiados ${tabela}:`, err.message)
   }
 }
 
@@ -3932,6 +3984,7 @@ const verificarCronometroReparos = semSobreposicao('verificarCronometroReparos',
     console.error('Erro ao verificar cronômetro de reparos:', err.message)
   }
   await avisarReabertura('reparos')
+  await enviarReanunciosAdiados('reparos')
 })
 
 // Cronômetro de matches de obras — espelha verificarCronometroReparos com as colunas reais de obra.
@@ -4085,6 +4138,7 @@ const verificarCronometroObras = semSobreposicao('verificarCronometroObras', asy
     console.error('Erro ao verificar cronômetro de obras:', err.message)
   }
   await avisarReabertura('obras')
+  await enviarReanunciosAdiados('obras')
 })
 
 // Encerramento assimétrico: fecha sozinho a solicitação do profissional que o dono não
@@ -4333,6 +4387,8 @@ module.exports = {
   TITULO_PEDIDO_CANCELADO,
   corpoPedidoCancelado,
   reanunciarDemanda,
+  enviarReanunciosAdiados,
+  tituloReanuncio,
   enviarPushNotificacao,
   OPCOES_PUSH,
   // Exportada para o painel admin (POST /admin/notificacoes/enviar): mesmo lote, recibos e

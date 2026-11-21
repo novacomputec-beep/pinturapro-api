@@ -61,6 +61,9 @@ const restaurarPropostasRebaixadas = async (db, tabela, demandaId) => {
 
 const migrarReaberturaMatch = async (client) => {
   for (const t of ['obras', 'reparos']) await client.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS aviso_reabertura_em TIMESTAMPTZ`)
+  // Reanúncio (alertaService.reanunciarDemanda) devido no silêncio 22:00–07:00 SP: fica marcado
+  // aqui e sai no 1º tique das 07:00 (alertaService.enviarReanunciosAdiados).
+  for (const t of ['obras', 'reparos']) await client.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS reanuncio_pendente_em TIMESTAMPTZ`)
   for (const t of ['candidaturas', 'interesse_reparos']) await client.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS status_antes_match TEXT`)
 }
 
