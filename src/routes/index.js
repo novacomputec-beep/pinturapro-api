@@ -9978,23 +9978,46 @@ router.patch('/admin/denuncias/:id', autenticar, exigirAdmin, async (req, res) =
 // JOIN (interno, não LEFT) em usuarios, exatamente como o de denunciante_id lá: usuario_id é
 // NOT NULL e ON DELETE CASCADE, então a sugestão de um autor excluído deixa de existir junto
 // com ele — não existe linha órfã para o join derrubar.
+// RESPOSTAS (dono, 21/11/2026): cada item traz respondida (bool), resposta (texto da ÚLTIMA
+// resposta) e respondida_em — lidos de respostas_equipe (origem 'sugestao'), onde
+// POST /admin/respostas-equipe grava toda resposta do painel desde 21/10/2026; nada novo é gravado
+// aqui. ?status=sem_resposta|respondidas|todas (padrão sem_resposta; outro valor → 400) filtra a
+// lista, e `contagens` devolve o total de cada um (independente do filtro e da página).
+const STATUS_SUGESTOES = ['sem_resposta', 'respondidas', 'todas']
 router.get('/admin/sugestoes', autenticar, exigirAdmin, async (req, res) => {
   try {
     const { page, limit, offset } = paginacaoAdmin(req.query)
+    const status = req.query.status === undefined || req.query.status === '' ? 'sem_resposta' : req.query.status
+    if (!STATUS_SUGESTOES.includes(status)) {
+      return res.status(400).json({ erro: `status deve ser um de: ${STATUS_SUGESTOES.join(', ')}` })
+    }
 
     const lista = await pool.query(
       `SELECT s.id, s.texto, s.criado_em,
-              s.usuario_id, u.nome AS usuario_nome, u.email AS usuario_email
+              s.usuario_id, u.nome AS usuario_nome, u.email AS usuario_email,
+              (ult.id IS NOT NULL) AS respondida, ult.resposta, ult.criada_em AS respondida_em
        FROM sugestoes s
        JOIN usuarios u ON u.id = s.usuario_id
+       LEFT JOIN LATERAL (
+         SELECT re.id, re.resposta, re.criada_em FROM respostas_equipe re
+          WHERE re.origem = 'sugestao' AND re.origem_id = s.id
+          ORDER BY re.criada_em DESC, re.id DESC LIMIT 1) ult ON true
+       WHERE ($3::text = 'todas' OR ($3::text = 'respondidas') = (ult.id IS NOT NULL))
        ORDER BY s.criado_em DESC
        LIMIT $1 OFFSET $2`,
-      [limit, offset]
+      [limit, offset, status]
     )
+    const cont = await pool.query(
+      `SELECT count(*)::int AS todas,
+              count(*) FILTER (WHERE EXISTS (SELECT 1 FROM respostas_equipe re WHERE re.origem = 'sugestao' AND re.origem_id = s.id))::int AS respondidas
+         FROM sugestoes s JOIN usuarios u ON u.id = s.usuario_id`)
+    const { todas, respondidas } = cont.rows[0]
 
     res.json({
       page,
       limit,
+      status,
+      contagens: { sem_resposta: todas - respondidas, respondidas, todas },
       sugestoes: lista.rows
     })
   } catch (err) {
