@@ -461,6 +461,7 @@ CREATE TABLE IF NOT EXISTS "obras" (
   "aviso_resposta_final_em" timestamp with time zone,
   "especialidades_inferidas" text[],
   "aviso_reabertura_em" timestamp with time zone,
+  "reanuncio_pendente_em" timestamp with time zone,
   "aviso_desinstalou_em" timestamp with time zone,
   "valor_a_combinar" boolean DEFAULT false NOT NULL
 );
@@ -649,6 +650,7 @@ CREATE TABLE IF NOT EXISTS "reparos" (
   "horarios_vencidos" integer DEFAULT 0 NOT NULL,
   "aviso_resposta_final_em" timestamp with time zone,
   "aviso_reabertura_em" timestamp with time zone,
+  "reanuncio_pendente_em" timestamp with time zone,
   "aviso_desinstalou_em" timestamp with time zone,
   "local_atendimento" text,
   "valor_a_combinar" boolean DEFAULT false NOT NULL
