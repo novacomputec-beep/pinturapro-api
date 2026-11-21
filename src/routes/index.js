@@ -3971,10 +3971,12 @@ const criarHandlerResposta = (tabela) => async (req, res) => {
   }
 }
 
-// Mesmas guardas de POST /obras/:id/candidatura e POST /reparos/:id/interesse: conta não
-// suspensa, assinatura ativa, tier do lado certo, verificação de identidade aprovada.
-router.post('/obras/:id/perguntas',   autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPodeObras, exigirVerificado, criarHandlerPergunta('obras'))
-router.post('/reparos/:id/perguntas', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPodeServicos, exigirVerificado, criarHandlerPergunta('reparos'))
+// Guardas de POST /obras/:id/candidatura e POST /reparos/:id/interesse — conta não suspensa,
+// assinatura ativa, tier do lado certo — MENOS a verificação de identidade (dono, 21/11/2026):
+// documento + selfie só é exigido para ENVIAR PROPOSTA, nunca para perguntar. exigirVerificado
+// fica só nas três rotas de proposta.
+router.post('/obras/:id/perguntas',   autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPodeObras, criarHandlerPergunta('obras'))
+router.post('/reparos/:id/perguntas', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPodeServicos, criarHandlerPergunta('reparos'))
 router.post('/obras/:id/perguntas/:pid/resposta',   autenticar, criarHandlerResposta('obras'))
 router.post('/reparos/:id/perguntas/:pid/resposta', autenticar, criarHandlerResposta('reparos'))
 

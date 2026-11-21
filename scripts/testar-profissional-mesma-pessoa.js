@@ -448,7 +448,7 @@ const main = async () => {
   // Os gates de CONTA julgam a conta do TOKEN: reparador da pessoa não verificado é barrado
   // mesmo agindo pela conta pintor (verificada).
   await db.query(`UPDATE usuarios SET verificacao_status = 'nao_solicitada' WHERE id = $1`, [PR.id])
-  r = await rodar('post', '/obras/:id/perguntas', { id: PR.id, params: { id: OBRA }, body: { pergunta: 'Tem andaime?' }, soGates: true })
+  r = await rodar('post', '/obras/:id/candidatura', { id: PR.id, params: { id: OBRA }, body: { valor_proposto: 100 }, soGates: true }) // rota de PROPOSTA: a pergunta não exige mais verificação (21/11/2026)
   ok(r.status === 403 && r.body.codigo === 'VERIFICACAO_NECESSARIA', 'verificação de identidade continua sendo da conta LOGADA (não da conta assumida)', r.body)
   await db.query(`UPDATE usuarios SET verificacao_status = 'aprovado' WHERE id = $1`, [PR.id])
 
