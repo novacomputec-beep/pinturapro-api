@@ -186,10 +186,20 @@ const main = async () => {
   ok(r.status === 400 && r.body.codigo === 'prazo_invalido', 'prazo fora das faixas: 400 prazo_invalido', r.body)
   const antes = (await db.query(`SELECT count(*)::int AS n FROM reparos`)).rows[0].n
   ok(antes === 2 && (await db.query(`SELECT count(*)::int AS n FROM reparos WHERE criado_por <> $1`, [DONO_A])).rows[0].n === 0, 'só os 2 pedidos válidos foram gravados, todos da conta oficial', antes)
-  // Teto de pedidos abertos de qualquer dono sem histórico (limite_demandas = 5 em produção): vale para a oficial.
+  // Teto de pedidos abertos (limite_demandas, 5 em produção): a conta OFICIAL é isenta (dono, 21/11/2026);
+  // o contratante comum sem histórico segue barrado.
   await db.query(`INSERT INTO configuracoes (chave, valor) VALUES ('limite_demandas_live_sem_historico', '2') ON CONFLICT (chave) DO UPDATE SET valor = '2'`)
   r = await quieto(() => chamar('post', '/admin/pedidos-oficiais', ADMIN, { body: { ...pedido, titulo: 'Terceiro pedido' } }))
-  ok(r.status === 409, 'mesmo teto de pedidos abertos de qualquer contratante sem histórico: 409 no 3º', { status: r.status, body: r.body })
+  ok(r.status === 201 && r.body.criado_por === DONO_A, 'conta oficial com o teto (2) já atingido: o 3º pedido é criado (isenta do teto)', { status: r.status, body: r.body?.erro })
+  r = await quieto(() => chamar('post', '/reparos/dono', DONO_A, { body: { titulo: 'Quarto pedido', categoria: 'conserto_celular', cidade: 'Patos de Minas', uf: 'MG', valor_estimado: 80 }, soHandler: true }))
+  ok(r.status === 201, 'isenção vale também quando a própria conta oficial publica pelo app (POST /reparos/dono)', { status: r.status, body: r.body?.erro })
+  const comum = (titulo) => quieto(() => chamar('post', '/reparos/dono', DONO_B, { body: { titulo, categoria: 'faxina', cidade: 'Patos de Minas', uf: 'MG', valor_estimado: 80 }, soHandler: true }))
+  const c1 = await comum('Faxina um'), c2 = await comum('Faxina dois'), c3 = await comum('Faxina três')
+  ok(c1.status === 201 && c2.status === 201 && c3.status === 409, 'contratante comum sem histórico: teto de sempre (409 no 3º)', [c1.status, c2.status, c3.status, c3.body?.erro])
+  await db.query(`UPDATE usuarios SET oficial = false WHERE id = $1`, [DONO_A])
+  r = await quieto(() => chamar('post', '/reparos/dono', DONO_A, { body: { titulo: 'Quinto pedido', categoria: 'conserto_celular', cidade: 'Patos de Minas', uf: 'MG', valor_estimado: 80 }, soHandler: true }))
+  ok(r.status === 409, 'a isenção é da MARCA: desmarcada, a mesma conta volta a ser barrada', { status: r.status })
+  await db.query(`UPDATE usuarios SET oficial = true WHERE id = $1`, [DONO_A])
   await db.query(`UPDATE configuracoes SET valor = '5' WHERE chave = 'limite_demandas_live_sem_historico'`)
 
   // ═══ 5. dono_oficial no feed e no detalhe ══════════════════════════════════════════════════

@@ -2161,6 +2161,11 @@ const lerLimiteDemandas = async () => {
 // sem reler a configuração.
 const limiteDemandasAtingido = async (tabela, donoId, clientRequestId) => {
   const limite = await lerLimiteDemandas()
+  // Conta oficial do ProTudo (utils/contaOficial; dono, 21/11/2026): sem teto de pedidos abertos —
+  // ela publica em nome da plataforma. Só o teto: moderação, validações e o bloqueio de pedidos
+  // (bloqueioDePedidos) seguem valendo para ela como para qualquer contratante.
+  const contaOficial = await pool.query(`SELECT oficial FROM usuarios WHERE id = $1`, [donoId])
+  if (contaOficial.rows[0]?.oficial === true) return { atingido: false, limite }
   // Retry com chave já gravada: pula o teto inteiro. Sem isso, o dono que bate no limite com a
   // 2ª demanda e sofre timeout na resposta receberia 409 no retry — a demanda existe, mas o app
   // mostraria erro. O ON CONFLICT do INSERT devolve a linha original; o teto não pode interferir.
