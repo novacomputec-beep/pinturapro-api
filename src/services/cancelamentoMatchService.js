@@ -754,7 +754,7 @@ const cancelarPorAdmin = async ({ tabela, id, adminId, motivo }) => {
     d = r.rows[0]
     matchReal = !!d.match_usuario_id && d.match_real
     await client.query(
-      `UPDATE ${lado.tabela} SET ${SQL_LIMPAR_MATCH},
+      `UPDATE ${lado.tabela} SET ${SQL_LIMPAR_MATCH}, cancelada_por = 'admin',
               status = 'cancelada', status_aprovacao = 'cancelada', encerrado_em = COALESCE(encerrado_em, NOW())
         WHERE id = $1`,
       [id]

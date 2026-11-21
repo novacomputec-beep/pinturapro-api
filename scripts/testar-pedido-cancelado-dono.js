@@ -119,8 +119,8 @@ const main = async () => {
     CREATE TABLE avisos_fora_area (tabela text, demanda_id uuid, usuario_id uuid, enviado_em timestamptz NOT NULL DEFAULT now());
     CREATE TABLE avisos_acima_do_teto (tabela text, demanda_id uuid, usuario_id uuid, criado_em timestamptz NOT NULL DEFAULT now(), resumo_em timestamptz, lembrete boolean NOT NULL DEFAULT false, PRIMARY KEY (tabela, demanda_id, usuario_id));
     CREATE TABLE prestadores_bloqueados_dono (dono_id uuid, prestador_id uuid);
-    CREATE TABLE reparos (${colsDemanda});
-    CREATE TABLE obras (${colsDemanda});
+    CREATE TABLE reparos (cancelada_por text, ${colsDemanda});
+    CREATE TABLE obras (cancelada_por text, ${colsDemanda});
     CREATE TABLE interesse_reparos (${colsProposta('reparo_id')});
     CREATE TABLE candidaturas (${colsProposta('obra_id')});
     CREATE TABLE perguntas_demanda (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tipo text, demanda_id uuid, autor_id uuid, pergunta text, resposta text, criado_em timestamptz DEFAULT now(), respondido_em timestamptz);
