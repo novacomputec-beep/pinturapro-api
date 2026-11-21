@@ -146,6 +146,7 @@ const { normalizarLocalAtendimento, aceitaLocalAtendimento, sqlAtendeLocal, migr
 const { CHECK_TIPO_EMAIL_ALERTAS } = require('../services/emailResumoDiarioService')
 // Dica "adicione uma foto ou vídeo" no aviso de pergunta nova ao dono (pedido sem mídia).
 const { TABELA_MIDIAS, dicaFoto } = require('../utils/dicaFoto')
+const { migrarContaOficial, sqlDonoOficial, buscarContaOficial } = require('../utils/contaOficial')
 // Mídia depois da publicação: 409 em pedido finalizado e aviso a quem perguntou (services/avisoMidiaService).
 const { demandaFinalizada, ERRO_PEDIDO_FINALIZADO, migrarAvisoMidia, avisarMidiaAdicionada } = require('../services/avisoMidiaService')
 const { registrarReinstalacao, sqlInstalado } = require('../utils/desinstalacoes')
@@ -1860,6 +1861,8 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     }
     // Reabertura pelo cronômetro (utils/reaberturaMatch): aviso_reabertura_em em obras/reparos.
     await require('../utils/reaberturaMatch').migrarReaberturaMatch(client)
+    // Conta oficial do ProTudo (utils/contaOficial): usuarios.oficial.
+    await migrarContaOficial(client)
     // Indicações (utils/indicacoes): código único de 6 caracteres por profissional, quem o
     // indicou, e os dois agregados por indicador (meses de bônus com teto, embaixador).
     // Colunas ADD IF NOT EXISTS; a função é CREATE OR REPLACE; o backfill só toca prestador
@@ -4011,6 +4014,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
         -- cliente_nao_respondeu_90d: propostas de horário de profissional que o dono (pessoa) deixou
         -- vencer sem resposta nos últimos 90 dias (utils/responsabilidade) — sai a qualquer leitor.
         ${sqlClienteNaoRespondeu90d('o.criado_por')} AS cliente_nao_respondeu_90d,
+        -- dono_oficial: obra da conta oficial do ProTudo (utils/contaOficial) — sai a qualquer leitor.
+        ${sqlDonoOficial('o.criado_por')} AS dono_oficial,
         -- especialidades_inferidas (slugs de ofício do título + descrição) nunca NULL no payload —
         -- repete a coluna de o.* já coalescida (a última de mesmo nome vence na linha do pg).
         COALESCE(o.especialidades_inferidas, '{}'::text[]) AS especialidades_inferidas,
@@ -4775,7 +4780,8 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
 })
 
 // exigirNaoSuspenso: mesma regra de POST /obras/dono (dono suspenso por contato não publica).
-router.post('/reparos/dono', autenticar, exigirNaoSuspenso, async (req, res) => {
+// Função nomeada: POST /admin/pedidos-oficiais (abaixo) cria o pedido da conta oficial por ESTE handler.
+const criarReparoDono = async (req, res) => {
   try {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos podem cadastrar serviços' })
@@ -4907,6 +4913,94 @@ router.post('/reparos/dono', autenticar, exigirNaoSuspenso, async (req, res) => 
   } catch (err) {
     console.error('[reparos/dono]', err.message)
     res.status(500).json({ erro: 'Erro ao cadastrar serviço' })
+  }
+}
+router.post('/reparos/dono', autenticar, exigirNaoSuspenso, criarReparoDono)
+
+// ─── CONTA OFICIAL DO PROTUDO (utils/contaOficial; dono, 21/11/2026) ─────────────────────────────
+// POST /admin/conta-oficial { usuario_id } ou { email } — super-admin. Marca UMA conta de
+// contratante (role 'dono_obra', ativa) como oficial; a que estava marcada deixa de ser (um
+// statement só). Por e-mail: se o e-mail tem mais de uma conta de contratante, 409 com a lista
+// (escolha por usuario_id). Não cria conta: a conta nasce pelo cadastro normal do app.
+const UUID_CONTA_OFICIAL = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+router.post('/admin/conta-oficial', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const { usuario_id, email } = req.body || {}
+    const porId = typeof usuario_id === 'string' && usuario_id.trim() !== ''
+    const porEmail = typeof email === 'string' && email.trim() !== ''
+    if (!porId && !porEmail) return res.status(400).json({ erro: 'Informe usuario_id ou email' })
+    if (porId && !UUID_CONTA_OFICIAL.test(usuario_id.trim())) return res.status(400).json({ erro: 'usuario_id inválido' })
+    const contas = await pool.query(
+      `SELECT id, nome, email, role, tipo_dono, ativo FROM usuarios
+        WHERE ${porId ? 'id = $1::uuid' : 'lower(btrim(email)) = lower(btrim($1::text))'} ORDER BY criado_em, id`,
+      [porId ? usuario_id.trim() : email])
+    if (contas.rows.length === 0) return res.status(404).json({ erro: 'Conta não encontrada', codigo: 'conta_nao_encontrada' })
+    const contratantes = contas.rows.filter(u => u.role === 'dono_obra' && u.ativo !== false)
+    if (contratantes.length === 0) {
+      return res.status(400).json({ erro: 'A conta oficial precisa ser uma conta de contratante ativa', codigo: 'nao_contratante' })
+    }
+    if (contratantes.length > 1) {
+      return res.status(409).json({
+        erro: 'Este e-mail tem mais de uma conta de contratante — informe usuario_id', codigo: 'mais_de_uma_conta',
+        contas: contratantes.map(u => ({ id: u.id, nome: u.nome, tipo_dono: u.tipo_dono })),
+      })
+    }
+    const alvo = contratantes[0]
+    await pool.query(`UPDATE usuarios SET oficial = (id = $1::uuid) WHERE oficial IS TRUE OR id = $1::uuid`, [alvo.id])
+    console.log(`[ContaOficial] conta ${alvo.id} marcada como oficial por ${req.usuario.id}`)
+    res.json({ mensagem: 'Conta marcada como oficial', conta: { id: alvo.id, nome: alvo.nome, email: alvo.email, tipo_dono: alvo.tipo_dono, oficial: true } })
+  } catch (err) {
+    console.error('[admin/conta-oficial]', err.message)
+    res.status(500).json({ erro: 'Erro ao marcar a conta oficial' })
+  }
+})
+
+// POST /admin/pedidos-oficiais — super-admin. Cria um reparo NORMAL cujo dono é a conta oficial,
+// pelo MESMO handler do POST /reparos/dono (criarReparoDono): mesma moderação, validações, teto de
+// pedidos abertos, publicação, push/e-mail de demanda nova e lembretes. Corpo:
+//   { titulo, categoria | categorias[1..3], cidade, uf?, bairro?, valor | valor_a_combinar: true,
+//     prazo? (horas de uma faixa de utils/faixasPrazo, ou 'hoje'; ausente = 720h), detalhes?,
+//     local_atendimento?, timezone?, client_request_id? }
+// Resposta: a do POST /reparos/dono (201 com a linha do reparo; 400/409 com o mesmo corpo).
+// Sem conta oficial marcada: 409 sem_conta_oficial.
+router.post('/admin/pedidos-oficiais', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const oficial = await buscarContaOficial(pool)
+    if (!oficial) {
+      return res.status(409).json({ erro: 'Nenhuma conta oficial marcada — use POST /admin/conta-oficial', codigo: 'sem_conta_oficial' })
+    }
+    const b = req.body || {}
+    const corpo = {
+      titulo: b.titulo,
+      descricao: b.detalhes !== undefined ? b.detalhes : b.descricao,
+      categoria: b.categoria,
+      categorias: Array.isArray(b.categorias) ? b.categorias : undefined,
+      cidade: b.cidade, uf: b.uf, bairro: b.bairro,
+      valor_estimado: b.valor !== undefined ? b.valor : b.valor_estimado,
+      valor_a_combinar: b.valor_a_combinar,
+      local_atendimento: b.local_atendimento,
+      timezone: b.timezone,
+      client_request_id: b.client_request_id,
+    }
+    const prazo = b.prazo !== undefined ? b.prazo : b.prazo_atendimento_horas
+    if (prazo === PRAZO_MODO_HOJE) {
+      corpo.prazo_modo = PRAZO_MODO_HOJE
+      corpo.prazo_atendimento_horas = 24
+    } else if (prazo !== undefined && prazo !== null && prazo !== '') {
+      const horas = Number(prazo)
+      const faixas = Object.keys(require('../utils/faixasPrazo').FAIXAS)
+      if (!Number.isInteger(horas) || !faixas.includes(String(horas))) {
+        return res.status(400).json({ erro: `Prazo inválido — use 'hoje' ou uma das faixas em horas: ${faixas.join(', ')}`, codigo: 'prazo_invalido' })
+      }
+      corpo.prazo_atendimento_horas = horas
+    }
+    // O handler lê só req.usuario (id, role, nome, e-mail) e req.body — a conta oficial entra no lugar do admin.
+    const reqOficial = { usuario: { ...oficial, role: 'dono_obra' }, body: corpo, params: {}, query: {}, headers: req.headers, get: (h) => (typeof req.get === 'function' ? req.get(h) : undefined) }
+    console.log(`[PedidoOficial] admin ${req.usuario.id} criando pedido pela conta oficial ${oficial.id}`)
+    return criarReparoDono(reqOficial, res)
+  } catch (err) {
+    console.error('[admin/pedidos-oficiais]', err.message)
+    res.status(500).json({ erro: 'Erro ao criar o pedido oficial' })
   }
 })
 
@@ -5496,6 +5590,8 @@ router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPod
              ${sqlTotalExtensaoReparo('r.')} AS total_extensao_horas,
              -- Marca do dono (utils/responsabilidade): propostas de horário que ele deixou vencer em 90 dias.
              ${sqlClienteNaoRespondeu90d('r.criado_por')} AS cliente_nao_respondeu_90d,
+             -- Pedido da conta oficial do ProTudo (utils/contaOficial).
+             ${sqlDonoOficial('r.criado_por')} AS dono_oficial,
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         (SELECT url FROM midias_reparos WHERE reparo_id = r.id ORDER BY (url LIKE '%/video/upload/%'), ordem LIMIT 1) as foto_capa
       FROM reparos r
@@ -6894,6 +6990,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
               ${sqlMotivoEscolherOutro()} AS motivo_escolher_outro,
               -- cliente_nao_respondeu_90d: mesma marca do dono do GET /obras/:id (utils/responsabilidade).
               ${sqlClienteNaoRespondeu90d('reparos.criado_por')} AS cliente_nao_respondeu_90d,
+              -- dono_oficial: pedido da conta oficial do ProTudo (utils/contaOficial) — sai a qualquer leitor.
+              ${sqlDonoOficial('reparos.criado_por')} AS dono_oficial,
               -- Lembretes "Agende seu atendimento" deste match: quando sai o próximo ao
               -- profissional (alertaService.sqlProximoLembreteAgendar); só para o dono.
               ${sqlProximoLembreteAgendar('reparos', 'reparos.')} AS proximo_lembrete_agendar_em
@@ -7050,6 +7148,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       dono_telefone,
       dono_nome,
       dono_foto_url,
+      // Pedido da conta oficial do ProTudo (também em reparo.dono_oficial).
+      dono_oficial: reparo.dono_oficial === true,
       sugestoes_restantes,
       extensao_maxima_horas,
       pode_aumentar_valor,

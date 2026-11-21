@@ -33,7 +33,7 @@ const NOVAS = {
 }
 // Reagrupamento aprovado (13/11/2026): os 10 grupos finais, slugs na ordem do mapa.
 const GRUPOS_FINAIS = {
-  'Consertos da casa': ['eletrica', 'eletronica', 'climatizacao', 'hidraulica', 'alvenaria', 'gesseiro', 'marcenaria', 'serralheria', 'vidraceiro', 'chaveiro', 'estofamento', 'montagem_moveis', 'seguranca_eletronica'],
+  'Consertos da casa': ['eletrica', 'eletronica', 'climatizacao', 'hidraulica', 'alvenaria', 'gesseiro', 'marcenaria', 'serralheria', 'vidraceiro', 'chaveiro', 'estofamento', 'montagem_moveis', 'seguranca_eletronica', 'conserto_celular'],
   'Limpeza e jardim': ['faxina', 'dedetizacao', 'jardineiro'],
   'Beleza': ['cabelo', 'manicure', 'maquiagem', 'barbeiro', 'depilacao', 'massagem', 'podologo', 'design_sobrancelhas'],
   'Festas e eventos': ['aluguel_festas', 'decoracao_festas', 'recreacao_infantil', 'dj', 'musico', 'garcom', 'churrasqueiro', 'cozinheiro', 'confeiteiro', 'salgadeiro', 'filmagem_fotografia'],
@@ -54,10 +54,10 @@ const main = async () => {
 
   // ---- listas
   const slugsApp = C.CATEGORIAS_SERVICO.map(c => c.slug)
-  ok(E.ESPECIALIDADES_REPARADOR.length === 63 && slugsApp.length === 63 && JSON.stringify(E.ESPECIALIDADES_REPARADOR) === JSON.stringify(slugsApp),
-     'ESPECIALIDADES_REPARADOR e CATEGORIAS_SERVICO: 63 slugs, mesma ordem', { n: E.ESPECIALIDADES_REPARADOR.length })
-  ok(E.ESPECIALIDADES_REPARADOR.slice(-6).join() === 'seguranca_eletronica,locucao,jingles_vinhetas,marketing_publicidade,contabilidade,outros', "as novas entram antes de 'outros', na ordem em que chegaram", E.ESPECIALIDADES_REPARADOR.slice(-5))
-  ok(new Set(E.ESPECIALIDADES_REPARADOR).size === 63, 'nenhum slug repetido')
+  ok(E.ESPECIALIDADES_REPARADOR.length === 64 && slugsApp.length === 64 && JSON.stringify(E.ESPECIALIDADES_REPARADOR) === JSON.stringify(slugsApp),
+     'ESPECIALIDADES_REPARADOR e CATEGORIAS_SERVICO: 64 slugs, mesma ordem', { n: E.ESPECIALIDADES_REPARADOR.length })
+  ok(E.ESPECIALIDADES_REPARADOR.slice(-7).join() === 'seguranca_eletronica,locucao,jingles_vinhetas,marketing_publicidade,contabilidade,conserto_celular,outros', "as novas entram antes de 'outros', na ordem em que chegaram", E.ESPECIALIDADES_REPARADOR.slice(-5))
+  ok(new Set(E.ESPECIALIDADES_REPARADOR).size === 64, 'nenhum slug repetido')
   // Contabilidade + rótulo novo do grupo (16/11/2026): só o NOME muda; chave, etiquetas e os outros 9 grupos iguais.
   ok(!('Digital e aulas' in G.GRUPOS_RELACIONADOS) && G.CHAVE_DO_GRUPO['Escritório e aulas'] === 'digital_aulas' && G.CHAVE_DO_SLUG.contabilidade === 'digital_aulas' && G.CHAVE_DO_SLUG.aula_particular === 'digital_aulas',
      'grupo "Escritório e aulas": rótulo novo, chave digital_aulas mantida, contabilidade dentro')
@@ -78,9 +78,9 @@ const main = async () => {
   ok(ET.GRUPOS_AVALIACAO.length === 12 && ET.GRUPOS_AVALIACAO.map(g => g.chave).join() === 'reparos_casa,eletrica_tec,limpeza,beleza,festas,cuidado,transporte,seguranca,digital_aulas,arte,divulgacao,construcao_pintura',
      'etiquetas: Consertos, Elétrica e tecnologia, os outros 9 de serviço + obra', ET.GRUPOS_AVALIACAO.map(g => `${g.chave}:${g.nome}`))
   const gEle = ET.GRUPOS_AVALIACAO.find(g => g.chave === 'eletrica_tec'), gCons = ET.GRUPOS_AVALIACAO.find(g => g.chave === 'reparos_casa')
-  ok(gEle.nome === 'Elétrica e tecnologia' && gEle.especialidades.join() === 'eletrica,eletronica,climatizacao,seguranca_eletronica'
+  ok(gEle.nome === 'Elétrica e tecnologia' && gEle.especialidades.join() === 'eletrica,eletronica,climatizacao,seguranca_eletronica,conserto_celular'
      && gCons.especialidades.join() === 'hidraulica,alvenaria,gesseiro,marcenaria,serralheria,vidraceiro,chaveiro,estofamento,montagem_moveis',
-     'catálogo: elétrica/eletrônica/climatização/segurança eletrônica no grupo de etiquetas elétrico; Consertos com os outros 9', { ele: gEle.especialidades, cons: gCons.especialidades })
+     'catálogo: elétrica/eletrônica/climatização/segurança eletrônica/conserto de celular no grupo de etiquetas elétrico; Consertos com os outros 9', { ele: gEle.especialidades, cons: gCons.especialidades })
   ok(JSON.stringify(ET.ETIQUETAS_POR_GRUPO.eletrica_tec[5]) === '["Resolveu de vez","Serviço muito seguro","Super organizado"]' && JSON.stringify(ET.ETIQUETAS_POR_GRUPO.eletrica_tec[1]) === '["Não resolveu","Serviço perigoso","Estragou algo"]',
      'conjunto elétrico de antes restaurado ("Serviço muito seguro"…)')
   ok(JSON.stringify(ET.ETIQUETAS_POR_GRUPO.divulgacao) === JSON.stringify(ET.ETIQUETAS_POR_GRUPO.digital_aulas), 'etiquetas: Divulgação = conjunto de Escritório e aulas (digital_aulas)')

@@ -22,6 +22,7 @@ const CATEGORIAS_LOCAL_ATENDIMENTO = Object.freeze([
   'depilacao', 'massagem', 'podologo', 'pet',
   'mecanica', 'borracheiro', 'lavajato', 'informatica', 'eletronica', 'estofamento', 'costura',
   'chaveiro', 'filmagem_fotografia', 'confeiteiro', 'salgadeiro', 'artesanato', 'aluguel_festas',
+  'conserto_celular',
 ])
 const LOCAIS_ATENDIMENTO = Object.freeze(['casa_cliente', 'local_profissional', 'tanto_faz'])
 

@@ -8,6 +8,7 @@ const { categoriasDoReparo } = require('./categoriasApp')
 const CATEGORIAS_PEDE_FOTO = Object.freeze([
   'hidraulica', 'eletrica', 'alvenaria', 'marcenaria', 'montagem_moveis', 'estofamento', 'vidraceiro',
   'serralheria', 'gesseiro', 'climatizacao', 'eletronica', 'informatica', 'mecanica', 'jardineiro',
+  'conserto_celular',
 ])
 const DICA_FOTO = ' · Dica: adicione uma foto ou vídeo 📸'
 

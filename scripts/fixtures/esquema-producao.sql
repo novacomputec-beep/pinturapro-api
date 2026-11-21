@@ -753,6 +753,7 @@ CREATE TABLE IF NOT EXISTS "usuarios" (
   "indicado_por" uuid,
   "meses_bonus_indicacao" integer DEFAULT 0 NOT NULL,
   "embaixador" boolean DEFAULT false NOT NULL,
+  "oficial" boolean DEFAULT false NOT NULL,
   "desinstalado_em" timestamp with time zone,
   "referencias_alteradas_em" timestamp with time zone,
   "outros_descricao" text,

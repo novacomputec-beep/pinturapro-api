@@ -32,6 +32,7 @@ const ESPECIALIDADES_REPARADOR = [
   'borracheiro', 'seguranca_eletronica',
   'locucao', 'jingles_vinhetas', 'marketing_publicidade',
   'contabilidade',
+  'conserto_celular',
   'outros',
 ]
 

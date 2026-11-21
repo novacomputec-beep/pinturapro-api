@@ -123,7 +123,7 @@ const ETIQUETAS_POR_GRUPO = {
 // 'eletrica_tec' lista só elas. A regra de grupo (servidor e app) é a mesma de sempre: todo grupo
 // cujas especialidades tocam alguma categoria da demanda — elétrica pura avalia só com as de
 // elétrica; elétrica + hidráulica, com as duas.
-const SLUGS_ELETRICOS = ['eletrica', 'eletronica', 'climatizacao', 'seguranca_eletronica']
+const SLUGS_ELETRICOS = ['eletrica', 'eletronica', 'climatizacao', 'seguranca_eletronica', 'conserto_celular']
 const GRUPO_ELETRICO = { chave: 'eletrica_tec', nome: 'Elétrica e tecnologia', especialidades: SLUGS_ELETRICOS }
 
 // Os 12 grupos na ordem de apresentação: os 10 de serviço (ordem de GRUPOS_RELACIONADOS), com

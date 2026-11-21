@@ -79,6 +79,9 @@ const CATEGORIAS_SERVICO = [
   // Contabilidade (dono, 16/11/2026) — grupo "Escritório e aulas" (chave digital_aulas).
   { slug: 'contabilidade',   rotulo: 'Contabilidade',     emoji: '🧾',
     palavras: ['contador', 'imposto de renda', 'abertura de empresa', 'MEI'] },
+  // Conserto de celular e tablet (dono, 21/11/2026) — junto de eletronica: push em "Consertos da
+  // casa" (gruposCategorias), avaliação em "Elétrica e tecnologia" (etiquetasAvaliacao).
+  { slug: 'conserto_celular', rotulo: 'Conserto de celular e tablet', emoji: '📲' },
   { slug: 'outros',          rotulo: 'Outros',            emoji: '➕' },
 ]
 
