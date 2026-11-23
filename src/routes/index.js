@@ -134,6 +134,8 @@ const { ofuscarCoordenadas, ofuscarCoordenadasLista, aplicarPrivacidadeLocal } =
 // Limite por CONTA nas tentativas de DELETE /conta/excluir (tabela tentativas_auth, vale entre réplicas).
 const { registrarTentativa, limparTentativas } = require('../utils/tentativasAuth')
 const { enviarEmail } = require('../services/emailService')
+// Acordo ético do contratante + motivo do cancelamento pelo dono (utils/acordoEtico).
+const { situacaoAcordoEtico, registrarAceiteAcordoEtico, aceitouAcordoNoCorpo, sqlCteAceiteAcordo, lerMotivoCancelamentoDono } = require('../utils/acordoEtico')
 // sqlDonoDaPessoa / ehMesmaPessoa: posse de demanda por PESSOA (mesmo CPF), não por conta — um
 // dono_reparo gerencia as obras da sua conta de pintura e vice-versa (Fase 1 do lado contratante).
 // sqlProfissionalDaPessoa / sqlArrayProfissionaisDaPessoa / sqlPessoaNaoSuspensa: o espelho para
@@ -649,6 +651,10 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     // (POST /admin/:tabela/:id/cancelar). NULL nos demais caminhos e em todo o histórico (sem backfill).
     await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS cancelada_por TEXT`)
     await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS cancelada_por TEXT`)
+    // Acordo ético do contratante e motivo do cancelamento pelo dono (utils/acordoEtico; dono, 23/11/2026).
+    await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS acordo_etico_aceito_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS motivo_cancelamento TEXT`)
+    await client.query(`ALTER TABLE reparos ADD COLUMN IF NOT EXISTS motivo_cancelamento TEXT`)
     // Encerramento assimétrico: a chamada do PROFISSIONAL a /encerrar registra a solicitação,
     // e o DONO fecha de fato (o dono nunca solicita — encerrar, para ele, encerra na hora).
     // encerramento_solicitado_por IS NOT NULL É o estado pendente — sem status novo no banco:
@@ -2494,6 +2500,21 @@ router.post('/auth/boas-vindas-confirmada', autenticar, async (req, res) => {
   }
 })
 
+// POST /auth/acordo-etico — o contratante aceitou o acordo ético: grava NOW() em
+// usuarios.acordo_etico_aceito_em (utils/acordoEtico). Responde com o precisa_acordo_etico
+// recalculado (false: a contagem recomeça do aceite).
+router.post('/auth/acordo-etico', autenticar, async (req, res) => {
+  try {
+    const aceitoEm = await registrarAceiteAcordoEtico(req.usuario.id)
+    if (!aceitoEm) return res.status(404).json({ erro: 'Usuário não encontrado' })
+    const situacao = await situacaoAcordoEtico(req.usuario.id)
+    res.json({ ok: true, acordo_etico_aceito_em: aceitoEm, precisa_acordo_etico: situacao.precisa })
+  } catch (err) {
+    console.error('[auth/acordo-etico]', err.message)
+    res.status(500).json({ erro: 'Erro ao registrar o aceite do acordo' })
+  }
+})
+
 // ============================================================
 // USUARIOS
 // ============================================================
@@ -3111,15 +3132,18 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
     // no POSTGRES — o container roda em UTC e um new Date() daria o DIA errado nas horas finais
     // do dia local (mesmo motivo documentado em JANELAS_CHEGADA).
     // A zona entra como PARÂMETRO ($21), nunca interpolada: o valor vem do cliente.
+    // acordo_etico: true (app novo) grava o aceite do acordo ético no MESMO statement do INSERT
+    // (CTE aceite_acordo — utils/acordoEtico): cria e aceita juntos, ou nenhum dos dois.
     const result = await pool.query(
-      `INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, coordenadas_origem, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar, prazo_modo, prazo_timezone, valor_a_combinar)
+      `${sqlCteAceiteAcordo('$1', '$23')}
+       INSERT INTO obras (criado_por, titulo, categoria, valor, cidade, bairro, uf, metragem, prazo_execucao_dias, expira_em, descricao, tags, endereco_obra, ponto_referencia, latitude, longitude, coordenadas_origem, status, enviada_por_dono, status_aprovacao, client_request_id, horas_para_expirar, prazo_modo, prazo_timezone, valor_a_combinar)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
                CASE WHEN $20::text = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia('$21::text')} ELSE $10::timestamptz END,
                $11,$12,$13,$14,$15,$16,$17,'rascunho',true,'pendente',$18,$19,$20,$21,$22::boolean)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao, prazoModo, prazoZona, valorObra.valor_a_combinar]
+      [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao, prazoModo, prazoZona, valorObra.valor_a_combinar, aceitouAcordoNoCorpo(req.body)]
     )
     let obra = result.rows[0]
     // Especialidades inferidas do título + descrição (utils/especialidadesInferidas): gravadas já na
@@ -3339,6 +3363,8 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
              ${sqlSituacaoPainel('o')} AS situacao_painel,
              -- Quem cancelou: 'cliente' | 'admin' | null (coluna cancelada_por; sem backfill).
              o.cancelada_por,
+             -- Motivo que o dono escolheu ao cancelar (utils/acordoEtico); NULL sem motivo/app antigo.
+             o.motivo_cancelamento,
              -- Valor COMBINADO (utils/valorAcordado): o da candidatura escolhida; NULL sem escolhido.
              -- Em pedido "valor a combinar" (valor NULL) é o único preço que existe.
              (SELECT ${sqlValorAcordadoObra('ca', 'o')} FROM candidaturas ca WHERE ca.obra_id = o.id AND ca.status = 'aceito' LIMIT 1) AS valor_acordado,
@@ -3365,6 +3391,9 @@ router.delete('/obras/:id', autenticar, exigirSuperAdmin, obrasCtrl.encerrar)
 // Dono pode excluir sua própria obra
 router.delete('/obras/dono/:id', autenticar, async (req, res) => {
   try {
+    // motivo_cancelamento (utils/acordoEtico): opcional — app antigo não manda e grava NULL.
+    const motivo = lerMotivoCancelamentoDono(req)
+    if (motivo.erro) return res.status(400).json(motivo)
     // match_real: o match é sustentado por uma candidatura 'aceito' do próprio pintor casado.
     const obra = await pool.query(
       `SELECT o.id, o.match_usuario_id, o.status,
@@ -3385,15 +3414,15 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
       const emAndamento = await cancelarPedidoEmAndamento('obras', req.params.id, req.usuario.id)
       if (emAndamento) {
         if (!emAndamento.ok) return res.status(409).json({ erro: 'O atendimento mudou enquanto você cancelava. Atualize a tela.', codigo: 'ESTADO_MUDOU' })
-        await pool.query(`UPDATE obras SET cancelada_por = 'cliente' WHERE id = $1 AND status = 'cancelada'`, [req.params.id])
+        await pool.query(`UPDATE obras SET cancelada_por = 'cliente', motivo_cancelamento = $2 WHERE id = $1 AND status = 'cancelada'`, [req.params.id, motivo.valor])
         return res.json({ mensagem: 'Obra removida com sucesso', em_andamento: true })
       }
       return res.status(409).json({ erro: "Já existe um profissional escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
     }
     // encerrado_em: mesmo motivo do recusar acima — libera a obra cancelada para a limpeza
     // de mídia depois de 7 dias. COALESCE não reinicia contagem já iniciada.
-    await pool.query(`UPDATE obras SET status = 'cancelada', status_aprovacao = 'cancelada', cancelada_por = 'cliente',
-      encerrado_em = COALESCE(encerrado_em, NOW()), ${SQL_LIMPAR_MATCH} WHERE id = $1`, [req.params.id])
+    await pool.query(`UPDATE obras SET status = 'cancelada', status_aprovacao = 'cancelada', cancelada_por = 'cliente', motivo_cancelamento = $2,
+      encerrado_em = COALESCE(encerrado_em, NOW()), ${SQL_LIMPAR_MATCH} WHERE id = $1`, [req.params.id, motivo.valor])
     // Obra aberta sem match cancelada: push aos interessados não recusados (segundo plano).
     if (obra.rows[0].status === 'aberta') avisarPedidoCanceladoPeloDono('obras', req.params.id).catch(() => {})
     if (obra.rows[0].match_usuario_id) console.log(`[obras/dono DELETE] ${req.params.id}: match órfão (${obra.rows[0].match_usuario_id}) limpo na exclusão`)
@@ -4904,15 +4933,17 @@ const criarReparoDono = async (req, res) => {
     const prazoZona = prazoModo ? await resolverZonaCliente(req.body?.timezone) : null
     // ON CONFLICT no índice parcial (criado_por, client_request_id): retries com a mesma chave
     // retornam o reparo já criado em vez de inserir duplicata. Sem chave (NULL) → insert normal.
+    // acordo_etico: true grava o aceite no MESMO statement (ver POST /obras/dono).
     const result = await pool.query(
-      `INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id, prazo_modo, prazo_timezone, categorias, local_atendimento, valor_a_combinar)
+      `${sqlCteAceiteAcordo('$1', '$23')}
+       INSERT INTO reparos (criado_por, titulo, categoria, descricao, valor_estimado, cidade, bairro, uf, tags, status, status_aprovacao, expira_em, prazo_atendimento_horas, endereco_reparo, ponto_referencia, latitude, longitude, coordenadas_origem, client_request_id, prazo_modo, prazo_timezone, categorias, local_atendimento, valor_a_combinar)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'aberta','aprovada',
                CASE WHEN $18::text = '${PRAZO_MODO_HOJE}' THEN ${sqlFimDoDia('$19::text')} ELSE $10::timestamptz END,
                $11,$12,$13,$14,$15,$16,$17,$18,$19,$20::text[],$21::text,$22::boolean)
        ON CONFLICT (criado_por, client_request_id) WHERE client_request_id IS NOT NULL
        DO UPDATE SET client_request_id = EXCLUDED.client_request_id
        RETURNING *`,
-      [req.usuario.id, titulo, categoriaPrincipal, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo, prazoZona, listaCategorias, localAtendimento.valor, valorServico.valor_a_combinar]
+      [req.usuario.id, titulo, categoriaPrincipal, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo, prazoZona, listaCategorias, localAtendimento.valor, valorServico.valor_a_combinar, aceitouAcordoNoCorpo(req.body)]
     )
     res.status(201).json(result.rows[0])
     // ESTE e o unico envio que dispara no fluxo real, e por isso ele FICA. O INSERT acima
@@ -5033,6 +5064,9 @@ router.post('/admin/pedidos-oficiais', autenticar, exigirSuperAdmin, async (req,
 
 router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
   try {
+    // motivo_cancelamento: ver DELETE /obras/dono/:id.
+    const motivo = lerMotivoCancelamentoDono(req)
+    if (motivo.erro) return res.status(400).json(motivo)
     // match_real: ver DELETE /obras/dono/:id — só um interesse 'aceito' do prestador casado segura
     // a exclusão; match órfão é limpo no UPDATE abaixo.
     const reparo = await pool.query(
@@ -5047,7 +5081,7 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
       const emAndamento = await cancelarPedidoEmAndamento('reparos', req.params.id, req.usuario.id)
       if (emAndamento) {
         if (!emAndamento.ok) return res.status(409).json({ erro: 'O atendimento mudou enquanto você cancelava. Atualize a tela.', codigo: 'ESTADO_MUDOU' })
-        await pool.query(`UPDATE reparos SET cancelada_por = 'cliente' WHERE id = $1 AND status = 'cancelada'`, [req.params.id])
+        await pool.query(`UPDATE reparos SET cancelada_por = 'cliente', motivo_cancelamento = $2 WHERE id = $1 AND status = 'cancelada'`, [req.params.id, motivo.valor])
         return res.json({ mensagem: 'Serviço cancelado com sucesso', em_andamento: true })
       }
       return res.status(409).json({ erro: "Já existe um profissional escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
@@ -5064,10 +5098,10 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
     // pelo braço 'cancelada', e contratos/avaliações continuam com referente.
     // encerrado_em é o relógio desses 7 dias; COALESCE não reinicia contagem já iniciada.
     await pool.query(
-      `UPDATE reparos SET status = 'cancelada', status_aprovacao = 'cancelada', cancelada_por = 'cliente',
+      `UPDATE reparos SET status = 'cancelada', status_aprovacao = 'cancelada', cancelada_por = 'cliente', motivo_cancelamento = $2,
               encerrado_em = COALESCE(encerrado_em, NOW()), ${SQL_LIMPAR_MATCH}
         WHERE id = $1`,
-      [req.params.id]
+      [req.params.id, motivo.valor]
     )
     // Reparo aberto sem match cancelado: push aos interessados não recusados (segundo plano).
     if (reparo.rows[0].status === 'aberta') avisarPedidoCanceladoPeloDono('reparos', req.params.id).catch(() => {})
@@ -5418,6 +5452,7 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
              ${sqlSituacaoPainel('r')} AS situacao_painel,
              -- Quem cancelou: 'cliente' | 'admin' | null (coluna cancelada_por; sem backfill).
              r.cancelada_por,
+             r.motivo_cancelamento,
              -- Valor COMBINADO: o do interesse escolhido (ver GET /obras/admin).
              (SELECT ${sqlValorAcordadoReparo('ia', 'r')} FROM interesse_reparos ia WHERE ia.reparo_id = r.id AND ia.status = 'aceito' LIMIT 1) AS valor_acordado,
              (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) AS total_interessados,

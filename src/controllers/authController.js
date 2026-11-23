@@ -17,6 +17,7 @@ const { normalizarCodigo, recalcularIndicador } = require('../utils/indicacoes')
 const { temReferenciaPropria, ERRO_REFERENCIA_PROPRIA, erroTelefoneReferencias, camposReferencias } = require('../utils/referencias')
 // Resumo de avaliações + selo "bem avaliado" no perfil do profissional (utils/etiquetasAvaliacao).
 const { sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
+const { camposAcordoEtico } = require('../utils/acordoEtico')
 // Login social (Google/Apple): verificação dos tokens e ticket de cadastro (services/loginSocialService).
 const social = require('../services/loginSocialService')
 const cfgSocial = require('../config/loginSocial')
@@ -738,6 +739,7 @@ const montarSessao = async (usuario, req, contas = []) => {
   // Fase 2b). Campos EXTRAS em `usuario`: app antigo ignora e segue decidindo as abas por
   // tipo_prestador; o app novo mostra Obras por pode_obras e Serviços por pode_servicos.
   const capacidade = await capacidadesDaPessoa(usuario.id)
+  const acordoEtico = await camposAcordoEtico(usuario)
 
   const token = gerarToken(usuario)
   registrarPlataforma(usuario.id, req)
@@ -764,6 +766,8 @@ const montarSessao = async (usuario, req, contas = []) => {
       // O app usa ESTE usuario até a próxima releitura do perfil (boot/revalidarSessao): sem
       // os campos aqui, "Minhas referências" ficava escondido logo depois do login.
       ...camposReferencias(usuario.referencias, usuario),
+      // Só na conta contratante: precisa_acordo_etico (utils/acordoEtico).
+      ...acordoEtico,
     },
     assinatura: assinaturaResult.rows[0] || null,
     token,
@@ -860,6 +864,8 @@ const perfil = async (req, res) => {
       // Mesmos campos do login (montarSessao): abas Obras/Serviços por capacidade, "Minhas
       // candidaturas"/"Meus interesses" por histórico — por PESSOA, lidos do banco.
       Object.assign(usuario, await capacidadesDaPessoa(usuario.id))
+      // Mesmo campo do login, só na conta contratante: precisa_acordo_etico (utils/acordoEtico).
+      Object.assign(usuario, await camposAcordoEtico(usuario))
     }
     // Profissional: resumo das avaliações recebidas + selo "bem avaliado" (3× 5★) no payload
     // do perfil, para o app mostrar sem segunda chamada. Dono/admin não recebem o bloco.
