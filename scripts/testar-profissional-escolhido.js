@@ -58,9 +58,9 @@ const main = async () => {
       status text DEFAULT 'aberta', status_aprovacao text DEFAULT 'aprovada', expira_em timestamptz, criado_em timestamptz DEFAULT now(),
       codigo_publico text, match_usuario_id uuid, match_feito_em timestamptz, chegada_prevista_em timestamptz, prazo_chegada_extra_em timestamptz`
   await db.exec(`
-    CREATE TABLE usuarios (id uuid PRIMARY KEY, nome text, email text, telefone text);
-    CREATE TABLE reparos (cancelada_por text, valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
-    CREATE TABLE obras (cancelada_por text, valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, valor numeric, horas_para_expirar numeric, metragem numeric, prazo_execucao_dias int, tags text[]);
+    CREATE TABLE usuarios (acordo_etico_aceito_em timestamptz, id uuid PRIMARY KEY, nome text, email text, telefone text);
+    CREATE TABLE reparos (motivo_cancelamento text, cancelada_por text, valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, categorias text[], valor_estimado numeric, prazo_atendimento_horas numeric);
+    CREATE TABLE obras (motivo_cancelamento text, cancelada_por text, valor_a_combinar boolean NOT NULL DEFAULT false, ${colsDemanda}, valor numeric, horas_para_expirar numeric, metragem numeric, prazo_execucao_dias int, tags text[]);
     CREATE TABLE candidaturas (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), valor_proposto numeric, valor_contraproposta numeric, obra_id uuid, usuario_id uuid, status text DEFAULT 'pendente', criado_em timestamptz DEFAULT now());
     CREATE TABLE interesse_reparos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), valor_proposto numeric, valor_contraproposta numeric, reparo_id uuid, usuario_id uuid, status text DEFAULT 'pendente', criado_em timestamptz DEFAULT now());
     CREATE UNIQUE INDEX candidaturas_aceito_unica_idx ON candidaturas (obra_id) WHERE status = 'aceito';
