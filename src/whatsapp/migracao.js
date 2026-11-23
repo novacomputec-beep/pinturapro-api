@@ -1,7 +1,7 @@
 // Tabelas do robô de WhatsApp (Etapa 1). Tudo ADITIVO e idempotente: roda na migração de boot da
 // API (dentro de um SAVEPOINT — falha aqui não impede a API de subir) e no início do worker.
 // `client` = conexão já dentro de uma transação.
-const { STATUS, CHAVE_PAUSADO, CHAVE_LOCK } = require('./config')
+const { STATUS, CHAVE_PAUSADO, CHAVE_LOCK, CHAVE_CANAL_AUTO, STATUS_POST_CANAL } = require('./config')
 
 const migrarWhatsapp = async (client) => {
   // API e worker podem subir juntos: um espera o outro (lock solto no fim da transação).
@@ -116,6 +116,39 @@ const migrarWhatsapp = async (client) => {
   await client.query(
     `INSERT INTO configuracoes (chave, valor) SELECT $1, 'false' WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`,
     [CHAVE_PAUSADO])
+
+  // CANAL (newsletter) — post automático (23/11/2026). whatsapp_canal_posts é a fila E o registro:
+  // a API insere 'pendente' (ou 'pulado' no dia sem pedidos), o worker posta e grava o resultado.
+  //   origem: 'auto' (18:00) | 'manual' (postar-agora); dia: data de São Paulo;
+  //   índice único (dia) só para 'auto' → no máximo UM post automático por dia, mesmo com réplicas;
+  //   enviando_em: marcado ANTES de postar — worker que cai no meio vira 'falha', nunca posta em dobro.
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS whatsapp_canal_posts (
+      id            BIGSERIAL PRIMARY KEY,
+      origem        TEXT NOT NULL CHECK (origem IN ('auto', 'manual')),
+      dia           DATE NOT NULL,
+      cidade        TEXT NOT NULL,
+      texto         TEXT,
+      total         INTEGER NOT NULL DEFAULT 0,
+      status        TEXT NOT NULL DEFAULT 'pendente' CHECK (status IN (${STATUS_POST_CANAL.map(s => `'${s}'`).join(', ')})),
+      erro          TEXT,
+      canal_jid     TEXT,
+      wa_message_id TEXT,
+      enviando_em   TIMESTAMPTZ,
+      criado_por    UUID,
+      criado_em     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      postado_em    TIMESTAMPTZ
+    )`)
+  await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS whatsapp_canal_posts_auto_dia_key ON whatsapp_canal_posts (dia) WHERE origem = 'auto'`)
+  await client.query(`CREATE INDEX IF NOT EXISTS whatsapp_canal_posts_pendentes_idx ON whatsapp_canal_posts (id) WHERE status = 'pendente'`)
+  // O que o worker descobriu do canal (a API lê): JID, nome, papel do número do robô e se é admin.
+  for (const col of ['canal_convite TEXT', 'canal_jid TEXT', 'canal_nome TEXT', 'canal_papel TEXT', 'canal_admin BOOLEAN', 'canal_erro TEXT', 'canal_verificado_em TIMESTAMPTZ']) {
+    await client.query(`ALTER TABLE whatsapp_estado ADD COLUMN IF NOT EXISTS ${col}`)
+  }
+  // Post automático das 18:00: nasce DESLIGADO.
+  await client.query(
+    `INSERT INTO configuracoes (chave, valor) SELECT $1, 'false' WHERE NOT EXISTS (SELECT 1 FROM configuracoes WHERE chave = $1)`,
+    [CHAVE_CANAL_AUTO])
 }
 
 module.exports = { migrarWhatsapp }

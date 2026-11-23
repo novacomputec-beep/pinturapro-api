@@ -95,4 +95,35 @@ const montarResumoCanal = ({ cidade, itens, agora = new Date() }) => {
   return { texto: linhas.join('\n'), total: ordenados.length }
 }
 
-module.exports = { montarResumoCanal, MAX_ITENS }
+// POST AUTOMÁTICO do canal (dono, 23/11/2026 — services/whatsappCanalService): UMA linha por pedido,
+// mais recentes primeiro, no máximo MAX_ITENS:
+//   "{emoji} {título} — {R$ valor | Aceita propostas} → protudo.app.br/p/{codigo}"
+// Mesmos itens de montarResumoCanal (utils/itensCanal): nome, telefone e endereço nem chegam aqui.
+// O título é texto livre do dono: sequência com cara de telefone (8+ dígitos) é retirada.
+// Sem pedidos → texto null (o dia é pulado). Devolve { texto, total, exibidos }.
+const LINK_BAIXAR = 'https://protudo.app.br/baixar'
+const RE_TELEFONE = /(?:\+?\d[\s().-]*){8,}/g
+const tituloDoPost = (s) => limparTitulo(String(s || '').replace(RE_TELEFONE, ' '))
+const montarPostCanal = ({ cidade, itens }) => {
+  const ordenados = [...itens].sort((a, b) => new Date(b.criado_em) - new Date(a.criado_em))
+  const exibidos = ordenados.slice(0, MAX_ITENS)
+  if (exibidos.length === 0) return { texto: null, total: 0, exibidos: 0 }
+  const linhas = exibidos.map((it) => {
+    const { emoji } = categoriaApresentada(it.tipo, it)
+    const valor = formatarValor(it.valor)
+    const codigo = String(it.codigo_publico || '').trim().toUpperCase()
+    const link = RE_CODIGO_PUBLICO.test(codigo) ? ` → ${PREFIXO_LINK_PUBLICO}${codigo}` : ''
+    return `${emoji} ${tituloDoPost(it.titulo)} — ${valor ? `R$ ${valor}` : 'Aceita propostas'}${link}`
+  })
+  const texto = [
+    `📋 Pedidos abertos hoje em ${String(cidade || '').trim()}`,
+    '',
+    ...linhas,
+    '',
+    `Baixe o ${MARCA} gratuito e mande sua proposta! 👇`,
+    LINK_BAIXAR,
+  ].join('\n')
+  return { texto, total: ordenados.length, exibidos: exibidos.length }
+}
+
+module.exports = { montarResumoCanal, montarPostCanal, MAX_ITENS, LINK_BAIXAR }

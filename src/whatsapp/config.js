@@ -59,6 +59,25 @@ const IDADE_MAXIMA_PERGUNTA_HORAS = 24    // pergunta mais velha que isso não g
 const ESPERA_INTERESSADO_MIN = 15
 const IDADE_MAXIMA_INTERESSADO_HORAS = 24 // interesse mais velho que isso não gera aviso
 const MAX_INTERESSADOS_POR_MENSAGEM = 50
+// CANAL do WhatsApp (newsletter) — post automático (dono, 23/11/2026). A API monta o texto e deixa
+// uma linha 'pendente' em whatsapp_canal_posts (services/whatsappCanalService); o worker resolve o
+// canal pelo convite (env WHATSAPP_CANAL_CONVITE), confere se o número do robô é admin e posta
+// (./canal). A chave liga/desliga o post das 18:00 e nasce DESLIGADA.
+const CHAVE_CANAL_AUTO = 'canal_auto_ativo'
+const HORA_POST_CANAL = 18                // São Paulo; o automático só nasce de 18:00 até o fim da janela (21:00)
+const VALIDADE_POST_MANUAL_MIN = 15       // "postar agora" que o worker não pegou nesse tempo vira falha
+const REVERIFICAR_CANAL_MS = 6 * 60 * 60 * 1000
+const NOVA_TENTATIVA_CANAL_MS = 5 * 60 * 1000
+const STATUS_POST_CANAL = ['pendente', 'postado', 'falha', 'pulado']
+// WHATSAPP_CANAL_CONVITE: o código do convite (0029V…), o link inteiro do canal ou o JID
+// (…@newsletter). Devolve { tipo: 'invite' | 'jid', chave } ou null (ausente/inválido).
+const lerConviteCanal = (env = process.env) => {
+  const bruto = String(env.WHATSAPP_CANAL_CONVITE ?? '').trim()
+  if (!bruto) return null
+  if (/^\d+@newsletter$/.test(bruto)) return { tipo: 'jid', chave: bruto }
+  const codigo = bruto.replace(/^https?:\/\/(www\.)?whatsapp\.com\/channel\//i, '').replace(/[/?#].*$/, '')
+  return /^[A-Za-z0-9_-]{10,64}$/.test(codigo) ? { tipo: 'invite', chave: codigo } : null
+}
 const CHAVE_PAUSADO = 'whatsapp_pausado'
 const chaveTipo = (tipo) => `whatsapp_tipo_${tipo}`
 
@@ -136,5 +155,6 @@ module.exports = {
   ESPERA_ENTRE_TENTATIVAS_MIN, MAX_ITENS_POR_MENSAGEM, STATUS, TIPOS, CHAVE_PAUSADO, chaveTipo, CHAVE_LOCK,
   TIPO_RESPOSTA, ROTULO_RESPOSTA, RESPOSTA_VALIDADE_MIN, TIPO_AVULSA, MAX_TEXTO_AVULSA, DEDUPE_AVULSA_HORAS, INTERVALO_PESSOA_HORAS, MAX_PERGUNTAS_POR_MENSAGEM,
   ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, ESPERA_INTERESSADO_MIN, IDADE_MAXIMA_INTERESSADO_HORAS, MAX_INTERESSADOS_POR_MENSAGEM,
+  CHAVE_CANAL_AUTO, HORA_POST_CANAL, VALIDADE_POST_MANUAL_MIN, REVERIFICAR_CANAL_MS, NOVA_TENTATIVA_CANAL_MS, STATUS_POST_CANAL, lerConviteCanal,
   WATCH_PATHS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela, intervaloMs, ehPedidoDeSaida,
 }

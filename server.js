@@ -837,7 +837,11 @@ const iniciarAgendador = () => {
   //   1 min: novo interessado em pedido de dono SEM push (15 min de espera para juntar) → fila.
   const whatsappInteressados = require('./src/services/whatsappInteressadosService')
   setInterval(job('whatsappNovosInteressados', whatsappPerguntas.semSobrepor('interessados', () => whatsappInteressados.enfileirarNovosInteressados())), INTERVALO_CRONOMETRO)
-  setInterval(job('whatsappRecebidas', whatsappPerguntas.semSobrepor('recebidas', () => whatsappPerguntas.processarRecebidas({ responder: rotasApp.responderPergunta }))), 5 * 1000)
+  //   1 min: post automático das 18:00 no Canal do WhatsApp (services/whatsappCanalService) — só
+  //   com canal_auto_ativo ligado; no máximo um por dia; o worker é quem publica.
+  const whatsappCanal = require('./src/services/whatsappCanalService')
+  setInterval(job('whatsappCanalPostAutomatico', whatsappPerguntas.semSobrepor('canal', () => whatsappCanal.agendarPostAutomatico())), INTERVALO_CRONOMETRO)
+  setInterval(job('whatsappRecebidas',whatsappPerguntas.semSobrepor('recebidas', () => whatsappPerguntas.processarRecebidas({ responder: rotasApp.responderPergunta }))), 5 * 1000)
   // Agendamento livre: lembretes do horário aceito ao profissional (véspera 18:00, 2h antes, na
   // hora) e a vigia "o profissional veio?" ao dono (1h depois do horário). Mesma cadência dos
   // cronômetros; fora do warm-up pelo mesmo motivo do lembrete acima.

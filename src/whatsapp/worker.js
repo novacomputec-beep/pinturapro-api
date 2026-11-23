@@ -13,6 +13,7 @@ const { validarAdaptador } = require('./adaptador')
 const { criarAdaptadorBaileys } = require('./adaptadorBaileys')
 const { processarProxima, recuperarInterrompidas, aplicarStatus } = require('./fila')
 const { registrarRecebida } = require('./entrada')
+const { criarCanal, recuperarPostsInterrompidos } = require('./canal')
 const { lerTrava, intervaloMs, ESPERA_FILA_VAZIA_MS, CHAVE_LOCK } = require('./config')
 
 let parando = false
@@ -73,7 +74,13 @@ const iniciar = async () => {
   const perdidas = await recuperarInterrompidas(pool)
   if (perdidas) console.log(`[whatsapp] ${perdidas} mensagem(ns) interrompida(s) no envio anterior marcada(s) como falha`)
 
+  const postsPerdidos = await recuperarPostsInterrompidos(pool)
+  if (postsPerdidos) console.log(`[whatsapp/canal] ${postsPerdidos} post(s) interrompido(s) na postagem anterior marcado(s) como falha`)
+
   const adaptador = validarAdaptador(criarAdaptadorBaileys({ db: pool }))
+  // Canal do WhatsApp (./canal): resolve o canal do convite, confere se o robô é admin e publica
+  // os posts pendentes (o das 18:00 e o "postar agora" do painel).
+  const canal = criarCanal({ db: pool, adaptador })
   adaptador.aoMudarEstado((estado) => { console.log(`[whatsapp] conexão: ${estado.conexao}`); return gravarEstado(estado, trava) })
   adaptador.aoReceber((msg) => registrarRecebida(pool, msg).then(r => { if (r.saiu) console.log(`[whatsapp] pedido de saída (SAIR): ${r.usuarios.length} conta(s)`) }))
   adaptador.aoAtualizarStatus((s) => aplicarStatus(pool, s))
@@ -123,6 +130,14 @@ const iniciar = async () => {
     } catch (err) {
       console.error('[whatsapp] erro no laço da fila:', err.message)
       espera = 10000
+    }
+    // Canal: fora do try da fila — erro aqui não atrasa as mensagens, e vice-versa.
+    try {
+      const c = await canal.passo()
+      if (c.postou) console.log(`[whatsapp/canal] post ${c.id} publicado id=${c.waMessageId}`)
+      if (c.falouComWhatsapp) espera = Math.max(espera, intervaloMs())
+    } catch (err) {
+      console.error('[whatsapp/canal] erro no passo do canal:', err.message)
     }
     await dormir(espera)
   }

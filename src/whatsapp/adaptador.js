@@ -15,6 +15,13 @@
 //                                     (ou null); midia = 'audio' | 'imagem' | … (null quando é texto).
 //   aoAtualizarStatus(fn)           → fn({ id, status }) com status 'entregue' | 'lida'.
 //   aoMudarEstado(fn)               → fn(estado()) a cada mudança de conexão/QR.
+//
+// CANAL (newsletter) — fora de METODOS (a fila não precisa); exigidos só por ./canal:
+//   resolverCanal({ tipo, chave })  → { jid, nome, papel, admin, seguidores } do canal do convite
+//                                     (tipo 'invite') ou do JID (tipo 'jid'); papel = papel do NÚMERO
+//                                     DO ROBÔ no canal ('OWNER' | 'ADMIN' | 'SUBSCRIBER' | 'GUEST' | null).
+//   postarNoCanal(jid, texto)       → { id } — publica o texto no canal (só admin consegue).
+const METODOS_CANAL = ['resolverCanal', 'postarNoCanal']
 const METODOS = ['conectar', 'desconectar', 'estado', 'existeNoWhatsapp', 'enviarTexto', 'aoReceber', 'aoAtualizarStatus', 'aoMudarEstado']
 const CONEXOES = ['desligado', 'conectando', 'aguardando_qr', 'conectado']
 
@@ -24,4 +31,4 @@ const validarAdaptador = (adaptador) => {
   return adaptador
 }
 
-module.exports = { METODOS, CONEXOES, validarAdaptador }
+module.exports = { METODOS, METODOS_CANAL, CONEXOES, validarAdaptador }
