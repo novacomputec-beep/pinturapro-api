@@ -240,7 +240,7 @@ const main = async () => {
   })
   const tipos = (await chamar('get', '/admin/whatsapp/tipos')).body.tipos
   const ni = tipos.find(x => x.tipo === 'novo_interessado')
-  ok(tipos.map(x => x.tipo).join() === 'pergunta_sem_resposta,novo_interessado,prazo_acabando,escolhido,horario_aguardando,teste'
+  ok(tipos.map(x => x.tipo).join() === 'pergunta_sem_resposta,novo_interessado,especialidade_rara,prazo_acabando,escolhido,horario_aguardando,teste'
      && ni.rotulo === '🙋 Novo interessado' && ni.dica === 'Só para quem está sem notificação' && ni.implementado === true && ni.ligado === true
      && tipos.find(x => x.tipo === 'teste').dica === null,
      'painel /tipos: "🙋 Novo interessado" com a dica "Só para quem está sem notificação", implementado', ni)

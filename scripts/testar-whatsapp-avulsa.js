@@ -154,7 +154,7 @@ const main = async () => {
 
   const tipos = (await chamar('get', '/admin/whatsapp/tipos')).body.tipos
   const put = await chamar('put', '/admin/whatsapp/tipos', { body: { tipo: 'avulsa', ligado: false } })
-  ok(tipos.map(x => x.tipo).join() === 'pergunta_sem_resposta,novo_interessado,prazo_acabando,escolhido,horario_aguardando,teste' && put.status === 400,
+  ok(tipos.map(x => x.tipo).join() === 'pergunta_sem_resposta,novo_interessado,especialidade_rara,prazo_acabando,escolhido,horario_aguardando,teste' && put.status === 400,
      'painel /tipos: avulsa não aparece no liga/desliga e não aceita PUT', [tipos.length, put.status])
 
   // dedupe: depois de enviada continua valendo; 25 h depois, ou se falhou, entra de novo.

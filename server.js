@@ -837,6 +837,10 @@ const iniciarAgendador = () => {
   //   1 min: novo interessado em pedido de dono SEM push (15 min de espera para juntar) → fila.
   const whatsappInteressados = require('./src/services/whatsappInteressadosService')
   setInterval(job('whatsappNovosInteressados', whatsappPerguntas.semSobrepor('interessados', () => whatsappInteressados.enfileirarNovosInteressados())), INTERVALO_CRONOMETRO)
+  //   15 min: pedido sem interessado no último quarto do prazo, de especialidade com poucos
+  //   profissionais na região → até 5 deles, os mais próximos (services/whatsappEspecialidadeRaraService).
+  const whatsappRara = require('./src/services/whatsappEspecialidadeRaraService')
+  setInterval(job('whatsappEspecialidadeRara', whatsappPerguntas.semSobrepor('especialidade_rara', () => whatsappRara.enfileirarEspecialidadeRara())), whatsappRara.INTERVALO_MS)
   //   1 min: post automático das 18:00 no Canal do WhatsApp (services/whatsappCanalService) — só
   //   com canal_auto_ativo ligado; no máximo um por dia; o worker é quem publica.
   const whatsappCanal = require('./src/services/whatsappCanalService')
