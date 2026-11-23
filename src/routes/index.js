@@ -38,6 +38,7 @@ const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQ
         pedidoCancelamentoParaApp, semColunasPedidoCancelamentoParaApp,
         cancelarPedidoEmAndamento, sqlEncerradoPeloClienteEmAndamento } = require('../services/cancelamentoMatchService')
 // "Liberar WhatsApp" (arte "Ela chegou? v2"): o dono libera o próprio número ao escolhido antes do "Estou a caminho".
+const { migrarPenalidadesAuto, verificarPenalidadeAvaliacoes, verificarPenalidadeDenuncias, exigirNaoSuspensoSalvoAvaliacoes, exigirPodePublicar, sqlNotaBaixaAntes } = require('../utils/penalidadesAuto')
 const { handler: liberarWhatsappHandler, whatsappLiberado, migrarWhatsappLiberado } = require('../services/liberarWhatsappService')
 // Propostas rebaixadas pelo match voltam a valer quando a demanda retorna ao feed (regra única).
 const { sqlRestaurarPropostas, SQL_MARCAR_REABERTURA } = require('../utils/reaberturaMatch')
@@ -751,6 +752,9 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     const valoresACombinar = await migrarValorACombinar(client)
     // "Liberar WhatsApp" (services/liberarWhatsappService): whatsapp_liberado_em / _para em reparos e obras.
     await migrarWhatsappLiberado(client)
+    // Penalidades automáticas (utils/penalidadesAuto): observação/suspensão por avaliações baixas,
+    // publicação suspensa por denúncias, e o marco "só conta daqui em diante".
+    await migrarPenalidadesAuto(client)
     for (const v of valoresACombinar) console.log(`[migration] valor a combinar: ${v.tabela} ${v.id} "${v.titulo}" (valor era ${v.valor_antes})`)
     // Instante em que o push "nova obra/novo serviço disponível" foi disparado. NULL = ainda
     // não avisado. Escrito UMA vez pelo claim atômico de POST /:id/midias-prontas (o app
@@ -3046,7 +3050,9 @@ const resolverZonaCliente = async (bruto) => {
 
 // exigirNaoSuspenso: dono suspenso (3ª tentativa de compartilhar contato — utils/tentativasContato)
 // não publica pedido novo enquanto durar a suspensão; o que já está em andamento segue.
-router.post('/obras/dono', autenticar, exigirNaoSuspenso, async (req, res) => {
+// Penalidades automáticas (utils/penalidadesAuto): suspenso por AVALIAÇÕES ainda publica como
+// cliente; cliente com 3 denúncias fica 7 dias sem publicar (exigirPodePublicar → 403 com a data).
+router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirPodePublicar, async (req, res) => {
   try {
     if (req.usuario.role !== 'dono_obra' && req.usuario.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas donos de obra podem cadastrar obras' })
@@ -3263,7 +3269,7 @@ router.post('/obras-aprovacao/:id/recusar', autenticar, exigirAdmin, async (req,
   }
 })
 
-router.get('/obras', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiva, exigirPodeObras, async (req, res) => {
+router.get('/obras', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirAssinaturaAtiva, exigirPodeObras, async (req, res) => {
   try {
     const { page, limit, offset } = paginacaoAdmin(req.query)
     req.query.page  = page
@@ -4936,7 +4942,7 @@ const criarReparoDono = async (req, res) => {
     res.status(500).json({ erro: 'Erro ao cadastrar serviço' })
   }
 }
-router.post('/reparos/dono', autenticar, exigirNaoSuspenso, criarReparoDono)
+router.post('/reparos/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirPodePublicar, criarReparoDono)
 
 // ─── CONTA OFICIAL DO PROTUDO (utils/contaOficial; dono, 21/11/2026) ─────────────────────────────
 // POST /admin/conta-oficial { usuario_id } ou { email } — super-admin. Marca UMA conta de
@@ -5590,7 +5596,7 @@ router.get('/prestador/oportunidades-resumo', autenticar, exigirPrestador, async
   }
 })
 
-router.get('/reparos', autenticar, exigirNaoSuspenso, exigirPrestador, exigirPodeServicos, async (req, res) => {
+router.get('/reparos', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirPrestador, exigirPodeServicos, async (req, res) => {
   try {
     const { page, limit, offset } = paginacaoAdmin(req.query)
     const { categoria, raio_km, lat, lng } = req.query
@@ -8879,6 +8885,8 @@ router.post('/avaliacoes', autenticar, async (req, res) => {
     } catch (err) {
       console.error(`[Avaliacoes] aviso ao profissional ${avaliado_id}:`, err.message)
     }
+    // Penalidade automática (média das 3 últimas <= 2,0): observação, depois suspensão. Nunca lança.
+    await verificarPenalidadeAvaliacoes(avaliado_id)
   } catch (err) {
     console.error('[Avaliacoes] Erro:', err.message)
     res.status(500).json({ erro: 'Erro ao registrar avaliação' })
@@ -9091,6 +9099,8 @@ router.post('/denuncias', autenticar, async (req, res) => {
     if (descricaoLimpa !== texto) registrarTentativaContato({ usuario_id: uid, tipo: `denuncia_${contrato_tipo}`, demanda_id: contrato_id, campo: 'descricao', conta: temContatoClaro(texto) })
 
     res.status(201).json({ mensagem: 'Denúncia registrada. Nossa equipe vai analisar.', id: result.rows[0].id })
+    // Penalidade automática do cliente (3 denúncias de 3 profissionais em 60 dias). Nunca lança.
+    await verificarPenalidadeDenuncias(c.criado_por)
   } catch (err) {
     console.error('[Denuncias] Erro:', err.message)
     res.status(500).json({ erro: 'Erro ao registrar denúncia' })
@@ -9921,12 +9931,16 @@ router.get('/admin/denuncias', autenticar, exigirAdmin, async (req, res) => {
               d.status, d.criado_em,
               d.denunciante_id, ud.nome AS denunciante_nome, ud.email AS denunciante_email,
               d.denunciado_id,  ua.nome AS denunciado_nome,  ua.email AS denunciado_email,
-              COALESCE(o.titulo, r.titulo) AS contrato_titulo
+              COALESCE(o.titulo, r.titulo) AS contrato_titulo,
+              -- Anti-revanche (utils/penalidadesAuto): denúncia feita DEPOIS de o denunciante levar nota
+              -- <= 2 neste contrato. Não conta para a penalidade automática do cliente.
+              (nb.estrelas IS NOT NULL) AS apos_nota_baixa, nb.estrelas AS apos_nota_baixa_estrelas
        FROM denuncias d
        JOIN usuarios ud ON ud.id = d.denunciante_id
        LEFT JOIN usuarios ua ON ua.id = d.denunciado_id
        LEFT JOIN obras   o ON d.contrato_tipo = 'obra'   AND o.id = d.contrato_id
        LEFT JOIN reparos r ON d.contrato_tipo = 'reparo' AND r.id = d.contrato_id
+       LEFT JOIN LATERAL (${sqlNotaBaixaAntes('d')}) nb ON true
        ${filtro}
        ORDER BY d.criado_em DESC
        LIMIT $1 OFFSET $2`,
@@ -11060,6 +11074,7 @@ router.post('/admin/canal/convites/enviar', autenticar, exigirAdmin, async (req,
 
 // Aba "WhatsApp" do painel (robô — Etapa 1): /admin/whatsapp/* (status+QR, pausa, contadores, lista, tipos, teste).
 router.use(require('./adminWhatsapp'))
+router.use(require('./adminPenalidades'))
 
 module.exports = router
 module.exports.migracaoPronta = migracaoPronta

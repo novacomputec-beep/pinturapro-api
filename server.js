@@ -895,6 +895,9 @@ const iniciarAgendador = () => {
   // Suspensões por contato (7 dias) vencidas: de hora em hora, como a expiração de assinatura —
   // a folga de até 1h num prazo de 7 dias é irrelevante. Fora do warm-up: a próxima hora pega.
   setInterval(job('liberarSuspensoesContato', () => { liberarSuspensoesContato() }), 60 * 60 * 1000)
+  // Penalidades automáticas (utils/penalidadesAuto): levanta, sem mensagem, as suspensões de 7 dias
+  // vencidas (avaliações baixas / publicação por denúncias). De 5 em 5 min.
+  setInterval(job('encerrarPenalidadesVencidas', () => { require('./src/utils/penalidadesAuto').encerrarPenalidadesVencidas() }), 5 * 60 * 1000)
   // Pedido de acordo de cancelamento vale 2h: varredura de 5 em 5 min, como os claims de cronômetro.
   setInterval(job('expirarPedidosCancelamento', () => { expirarPedidosCancelamento() }), 5 * 60 * 1000)
   // De 5 em 5 minutos. Era de hora em hora, justificado pelo prazo (então de 2 dias) do
