@@ -121,7 +121,7 @@ app.use(cors((req, callback) => {
   const origin = ROTAS_SITE.test(req.path) ? [...CORS_ORIGENS, CORS_ORIGEM_SITE] : CORS_ORIGENS
   callback(null, {
     origin,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true
   })
