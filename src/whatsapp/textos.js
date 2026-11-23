@@ -57,6 +57,22 @@ const textoInteressados = (itens, { primeira = false } = {}) => {
 // Resposta do robô a quem responde a um aviso de novo interessado (a escolha é feita no app).
 const TEXTO_RESPOSTA_INTERESSADO = 'Para escolher o profissional, toque no link acima 👆'
 
+// ESPECIALIDADE RARA (dono, 23/11/2026) — para o PROFISSIONAL. Texto aprovado pelo dono.
+// "45 min", "3 h", "3 h 20 min", "1 dia", "2 dias e 5 h" (minutos só abaixo de um dia).
+const tempoRestante = (ms) => {
+  const min = Math.max(1, Math.floor(Number(ms) / 60000) || 0)
+  if (min < 60) return `${min} min`
+  const h = Math.floor(min / 60)
+  if (h < 24) return min % 60 ? `${h} h ${min % 60} min` : `${h} h`
+  const d = Math.floor(h / 24)
+  return `${d} ${d === 1 ? 'dia' : 'dias'}${h % 24 ? ` e ${h % 24} h` : ''}`
+}
+// dados = { primeiro_nome, rotulo, titulo, codigo, expira_em }; agora = instante do envio.
+const textoEspecialidadeRara = (dados, { primeira = false, agora = new Date() } = {}) => {
+  const corpo = `Oi, ${dados.primeiro_nome}! 👋 Aqui é o *ProTudo*.\nTem um pedido de *${dados.rotulo}* perto de você ainda sem ninguém: *"${dados.titulo}"*.\n⏰ Termina em ${tempoRestante(new Date(dados.expira_em).getTime() - new Date(agora).getTime())}.\n👉 Veja e mande sua proposta: protudo.app.br/p/${dados.codigo}`
+  return primeira ? corpo + RODAPE_SAIR : corpo
+}
+
 // "1 ou 2", "1, 2 ou 3"…
 const listaNumeros = (numeros) => {
   const ns = [...numeros].sort((a, b) => a - b)
@@ -77,4 +93,4 @@ const lerNumeroInicial = (texto) => {
 }
 
 module.exports = { RODAPE_SAIR, primeiroNome, textoPerguntas, textoNaoEntendi, TEXTO_NAO_ENTENDI_SEM_NUMERO, TEXTO_SO_ESCRITA, textoEntregue, textoNaoEntregue, lerNumeroInicial, listaNumeros,
-  textoInteressados, linkAbrir, DICA_NOTIFICACOES, TEXTO_RESPOSTA_INTERESSADO }
+  tempoRestante, textoEspecialidadeRara, textoInteressados, linkAbrir, DICA_NOTIFICACOES, TEXTO_RESPOSTA_INTERESSADO }

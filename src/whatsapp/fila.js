@@ -20,11 +20,14 @@
 // Sai sempre sozinha (nunca agrupada) e não "caduca" (não há pergunta no app para ser respondida).
 // 'avulsa' (19/11/2026 — POST /admin/whatsapp/avulsa): escrita à mão no painel; sempre ligada (fora
 // do liga/desliga por tipo), sai sozinha com o texto exato e passa pelas demais travas.
+// 'especialidade_rara' (23/11/2026 — services/whatsappEspecialidadeRaraService): para o
+// profissional; uma mensagem por linha, redigida AQUI (o "Termina em…" é o da hora do envio). Sai da
+// fila sem enviar se o pedido ganhou interessado/escolhido, fechou ou venceu.
 // `db` = pool (ou client); `agora` e `env` injetáveis para o teste.
 const { TIPOS, CHAVE_PAUSADO, chaveTipo, MAX_TENTATIVAS, ESPERA_ENTRE_TENTATIVAS_MIN, MAX_ITENS_POR_MENSAGEM,
         TIPO_RESPOSTA, RESPOSTA_VALIDADE_MIN, INTERVALO_PESSOA_HORAS, MAX_PERGUNTAS_POR_MENSAGEM, MAX_INTERESSADOS_POR_MENSAGEM,
-        lerTrava, travaPermite, dentroDaJanela, variantesTelefone } = require('./config')
-const { textoPerguntas, textoInteressados } = require('./textos')
+        TIPO_RARA, lerTrava, travaPermite, dentroDaJanela, variantesTelefone } = require('./config')
+const { textoPerguntas, textoInteressados, textoEspecialidadeRara } = require('./textos')
 
 const TIPO_PERGUNTA = 'pergunta_sem_resposta'
 const TIPO_INTERESSADO = 'novo_interessado'
@@ -91,6 +94,17 @@ const sqlInteressadoVale = (m, n) => `(${sqlDonoSemPush(`${m}.usuario_id`)} AND 
              WHERE ${m}.ref_tabela = 'obras' AND d.id = ${m}.ref_id AND i.id::text = ${m}.dados->>'interesse_id'
                AND ${sqlInteresseVivo('i')} AND ${sqlPedidoAbertoSemEscolhido('d', n)})))`
 
+// Linha da fila (alias m) de 'especialidade_rara' que ainda deve sair: o pedido (ref_tabela/ref_id)
+// segue aberto, sem escolhido, dentro do prazo e SEM nenhum interessado vivo.
+const sqlRaraVale = (m, n) => `(
+    EXISTS (SELECT 1 FROM reparos d WHERE ${m}.ref_tabela = 'reparos' AND d.id = ${m}.ref_id AND ${sqlPedidoAbertoSemEscolhido('d', n)}
+               AND NOT EXISTS (SELECT 1 FROM interesse_reparos i WHERE i.reparo_id = d.id AND ${sqlInteresseVivo('i')}))
+ OR EXISTS (SELECT 1 FROM obras d WHERE ${m}.ref_tabela = 'obras' AND d.id = ${m}.ref_id AND ${sqlPedidoAbertoSemEscolhido('d', n)}
+               AND NOT EXISTS (SELECT 1 FROM candidaturas i WHERE i.obra_id = d.id AND ${sqlInteresseVivo('i')})))`
+// Prazo ATUAL do pedido da linha (o dono pode ter estendido depois de a linha entrar na fila).
+const sqlExpiraDoPedido = (m) => `(CASE ${m}.ref_tabela WHEN 'reparos' THEN (SELECT d.expira_em FROM reparos d WHERE d.id = ${m}.ref_id)
+                                      WHEN 'obras' THEN (SELECT d.expira_em FROM obras d WHERE d.id = ${m}.ref_id) END)`
+
 // Devolve { enviou, motivo, falouComWhatsapp }. falouComWhatsapp = true → o worker espera o
 // intervalo de 20–40 s antes da próxima (vale também para a consulta onWhatsApp sem envio).
 const processarProxima = async ({ db, adaptador, agora = new Date(), env = process.env } = {}) => {
@@ -146,7 +160,8 @@ const processarProxima = async ({ db, adaptador, agora = new Date(), env = proce
 
     // Agrupa: os itens pendentes do MESMO tipo, da mesma pessoa, para o mesmo telefone.
     const grupo = await db.query(
-      `SELECT m.id, m.texto, m.dados, ${p.tipo === TIPO_PERGUNTA ? `(m.sandbox OR ${sqlPerguntaPendente('pq', '$4')})` : p.tipo === TIPO_INTERESSADO ? sqlInteressadoVale('m', '$4') : 'true'} AS vale
+      `SELECT m.id, m.texto, m.dados, ${p.tipo === TIPO_PERGUNTA ? `(m.sandbox OR ${sqlPerguntaPendente('pq', '$4')})` : p.tipo === TIPO_INTERESSADO ? sqlInteressadoVale('m', '$4') : p.tipo === TIPO_RARA ? sqlRaraVale('m', '$4') : 'true'} AS vale,
+              ${p.tipo === TIPO_RARA ? sqlExpiraDoPedido('m') : 'NULL::timestamptz'} AS expira_em
          FROM whatsapp_mensagens m
          ${p.tipo === TIPO_PERGUNTA ? `LEFT JOIN perguntas_demanda pq ON pq.id = m.ref_id` : ''}
         WHERE m.status = 'fila' AND m.enviando_em IS NULL AND m.telefone = $1 AND m.tipo = $2
@@ -170,13 +185,18 @@ const processarProxima = async ({ db, adaptador, agora = new Date(), env = proce
     const ids = itens.map(l => l.id)
 
     let texto = montarTexto(itens)
-    if (p.tipo === TIPO_PERGUNTA || p.tipo === TIPO_INTERESSADO) {
+    if (p.tipo === TIPO_PERGUNTA || p.tipo === TIPO_INTERESSADO || p.tipo === TIPO_RARA) {
       // Primeira mensagem que este número recebe do robô (qualquer tipo)? Só ela leva o "responda SAIR".
       const antes = await db.query(
         `SELECT 1 FROM whatsapp_mensagens WHERE enviada_em IS NOT NULL AND telefone = ANY($1::text[]) LIMIT 1`,
         [variantesTelefone(p.telefone)])
-      const redigir = p.tipo === TIPO_INTERESSADO ? textoInteressados : textoPerguntas
-      texto = redigir(itens.map(l => l.dados || {}), { primeira: antes.rows.length === 0 })
+      const primeira = antes.rows.length === 0
+      if (p.tipo === TIPO_RARA) {
+        texto = textoEspecialidadeRara({ ...(itens[0].dados || {}), expira_em: itens[0].expira_em || itens[0].dados?.expira_em }, { primeira, agora })
+      } else {
+        const redigir = p.tipo === TIPO_INTERESSADO ? textoInteressados : textoPerguntas
+        texto = redigir(itens.map(l => l.dados || {}), { primeira })
+      }
     }
     await db.query(`UPDATE whatsapp_mensagens SET enviando_em = $2::timestamptz WHERE id = ANY($1::bigint[])`, [ids, agoraIso])
 
@@ -235,4 +255,4 @@ const aplicarStatus = async (db, { id, status }) => {
 }
 
 module.exports = { lerConfig, recuperarInterrompidas, processarProxima, aplicarStatus, montarTexto, sqlPerguntaPendente, TIPO_PERGUNTA,
-  TIPO_INTERESSADO, sqlPedidoAbertoSemEscolhido, sqlInteresseVivo, sqlDonoSemPush, sqlInteressadoVale }
+  TIPO_INTERESSADO, sqlPedidoAbertoSemEscolhido, sqlInteresseVivo, sqlDonoSemPush, sqlInteressadoVale, sqlRaraVale }

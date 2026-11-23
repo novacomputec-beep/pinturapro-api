@@ -30,6 +30,10 @@ const STATUS = ['fila', 'enviada', 'entregue', 'lida', 'respondida', 'falha', 's
 const TIPOS = {
   pergunta_sem_resposta: { rotulo: 'Pergunta sem resposta', padrao: false, implementado: true, limitePorPessoa: true },
   novo_interessado: { rotulo: '🙋 Novo interessado', dica: 'Só para quem está sem notificação', padrao: false, implementado: true, limitePorPessoa: true },
+  // 'especialidade_rara' (dono, 23/11/2026 — services/whatsappEspecialidadeRaraService): pedido sem
+  // interessado no último quarto do prazo, para até 5 profissionais de uma especialidade com poucos
+  // profissionais na região. sozinho = uma mensagem por linha (redigida na hora do envio).
+  especialidade_rara: { rotulo: '🔎 Especialidade rara', dica: 'Pedido sem interessados, para até 5 profissionais da especialidade', padrao: false, implementado: true, sozinho: true },
   prazo_acabando: { rotulo: 'Prazo acabando', padrao: false, implementado: false },
   escolhido: { rotulo: 'Profissional escolhido', padrao: false, implementado: false },
   horario_aguardando: { rotulo: 'Horário aguardando resposta', padrao: false, implementado: false },
@@ -59,6 +63,15 @@ const IDADE_MAXIMA_PERGUNTA_HORAS = 24    // pergunta mais velha que isso não g
 const ESPERA_INTERESSADO_MIN = 15
 const IDADE_MAXIMA_INTERESSADO_HORAS = 24 // interesse mais velho que isso não gera aviso
 const MAX_INTERESSADOS_POR_MENSAGEM = 50
+// Especialidade rara (profissional): pedido aberto SEM interessado, no último quarto do prazo e
+// com pelo menos RARA_MIN_RESTANTE_MIN pela frente, de especialidade com no máximo
+// RARA_MAX_PROFISSIONAIS profissionais ativos no alcance do pedido.
+const TIPO_RARA = 'especialidade_rara'
+const RARA_INTERVALO_JOB_MIN = 15         // de quanto em quanto tempo a API procura pedidos
+const RARA_MAX_PROFISSIONAIS = 15         // acima disto a especialidade não é "rara" ali
+const RARA_MAX_AVISOS_POR_PEDIDO = 5      // profissionais avisados por pedido (os mais próximos)
+const RARA_MIN_RESTANTE_MIN = 60          // prazo que ainda precisa restar para o aviso entrar na fila
+const RARA_INTERVALO_PESSOA_HORAS = 24    // no máximo um aviso deste tipo por profissional por dia
 // CANAL do WhatsApp (newsletter) — post automático (dono, 23/11/2026). A API monta o texto e deixa
 // uma linha 'pendente' em whatsapp_canal_posts (services/whatsappCanalService); o worker resolve o
 // canal pelo convite (env WHATSAPP_CANAL_CONVITE), confere se o número do robô é admin e posta
@@ -155,6 +168,7 @@ module.exports = {
   ESPERA_ENTRE_TENTATIVAS_MIN, MAX_ITENS_POR_MENSAGEM, STATUS, TIPOS, CHAVE_PAUSADO, chaveTipo, CHAVE_LOCK,
   TIPO_RESPOSTA, ROTULO_RESPOSTA, RESPOSTA_VALIDADE_MIN, TIPO_AVULSA, MAX_TEXTO_AVULSA, DEDUPE_AVULSA_HORAS, INTERVALO_PESSOA_HORAS, MAX_PERGUNTAS_POR_MENSAGEM,
   ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, ESPERA_INTERESSADO_MIN, IDADE_MAXIMA_INTERESSADO_HORAS, MAX_INTERESSADOS_POR_MENSAGEM,
+  TIPO_RARA, RARA_INTERVALO_JOB_MIN, RARA_MAX_PROFISSIONAIS, RARA_MAX_AVISOS_POR_PEDIDO, RARA_MIN_RESTANTE_MIN, RARA_INTERVALO_PESSOA_HORAS,
   CHAVE_CANAL_AUTO, HORA_POST_CANAL, VALIDADE_POST_MANUAL_MIN, REVERIFICAR_CANAL_MS, NOVA_TENTATIVA_CANAL_MS, STATUS_POST_CANAL, lerConviteCanal,
   WATCH_PATHS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela, intervaloMs, ehPedidoDeSaida,
 }
