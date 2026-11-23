@@ -39,6 +39,20 @@ const segundos = (ts) => {
   return Number.isFinite(n) && n > 0 ? new Date(n * 1000) : new Date()
 }
 
+// Metadados do canal (as duas formas que a biblioteca devolve) → o que o contrato promete.
+const PAPEIS_ADMIN = ['OWNER', 'ADMIN']
+const canalDoMetadata = (m) => {
+  const papel = String(m?.viewer_metadata?.role || '').toUpperCase() || null
+  const n = parseInt(m?.thread_metadata?.subscribers_count ?? m?.subscribers, 10)
+  return {
+    jid: m.id,
+    nome: m?.thread_metadata?.name?.text ?? (typeof m?.name === 'string' ? m.name : null),
+    papel,
+    admin: papel ? PAPEIS_ADMIN.includes(papel) : null,   // null = o WhatsApp não informou o papel
+    seguidores: Number.isFinite(n) ? n : null,
+  }
+}
+
 const criarAdaptadorBaileys = ({ db, log = console } = {}) => {
   let lib = null, sock = null, auth = null, parado = true, tentativa = 0, timer = null
   let atual = { conexao: 'desligado', qr: null, numero: null }
@@ -164,10 +178,22 @@ const criarAdaptadorBaileys = ({ db, log = console } = {}) => {
       const m = await exigirConectado().sendMessage(jid, { text: texto })
       return { id: m?.key?.id || null }
     },
+    // Canal (newsletter). newsletterMetadata devolve o canal com viewer_metadata.role = papel do
+    // número conectado; só OWNER/ADMIN publica.
+    resolverCanal: async ({ tipo, chave }) => {
+      const m = await exigirConectado().newsletterMetadata(tipo === 'jid' ? 'jid' : 'invite', chave)
+      if (!m?.id) throw new Error('canal não encontrado para este convite')
+      return canalDoMetadata(m)
+    },
+    postarNoCanal: async (jid, texto) => {
+      if (!/@newsletter$/.test(String(jid || ''))) throw new Error('destino não é um canal (@newsletter)')
+      const m = await exigirConectado().sendMessage(jid, { text: texto })
+      return { id: m?.key?.id || null }
+    },
     aoReceber: (fn) => { ouvintes.receber.push(fn) },
     aoAtualizarStatus: (fn) => { ouvintes.status.push(fn) },
     aoMudarEstado: (fn) => { ouvintes.estado.push(fn) },
   }
 }
 
-module.exports = { criarAdaptadorBaileys, telefoneDoJid, textoDaMensagem, midiaDaMensagem, citadaDaMensagem }
+module.exports = { criarAdaptadorBaileys, canalDoMetadata, telefoneDoJid, textoDaMensagem, midiaDaMensagem, citadaDaMensagem }

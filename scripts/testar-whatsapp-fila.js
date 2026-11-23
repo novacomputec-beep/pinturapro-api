@@ -269,8 +269,8 @@ const main = async () => {
 
   // ---------- rotas do painel ----------
   const todas = rotas.stack.filter(x => x.route)
-  ok(todas.length === 11 && todas.every(x => x.route.stack.length === 3 && x.route.stack[0].handle.name === 'autenticar' && x.route.stack[1].handle.name === 'exigirSuperAdmin'),
-     'as 11 rotas /admin/whatsapp/* exigem login e super-admin', todas.map(x => x.route.path))
+  ok(todas.length === 14 && todas.every(x => x.route.stack.length === 3 && x.route.stack[0].handle.name === 'autenticar' && x.route.stack[1].handle.name === 'exigirSuperAdmin'),
+     'as 14 rotas /admin/whatsapp/* exigem login e super-admin', todas.map(x => x.route.path))
   await q(`UPDATE whatsapp_estado SET conexao = 'aguardando_qr', qr = 'QR-TEXTO', heartbeat_em = NOW(), trava = NULL`)
   let st = await chamar('get', '/admin/whatsapp/status')
   ok(st.status === 200 && st.body.worker_vivo && st.body.conexao === 'aguardando_qr' && st.body.qr === 'QR-TEXTO' && st.body.envio_liberado === false && st.body.pausado === false, 'status: worker vivo, QR e trava ausente', st.body)

@@ -10,6 +10,8 @@ const { TIPOS, STATUS, CHAVE_PAUSADO, chaveTipo, TZ, dentroDaJanela, normalizarT
 const { lerConfig } = require('../whatsapp/fila')
 const { enfileirar } = require('../services/whatsappFilaService')
 const { simularPergunta } = require('../services/whatsappPerguntasService')
+const canalService = require('../services/whatsappCanalService')
+const { CHAVE_CANAL_AUTO, HORA_POST_CANAL } = require('../whatsapp/config')
 
 // Worker considerado vivo se bateu nos últimos 90 s (ele bate a cada 30 s).
 const WORKER_VIVO_SEGUNDOS = 90
@@ -333,6 +335,46 @@ router.post('/admin/whatsapp/simular-pergunta', autenticar, exigirSuperAdmin, as
       mensagem: `${r.ja_na_fila ? 'Já havia uma pergunta simulada na fila.' : 'Pergunta simulada na fila.'} ${quando}`,
     })
   } catch (err) { responderErro(res, 'simular-pergunta', err) }
+})
+
+// ─── CANAL do WhatsApp — post automático (23/11/2026, services/whatsappCanalService) ───────────
+// GET /admin/whatsapp/canal/preview — o texto que sairia AGORA (texto null = nenhum pedido: o dia
+// seria pulado), a chave canal_auto_ativo, o que o robô sabe do canal (JID, nome, papel e
+// robo_admin = o número do robô é admin e pode postar) e os últimos registros (hora, texto, resultado).
+router.get('/admin/whatsapp/canal/preview', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const post = await canalService.montarPost()
+    res.json({
+      ...post,
+      canal_auto_ativo: await canalService.canalAutoAtivo(),
+      hora_do_post: `${String(HORA_POST_CANAL).padStart(2, '0')}:00`,
+      fuso: TZ,
+      canal: await canalService.estadoDoCanal(),
+      ultimos: await canalService.ultimosPosts(),
+    })
+  } catch (err) { responderErro(res, 'canal/preview', err) }
+})
+
+// POST /admin/whatsapp/canal/postar-agora — põe o resumo de agora na fila do canal (origem
+// 'manual', fora do "um por dia" do automático). O robô publica em segundos; o resultado aparece
+// em `ultimos` do preview. 409: robô desconectado/pausado, canal não resolvido, robô não admin,
+// já há um post esperando, ou nenhum pedido aberto.
+router.post('/admin/whatsapp/canal/postar-agora', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const r = await canalService.postarAgora({ usuarioId: req.usuario?.id || null })
+    if (!r.ok) return res.status(r.status).json({ erro: r.erro, ...(r.id ? { id: r.id } : {}) })
+    res.json({ id: r.id, status: 'pendente', total: r.total, texto: r.texto, mensagem: 'Post na fila do canal. O robô publica em instantes.' })
+  } catch (err) { responderErro(res, 'canal/postar-agora', err) }
+})
+
+// PUT /admin/whatsapp/canal/auto { ativo } — liga/desliga o post automático das 18:00 (canal_auto_ativo).
+router.put('/admin/whatsapp/canal/auto', autenticar, exigirSuperAdmin, async (req, res) => {
+  try {
+    const { ativo } = req.body || {}
+    if (typeof ativo !== 'boolean') return res.status(400).json({ erro: 'ativo deve ser true ou false' })
+    await gravarConfig(CHAVE_CANAL_AUTO, ativo ? 'true' : 'false')
+    res.json({ canal_auto_ativo: ativo })
+  } catch (err) { responderErro(res, 'canal/auto', err) }
 })
 
 module.exports = router
