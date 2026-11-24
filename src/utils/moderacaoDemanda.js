@@ -125,6 +125,13 @@ const temContatoClaro = (v) => {
   return (v.match(RE_TELEFONE) || []).some(ehTelefone)
 }
 
+// Só TELEFONE em algarismos (8+ dígitos) ou "canal + número" (6+) — utils/suspeitaAnuncio.
+const temTelefone = (v) => {
+  if (typeof v !== 'string' || !v) return false
+  if ((v.match(RE_CANAL_NUMERO) || []).some(m => contarDigitos(m) >= 6)) return true
+  return (v.match(RE_TELEFONE) || []).some(ehTelefone)
+}
+
 // ───── Telefone PARTIDO entre mensagens ("34 9988" numa, "1 7102" na outra) ─────
 // Cada mensagem sozinha passa pelo sanitizador (menos de 8 dígitos); juntas formam o número.
 // fragmentosNumericos: trechos de dígitos (algarismos e por extenso) com 2+ dígitos que NÃO
@@ -230,6 +237,7 @@ module.exports = {
   avisarModeracao,
   sanitizarTexto,
   temContatoClaro,
+  temTelefone,
   fragmentosNumericos,
   mascararDigitosPartidos,
   MENSAGEM_REJEICAO,

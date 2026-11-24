@@ -38,6 +38,9 @@ const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQ
         pedidoCancelamentoParaApp, semColunasPedidoCancelamentoParaApp,
         cancelarPedidoEmAndamento, sqlEncerradoPeloClienteEmAndamento } = require('../services/cancelamentoMatchService')
 // "Liberar WhatsApp" (arte "Ela chegou? v2"): o dono libera o próprio número ao escolhido antes do "Estou a caminho".
+// Pedidos salvos (❤️) e pedido que parece anúncio (dono, 24/11/2026).
+const { migrarDemandasSalvas, anexarSalvo, anexarSalvosCount } = require('../utils/demandasSalvas')
+const { migrarSuspeitaAnuncio, avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita } = require('../utils/suspeitaAnuncio')
 const { migrarPenalidadesAuto, verificarPenalidadeAvaliacoes, verificarPenalidadeDenuncias, exigirNaoSuspensoSalvoAvaliacoes, exigirPodePublicar, sqlNotaBaixaAntes } = require('../utils/penalidadesAuto')
 const { handler: liberarWhatsappHandler, whatsappLiberado, migrarWhatsappLiberado } = require('../services/liberarWhatsappService')
 // Propostas rebaixadas pelo match voltam a valer quando a demanda retorna ao feed (regra única).
@@ -761,6 +764,9 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     // Penalidades automáticas (utils/penalidadesAuto): observação/suspensão por avaliações baixas,
     // publicação suspensa por denúncias, e o marco "só conta daqui em diante".
     await migrarPenalidadesAuto(client)
+    // Pedidos salvos (utils/demandasSalvas) e marca de anúncio + ocorrências (utils/suspeitaAnuncio).
+    await migrarDemandasSalvas(client)
+    await migrarSuspeitaAnuncio(client)
     for (const v of valoresACombinar) console.log(`[migration] valor a combinar: ${v.tabela} ${v.id} "${v.titulo}" (valor era ${v.valor_antes})`)
     // Instante em que o push "nova obra/novo serviço disponível" foi disparado. NULL = ainda
     // não avisado. Escrito UMA vez pelo claim atômico de POST /:id/midias-prontas (o app
@@ -2938,6 +2944,8 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
     // desistencia_recente: o último pintor que cancelou depois de escolhido ({ id, nome, foto_url,
     // cancelado_em, motivo_texto, acordo }) nas obras SEM match; null nas demais (utils/desistencias).
     await anexarDesistenciaRecente('obras', result.rows)
+    // salvos_count: quantos profissionais salvaram (❤️) cada obra (utils/demandasSalvas).
+    await anexarSalvosCount('obras', result.rows)
     const agora = new Date()
     // Com profissional escolhido (match_usuario_id) a obra NUNCA é arquivada por expira_em: ele é
     // só o prazo de escolha — caso 3529D (17/11/2026), aberto com chegada confirmada e no Histórico.
@@ -3091,6 +3099,11 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
       return res.status(400).json({ erro: MENSAGEM_REJEICAO, codigo: CODIGO_REJEICAO })
     }
     const { titulo, descricao } = moderacao
+    // Pedido que parece anúncio (utils/suspeitaAnuncio): sobre o texto ORIGINAL. O app que mandou
+    // confirmar_pedido_real sem ser true recebe o 409 com a marca, nada gravado; os demais publicam
+    // com a marca gravada para o painel.
+    const suspeitaObra = decidirPublicacao(req.body, await avaliarSuspeitaAnuncio({ usuarioId: req.usuario.id, tabela: 'obras', titulo: req.body.titulo, descricao: req.body.descricao }))
+    if (suspeitaObra.barrar) return res.status(409).json(suspeitaObra.barrar)
     // Valor obrigatório e > 0 (utils/valorDemanda): sem isto a obra era gravada e publicada com
     // o que viesse — vazio, 0 ou negativo. Depois da moderação, para o anúncio continuar
     // recebendo a mensagem (e o aviso ao moderador) dele.
@@ -3146,6 +3159,7 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
       [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao, prazoModo, prazoZona, valorObra.valor_a_combinar, aceitouAcordoNoCorpo(req.body)]
     )
     let obra = result.rows[0]
+    if (suspeitaObra.marcar) await gravarSuspeita('obras', obra, suspeitaObra.motivos)
     // Especialidades inferidas do título + descrição (utils/especialidadesInferidas): gravadas já na
     // criação, antes da publicação — é o que acrescenta encanador/eletricista/… ao aviso de obra nova
     // e mostra a obra no feed deles.
@@ -3164,7 +3178,7 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
         // Ausente/false (painel, app antigo): aviso imediato, como sempre.
         const teraMidias = req.body?.tera_midias === true || req.body?.tera_midias === 'true'
         const publicada = await aprovarEPublicarObra(obra.id, { avisarPintores: !teraMidias, automatica: true })
-        if (publicada) obra = publicada
+        if (publicada) obra = { ...publicada, suspeita_anuncio: obra.suspeita_anuncio === true, suspeita_anuncio_motivos: obra.suspeita_anuncio_motivos ?? null }
       }
     } catch (err) {
       console.error('[obras/dono] aprovacao automatica falhou:', err.message)
@@ -3356,6 +3370,8 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
     if (!where) return res.status(400).json({ erro: 'Filtro inválido' })
     const result = await pool.query(`
       SELECT o.id, o.codigo_publico, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade, o.uf, o.bairro,
+             -- Parece anúncio (utils/suspeitaAnuncio): marca da publicação e quando o admin tirou do ar.
+             o.suspeita_anuncio, o.suspeita_anuncio_motivos, o.anuncio_em,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status,
              o.criado_em, o.horas_para_expirar, o.prazo_modo,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
@@ -4213,6 +4229,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
     // encerramento_automatico_em: quando o cron fecha sozinho a solicitação pendente do pintor
     // (solicitado_em + 2 dias — alertaService.encerramentoAutomaticoEm); null sem solicitação.
+    // Pedidos salvos: o dono vê quantos salvaram (salvos_count); os demais, se salvaram (salvo).
+    if (ehDono) await anexarSalvosCount('obras', [obra]); else await anexarSalvo('obras', [obra], req.usuario.id)
     res.json({ obra, ...(await identidadeNaDemanda(req, obra, ehDono)), whatsapp_liberado: (ehDono || ehPintorDoMatch) ? whatsappLiberado(obra) : null, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, pode_escolher_outro, motivo_escolher_outro, desistencias, interessados_ativos, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
@@ -4823,6 +4841,8 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
     // desistencia_recente: o último prestador que cancelou depois de escolhido ({ id, nome, foto_url,
     // cancelado_em, motivo_texto, acordo }) nos reparos SEM match; null nos demais (utils/desistencias).
     await anexarDesistenciaRecente('reparos', result.rows)
+    // salvos_count: quantos profissionais salvaram (❤️) cada reparo (utils/demandasSalvas).
+    await anexarSalvosCount('reparos', result.rows)
     const agora = new Date()
     // Com profissional escolhido (match_usuario_id) o reparo NUNCA é arquivado por expira_em: ele é
     // só o prazo de escolha — caso 3529D (17/11/2026), aberto com chegada confirmada e no Histórico.
@@ -4902,6 +4922,9 @@ const criarReparoDono = async (req, res) => {
     // nas demais o campo é ignorado (NULL). App antigo não manda → NULL → nenhum filtro.
     const localAtendimento = normalizarLocalAtendimento(req.body?.local_atendimento, listaCategorias)
     if (localAtendimento.erro) return res.status(400).json({ erro: localAtendimento.erro })
+    // Pedido que parece anúncio (utils/suspeitaAnuncio) — mesma regra do POST /obras/dono.
+    const suspeitaReparo = decidirPublicacao(req.body, await avaliarSuspeitaAnuncio({ usuarioId: req.usuario.id, tabela: 'reparos', titulo: req.body.titulo, descricao: req.body.descricao, categorias: listaCategorias }))
+    if (suspeitaReparo.barrar) return res.status(409).json(suspeitaReparo.barrar)
     // Mesmo teto do POST /obras/dono e sobre a MESMA contagem (obras + reparos): o limite é por
     // dono, não por tipo de demanda, senão 2 obras + 2 reparos passariam.
     // Mesmo bloqueio de pedidos novos do POST /obras/dono (utils/responsabilidade).
@@ -4945,6 +4968,7 @@ const criarReparoDono = async (req, res) => {
        RETURNING *`,
       [req.usuario.id, titulo, categoriaPrincipal, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo, prazoZona, listaCategorias, localAtendimento.valor, valorServico.valor_a_combinar, aceitouAcordoNoCorpo(req.body)]
     )
+    if (suspeitaReparo.marcar) await gravarSuspeita('reparos', result.rows[0], suspeitaReparo.motivos)
     res.status(201).json(result.rows[0])
     // ESTE e o unico envio que dispara no fluxo real, e por isso ele FICA. O INSERT acima
     // grava status_aprovacao='aprovada' direto: reparo nasce publicado, nao passa por fila de
@@ -5446,6 +5470,8 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
     // utils/profissionalEscolhido), NULL quando não há. Mesma definição de GET /obras/admin.
     const result = await pool.query(`
       SELECT r.id, r.codigo_publico, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.valor_a_combinar, r.cidade, r.uf, r.bairro,
+             -- Parece anúncio (utils/suspeitaAnuncio): marca da publicação e quando o admin tirou do ar.
+             r.suspeita_anuncio, r.suspeita_anuncio_motivos, r.anuncio_em,
              r.expira_em, r.status, r.criado_em, r.prazo_atendimento_horas,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              ${sqlExpiradaPainel('r')} AS expirada,
@@ -5744,6 +5770,8 @@ router.get('/reparos', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirPrest
     query += ` OFFSET $${params.length}`
 
     const result = await pool.query(query, params)
+    // salvo: true/false — o profissional salvou (❤️) este pedido (utils/demandasSalvas).
+    await anexarSalvo('reparos', result.rows, req.usuario.id)
     // Título mascarado na leitura (linha antiga, gravada antes do filtro de contato) — o mesmo
     // tratamento de GET /reparos/:id. Só o título sai no card do feed.
     // Coordenadas ARREDONDADAS (utils/privacidadeDemanda): o feed é descoberta — ninguém aqui tem
@@ -7183,6 +7211,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     const interessados_ativos = ehDono ? await contarInteressadosAtivos('reparos', req.params.id) : null
     // PALIATIVO app 1.2.2/1.2.3: as colunas do pedido de acordo não vão ao app (ninguém abaixo as lê).
     semColunasPedidoCancelamentoParaApp('reparos', reparo, req)
+    // Pedidos salvos: o dono vê quantos salvaram (salvos_count); os demais, se salvaram (salvo).
+    if (ehDono) await anexarSalvosCount('reparos', [reparo]); else await anexarSalvo('reparos', [reparo], req.usuario.id)
     res.json({
       reparo,
       // conta_id / sou_escolhido / sou_dono — identidade por pessoa (identidadeNaDemanda).
@@ -11110,6 +11140,9 @@ router.post('/admin/canal/convites/enviar', autenticar, exigirAdmin, async (req,
 // Aba "WhatsApp" do painel (robô — Etapa 1): /admin/whatsapp/* (status+QR, pausa, contadores, lista, tipos, teste).
 router.use(require('./adminWhatsapp'))
 router.use(require('./adminPenalidades'))
+// Pedidos salvos (POST/GET /salvos) e POST /admin/demandas/:tipo/:id/marcar-anuncio.
+router.use(require('./salvos'))
+router.use(require('./adminAnuncios'))
 
 module.exports = router
 module.exports.migracaoPronta = migracaoPronta

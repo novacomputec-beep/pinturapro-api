@@ -144,6 +144,7 @@ const main = async () => {
     CREATE TABLE avaliacoes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), avaliado_id uuid, estrelas int);
     SET search_path = public, pg_catalog;
   `)
+  await db.exec(require('fs').readFileSync(require('path').join(__dirname, 'fixtures/salvos-e-anuncios.sql'), 'utf8')) // pedidos salvos + marca de anúncio (24/11/2026)
   await U_.migrarResponsabilidade(db)
 
   // reparos.local_atendimento + usuarios.atende_* (utils/localAtendimento) — a mesma migração de boot.
