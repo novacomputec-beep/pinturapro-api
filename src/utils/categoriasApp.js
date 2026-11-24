@@ -84,7 +84,7 @@ const CATEGORIAS_SERVICO = [
   { slug: 'conserto_celular', rotulo: 'Conserto de celular e tablet', emoji: '📲' },
   // 12 novas (dono, 24/11/2026). As 6 primeiras são SERVIÇO (reparos.categoria), no grupo de push
   // "Obras de Construção Civil" (gruposCategorias) — não são papéis de obra (ESPECIALIDADES_OBRA).
-  { slug: 'arquiteto',       rotulo: 'Arquiteto',         emoji: '🏛️' },
+  { slug: 'arquiteto',       rotulo: 'Arquiteto',         emoji: '📏' },
   { slug: 'decoracao_interiores', rotulo: 'Decoração de interiores', emoji: '🖼️' },
   { slug: 'paisagismo',      rotulo: 'Paisagismo',        emoji: '🏞️' },
   { slug: 'azulejista',      rotulo: 'Azulejista e pisos', emoji: '🔲' },

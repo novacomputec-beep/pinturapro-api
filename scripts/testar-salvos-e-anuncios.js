@@ -121,7 +121,7 @@ const main = async () => {
   }
   await usr(900, 'Admin', 'admin')
   const dono = await usr(1, 'Carlos Eletricista Souza', 'dono_obra', { cpf_cnpj: '111.111.111-11' })
-  await usr(2, 'Carlos Pro', 'prestador', { cpf_cnpj: '11111111111', especialidades: ['eletrica', 'pintor'] })   // MESMO CPF do dono
+  await usr(2, 'Carlos Pro', 'prestador', { cpf_cnpj: '11111111111', especialidades: ['eletrica', 'pintor'], codigo_indicacao: 'ABC234' })   // MESMO CPF do dono
   const donoIrmao = await usr(3, 'Carlos Outro Perfil', 'dono_obra', { cpf_cnpj: '11111111111', tipo_dono: 'pintura' })
   const cliente = await usr(4, 'Maria Cliente', 'dono_obra')
   const cliente2 = await usr(5, 'Joana Cliente', 'dono_obra')
@@ -299,8 +299,10 @@ const main = async () => {
      'marcar como anúncio: sai do feed (cancelada pelo admin, anuncio_em), 1 ocorrência, sem penalidade', { corpo: r.body, d })
   let msgs = (await q(`SELECT tipo, usuario_id, telefone, texto, ref_tabela, ref_id, status FROM whatsapp_mensagens ORDER BY id`)).rows
   ok(msgs.length === 1 && msgs[0].tipo === 'avulsa' && msgs[0].usuario_id === dono.id && msgs[0].telefone === '+5534900000001' && msgs[0].ref_tabela === 'reparos' && msgs[0].ref_id === RA && msgs[0].status === 'fila'
-     && msgs[0].texto === 'Oi, Carlos! 👋 Aqui é o *ProTudo*. Tiramos do ar o seu pedido *"Instalar tomada na cozinha"* porque ele parece um anúncio do seu trabalho, e os pedidos são para quem quer contratar. 😉 Para divulgar seus serviços, use o seu perfil de profissional no app: protudo.app.br/baixar',
-     'WhatsApp na fila do robô (tipo avulsa) para o dono do pedido, com o texto aprovado e o link do app', msgs[0])
+     && msgs[0].texto === 'Oi, Carlos! 👋 Aqui é o *ProTudo*. Tiramos do ar o seu pedido *"Instalar tomada na cozinha"* porque ele parece um anúncio do seu trabalho, e os pedidos são para quem quer contratar. 😉 Para divulgar seus serviços, compartilhe o seu link do ProTudo: https://protudo.app.br/baixar?c=ABC234',
+     'WhatsApp na fila do robô (tipo avulsa) para o dono do pedido, com o texto aprovado e o link de convite do próprio profissional (mesmo CPF)', msgs[0])
+  ok(/compartilhe o seu link do ProTudo: https:\/\/protudo\.app\.br\/baixar$/.test(A.textoAnuncioRemovido({ nome: 'Maria Silva', titulo: 'X' })) && /^Oi, Maria! /.test(A.textoAnuncioRemovido({ nome: 'Maria Silva', titulo: 'X' })),
+     'sem conta profissional (sem código): link de baixar o app, sem código')
   r = await marcar('reparo', RA)
   ok(r.status === 409 && r.body.codigo === 'JA_MARCADO' && (await q(`SELECT 1 FROM anuncios_ocorrencias`)).rows.length === 1 && (await q(`SELECT 1 FROM whatsapp_mensagens`)).rows.length === 1, 'marcar de novo: 409, sem 2ª ocorrência nem 2ª mensagem', r)
   const e5 = await marcar('servico', RA), e6 = await marcar('reparo', 'xyz'), e7 = await marcar('obra', RA)
@@ -355,6 +357,23 @@ const main = async () => {
   r = await chamar('get', '/reparos/admin', { usuario: ADM, query: { filtro: 'canceladas' } })
   const noPainel = (r.body?.reparos || []).find(x => x.id === RA)
   ok(noPainel?.suspeita_anuncio === true && !!noPainel.anuncio_em && Array.isArray(noPainel.suspeita_anuncio_motivos), 'GET /reparos/admin: suspeita_anuncio, motivos e anuncio_em na linha', noPainel && { s: noPainel.suspeita_anuncio, m: noPainel.suspeita_anuncio_motivos })
+
+  // Painel: "também é profissional: {especialidade}" nas quatro listas.
+  ok(noPainel?.dono_profissional_especialidade === 'eletrica' && noPainel.dono_profissional_especialidade_rotulo === 'Elétrica', 'GET /reparos/admin: dono também é profissional de Elétrica', noPainel && noPainel.dono_profissional_especialidade)
+  const outro = (r.body?.reparos || []).find(x => x.titulo === 'Faço 1')
+  ok(outro && outro.dono_profissional_especialidade === null && outro.dono_profissional_especialidade_rotulo === null, 'dono que não é profissional: null')
+  const OP = await demanda('obras', donoIrmao, 'Pintura do apartamento', { especialidades_inferidas: ['alvenaria', 'pintor'] })
+  const OQ = await demanda('obras', donoIrmao, 'Muro de arrimo', { especialidades_inferidas: ['alvenaria'], status: 'rascunho', status_aprovacao: 'pendente', enviada_por_dono: true })
+  r = await chamar('get', '/obras/admin', { usuario: ADM, query: { filtro: 'abertas' } })
+  const oP = (r.body?.obras || []).find(x => x.id === OP)
+  ok(oP?.dono_profissional_especialidade === 'pintor' && oP.dono_profissional_especialidade_rotulo === 'Pintor', 'GET /obras/admin: pela especialidade INFERIDA (outra conta de contratante do mesmo CPF)', oP && oP.dono_profissional_especialidade)
+  r = await chamar('get', '/obras-aprovacao', { usuario: ADM, query: {} })
+  const oQ = (r.body?.obras || []).find(x => x.id === OQ)
+  ok(oQ && oQ.dono_profissional_especialidade === null, 'GET /obras-aprovacao: campo presente; null quando a especialidade do pedido não é a dele', oQ && oQ.dono_profissional_especialidade)
+  const RP = await demanda('reparos', dono, 'Pintar e trocar tomada', { categoria: 'faxina', categorias: ['faxina', 'eletrica'], status_aprovacao: 'pendente' })
+  r = await chamar('get', '/reparos/aprovacao', { usuario: ADM, query: {} })
+  const rP = (r.body?.reparos || []).find(x => x.id === RP)
+  ok(rP?.dono_profissional_especialidade === 'eletrica' && rP.dono_profissional_especialidade_rotulo === 'Elétrica', 'GET /reparos/aprovacao: a categoria do pedido que ele exerce (a 2ª da lista)', rP && rP.dono_profissional_especialidade)
 
   const inesperados = erros.filter(e => !/sem banco/.test(e))
   ok(inesperados.length === 0, 'nenhum erro inesperado no log', inesperados.slice(0, 5))
