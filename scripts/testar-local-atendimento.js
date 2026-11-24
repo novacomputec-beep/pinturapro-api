@@ -194,6 +194,7 @@ const main = async () => {
     CREATE TABLE avaliacoes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), avaliador_id uuid, avaliado_id uuid, estrelas int);
     SET search_path = public, pg_catalog;
   `)
+  await db.exec(require('fs').readFileSync(require('path').join(__dirname, 'fixtures/salvos-e-anuncios.sql'), 'utf8')) // pedidos salvos + marca de anúncio (24/11/2026)
   const cliente = { query: (s, p) => db.query(s, p) }
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(cliente)
 

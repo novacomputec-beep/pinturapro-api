@@ -84,6 +84,7 @@ const main = async () => {
     CREATE TABLE email_alertas (tipo text, demanda_id uuid, usuario_id uuid, created_at timestamptz DEFAULT now(), UNIQUE (tipo, demanda_id, usuario_id));
     SET search_path = public, pg_catalog;
   `)
+  await db.exec(require('fs').readFileSync(require('path').join(__dirname, 'fixtures/salvos-e-anuncios.sql'), 'utf8')) // pedidos salvos + marca de anúncio (24/11/2026)
   await db.exec(`CREATE TABLE IF NOT EXISTS assinaturas (usuario_id uuid, status text, tipo text, plano text, proximo_vencimento timestamptz, atualizado_em timestamptz)`)
   // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)

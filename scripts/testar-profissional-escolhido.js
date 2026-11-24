@@ -66,6 +66,7 @@ const main = async () => {
     CREATE UNIQUE INDEX candidaturas_aceito_unica_idx ON candidaturas (obra_id) WHERE status = 'aceito';
     CREATE UNIQUE INDEX interesse_reparos_aceito_unico_idx ON interesse_reparos (reparo_id) WHERE status = 'aceito';
   `)
+  await db.exec(require('fs').readFileSync(require('path').join(__dirname, 'fixtures/salvos-e-anuncios.sql'), 'utf8')) // pedidos salvos + marca de anúncio (24/11/2026)
   await db.query(`INSERT INTO usuarios (id, nome, email, telefone) VALUES
     ($1, 'Maria Nogueira', 'maria@x.invalid', '34999990000'),
     ($2, 'Alex Sander', 'alex@x.invalid', '34999990001'),

@@ -104,6 +104,7 @@ const main = async () => {
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz);
     INSERT INTO configuracoes (chave, valor) VALUES ('grupos_relacionados_ativo', 'true');
   `)
+  await db.exec(require('fs').readFileSync(require('path').join(__dirname, 'fixtures/salvos-e-anuncios.sql'), 'utf8')) // pedidos salvos + marca de anúncio (24/11/2026)
   // Responsabilidade pós-match (eventos_responsabilidade, dias_credito_*, aviso_resposta_final_em) — a mesma migração de boot.
   await require(path.join(REPO, 'src/utils/responsabilidade')).migrarResponsabilidade(db)
 

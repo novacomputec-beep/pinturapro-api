@@ -4368,6 +4368,8 @@ const autoEncerrarPendentes = async () => {
 }
 
 module.exports = {
+  // Silêncio noturno dos pushes (22:00–07:00 SP), para os crons de fora (utils/demandasSalvas).
+  SQL_FORA_SILENCIO,
   // Valor a combinar: textos que mostram (ou deixam de sugerir) valor.
   mensagemLembreteObra, mensagemLembreteReparo, tituloBaixoEngajamento,
   // Saída por atraso (cronômetro): retrato em desistencias + textos do push do dono.

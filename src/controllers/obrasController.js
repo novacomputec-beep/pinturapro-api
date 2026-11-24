@@ -22,6 +22,7 @@ const { ofuscarCoordenadasLista } = require('../utils/privacidadeDemanda')
 // Marca do dono no card (utils/responsabilidade): propostas de horário que ele deixou vencer em 90 dias.
 const { sqlClienteNaoRespondeu90d } = require('../utils/responsabilidade')
 const { sqlDonoOficial } = require('../utils/contaOficial')
+const { anexarSalvo } = require('../utils/demandasSalvas')
 
 const listar = async (req, res) => {
   try {
@@ -127,6 +128,8 @@ const listar = async (req, res) => {
     params.push(parseInt(limit), offset)
 
     const result = await pool.query(query, params)
+    // salvo: true/false — o profissional salvou (❤️) esta obra (utils/demandasSalvas).
+    await anexarSalvo('obras', result.rows, req.usuario.id)
 
     // Título mascarado na leitura (linha antiga, gravada antes do filtro de contato) — o mesmo
     // tratamento de GET /obras/:id. Só o título sai no card do feed.

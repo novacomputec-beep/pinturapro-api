@@ -125,6 +125,7 @@ const main = async () => {
     CREATE TABLE tentativas_contato (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), usuario_id uuid, criado_em timestamptz DEFAULT now());
     SET search_path = public, pg_catalog;
   `)
+  await db.exec(require('fs').readFileSync(require('path').join(__dirname, 'fixtures/salvos-e-anuncios.sql'), 'utf8')) // pedidos salvos + marca de anúncio (24/11/2026)
 
   // O que o detalhe lê além do esquema acima.
   // obras.especialidades_inferidas (GET /obras/:id devolve a lista, 11/11/2026) — a mesma migração de boot.

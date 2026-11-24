@@ -465,7 +465,11 @@ CREATE TABLE IF NOT EXISTS "obras" (
   "aviso_reabertura_em" timestamp with time zone,
   "reanuncio_pendente_em" timestamp with time zone,
   "aviso_desinstalou_em" timestamp with time zone,
-  "valor_a_combinar" boolean DEFAULT false NOT NULL
+  "valor_a_combinar" boolean DEFAULT false NOT NULL,
+  "suspeita_anuncio" boolean DEFAULT false NOT NULL,
+  "suspeita_anuncio_motivos" text[],
+  "anuncio_em" timestamp with time zone,
+  "anuncio_por" uuid
 );
 
 CREATE TABLE IF NOT EXISTS "pedidos_suporte" (
@@ -657,7 +661,11 @@ CREATE TABLE IF NOT EXISTS "reparos" (
   "reanuncio_pendente_em" timestamp with time zone,
   "aviso_desinstalou_em" timestamp with time zone,
   "local_atendimento" text,
-  "valor_a_combinar" boolean DEFAULT false NOT NULL
+  "valor_a_combinar" boolean DEFAULT false NOT NULL,
+  "suspeita_anuncio" boolean DEFAULT false NOT NULL,
+  "suspeita_anuncio_motivos" text[],
+  "anuncio_em" timestamp with time zone,
+  "anuncio_por" uuid
 );
 
 CREATE TABLE IF NOT EXISTS "respostas_equipe" (
@@ -794,4 +802,23 @@ CREATE TABLE IF NOT EXISTS "whatsapp_envios" (
   "usuario_id" uuid,
   "admin_id" uuid,
   "enviado_em" timestamp with time zone DEFAULT now() NOT NULL
+);
+
+-- Pedidos salvos e ocorrências de anúncio (24/11/2026).
+CREATE TABLE IF NOT EXISTS "demandas_salvas" (
+  "usuario_id" uuid NOT NULL,
+  "tipo" text NOT NULL,
+  "demanda_id" uuid NOT NULL,
+  "criado_em" timestamp with time zone DEFAULT now() NOT NULL,
+  "aviso_fim_em" timestamp with time zone
+);
+
+CREATE TABLE IF NOT EXISTS "anuncios_ocorrencias" (
+  "id" bigserial,
+  "usuario_id" uuid NOT NULL,
+  "tabela" text NOT NULL,
+  "demanda_id" uuid NOT NULL,
+  "titulo" text,
+  "admin_id" uuid,
+  "criado_em" timestamp with time zone DEFAULT now() NOT NULL
 );

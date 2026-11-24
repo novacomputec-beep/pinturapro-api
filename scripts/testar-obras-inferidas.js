@@ -93,6 +93,7 @@ const main = async () => {
     CREATE TABLE configuracoes (chave text PRIMARY KEY, valor text, atualizado_em timestamptz);
     CREATE TABLE avisos_fora_area (usuario_id uuid, tipo text, demanda_id uuid, enviado_em timestamptz DEFAULT now());
   `)
+  await db.exec(require('fs').readFileSync(require('path').join(__dirname, 'fixtures/salvos-e-anuncios.sql'), 'utf8')) // pedidos salvos + marca de anúncio (24/11/2026)
   const cliente = { query: (s, p) => db.query(s, p) }
   await require(path.join(REPO, 'src/utils/avisosPorDistancia')).migrarAvisosPorDistancia(cliente)
   await I.migrarEspecialidadesInferidas(cliente)

@@ -17,7 +17,10 @@
 // 3) ANTI-REVANCHE — denúncia feita DEPOIS de o denunciante receber nota <= 2 naquele mesmo
 //    contrato não conta (sqlNotaBaixaAntes; GET /admin/denuncias mostra apos_nota_baixa).
 //    Denúncia arquivada pelo admin também não conta.
-// penalidades_auto guarda cada observação/suspensão com o motivo (as 3 notas ou as 3 denúncias).
+// 4) ANÚNCIOS (24/11/2026, utils/suspeitaAnuncio) — 3 pedidos da pessoa marcados como anúncio pelo
+//    admin em 90 dias → os mesmos 7 dias sem publicar (publicacao_suspensa_ate), com texto próprio.
+// penalidades_auto guarda cada observação/suspensão com o motivo (as 3 notas, as 3 denúncias ou os
+// 3 anúncios).
 const { pool } = require('./supabase')
 const { invalidarCacheAssinatura, exigirNaoSuspenso } = require('../middlewares/auth')
 const { sqlContasDaPessoa } = require('./tipoConta')
@@ -31,6 +34,8 @@ const DIAS_SUSPENSAO = 7
 const DENUNCIAS_PARA_SUSPENDER = 3
 const JANELA_DENUNCIAS_DIAS = 60
 const MOTIVO_SUSPENSAO_AVALIACOES = 'Avaliações baixas'
+const ANUNCIOS_PARA_SUSPENDER = 3
+const JANELA_ANUNCIOS_DIAS = 90
 
 const TITULO_OBSERVACAO = '⚠️ Sua conta está em observação'
 const CORPO_OBSERVACAO = `Suas últimas avaliações ficaram abaixo de 3 estrelas. Capriche nos próximos serviços: se a nota continuar baixa, sua conta será suspensa por ${DIAS_SUSPENSAO} dias.`
@@ -38,6 +43,8 @@ const TITULO_SUSPENSAO = `⛔ Conta suspensa por ${DIAS_SUSPENSAO} dias`
 const corpoSuspensao = (data) => `Suas avaliações continuaram baixas. Você volta a receber pedidos em ${data}. Dúvidas? Fale com o suporte no app.`
 const TITULO_PUBLICACAO = `⛔ Publicação de pedidos suspensa por ${DIAS_SUSPENSAO} dias`
 const corpoPublicacao = (data) => `Recebemos denúncias de profissionais diferentes sobre seus pedidos. Você poderá publicar de novo em ${data}. Dúvidas? Fale com o suporte no app.`
+
+const corpoPublicacaoAnuncios = (data) => `Tiramos do ar ${ANUNCIOS_PARA_SUSPENDER} pedidos seus que eram anúncios do seu trabalho. Os pedidos são para quem quer contratar. Você poderá publicar de novo em ${data}. Dúvidas? Fale com o suporte no app.`
 
 // "30/11/2026" no fuso de São Paulo.
 const dataBR = (d) => new Intl.DateTimeFormat('pt-BR', { timeZone: FUSO, day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(d))
@@ -182,6 +189,40 @@ const verificarPenalidadeDenuncias = async (clienteId, db = pool) => {
   }
 }
 
+// 4) Depois de cada pedido marcado como anúncio pelo admin. Por PESSOA (contas de contratante do
+// mesmo CPF). Nunca lança. Devolve 'suspenso' | 'ja_suspenso' | null.
+const verificarPenalidadeAnuncios = async (clienteId, db = pool) => {
+  try {
+    if (!clienteId) return null
+    const desde = await inicioDaContagem(db, clienteId, 'cliente')
+    if (!desde) return null
+    const anuncios = (await db.query(
+      `SELECT a.id, a.tabela, a.demanda_id, a.titulo, a.criado_em FROM anuncios_ocorrencias a
+        WHERE a.usuario_id IN (${sqlContasDaPessoa('$1')})
+          AND a.criado_em > $2::timestamptz
+          AND a.criado_em > NOW() - ($3::int * INTERVAL '1 day')
+        ORDER BY a.criado_em DESC, a.id DESC LIMIT ${ANUNCIOS_PARA_SUSPENDER}`,
+      [clienteId, desde, JANELA_ANUNCIOS_DIAS])).rows
+    if (anuncios.length < ANUNCIOS_PARA_SUSPENDER) return null
+    const sus = await db.query(
+      `UPDATE usuarios SET publicacao_suspensa_ate = NOW() + ($2::int * INTERVAL '1 day')
+        WHERE id = $1 AND (publicacao_suspensa_ate IS NULL OR publicacao_suspensa_ate <= NOW())
+        RETURNING publicacao_suspensa_ate AS ate, push_token, email, nome`,
+      [clienteId, DIAS_SUSPENSAO])
+    if (sus.rows.length === 0) return 'ja_suspenso'
+    const { ate, ...usuario } = sus.rows[0]
+    await db.query(`INSERT INTO penalidades_auto (usuario_id, lado, tipo, motivo, ate) VALUES ($1, 'cliente', 'suspensao', $2::jsonb, $3)`,
+      [clienteId, JSON.stringify({ anuncios }), ate])
+    console.log(`[Penalidades] cliente ${clienteId} sem publicar por ${DIAS_SUSPENSAO} dias — ${ANUNCIOS_PARA_SUSPENDER} pedidos marcados como anúncio em ${JANELA_ANUNCIOS_DIAS} dias`)
+    await entregar({ usuario_id: clienteId, ...usuario, titulo: TITULO_PUBLICACAO, corpo: corpoPublicacaoAnuncios(dataBR(ate)),
+      data: { tipo: 'publicacao_suspensa', motivo: 'anuncios', dias: DIAS_SUSPENSAO, ate }, rotulo: `publicacao suspensa anuncios ${clienteId}` })
+    return 'suspenso'
+  } catch (err) {
+    console.error(`[Penalidades] anúncios de ${clienteId}:`, err.message)
+    return null
+  }
+}
+
 // Cron (server.js): levanta, SEM mensagem, o que venceu. Só as suspensões deste módulo.
 const encerrarPenalidadesVencidas = async (db = pool) => {
   try {
@@ -209,8 +250,8 @@ const exigirNaoSuspensoSalvoAvaliacoes = (req, res, next) =>
 
 // POST /obras/dono e POST /reparos/dono: cliente com a publicação suspensa (por pessoa: qualquer
 // conta do mesmo CPF) → 403 com a data. Lê do banco (rota de escrita, sem o cache de autenticar).
-const corpoPublicacaoSuspensa = (ate) => ({
-  erro: `Publicação de pedidos suspensa até ${dataBR(ate)}: recebemos denúncias de profissionais diferentes sobre seus pedidos. Seus pedidos abertos continuam valendo. Dúvidas? Fale com o suporte no app.`,
+const corpoPublicacaoSuspensa = (ate, porAnuncios = false) => ({
+  erro: `Publicação de pedidos suspensa até ${dataBR(ate)}: ${porAnuncios ? `tiramos do ar ${ANUNCIOS_PARA_SUSPENDER} pedidos seus que eram anúncios do seu trabalho` : 'recebemos denúncias de profissionais diferentes sobre seus pedidos'}. Seus pedidos abertos continuam valendo. Dúvidas? Fale com o suporte no app.`,
   codigo: 'PUBLICACAO_SUSPENSA',
   publicacao_suspensa_ate: ate,
 })
@@ -220,7 +261,14 @@ const exigirPodePublicar = async (req, res, next) => {
     const r = await pool.query(
       `SELECT MAX(publicacao_suspensa_ate) AS ate FROM usuarios
         WHERE id IN (${sqlContasDaPessoa('$1')}) AND publicacao_suspensa_ate > NOW()`, [req.usuario.id])
-    if (r.rows[0]?.ate) return res.status(403).json(corpoPublicacaoSuspensa(r.rows[0].ate))
+    if (r.rows[0]?.ate) {
+      // Motivo da suspensão em vigor (anúncios × denúncias) só muda o texto.
+      const m = await pool.query(
+        `SELECT (p.motivo ? 'anuncios') AS anuncios FROM penalidades_auto p
+          WHERE p.usuario_id IN (${sqlContasDaPessoa('$1')}) AND p.lado = 'cliente' AND p.tipo = 'suspensao' AND p.encerrada_em IS NULL
+          ORDER BY p.id DESC LIMIT 1`, [req.usuario.id]).catch(() => ({ rows: [] }))
+      return res.status(403).json(corpoPublicacaoSuspensa(r.rows[0].ate, m.rows[0]?.anuncios === true))
+    }
     next()
   } catch (err) {
     console.error('[Penalidades] exigirPodePublicar:', err.message)
@@ -254,6 +302,8 @@ const listarPenalidades = async (db = pool) => {
           WHERE a.id = ANY($1::uuid[])`, [ids])).rows
       motivo = { tipo: 'avaliacoes', media: m.media, resumo: `Média ${String(m.media).replace('.', ',')} nas últimas ${ids.length} avaliações (${m.avaliacoes.map(a => `${a.estrelas}★`).join(', ')})`,
         avaliacoes: m.avaliacoes.map(a => ({ ...a, contrato_titulo: tit.find(t => t.id === a.id)?.titulo || null })) }
+    } else if (m.anuncios) {
+      motivo = { tipo: 'anuncios', resumo: `${m.anuncios.length} pedidos marcados como anúncio em ${JANELA_ANUNCIOS_DIAS} dias`, anuncios: m.anuncios }
     } else {
       const ids = (m.denuncias || []).map(d => d.id)
       const det = (await db.query(
@@ -293,6 +343,7 @@ const encerrarPeloAdmin = async (penalidadeId, tipo, adminId, db = pool) => {
 }
 
 module.exports = {
+  ANUNCIOS_PARA_SUSPENDER, JANELA_ANUNCIOS_DIAS, corpoPublicacaoAnuncios, verificarPenalidadeAnuncios,
   CHAVE_MARCO, NOTAS_NA_MEDIA, MEDIA_MAXIMA, DIAS_SUSPENSAO, DENUNCIAS_PARA_SUSPENDER, JANELA_DENUNCIAS_DIAS, MOTIVO_SUSPENSAO_AVALIACOES,
   TITULO_OBSERVACAO, CORPO_OBSERVACAO, TITULO_SUSPENSAO, corpoSuspensao, TITULO_PUBLICACAO, corpoPublicacao, dataBR,
   migrarPenalidadesAuto, verificarPenalidadeAvaliacoes, verificarPenalidadeDenuncias, encerrarPenalidadesVencidas,
