@@ -31,18 +31,18 @@ const NOVAS = {
   jingles_vinhetas: { rotulo: 'Jingles e vinhetas', emoji: '🎵', grupo: 'Divulgação e publicidade', chave: 'divulgacao', irmao: 'editor_video' },
   marketing_publicidade: { rotulo: 'Marketing e publicidade', emoji: '📈', grupo: 'Divulgação e publicidade', chave: 'divulgacao', irmao: 'panfletagem' },
   // 12 novas (24/11/2026)
-  arquiteto:            { rotulo: 'Arquiteto',               emoji: '📐', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'azulejista' },
-  decoracao_interiores: { rotulo: 'Decoração de interiores', emoji: '🛋️', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'arquiteto' },
-  paisagismo:           { rotulo: 'Paisagismo',              emoji: '🌳', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'arquiteto' },
-  azulejista:           { rotulo: 'Azulejista e pisos',      emoji: '🧱', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'telhados' },
-  telhados:             { rotulo: 'Telhados e calhas',       emoji: '🏠', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'impermeabilizacao' },
+  arquiteto:            { rotulo: 'Arquiteto',               emoji: '🏛️', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'azulejista' },
+  decoracao_interiores: { rotulo: 'Decoração de interiores', emoji: '🖼️', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'arquiteto' },
+  paisagismo:           { rotulo: 'Paisagismo',              emoji: '🏞️', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'arquiteto' },
+  azulejista:           { rotulo: 'Azulejista e pisos',      emoji: '🔲', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'telhados' },
+  telhados:             { rotulo: 'Telhados e calhas',       emoji: '🛖', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'impermeabilizacao' },
   impermeabilizacao:    { rotulo: 'Impermeabilização',       emoji: '💧', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'telhados' },
   eletrodomesticos:     { rotulo: 'Conserto de eletrodomésticos', emoji: '🔌', grupo: 'Consertos da casa', chave: 'reparos_casa', irmao: 'eletronica' },
   desentupimento:       { rotulo: 'Desentupimento',          emoji: '🚽', grupo: 'Consertos da casa', chave: 'reparos_casa', irmao: 'hidraulica' },
   piscineiro:           { rotulo: 'Piscineiro',              emoji: '🏊', grupo: 'Consertos da casa', chave: 'reparos_casa', irmao: 'hidraulica' },
   lavanderia:           { rotulo: 'Lavanderia e passadeira', emoji: '🧺', grupo: 'Limpeza e jardim', chave: 'limpeza', irmao: 'faxina' },
-  higienizacao:         { rotulo: 'Higienização de estofados e tapetes', emoji: '🧽', grupo: 'Limpeza e jardim', chave: 'limpeza', irmao: 'faxina' },
-  cortinas:             { rotulo: 'Cortinas e persianas',    emoji: '🪟', grupo: 'Limpeza e jardim', chave: 'limpeza', irmao: 'jardineiro' },
+  higienizacao:         { rotulo: 'Higienização de estofados e tapetes', emoji: '🫧', grupo: 'Limpeza e jardim', chave: 'limpeza', irmao: 'faxina' },
+  cortinas:             { rotulo: 'Cortinas e persianas',    emoji: '🎐', grupo: 'Limpeza e jardim', chave: 'limpeza', irmao: 'jardineiro' },
 }
 const DOZE = ['arquiteto', 'decoracao_interiores', 'paisagismo', 'azulejista', 'telhados', 'impermeabilizacao', 'eletrodomesticos', 'desentupimento', 'piscineiro', 'lavanderia', 'higienizacao', 'cortinas']
 // Reagrupamento aprovado (13/11/2026): os 10 grupos finais, slugs na ordem do mapa.
