@@ -33,6 +33,10 @@ const ESPECIALIDADES_REPARADOR = [
   'locucao', 'jingles_vinhetas', 'marketing_publicidade',
   'contabilidade',
   'conserto_celular',
+  // 12 novas (dono, 24/11/2026): 6 de "Obras de Construção Civil", 3 de Consertos, 3 de Limpeza e jardim.
+  'arquiteto', 'decoracao_interiores', 'paisagismo', 'azulejista', 'telhados', 'impermeabilizacao',
+  'eletrodomesticos', 'desentupimento', 'piscineiro',
+  'lavanderia', 'higienizacao', 'cortinas',
   'outros',
 ]
 

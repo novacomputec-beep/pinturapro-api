@@ -253,8 +253,8 @@ const main = async () => {
   const BELEZA_PET = ['manicure', 'cabelo', 'barbeiro', 'maquiagem', 'design_sobrancelhas', 'depilacao', 'massagem', 'podologo', 'pet']
   const NOVAS = ['mecanica', 'borracheiro', 'lavajato', 'informatica', 'eletronica', 'estofamento', 'costura',
                  'chaveiro', 'filmagem_fotografia', 'confeiteiro', 'salgadeiro', 'artesanato', 'aluguel_festas']
-  ok(LA.CATEGORIAS_LOCAL_ATENDIMENTO.length === 23 && new Set(LA.CATEGORIAS_LOCAL_ATENDIMENTO).size === 23 && LA.CATEGORIAS_LOCAL_ATENDIMENTO.every(s => slugsServico.has(s)),
-     'CATEGORIAS_LOCAL_ATENDIMENTO: 23 slugs sem repetição, todos existentes em CATEGORIAS_SERVICO', LA.CATEGORIAS_LOCAL_ATENDIMENTO)
+  ok(LA.CATEGORIAS_LOCAL_ATENDIMENTO.length === 25 && new Set(LA.CATEGORIAS_LOCAL_ATENDIMENTO).size === 25 && LA.CATEGORIAS_LOCAL_ATENDIMENTO.every(s => slugsServico.has(s)),
+     'CATEGORIAS_LOCAL_ATENDIMENTO: 25 slugs sem repetição, todos existentes em CATEGORIAS_SERVICO', LA.CATEGORIAS_LOCAL_ATENDIMENTO)
   ok(BELEZA_PET.every(s => LA.CATEGORIAS_LOCAL_ATENDIMENTO.includes(s)), 'as 9 de beleza/pet continuam na lista')
   ok(NOVAS.every(s => LA.CATEGORIAS_LOCAL_ATENDIMENTO.includes(s) && LA.normalizarLocalAtendimento('local_profissional', [s]).valor === 'local_profissional'),
      'as 13 novas (mecânica … aluguel para festas) aceitam local_atendimento', NOVAS.filter(s => !LA.CATEGORIAS_LOCAL_ATENDIMENTO.includes(s)))

@@ -9,6 +9,8 @@ const CATEGORIAS_PEDE_FOTO = Object.freeze([
   'hidraulica', 'eletrica', 'alvenaria', 'marcenaria', 'montagem_moveis', 'estofamento', 'vidraceiro',
   'serralheria', 'gesseiro', 'climatizacao', 'eletronica', 'informatica', 'mecanica', 'jardineiro',
   'conserto_celular',
+  'eletrodomesticos', 'desentupimento', 'piscineiro',
+  'arquiteto', 'decoracao_interiores', 'paisagismo', 'azulejista', 'telhados', 'impermeabilizacao',
 ])
 const DICA_FOTO = ' · Dica: adicione uma foto ou vídeo 📸'
 
