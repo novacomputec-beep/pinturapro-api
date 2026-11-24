@@ -108,6 +108,13 @@ const ETIQUETAS_POR_GRUPO = {
     2: ['Não ficou como pedi', 'Fora do combinado', 'Acabamento ruim'],
     1: ['Ficou muito ruim', 'Nada do combinado', 'Estragou o material'],
   },
+  obras_construcao_civil: { // Obras de Construção Civil, lado SERVIÇO (24/11/2026) — o mesmo conjunto de Construção e pintura
+    5: ['Acabamento perfeito', 'Trabalho caprichado', 'Deixou tudo limpo'],
+    4: ['Bom acabamento', 'Bem organizado', 'Cumpriu o combinado'],
+    3: ['Acabamento simples', 'Faltou capricho', 'Um pouco de sujeira'],
+    2: ['Acabamento ruim', 'Desperdiçou material', 'Deixou sujeira'],
+    1: ['Serviço mal feito', 'Abandonou a obra', 'Estragou material'],
+  },
   divulgacao: { // Divulgação e publicidade (13/11/2026) — o mesmo conjunto de Digital e aulas (o mais próximo)
     5: ['Superou expectativas', 'Muito didático', 'Muito criativo'],
     4: ['Entregou bem', 'Didático', 'Criativo'],

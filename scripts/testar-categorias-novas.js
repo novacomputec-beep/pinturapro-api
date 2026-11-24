@@ -30,11 +30,25 @@ const NOVAS = {
   locucao:         { rotulo: 'Locução',           emoji: '🎙️', grupo: 'Divulgação e publicidade', chave: 'divulgacao', irmao: 'social_midia' },
   jingles_vinhetas: { rotulo: 'Jingles e vinhetas', emoji: '🎵', grupo: 'Divulgação e publicidade', chave: 'divulgacao', irmao: 'editor_video' },
   marketing_publicidade: { rotulo: 'Marketing e publicidade', emoji: '📈', grupo: 'Divulgação e publicidade', chave: 'divulgacao', irmao: 'panfletagem' },
+  // 12 novas (24/11/2026)
+  arquiteto:            { rotulo: 'Arquiteto',               emoji: '📐', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'azulejista' },
+  decoracao_interiores: { rotulo: 'Decoração de interiores', emoji: '🛋️', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'arquiteto' },
+  paisagismo:           { rotulo: 'Paisagismo',              emoji: '🌳', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'arquiteto' },
+  azulejista:           { rotulo: 'Azulejista e pisos',      emoji: '🧱', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'telhados' },
+  telhados:             { rotulo: 'Telhados e calhas',       emoji: '🏠', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'impermeabilizacao' },
+  impermeabilizacao:    { rotulo: 'Impermeabilização',       emoji: '💧', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'telhados' },
+  eletrodomesticos:     { rotulo: 'Conserto de eletrodomésticos', emoji: '🔌', grupo: 'Consertos da casa', chave: 'reparos_casa', irmao: 'eletronica' },
+  desentupimento:       { rotulo: 'Desentupimento',          emoji: '🚽', grupo: 'Consertos da casa', chave: 'reparos_casa', irmao: 'hidraulica' },
+  piscineiro:           { rotulo: 'Piscineiro',              emoji: '🏊', grupo: 'Consertos da casa', chave: 'reparos_casa', irmao: 'hidraulica' },
+  lavanderia:           { rotulo: 'Lavanderia e passadeira', emoji: '🧺', grupo: 'Limpeza e jardim', chave: 'limpeza', irmao: 'faxina' },
+  higienizacao:         { rotulo: 'Higienização de estofados e tapetes', emoji: '🧽', grupo: 'Limpeza e jardim', chave: 'limpeza', irmao: 'faxina' },
+  cortinas:             { rotulo: 'Cortinas e persianas',    emoji: '🪟', grupo: 'Limpeza e jardim', chave: 'limpeza', irmao: 'jardineiro' },
 }
+const DOZE = ['arquiteto', 'decoracao_interiores', 'paisagismo', 'azulejista', 'telhados', 'impermeabilizacao', 'eletrodomesticos', 'desentupimento', 'piscineiro', 'lavanderia', 'higienizacao', 'cortinas']
 // Reagrupamento aprovado (13/11/2026): os 10 grupos finais, slugs na ordem do mapa.
 const GRUPOS_FINAIS = {
-  'Consertos da casa': ['eletrica', 'eletronica', 'climatizacao', 'hidraulica', 'alvenaria', 'gesseiro', 'marcenaria', 'serralheria', 'vidraceiro', 'chaveiro', 'estofamento', 'montagem_moveis', 'seguranca_eletronica', 'conserto_celular'],
-  'Limpeza e jardim': ['faxina', 'dedetizacao', 'jardineiro'],
+  'Consertos da casa': ['eletrica', 'eletronica', 'climatizacao', 'hidraulica', 'alvenaria', 'gesseiro', 'marcenaria', 'serralheria', 'vidraceiro', 'chaveiro', 'estofamento', 'montagem_moveis', 'seguranca_eletronica', 'conserto_celular', 'eletrodomesticos', 'desentupimento', 'piscineiro'],
+  'Limpeza e jardim': ['faxina', 'dedetizacao', 'jardineiro', 'lavanderia', 'higienizacao', 'cortinas'],
   'Beleza': ['cabelo', 'manicure', 'maquiagem', 'barbeiro', 'depilacao', 'massagem', 'podologo', 'design_sobrancelhas'],
   'Festas e eventos': ['aluguel_festas', 'decoracao_festas', 'recreacao_infantil', 'dj', 'musico', 'garcom', 'churrasqueiro', 'cozinheiro', 'confeiteiro', 'salgadeiro', 'filmagem_fotografia'],
   'Cuidado': ['baba', 'cuidador', 'pet'],
@@ -43,6 +57,7 @@ const GRUPOS_FINAIS = {
   'Escritório e aulas': ['profissional_home_office', 'aula_particular', 'personal_trainer', 'tradutor', 'informatica', 'contabilidade'],
   'Arte e criação': ['artesanato', 'costura', 'tatuagem'],
   'Divulgação e publicidade': ['locucao', 'jingles_vinhetas', 'marketing_publicidade', 'social_midia', 'panfletagem', 'placas_fachadas', 'editor_video'],
+  'Obras de Construção Civil': ['arquiteto', 'decoracao_interiores', 'paisagismo', 'azulejista', 'telhados', 'impermeabilizacao'],
 }
 
 const main = async () => {
@@ -54,10 +69,10 @@ const main = async () => {
 
   // ---- listas
   const slugsApp = C.CATEGORIAS_SERVICO.map(c => c.slug)
-  ok(E.ESPECIALIDADES_REPARADOR.length === 64 && slugsApp.length === 64 && JSON.stringify(E.ESPECIALIDADES_REPARADOR) === JSON.stringify(slugsApp),
-     'ESPECIALIDADES_REPARADOR e CATEGORIAS_SERVICO: 64 slugs, mesma ordem', { n: E.ESPECIALIDADES_REPARADOR.length })
-  ok(E.ESPECIALIDADES_REPARADOR.slice(-7).join() === 'seguranca_eletronica,locucao,jingles_vinhetas,marketing_publicidade,contabilidade,conserto_celular,outros', "as novas entram antes de 'outros', na ordem em que chegaram", E.ESPECIALIDADES_REPARADOR.slice(-5))
-  ok(new Set(E.ESPECIALIDADES_REPARADOR).size === 64, 'nenhum slug repetido')
+  ok(E.ESPECIALIDADES_REPARADOR.length === 76 && slugsApp.length === 76 && JSON.stringify(E.ESPECIALIDADES_REPARADOR) === JSON.stringify(slugsApp),
+     'ESPECIALIDADES_REPARADOR e CATEGORIAS_SERVICO: 76 slugs, mesma ordem', { n: E.ESPECIALIDADES_REPARADOR.length })
+  ok(E.ESPECIALIDADES_REPARADOR.slice(-19).join() === 'seguranca_eletronica,locucao,jingles_vinhetas,marketing_publicidade,contabilidade,conserto_celular,arquiteto,decoracao_interiores,paisagismo,azulejista,telhados,impermeabilizacao,eletrodomesticos,desentupimento,piscineiro,lavanderia,higienizacao,cortinas,outros', "as novas entram antes de 'outros', na ordem em que chegaram", E.ESPECIALIDADES_REPARADOR.slice(-5))
+  ok(new Set(E.ESPECIALIDADES_REPARADOR).size === 76, 'nenhum slug repetido')
   // Contabilidade + rótulo novo do grupo (16/11/2026): só o NOME muda; chave, etiquetas e os outros 9 grupos iguais.
   ok(!('Digital e aulas' in G.GRUPOS_RELACIONADOS) && G.CHAVE_DO_GRUPO['Escritório e aulas'] === 'digital_aulas' && G.CHAVE_DO_SLUG.contabilidade === 'digital_aulas' && G.CHAVE_DO_SLUG.aula_particular === 'digital_aulas',
      'grupo "Escritório e aulas": rótulo novo, chave digital_aulas mantida, contabilidade dentro')
@@ -65,9 +80,9 @@ const main = async () => {
   ok(JSON.stringify(catContab?.palavras) === '["contador","imposto de renda","abertura de empresa","MEI"]', 'contabilidade: palavras de busca (contador, imposto de renda, abertura de empresa, MEI)', catContab)
   ok((await G.expandirCategoria('contabilidade')).slice().sort().join() === 'aula_particular,contabilidade,informatica,personal_trainer,profissional_home_office,tradutor', 'pedido de contabilidade avisa o grupo Escritório e aulas e só ele', await G.expandirCategoria('contabilidade'))
   ok(!(await G.expandirCategoria('marketing_publicidade')).includes('contabilidade') && !(await G.expandirCategoria('eletrica')).includes('contabilidade'), 'contabilidade não entra em Divulgação nem em Consertos')
-  ok(JSON.stringify(G.GRUPOS_RELACIONADOS) === JSON.stringify(GRUPOS_FINAIS), 'os 10 grupos finais, exatamente (nomes, ordem e slugs)', Object.keys(G.GRUPOS_RELACIONADOS))
+  ok(JSON.stringify(G.GRUPOS_RELACIONADOS) === JSON.stringify(GRUPOS_FINAIS), 'os 11 grupos finais, exatamente (nomes, ordem e slugs)', Object.keys(G.GRUPOS_RELACIONADOS))
   ok(E.ESPECIALIDADES_REPARADOR.filter(s => s !== 'outros').every(s => Object.values(G.GRUPOS_RELACIONADOS).flat().includes(s)), "toda especialidade de serviço (menos 'outros') está em um grupo")
-  ok(JSON.stringify(G.CHAVE_DO_GRUPO) === JSON.stringify({ 'Consertos da casa': 'reparos_casa', 'Limpeza e jardim': 'limpeza', 'Beleza': 'beleza', 'Festas e eventos': 'festas', 'Cuidado': 'cuidado', 'Transporte': 'transporte', 'Segurança': 'seguranca', 'Escritório e aulas': 'digital_aulas', 'Arte e criação': 'arte', 'Divulgação e publicidade': 'divulgacao' }),
+  ok(JSON.stringify(G.CHAVE_DO_GRUPO) === JSON.stringify({ 'Consertos da casa': 'reparos_casa', 'Limpeza e jardim': 'limpeza', 'Beleza': 'beleza', 'Festas e eventos': 'festas', 'Cuidado': 'cuidado', 'Transporte': 'transporte', 'Segurança': 'seguranca', 'Escritório e aulas': 'digital_aulas', 'Arte e criação': 'arte', 'Divulgação e publicidade': 'divulgacao', 'Obras de Construção Civil': 'obras_construcao_civil' }),
      'chaves: Consertos herda reparos_casa, Limpeza e jardim herda limpeza, divulgacao nova, eletrica_tec some', G.CHAVE_DO_GRUPO)
   ok(!(await G.expandirCategoria('eletrica')).includes('informatica') && (await G.expandirCategoria('eletrica')).includes('hidraulica') && !(await G.expandirCategoria('faxina')).includes('eletrica'),
      'eletrica alcança hidráulica (Consertos), não informática nem faxina')
@@ -75,11 +90,11 @@ const main = async () => {
   // Etiquetas de avaliação: os 10 grupos (+ obra) e, SÓ nas etiquetas, Elétrica e tecnologia separada de
   // Consertos (dono, 13/11/2026); Divulgação reusa o conjunto de Digital e aulas.
   const ET = require(path.join(REPO, 'src/utils/etiquetasAvaliacao'))
-  ok(ET.GRUPOS_AVALIACAO.length === 12 && ET.GRUPOS_AVALIACAO.map(g => g.chave).join() === 'reparos_casa,eletrica_tec,limpeza,beleza,festas,cuidado,transporte,seguranca,digital_aulas,arte,divulgacao,construcao_pintura',
+  ok(ET.GRUPOS_AVALIACAO.length === 13 && ET.GRUPOS_AVALIACAO.map(g => g.chave).join() === 'reparos_casa,eletrica_tec,limpeza,beleza,festas,cuidado,transporte,seguranca,digital_aulas,arte,divulgacao,obras_construcao_civil,construcao_pintura',
      'etiquetas: Consertos, Elétrica e tecnologia, os outros 9 de serviço + obra', ET.GRUPOS_AVALIACAO.map(g => `${g.chave}:${g.nome}`))
   const gEle = ET.GRUPOS_AVALIACAO.find(g => g.chave === 'eletrica_tec'), gCons = ET.GRUPOS_AVALIACAO.find(g => g.chave === 'reparos_casa')
   ok(gEle.nome === 'Elétrica e tecnologia' && gEle.especialidades.join() === 'eletrica,eletronica,climatizacao,seguranca_eletronica,conserto_celular'
-     && gCons.especialidades.join() === 'hidraulica,alvenaria,gesseiro,marcenaria,serralheria,vidraceiro,chaveiro,estofamento,montagem_moveis',
+     && gCons.especialidades.join() === 'hidraulica,alvenaria,gesseiro,marcenaria,serralheria,vidraceiro,chaveiro,estofamento,montagem_moveis,eletrodomesticos,desentupimento,piscineiro',
      'catálogo: elétrica/eletrônica/climatização/segurança eletrônica/conserto de celular no grupo de etiquetas elétrico; Consertos com os outros 9', { ele: gEle.especialidades, cons: gCons.especialidades })
   ok(JSON.stringify(ET.ETIQUETAS_POR_GRUPO.eletrica_tec[5]) === '["Resolveu de vez","Serviço muito seguro","Super organizado"]' && JSON.stringify(ET.ETIQUETAS_POR_GRUPO.eletrica_tec[1]) === '["Não resolveu","Serviço perigoso","Estragou algo"]',
      'conjunto elétrico de antes restaurado ("Serviço muito seguro"…)')
@@ -136,6 +151,28 @@ const main = async () => {
     ok(inv.includes(slug), `${n.irmao} (já existente) agora alcança ${slug}`)
     const pub = await G.publicoDemanda([slug, 'outros'])
     ok(pub.push === null && pub.email.includes(n.irmao) && !pub.email.includes('outros'), `${slug} + outros: push a todos, e-mail ao grupo`, pub)
+  }
+  // ---- 12 novas (24/11/2026): avaliação, local de atendimento, dica de foto, inferência de obra
+  {
+    const LA = require(path.join(REPO, 'src/utils/localAtendimento')), DF = require(path.join(REPO, 'src/utils/dicaFoto')), I = require(path.join(REPO, 'src/utils/especialidadesInferidas'))
+    const grupoAval = (s) => JSON.stringify(ET.gruposDaDemanda('reparos', { categorias: [s] }))
+    ok(DOZE.slice(0, 6).every(s => grupoAval(s) === '["obras_construcao_civil"]') && JSON.stringify(ET.ETIQUETAS_POR_GRUPO.obras_construcao_civil) === JSON.stringify(ET.ETIQUETAS_POR_GRUPO.construcao_pintura),
+       'avaliação das 6 de Obras: grupo próprio com o conjunto de Construção e pintura')
+    ok(DOZE.slice(6, 9).every(s => grupoAval(s) === '["reparos_casa"]') && DOZE.slice(9).every(s => grupoAval(s) === '["limpeza"]'), 'avaliação: 3 em Consertos da casa, 3 em Limpeza e jardim')
+    ok(JSON.stringify(DOZE.filter(s => LA.CATEGORIAS_LOCAL_ATENDIMENTO.includes(s))) === '["eletrodomesticos","lavanderia"]'
+       && LA.normalizarLocalAtendimento('local_profissional', ['lavanderia']).valor === 'local_profissional' && LA.normalizarLocalAtendimento('local_profissional', ['telhados']).valor === null,
+       '"Onde vai ser o atendimento?": só eletrodomesticos e lavanderia')
+    ok(JSON.stringify(DOZE.filter(s => DF.pedeFoto('reparos', [s]))) === JSON.stringify(DOZE.slice(0, 9)), 'dica de foto: as 6 de Obras e as 3 de Consertos; as de Limpeza não', DOZE.filter(s => DF.pedeFoto('reparos', [s])))
+    ok(!DOZE.some(s => E.ESPECIALIDADES_OBRA.includes(s)) && !DOZE.some(s => E.GRUPO_OBRAS_REPARADOR.categorias.includes(s)) && E.ESPECIALIDADES_OBRA.length === 4,
+       'as 12 são SERVIÇO: papéis de obra e grupo de exibição seguem com os 4')
+    const inf = (titulo) => I.inferirEspecialidades({ titulo })
+    ok(inf('Troca de telhas e limpeza de calha').includes('telhados') && inf('Assentar porcelanato na cozinha').includes('azulejista') && inf('Impermeabilizar a laje').includes('impermeabilizacao')
+       && inf('Projeto de arquitetura da casa').includes('arquiteto') && inf('Projeto de paisagismo').includes('paisagismo') && inf('Design de interiores da sala').includes('decoracao_interiores')
+       && inf('Desentupir caixa de gordura').includes('desentupimento') && inf('Reforma da piscina').includes('piscineiro') && inf('Instalar persianas').includes('cortinas')
+       && inf('Conserto de geladeira').includes('eletrodomesticos') && inf('Higienização de sofá').includes('higienizacao'),
+       'inferência de obra: termos das novas especialidades')
+    ok(inf('Reparo no telhado').includes('alvenaria') && inf('Reparo no telhado').includes('pedreiro_servente') && !inf('Pintura da fachada').some(s => DOZE.includes(s)) && !inf('Reforma da lavanderia').includes('lavanderia'),
+       'inferência: telhado segue chamando pedreiro; pintura não puxa nenhuma das novas; "lavanderia" (cômodo) não infere')
   }
   // Chave desligada: só o próprio slug
   await db.query(`UPDATE configuracoes SET valor = 'false'`)

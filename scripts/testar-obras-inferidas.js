@@ -189,7 +189,7 @@ const main = async () => {
   await db.query(`UPDATE obras SET status = 'encerrada' WHERE id = $1`, [D(5)])
   const n = await I.backfillEspecialidadesInferidas(db)
   const bf = (await db.query(`SELECT codigo_publico, especialidades_inferidas FROM obras WHERE id IN ($1, $2) ORDER BY codigo_publico`, [D(4), D(5)])).rows
-  ok(n === 1 && igual(bf[0].especialidades_inferidas, ['alvenaria', 'pedreiro_servente', 'pintor']) && bf[1].especialidades_inferidas === null, 'backfill: só obras ABERTAS sem lista (1); a encerrada fica NULL', bf)
+  ok(n === 1 && igual(bf[0].especialidades_inferidas, ['alvenaria', 'telhados', 'pedreiro_servente', 'pintor']) && bf[1].especialidades_inferidas === null, 'backfill: só obras ABERTAS sem lista (1); a encerrada fica NULL', bf)
   ok((await I.backfillEspecialidadesInferidas(db)) === 0, 'backfill de novo: 0 (idempotente)')
   // Reanúncio de YS5XR: encanador JÁ avisado (push_entregas) não repete; um encanador NOVO recebe; público genérico não.
   await db.query(`INSERT INTO usuarios (id, nome, email, cidade, uf, role, tipo_prestador, cpf_cnpj, push_token, especialidades) VALUES ($1, 'Novo Encanador', 'novo@x.invalid', 'Niterói', 'RJ', 'prestador', 'reparador', '1010', $2, ARRAY['hidraulica'])`, [U(10), tok('novo')])

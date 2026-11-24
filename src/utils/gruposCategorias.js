@@ -25,8 +25,8 @@ const CHAVE_GRUPOS_ATIVO = 'grupos_relacionados_ativo'
 const GRUPOS_RELACIONADOS = {
   'Consertos da casa':            ['eletrica', 'eletronica', 'climatizacao', 'hidraulica', 'alvenaria', 'gesseiro',
                                    'marcenaria', 'serralheria', 'vidraceiro', 'chaveiro', 'estofamento', 'montagem_moveis',
-                                   'seguranca_eletronica', 'conserto_celular'],
-  'Limpeza e jardim':             ['faxina', 'dedetizacao', 'jardineiro'],
+                                   'seguranca_eletronica', 'conserto_celular', 'eletrodomesticos', 'desentupimento', 'piscineiro'],
+  'Limpeza e jardim':             ['faxina', 'dedetizacao', 'jardineiro', 'lavanderia', 'higienizacao', 'cortinas'],
   'Beleza':                       ['cabelo', 'manicure', 'maquiagem', 'barbeiro', 'depilacao', 'massagem', 'podologo',
                                    'design_sobrancelhas'],
   'Festas e eventos':             ['aluguel_festas', 'decoracao_festas', 'recreacao_infantil', 'dj', 'musico', 'garcom',
@@ -41,6 +41,9 @@ const GRUPOS_RELACIONADOS = {
   'Arte e criação':               ['artesanato', 'costura', 'tatuagem'],
   'Divulgação e publicidade':     ['locucao', 'jingles_vinhetas', 'marketing_publicidade', 'social_midia', 'panfletagem',
                                    'placas_fachadas', 'editor_video'],
+  // Grupo novo (dono, 24/11/2026): SERVIÇOS ligados a obra. Mesmo nome do grupo de exibição dos 4
+  // papéis de obra (especialidades.GRUPO_OBRAS_REPARADOR), que segue fora daqui.
+  'Obras de Construção Civil':    ['arquiteto', 'decoracao_interiores', 'paisagismo', 'azulejista', 'telhados', 'impermeabilizacao'],
 }
 
 // Chave curta e estável de cada grupo (API: /admin/crescimento-nichos, etiquetas de avaliação).
@@ -52,6 +55,7 @@ const CHAVE_DO_GRUPO = {
   'Beleza': 'beleza', 'Festas e eventos': 'festas',
   'Cuidado': 'cuidado', 'Transporte': 'transporte', 'Segurança': 'seguranca',
   'Escritório e aulas': 'digital_aulas', 'Arte e criação': 'arte', 'Divulgação e publicidade': 'divulgacao',
+  'Obras de Construção Civil': 'obras_construcao_civil',
 }
 
 // slug → lista do seu grupo (ele incluído). Montado uma vez; slug sem grupo não está no mapa.

@@ -50,6 +50,18 @@ const REGRAS_BASE = [
   { termos: ['montagem de moveis', 'montar moveis'], slugs: ['montagem_moveis'] },
   { termos: ['dedetiza*', 'cupim', 'cupins', 'descupiniza*'], slugs: ['dedetizacao'] },
   { termos: ['engenheiro', 'projeto estrutural', 'laudo'], slugs: ['engenheiro'] },
+  // 12 novas (24/11/2026): regras PRÓPRIAS, somadas às de cima (telhado segue chamando pedreiro).
+  { termos: ['arquiteto', 'arquiteta', 'arquitetura', 'projeto arquitetonico', 'planta baixa'], slugs: ['arquiteto'] },
+  { termos: ['design de interiores', 'decoracao de interiores', 'projeto de interiores', 'decorador', 'decoradora'], slugs: ['decoracao_interiores'] },
+  { termos: ['paisagismo', 'paisagista'], slugs: ['paisagismo'] },
+  { termos: ['azulejo', 'azulejista', 'revestimento', 'ceramica', 'porcelanato', 'rejunte', 'piso'], slugs: ['azulejista'] },
+  { termos: ['telhado', 'telha', 'calha', 'telhadista', 'rufo', 'cumeeira'], slugs: ['telhados'] },
+  { termos: ['impermeabiliza*', 'manta asfaltica', 'infiltracao'], slugs: ['impermeabilizacao'] },
+  { termos: ['eletrodomestico', 'geladeira', 'fogao', 'maquina de lavar', 'lavadora', 'micro-ondas', 'microondas'], slugs: ['eletrodomesticos'] },
+  { termos: ['desentup*', 'entupid*', 'entupimento', 'caixa de gordura', 'fossa'], slugs: ['desentupimento'] },
+  { termos: ['piscina', 'piscineiro'], slugs: ['piscineiro'] },
+  { termos: ['higienizacao de estofado', 'higienizacao de sofa', 'higienizacao de tapete', 'limpeza de sofa', 'limpeza de tapete'], slugs: ['higienizacao'] },
+  { termos: ['cortina', 'persiana'], slugs: ['cortinas'] },
 ]
 // Normalização igual à da cidade (utils/localidade): minúsculas, sem acento, espaços dobrados.
 const normalizar = (s) => String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim()

@@ -137,7 +137,7 @@ const main = async () => {
   ok(/inválida/.test(v.erro || ''), 'tipo NULL (legado): slug de obra continua recusado', v)
   v = esp.validarEspecialidades(['eletrica'], true, null)
   ok(!v.erro, 'tipo NULL (legado): lista de serviços como antes', v)
-  ok(esp.ESPECIALIDADES_REPARADOR.length === 64 && !OBRA4.some(s => esp.ESPECIALIDADES_REPARADOR.includes(s)),
+  ok(esp.ESPECIALIDADES_REPARADOR.length === 76 && !OBRA4.some(s => esp.ESPECIALIDADES_REPARADOR.includes(s)),
      'ESPECIALIDADES_REPARADOR (vocabulário de reparos.categoria) segue só com serviços (62) e SEM slug de obra', esp.ESPECIALIDADES_REPARADOR.length)
   ok(esp.ESPECIALIDADES_VALIDAS === esp.ESPECIALIDADES_REPARADOR, 'alias ESPECIALIDADES_VALIDAS intacto')
   ok(!Object.values(GRUPOS_RELACIONADOS).flat().some(s => OBRA4.includes(s)), 'GRUPOS_RELACIONADOS sem slug de obra (casamento de reparo não expande)')
@@ -391,8 +391,8 @@ const main = async () => {
   // ═══ 6. Textos e config ═══════════════════════════════════════════════════════════════════
   r = await chamar(camadas('get', '/config/grupos-categorias').slice(-1)[0], { usuario: null })
   ok(r.status === 200 && r.body.grupo_obras?.nome === 'Obras de Construção Civil' && igual(r.body.grupo_obras.categorias, OBRA4)
-     && !r.body.grupos.flatMap(x => x.categorias).some(c => OBRA4.includes(c)) && r.body.grupos.length === 10,
-     'GET /config/grupos-categorias: grupo_obras à parte; `grupos` (seletor de serviço) com os 10 de sempre e sem slug de obra', r.body.grupo_obras)
+     && !r.body.grupos.flatMap(x => x.categorias).some(c => OBRA4.includes(c)) && r.body.grupos.length === 11,
+     'GET /config/grupos-categorias: grupo_obras à parte; `grupos` (seletor de serviço) com os 11 de serviço e sem slug de obra', r.body.grupo_obras)
 
   const ler = (f) => fs.readFileSync(path.join(REPO, f), 'utf8')
   const VELHOS = [
