@@ -40,7 +40,7 @@ const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQ
 // "Liberar WhatsApp" (arte "Ela chegou? v2"): o dono libera o próprio número ao escolhido antes do "Estou a caminho".
 // Pedidos salvos (❤️) e pedido que parece anúncio (dono, 24/11/2026).
 const { migrarDemandasSalvas, anexarSalvo, anexarSalvosCount } = require('../utils/demandasSalvas')
-const { migrarSuspeitaAnuncio, avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita } = require('../utils/suspeitaAnuncio')
+const { migrarSuspeitaAnuncio, avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita, anexarEspecialidadeProfissionalDoDono } = require('../utils/suspeitaAnuncio')
 const { migrarPenalidadesAuto, verificarPenalidadeAvaliacoes, verificarPenalidadeDenuncias, exigirNaoSuspensoSalvoAvaliacoes, exigirPodePublicar, sqlNotaBaixaAntes } = require('../utils/penalidadesAuto')
 const { handler: liberarWhatsappHandler, whatsappLiberado, migrarWhatsappLiberado } = require('../services/liberarWhatsappService')
 // Propostas rebaixadas pelo match voltam a valer quando a demanda retorna ao feed (regra única).
@@ -3203,6 +3203,8 @@ router.get('/obras-aprovacao', autenticar, exigirAdmin, async (req, res) => {
        LIMIT $1 OFFSET $2`,
       [limit, offset]
     )
+    // dono_profissional_especialidade(_rotulo): o dono também é profissional DESTA especialidade (utils/suspeitaAnuncio).
+    await anexarEspecialidadeProfissionalDoDono('obras', result.rows)
     res.json({ obras: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar obras para aprovação' })
@@ -3393,6 +3395,7 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
       ORDER BY ${sqlOrdemPainel('o', filtro)}
       LIMIT 200
     `)
+    await anexarEspecialidadeProfissionalDoDono('obras', result.rows)
     res.json({ obras: result.rows })
   } catch (err) {
     console.error('Erro ao listar obras (admin):', err)
@@ -5367,6 +5370,7 @@ router.get('/reparos/aprovacao', autenticar, exigirAdmin, async (req, res) => {
        LIMIT $1 OFFSET $2`,
       [limit, offset]
     )
+    await anexarEspecialidadeProfissionalDoDono('reparos', result.rows)
     res.json({ reparos: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar reparos' })
@@ -5490,6 +5494,7 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
       ORDER BY ${sqlOrdemPainel('r', filtro)}
       LIMIT 200
     `)
+    await anexarEspecialidadeProfissionalDoDono('reparos', result.rows)
     res.json({ reparos: result.rows })
   } catch (err) {
     console.error('Erro ao listar reparos (admin):', err)

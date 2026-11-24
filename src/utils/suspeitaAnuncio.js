@@ -22,12 +22,15 @@ const { temTelefone } = require('./moderacaoDemanda')
 const { inferirEspecialidades } = require('./especialidadesInferidas')
 const { sqlCpfNormalizado } = require('./demandaPropria')
 const { primeiroNome } = require('../whatsapp/textos')
+const { LINK_INDICACAO } = require('./indicacoes')
+const { rotuloCategoria } = require('./especialidades')
 
 const CODIGO_SUSPEITA = 'SUSPEITA_ANUNCIO'
 const MENSAGEM_SUSPEITA = 'Este pedido parece um anúncio do seu trabalho. Os pedidos são para quem quer contratar um serviço. Se você quer mesmo contratar, confirme para publicar.'
 const MOTIVO_PROFISSIONAL = 'profissional_da_especialidade'
 const MOTIVO_TELEFONE = 'telefone'
-const LINK_APP = 'protudo.app.br/baixar'
+// Sem conta profissional (ou sem código de indicação): o link de baixar o app, sem código.
+const LINK_APP = 'https://protudo.app.br/baixar'
 const TABELAS = Object.freeze({ reparo: 'reparos', obra: 'obras' })
 
 // Sobre o texto DOBRADO (minúsculas, sem acento). Palavra inteira: "refaço", "satisfaço" e
@@ -112,8 +115,38 @@ const migrarSuspeitaAnuncio = async (client) => {
   await client.query(`CREATE INDEX IF NOT EXISTS anuncios_ocorrencias_usuario_idx ON anuncios_ocorrencias (usuario_id, criado_em DESC)`)
 }
 
-const textoAnuncioRemovido = ({ nome, titulo }) =>
-  `Oi, ${primeiroNome(nome)}! 👋 Aqui é o *ProTudo*. Tiramos do ar o seu pedido *"${titulo}"* porque ele parece um anúncio do seu trabalho, e os pedidos são para quem quer contratar. 😉 Para divulgar seus serviços, use o seu perfil de profissional no app: ${LINK_APP}`
+// O link é o convite do PRÓPRIO profissional (o mesmo que o app monta: utils/indicacoes.LINK_INDICACAO).
+const textoAnuncioRemovido = ({ nome, titulo, codigo_indicacao }) =>
+  `Oi, ${primeiroNome(nome)}! 👋 Aqui é o *ProTudo*. Tiramos do ar o seu pedido *"${titulo}"* porque ele parece um anúncio do seu trabalho, e os pedidos são para quem quer contratar. 😉 Para divulgar seus serviços, compartilhe o seu link do ProTudo: ${codigo_indicacao ? LINK_INDICACAO(codigo_indicacao) : LINK_APP}`
+
+// Painel ("também é profissional: {especialidade}"): em cada linha (que tem `id`), a especialidade
+// do pedido que o DONO também exerce numa conta profissional do mesmo CPF —
+// dono_profissional_especialidade (slug) e dono_profissional_especialidade_rotulo; null quando não
+// há. Reparo: as categorias; obra: as especialidades inferidas. Nunca lança.
+const anexarEspecialidadeProfissionalDoDono = async (tabela, linhas, db = pool) => {
+  const lista = Array.isArray(linhas) ? linhas : []
+  for (const l of lista) { l.dono_profissional_especialidade = null; l.dono_profissional_especialidade_rotulo = null }
+  if (lista.length === 0 || !Object.values(TABELAS).includes(tabela)) return linhas
+  const slugs = tabela === 'obras' ? `COALESCE(d.especialidades_inferidas, '{}'::text[])` : `COALESCE(NULLIF(d.categorias, '{}'::text[]), ARRAY[d.categoria]::text[])`
+  try {
+    const r = await db.query(
+      `SELECT d.id, ${slugs} AS slugs,
+              (SELECT array_agg(DISTINCT e) FROM usuarios dn
+                 JOIN usuarios p ON p.role = 'prestador' AND ${sqlCpfNormalizado('p.cpf_cnpj')} = ${sqlCpfNormalizado('dn.cpf_cnpj')}
+                CROSS JOIN LATERAL unnest(COALESCE(p.especialidades, '{}'::text[])) AS e
+                WHERE dn.id = d.criado_por) AS do_dono
+         FROM ${tabela} d WHERE d.id = ANY($1::uuid[])`, [lista.map(l => l.id)])
+    const porId = new Map(r.rows.map(x => [x.id, x]))
+    for (const l of lista) {
+      const x = porId.get(l.id)
+      const slug = (x?.slugs || []).find(s => s && s !== 'outros' && (x.do_dono || []).includes(s))
+      if (slug) { l.dono_profissional_especialidade = slug; l.dono_profissional_especialidade_rotulo = rotuloCategoria(slug) }
+    }
+  } catch (err) {
+    console.error(`[Anuncio] especialidade profissional do dono (${tabela}):`, err.message)
+  }
+  return linhas
+}
 
 // Painel: marca o pedido como anúncio. Devolve { ok: true, ... } ou { ok: false, status, erro, codigo }.
 const marcarComoAnuncio = async ({ tipo, id, adminId }, db = pool) => {
@@ -121,7 +154,11 @@ const marcarComoAnuncio = async ({ tipo, id, adminId }, db = pool) => {
   if (!tabela) return { ok: false, status: 400, erro: "tipo deve ser 'reparo' ou 'obra'" }
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id))) return { ok: false, status: 400, erro: 'id inválido' }
   const d = (await db.query(
-    `SELECT d.id, d.titulo, d.status, d.criado_por, d.match_usuario_id, d.anuncio_em, u.nome, u.telefone, u.whatsapp_avisos
+    `SELECT d.id, d.titulo, d.status, d.criado_por, d.match_usuario_id, d.anuncio_em, u.nome, u.telefone, u.whatsapp_avisos,
+            (SELECT p.codigo_indicacao FROM usuarios p
+              WHERE p.role = 'prestador' AND p.codigo_indicacao IS NOT NULL
+                AND ${sqlCpfNormalizado('p.cpf_cnpj')} = ${sqlCpfNormalizado('u.cpf_cnpj')}
+              ORDER BY p.id LIMIT 1) AS codigo_indicacao
        FROM ${tabela} d LEFT JOIN usuarios u ON u.id = d.criado_por WHERE d.id = $1::uuid`, [id])).rows[0]
   if (!d) return { ok: false, status: 404, erro: 'Pedido não encontrado' }
   if (d.anuncio_em) return { ok: false, status: 409, erro: 'Este pedido já foi marcado como anúncio.', codigo: 'JA_MARCADO' }
@@ -153,5 +190,6 @@ const marcarComoAnuncio = async ({ tipo, id, adminId }, db = pool) => {
 
 module.exports = {
   CODIGO_SUSPEITA, MENSAGEM_SUSPEITA, MOTIVO_PROFISSIONAL, MOTIVO_TELEFONE, LINK_APP, motivosDoTexto, especialidadesDoPedido,
+  anexarEspecialidadeProfissionalDoDono,
   avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita, migrarSuspeitaAnuncio, textoAnuncioRemovido, marcarComoAnuncio,
 }

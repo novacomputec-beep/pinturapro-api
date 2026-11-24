@@ -31,7 +31,7 @@ const NOVAS = {
   jingles_vinhetas: { rotulo: 'Jingles e vinhetas', emoji: '🎵', grupo: 'Divulgação e publicidade', chave: 'divulgacao', irmao: 'editor_video' },
   marketing_publicidade: { rotulo: 'Marketing e publicidade', emoji: '📈', grupo: 'Divulgação e publicidade', chave: 'divulgacao', irmao: 'panfletagem' },
   // 12 novas (24/11/2026)
-  arquiteto:            { rotulo: 'Arquiteto',               emoji: '🏛️', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'azulejista' },
+  arquiteto:            { rotulo: 'Arquiteto',               emoji: '📏', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'azulejista' },
   decoracao_interiores: { rotulo: 'Decoração de interiores', emoji: '🖼️', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'arquiteto' },
   paisagismo:           { rotulo: 'Paisagismo',              emoji: '🏞️', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'arquiteto' },
   azulejista:           { rotulo: 'Azulejista e pisos',      emoji: '🔲', grupo: 'Obras de Construção Civil', chave: 'obras_construcao_civil', irmao: 'telhados' },
