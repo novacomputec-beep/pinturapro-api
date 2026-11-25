@@ -156,14 +156,20 @@ const main = async () => {
   ok(/inválida/.test(v.erro || ''), 'tipo NULL: lista de sempre (slug de obra recusado)', v)
   ok(esp.ESPECIALIDADES_REPARADOR.length === 76 && esp.ESPECIALIDADES_OBRA.length === 4, 'listas de base intactas (76 serviços, 4 de obra)')
   const P = (tipo, e, role = 'prestador') => ({ role, tipo_prestador: tipo, especialidades: e })
-  ok(cap.podeServicos(P('reparador', ['eletrica'])) && cap.podeServicos(P('reparador', ['pintor'])) && cap.podeServicos(P('reparador', null)),
-     'podeServicos: reparador sempre (mesmo só com especialidade de obra ou sem lista)')
-  ok(cap.podeServicos(P('pintor', ['pintor', 'eletrica'])) && !cap.podeServicos(P('pintor', ['pintor'])) && !cap.podeServicos(P('pintor', null)),
-     'podeServicos: pintor SÓ com especialidade de serviço')
-  ok(!cap.podeServicos(P(null, ['eletrica'])) && !cap.podeServicos(P('reparador', ['eletrica'], 'dono_obra')) && !cap.podeServicos(null),
-     'podeServicos falha fechado: tipo NULL, role errado, linha nula')
-  ok(cap.podeObras(P('pintor', ['eletrica'])) && cap.podeObras(P('reparador', ['pintor'])) && !cap.podeObras(P('reparador', ['eletrica'])),
-     'podeObras (Fase 2a) inalterado')
+  // AVISOS (push/e-mail/WhatsApp): por especialidade, como sempre — avisaServicos / avisaObras.
+  ok(cap.avisaServicos(P('reparador', ['eletrica'])) && cap.avisaServicos(P('reparador', ['pintor'])) && cap.avisaServicos(P('reparador', null)),
+     'avisaServicos: reparador sempre (mesmo só com especialidade de obra ou sem lista)')
+  ok(cap.avisaServicos(P('pintor', ['pintor', 'eletrica'])) && !cap.avisaServicos(P('pintor', ['pintor'])) && !cap.avisaServicos(P('pintor', null)),
+     'avisaServicos: pintor SÓ com especialidade de serviço')
+  ok(!cap.avisaServicos(P(null, ['eletrica'])) && !cap.avisaServicos(P('reparador', ['eletrica'], 'dono_obra')) && !cap.avisaServicos(null),
+     'avisaServicos falha fechado: tipo NULL, role errado, linha nula')
+  ok(cap.avisaObras(P('pintor', ['eletrica'])) && cap.avisaObras(P('reparador', ['pintor'])) && !cap.avisaObras(P('reparador', ['eletrica'])),
+     'avisaObras (Fase 2a) inalterado')
+  // GATE / FEED / pode_* (regra de 25/11/2026): toda conta profissional pode os DOIS lados.
+  ok([P('pintor', ['pintor']), P('pintor', null), P('reparador', ['eletrica']), P('reparador', ['outros']), P('reparador', null)].every(u => cap.podeServicos(u) && cap.podeObras(u)),
+     'podeServicos / podeObras: todo pintor e todo reparador, qualquer especialidade (só "outros", sem lista)')
+  ok(!cap.podeServicos(P(null, ['eletrica'])) && !cap.podeObras(P(null, ['pintor'])) && !cap.podeServicos(P('reparador', ['eletrica'], 'dono_obra')) && !cap.podeObras(P('pintor', ['pintor'], 'dono_obra')) && !cap.podeServicos(null) && !cap.podeObras(null),
+     'podeServicos / podeObras falham fechado: tipo NULL, role errado, linha nula')
 
   // ═══ banco ════════════════════════════════════════════════════════════════════════════════
   db = new PGlite()
@@ -245,14 +251,14 @@ const main = async () => {
   ok(await ehDemandaPropria('obras', D(20), PR.id) === true, 'demanda criada pela conta de DONO da pessoa continua "própria" para as contas profissionais dela')
 
   const linhas = (await db.query(`SELECT u.id, u.nome, u.role, u.tipo_prestador, u.especialidades, ${cap.sqlPodeServicos('u')} AS sql_s, ${cap.sqlPodeObras('u')} AS sql_o FROM usuarios u`)).rows
-  ok(linhas.every(l => cap.podeServicos(l) === l.sql_s && cap.podeObras(l) === l.sql_o), 'podeServicos/podeObras (JS) ≡ SQL em todas as contas',
-     linhas.filter(l => cap.podeServicos(l) !== l.sql_s || cap.podeObras(l) !== l.sql_o).map(l => l.nome))
+  ok(linhas.every(l => cap.avisaServicos(l) === l.sql_s && cap.avisaObras(l) === l.sql_o), 'avisaServicos/avisaObras (JS) ≡ SQL dos avisos em todas as contas',
+     linhas.filter(l => cap.avisaServicos(l) !== l.sql_s || cap.avisaObras(l) !== l.sql_o).map(l => l.nome))
 
   // ═══ 3. Gates de SERVIÇO (capacidade simétrica) e por PESSOA ═══════════════════════════════
   let g = await gates(ROTAS_SERVICO, PS.id)
   ok(todasPassam(g), 'PINTOR com especialidade de serviço passa nas 7 rotas de serviço', resumo(g))
   g = await gates(ROTAS_SERVICO, PN.id)
-  ok(todasTier(g), 'pintor SEM especialidade de serviço → 403 TIER_INCORRETO nas 7 (regressão)', resumo(g))
+  ok(todasPassam(g), 'pintor SEM especialidade de serviço passa nas 7 (regra de 25/11: todo profissional vê tudo)', resumo(g))
   g = await gates(ROTAS_SERVICO, EST.id)
   ok(todasPassam(g), 'reparador passa nas 7 (regressão)', resumo(g))
   g = await gates(ROTAS_SERVICO, NL.id)
@@ -267,13 +273,13 @@ const main = async () => {
   g = await gates(ROTAS_OBRA, PR.id)
   ok(todasPassam(g), 'PESSOA: a conta REPARADOR (sem obra) passa nas rotas de OBRA pela conta irmã pintor', resumo(g))
   g = await gates(ROTAS_OBRA, EST.id)
-  ok(todasTier(g), 'ESTRANHO (mesmo e-mail, outro CPF) NÃO herda nada: 403 nas rotas de obra', resumo(g))
+  ok(todasPassam(g), 'ESTRANHO reparador (sem especialidade de obra) passa nas rotas de obra', resumo(g))
   g = await gates(ROTAS_OBRA, SR.id)
-  ok(todasTier(g), 'reparador SEM CPF não herda do pintor sem CPF de mesmo e-mail: 403 nas rotas de obra', resumo(g))
+  ok(todasPassam(g), 'reparador SEM CPF passa nas rotas de obra', resumo(g))
   g = await gates(ROTAS_SERVICO, SP.id)
-  ok(todasTier(g), 'pintor SEM CPF não herda do reparador sem CPF: 403 nas rotas de serviço', resumo(g))
+  ok(todasPassam(g), 'pintor SEM CPF passa nas rotas de serviço', resumo(g))
   g = await gates(ROTAS_SERVICO, IP.id)
-  ok(todasTier(g), 'conta irmã DESATIVADA não empresta capacidade: 403 nas rotas de serviço', resumo(g))
+  ok(todasPassam(g), 'pintor com conta irmã desativada passa nas rotas de serviço (pela própria conta)', resumo(g))
 
   // ═══ 4. Capacidades nas respostas (por pessoa) ════════════════════════════════════════════
   const linha = async (id) => (await db.query(`SELECT * FROM usuarios WHERE id = $1`, [id])).rows[0]
@@ -282,15 +288,15 @@ const main = async () => {
   let s = await sessao(PS)
   ok(s.pode_obras && s.pode_servicos && s.tipo_prestador === 'pintor', 'login PINTOR com serviço: pode_obras e pode_servicos true (tipo segue "pintor")', caps(s))
   s = await sessao(PN)
-  ok(s.pode_obras && !s.pode_servicos, 'login pintor sem serviço: pode_servicos false', caps(s))
+  ok(s.pode_obras && s.pode_servicos, 'login pintor sem serviço: pode_obras e pode_servicos true', caps(s))
   s = await sessao(EST)
-  ok(!s.pode_obras && s.pode_servicos, 'login ESTRANHO reparador: só pode_servicos', caps(s))
+  ok(s.pode_obras && s.pode_servicos, 'login ESTRANHO reparador: pode os DOIS lados', caps(s))
   s = await sessao(PP)
   ok(s.pode_obras && s.pode_servicos && !s.tem_candidaturas && !s.tem_interesses, 'login PESSOA (conta pintor): pode os DOIS lados; ainda sem propostas', caps(s))
   s = await sessao(PR)
   ok(s.pode_obras && s.pode_servicos, 'login PESSOA (conta reparador): pode os DOIS lados', caps(s))
   s = await sessao(IP)
-  ok(s.pode_obras && !s.pode_servicos, 'login com irmã desativada: pode_servicos false', caps(s))
+  ok(s.pode_obras && s.pode_servicos, 'login com irmã desativada: pode os DOIS lados', caps(s))
   s = await sessao(DP)
   ok(!s.pode_obras && !s.pode_servicos, 'login conta de DONO da pessoa: nenhuma capacidade profissional', caps(s))
   let r = await chamar(authCtrl.listarContas, { usuario: await linha(PP.id) })
@@ -302,7 +308,7 @@ const main = async () => {
   g = await gates(ROTAS_SERVICO, PN.id)
   ok(todasPassam(g), 'depois do save o pintor passa nas rotas de serviço', resumo(g))
   r = await chamar(authCtrl.atualizarPerfil, { usuario: { ...(await linha(PN.id)) }, body: { especialidades: ['pintor'] } })
-  ok(r.status === 200 && r.body.pode_servicos === false, 'PUT /auth/perfil: tirou o serviço → pode_servicos false', r.body)
+  ok(r.status === 200 && r.body.pode_servicos === true && r.body.pode_obras === true, 'PUT /auth/perfil: tirou o serviço → pode_servicos segue true', r.body)
 
   // ═══ 5. Público do push / e-mail: capacidade + UM aviso por pessoa ═════════════════════════
   const para = () => ordenado(pushes.map(p => p.to))

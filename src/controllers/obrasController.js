@@ -12,10 +12,9 @@ const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
 const { sqlNaoDemandaPropria } = require('../utils/demandaPropria')
 // Lista negra / bloqueio do dono / recusa por PESSOA no feed (Fase 2b — contas 'prestador' do mesmo CPF).
 const { sqlProfissionalDaPessoa, sqlArrayProfissionaisDaPessoa } = require('../utils/tipoConta')
-// Feed por especialidade inferida (utils/especialidadesInferidas): quem não é do público genérico de
-// obras (capacidadeObras.sqlPessoaPodeObras) vê só as obras cuja lista inferida casa com as suas.
-const { sqlPessoaPodeObras } = require('../utils/capacidadeObras')
-const { sqlEspecialidadesDaPessoa, gravarEspecialidadesInferidas } = require('../utils/especialidadesInferidas')
+// Especialidades inferidas (utils/especialidadesInferidas): gravadas na criação, para os AVISOS e o
+// card. O feed não filtra mais por elas (25/11/2026 — todo profissional vê todas as obras).
+const { gravarEspecialidadesInferidas } = require('../utils/especialidadesInferidas')
 const { mascararLista } = require('../utils/tentativasContato')
 // Coordenadas arredondadas no feed (utils/privacidadeDemanda): o filtro por raio roda nas exatas.
 const { ofuscarCoordenadasLista } = require('../utils/privacidadeDemanda')
@@ -71,9 +70,8 @@ const listar = async (req, res) => {
       -- Obra criada pela OUTRA conta da mesma pessoa (mesmo CPF normalizado): não aparece —
       -- POST /obras/:id/candidatura a recusa com 400 demanda_propria. Sem CPF, não filtra.
       AND ${sqlNaoDemandaPropria('o')}
-      -- Público genérico de obras vê tudo (como sempre); quem só chegou aqui pelas especialidades
-      -- inferidas (capacidadeObras.capacidadesDaPessoa) vê as obras que casam com as suas.
-      AND (${sqlPessoaPodeObras('$1')} OR o.especialidades_inferidas && ${sqlEspecialidadesDaPessoa('$1')})
+      -- Sem filtro de especialidade nem de tipo de conta (dono, 25/11/2026): todo profissional vê
+      -- TODAS as obras abertas. Quem entra aqui já passou pelo gate exigirPodeObras.
     `
     // $1 reservado para o usuario_id (filtro de bloqueio global por dono)
     const params = [req.usuario.id]

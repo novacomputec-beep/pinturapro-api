@@ -40,10 +40,21 @@ const SQL_SLUGS_OBRA = sqlListaSlugs(ESPECIALIDADES_OBRA, 'obra')
 const SQL_SLUGS_SERVICO = sqlListaSlugs(ESPECIALIDADES_REPARADOR, 'serviço')
 
 const temSlug = (u, conjunto) => Array.isArray(u.especialidades) && u.especialidades.some(e => conjunto.has(e))
-const podeObras = (u) => !!u && u.role === 'prestador' && (
+// REGRA PERMANENTE (dono, 25/11/2026): TODA conta profissional (reparador ou pintor, qualquer
+// especialidade, inclusive só 'outros') VÊ TUDO — feed de obras e de serviços, gates
+// (exigirPodeObras / exigirPodeServicos) e pode_obras / pode_servicos das respostas. É o que
+// podeObras / podeServicos (JS) e capacidadesDaPessoa respondem agora. tipo_prestador NULL
+// (legado) e os outros roles continuam de fora.
+// As regras POR ESPECIALIDADE descritas acima seguem valendo SÓ para os AVISOS (push / e-mail /
+// WhatsApp — alertaService) e para o "na sua especialidade" de utils/oportunidadesResumo:
+// avisaObras / avisaServicos (JS) ≡ sqlPodeObras / sqlPodeServicos (SQL), inalteradas.
+const ehProfissional = (u) => !!u && u.role === 'prestador' && (u.tipo_prestador === 'pintor' || u.tipo_prestador === 'reparador')
+const podeObras = ehProfissional
+const podeServicos = ehProfissional
+const avisaObras = (u) => !!u && u.role === 'prestador' && (
   u.tipo_prestador === 'pintor' || (u.tipo_prestador === 'reparador' && temSlug(u, SET_OBRA))
 )
-const podeServicos = (u) => !!u && u.role === 'prestador' && (
+const avisaServicos = (u) => !!u && u.role === 'prestador' && (
   u.tipo_prestador === 'reparador' || (u.tipo_prestador === 'pintor' && temSlug(u, SET_SERVICO))
 )
 
@@ -89,9 +100,13 @@ const capacidadesDaPessoa = async (usuarioId, db = pool) => {
   if (!usuarioId) return { ...NADA }
   const { sqlPessoaTemObrasInferidas } = require('./especialidadesInferidas')
   const r = await db.query(
-    `SELECT (${sqlPessoaPodeObras('$1')} OR ${sqlPessoaTemObrasInferidas('$1')}) AS pode_obras,
-            (NOT ${sqlPessoaPodeObras('$1')} AND ${sqlPessoaTemObrasInferidas('$1')}) AS obras_inferidas,
-            ${sqlPessoaPodeServicos('$1')} AS pode_servicos,
+    // Regra de 25/11/2026: conta profissional (pintor ou reparador) pode os DOIS lados, sempre.
+    // obras_inferidas fica no payload (apps antigos leem), mas não tem mais como ser true.
+    `WITH eu AS (SELECT EXISTS (SELECT 1 FROM usuarios p WHERE p.id = $1::uuid AND p.role = 'prestador'
+                                   AND p.tipo_prestador IN ('pintor', 'reparador')) AS prof)
+     SELECT ((SELECT prof FROM eu) OR ${sqlPessoaPodeObras('$1')} OR ${sqlPessoaTemObrasInferidas('$1')}) AS pode_obras,
+            (NOT (SELECT prof FROM eu) AND NOT ${sqlPessoaPodeObras('$1')} AND ${sqlPessoaTemObrasInferidas('$1')}) AS obras_inferidas,
+            ((SELECT prof FROM eu) OR ${sqlPessoaPodeServicos('$1')}) AS pode_servicos,
             EXISTS (SELECT 1 FROM candidaturas c WHERE ${sqlProfissionalDaPessoa('c.usuario_id', '$1')}) AS tem_candidaturas,
             EXISTS (SELECT 1 FROM interesse_reparos i WHERE ${sqlProfissionalDaPessoa('i.usuario_id', '$1')}) AS tem_interesses`,
     [usuarioId]
@@ -104,7 +119,7 @@ const capacidadesDaPessoa = async (usuarioId, db = pool) => {
 }
 
 module.exports = {
-  podeObras, podeServicos, sqlPodeObras, sqlPodeServicos, sqlPessoaPodeObras, sqlPessoaPodeServicos,
+  ehProfissional, podeObras, podeServicos, avisaObras, avisaServicos, sqlPodeObras, sqlPodeServicos, sqlPessoaPodeObras, sqlPessoaPodeServicos,
   capacidadesDaPessoa, capacidadeObras: capacidadesDaPessoa, // nome da Fase 2a, mantido
   SQL_SLUGS_OBRA, SQL_SLUGS_SERVICO,
 }

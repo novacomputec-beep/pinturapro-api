@@ -140,10 +140,10 @@ const main = async () => {
   r = await quieto(() => chamar('post', '/reparos/:id/perguntas', P.R_SEM_ASS.id, { params: { id: R1 }, body: { pergunta: 'Posso ir hoje?' } }))
   ok(r.status === 403 && r.body.codigo !== 'VERIFICACAO_NECESSARIA', 'sem assinatura ativa: pergunta segue barrada', { status: r.status, erro: r.body?.erro })
   r = await quieto(() => chamar('post', '/reparos/:id/perguntas', P.P_NAO.id, { params: { id: R1 }, body: { pergunta: 'Posso ir hoje?' } }))
-  ok(r.status === 403 && r.body.codigo !== 'VERIFICACAO_NECESSARIA', 'pintor em pergunta de SERVIÇO (lado errado): segue barrado', { status: r.status, erro: r.body?.erro })
+  ok(r.status === 201, 'pintor em pergunta de SERVIÇO: passa (regra de 25/11/2026 — todo profissional vê e atende os dois lados)', { status: r.status, erro: r.body?.erro })
   r = await quieto(() => chamar('post', '/reparos/:id/perguntas', P.R_NAO.id, { params: { id: R1 }, body: { pergunta: 'Outra pergunta' } }))
   ok(r.status === 409, 'uma pergunta por profissional por pedido (409 na segunda), como sempre', { status: r.status })
-  ok(await perguntasDe('reparo', R1) === 4, 'nenhuma pergunta a mais gravada pelas tentativas barradas')
+  ok(await perguntasDe('reparo', R1) === 5, 'só a pergunta do pintor entrou; nenhuma gravada pelas tentativas barradas')
 
   const errosReais = erros.filter(e => !/sem banco|migration/i.test(e))
   ok(errosReais.length === 0, 'nenhum erro logado', errosReais.slice(0, 5))

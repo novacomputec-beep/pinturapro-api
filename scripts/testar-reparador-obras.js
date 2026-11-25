@@ -55,7 +55,7 @@ const authCtrl = require(path.join(REPO, 'src/controllers/authController'))
 const alerta = require(path.join(REPO, 'src/services/alertaService'))
 const esp = require(path.join(REPO, 'src/utils/especialidades'))
 const { GRUPOS_RELACIONADOS } = require(path.join(REPO, 'src/utils/gruposCategorias'))
-const { podeObras, sqlPodeObras, capacidadeObras } = require(path.join(REPO, 'src/utils/capacidadeObras'))
+const { podeObras, avisaObras, sqlPodeObras, capacidadeObras } = require(path.join(REPO, 'src/utils/capacidadeObras'))
 
 let falhas = 0
 const ok = (c, rot, extra) => { if (!c) falhas++; console.log(`${c ? 'OK  ' : 'FAIL'} ${rot}${extra !== undefined ? ' | ' + JSON.stringify(extra) : ''}`) }
@@ -217,15 +217,21 @@ const main = async () => {
 
   // ═══ 2. podeObras (JS) ≡ sqlPodeObras (SQL) ═══════════════════════════════════════════════
   const linhas = (await db.query(`SELECT u.id, u.nome, u.role, u.tipo_prestador, u.especialidades, ${sqlPodeObras('u')} AS sql_pode FROM usuarios u ORDER BY u.id`)).rows
-  const divergentes = linhas.filter(l => podeObras(l) !== l.sql_pode).map(l => l.nome)
-  ok(divergentes.length === 0, 'podeObras (JS) e sqlPodeObras (SQL) concordam em TODAS as contas', divergentes)
+  const divergentes = linhas.filter(l => avisaObras(l) !== l.sql_pode).map(l => l.nome)
+  ok(divergentes.length === 0, 'avisaObras (JS) e sqlPodeObras (SQL) — a regra dos AVISOS — concordam em TODAS as contas', divergentes)
   const podem = linhas.filter(l => l.sql_pode).map(l => l.id)
   ok(igual(podem, [P.id, RO.id, RSUS.id, RFORA.id, RSEM.id, RONLY.id]),
      'capacidade: pintor + reparadores com especialidade de obra; reparador sem obra, tipo NULL, especialidades NULL, dono e admin NÃO',
      linhas.filter(l => l.sql_pode).map(l => l.nome))
-  ok(podeObras({ role: 'prestador', tipo_prestador: null, especialidades: ['pintor'] }) === false, 'falha fechado: tipo_prestador NULL com "pintor" em especialidades')
-  ok(podeObras({ role: 'dono_obra', tipo_prestador: 'pintor' }) === false && podeObras(null) === false && podeObras({ role: 'prestador', tipo_prestador: 'reparador' }) === false,
-     'falha fechado: role errado, linha nula, reparador sem lista')
+  ok(avisaObras({ role: 'prestador', tipo_prestador: null, especialidades: ['pintor'] }) === false, 'aviso falha fechado: tipo_prestador NULL com "pintor" em especialidades')
+  ok(avisaObras({ role: 'dono_obra', tipo_prestador: 'pintor' }) === false && avisaObras(null) === false && avisaObras({ role: 'prestador', tipo_prestador: 'reparador' }) === false,
+     'aviso falha fechado: role errado, linha nula, reparador sem lista')
+  // Regra de 25/11/2026: no GATE e no FEED toda conta profissional pode obras.
+  ok(podeObras({ role: 'prestador', tipo_prestador: 'reparador', especialidades: ['outros'] }) === true && podeObras({ role: 'prestador', tipo_prestador: 'reparador' }) === true
+     && podeObras({ role: 'prestador', tipo_prestador: 'pintor', especialidades: null }) === true,
+     'podeObras (gate/feed): todo profissional, qualquer especialidade (só "outros", sem lista)')
+  ok(podeObras({ role: 'prestador', tipo_prestador: null, especialidades: ['pintor'] }) === false && podeObras({ role: 'dono_obra', tipo_prestador: 'pintor' }) === false && podeObras(null) === false,
+     'podeObras falha fechado: tipo_prestador NULL, role errado, linha nula')
   const semAlias = (await db.query(`SELECT ${sqlPodeObras('')} AS p FROM usuarios WHERE id = $1`, [RO.id])).rows[0].p
   ok(semAlias === true, "sqlPodeObras('') (sem alias) avalia igual")
 
@@ -286,9 +292,9 @@ const main = async () => {
   g = await gates(RONLY.id)
   ok(todasPassam(g), 'reparador SÓ com especialidade de obra passa nas 6 rotas', resumo(g))
   g = await gates(RS.id)
-  ok(todasTier(g), 'reparador SEM especialidade de obra → 403 TIER_INCORRETO nas 6 (regressão)', resumo(g))
+  ok(todasPassam(g), 'reparador SEM especialidade de obra passa nas 6 (regra de 25/11: todo profissional vê tudo)', resumo(g))
   g = await gates(RNULO.id)
-  ok(todasTier(g), 'reparador com especialidades NULL → 403 nas 6', resumo(g))
+  ok(todasPassam(g), 'reparador com especialidades NULL passa nas 6', resumo(g))
   g = await gates(NL.id)
   ok(todasTier(g), 'prestador com tipo NULL e "pintor" em especialidades → 403 nas 6 (falha fechado)', resumo(g))
   g = await gates(DONO.id)
@@ -296,30 +302,29 @@ const main = async () => {
   g = await gates(ADM.id)
   ok(todasPassam(g), 'admin passa (moderação)', resumo(g))
   g = await gates(RC.id)
-  ok(g.filter(x => x.emAndamento).every(x => x.r.passou === true) && todasTier(g.filter(x => !x.emAndamento)),
-     'reparador sem obra MAS já candidato na obra: passa só em /pintor-responder e /match (proposta em andamento); feed/pergunta/candidatura nova → 403', resumo(g))
+  ok(todasPassam(g), 'reparador sem obra já candidato na obra: passa nas 6', resumo(g))
   let r = await rodar('post', '/obras/:id/match', { id: RC.id, params: { id: D(77) } })
-  ok(r.status === 403 && r.body.codigo === 'TIER_INCORRETO', 'candidato de UMA obra não passa no /match de OUTRA obra', r)
-  r = await rodar('post', '/obras/:id/match', { id: RS.id, params: { id: 'nao-e-uuid' } })
-  ok(r.status === 403, 'id de obra malformado no gate em andamento → 403, sem erro de banco', r)
+  ok(r.passou === true, 'profissional passa no gate de /match de qualquer obra (as regras da rota decidem)', r)
+  r = await rodar('post', '/obras/:id/match', { id: NL.id, params: { id: 'nao-e-uuid' } })
+  ok(r.status === 403, 'tipo NULL com id de obra malformado no gate em andamento → 403, sem erro de banco', r)
 
   // Lado reparo: exigirReparador não mudou.
   r = await rodar('get', '/reparos', { id: P.id })
-  ok(r.status === 403 && r.body.codigo === 'TIER_INCORRETO', 'pintor continua SEM acesso ao feed de reparos (403 TIER_INCORRETO)', r)
+  ok(r.passou === true, 'pintor (sem especialidade de serviço) passa no feed de reparos (regra de 25/11)', r)
   r = await rodar('get', '/reparos', { id: RO.id })
   ok(r.passou === true, 'reparador com obra continua passando no feed de reparos', r)
 
   // Cache velho: RCACHE autentica (cache de autenticar guarda especialidades antigas) e a
   // especialidade de obra é gravada "por outra réplica" (direto no banco, sem invalidar).
   g = await gates(RCACHE.id)
-  ok(todasTier(g), 'RCACHE sem obra → 403 (e o cache de autenticar fica com a lista antiga)', resumo(g))
+  ok(todasPassam(g), 'RCACHE sem obra passa (e o cache de autenticar fica com a lista antiga)', resumo(g))
   await db.query(`UPDATE usuarios SET especialidades = '{mecanica,engenheiro}' WHERE id = $1`, [RCACHE.id])
   g = await gates(RCACHE.id)
-  ok(todasPassam(g), 'especialidade de obra gravada em OUTRA réplica: o gate reconfere a negativa no banco e libera NA HORA', resumo(g))
+  ok(todasPassam(g), 'especialidade de obra gravada em OUTRA réplica: segue passando', resumo(g))
 
   // Save do perfil: PUT /auth/perfil invalida o cache e devolve pode_obras.
   g = await gates(RPERF.id)
-  ok(todasTier(g), 'RPERF sem obra → 403', resumo(g))
+  ok(todasPassam(g), 'RPERF sem obra passa', resumo(g))
   const reqPerf = (await db.query(`SELECT id, nome, email, role, ativo, tipo_prestador, especialidades FROM usuarios WHERE id = $1`, [RPERF.id])).rows[0]
   r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPerf, body: { especialidades: ['mecanica', 'pintor', 'pedreiro_servente'] } })
   ok(r.status === 200 && r.body.pode_obras === true && r.body.especialidades.length === 3, 'PUT /auth/perfil marcando obra → 200 com pode_obras: true', r.body)
@@ -328,11 +333,11 @@ const main = async () => {
   r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPerf, body: { especialidades: ['mecanica', 'eletrica', 'faxina', 'pintor', 'construtor', 'engenheiro'] } })
   ok(r.status === 400 && /no máximo 5/.test(r.body.erro), 'PUT /auth/perfil com 6 (3 serviço + 3 obra) → 400 teto 5', r.body)
   r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPerf, body: { especialidades: ['mecanica'] } })
-  ok(r.status === 200 && r.body.pode_obras === false, 'PUT /auth/perfil tirando obra → pode_obras: false', r.body)
+  ok(r.status === 200 && r.body.pode_obras === true, 'PUT /auth/perfil tirando obra → pode_obras segue true', r.body)
   g = await gates(RPERF.id)
-  ok(todasTier(g), 'depois de tirar a especialidade, RPERF volta ao 403 na mesma réplica (cache invalidado)', resumo(g))
+  ok(todasPassam(g), 'depois de tirar a especialidade, RPERF continua passando', resumo(g))
   r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPerf, body: { nome: 'RPERF Novo Nome' } })
-  ok(r.status === 200 && r.body.pode_obras === false && r.body.especialidades.length === 1, 'PUT /auth/perfil sem especialidades não mexe na lista', r.body)
+  ok(r.status === 200 && r.body.pode_obras === true && r.body.especialidades.length === 1, 'PUT /auth/perfil sem especialidades não mexe na lista', r.body)
   const reqPintor = (await db.query(`SELECT id, nome, email, role, ativo, tipo_prestador, especialidades FROM usuarios WHERE id = $1`, [P.id])).rows[0]
   r = await chamar(authCtrl.atualizarPerfil, { usuario: reqPintor, body: { especialidades: ['pintor', 'residencial'] } })
   ok(r.status === 400, 'PUT /auth/perfil de PINTOR com slug que não é especialidade → 400', r.body)
@@ -348,9 +353,11 @@ const main = async () => {
   r = await rodar('post', '/obras/:id/candidatura', { id: RO.id, params: { id: OBRA }, body: {}, soGates: false })
   ok(r.status === 409, 'segunda candidatura da mesma conta → 409 (unicidade por conta inalterada)', r)
   r = await rodar('post', '/obras/:id/candidatura', { id: RS.id, params: { id: OBRA }, body: {}, soGates: false })
-  ok(r.status === 403 && r.body.codigo === 'TIER_INCORRETO', 'reparador sem obra não se candidata (403), nada gravado', r)
+  ok(r.status === 201 && r.body.usuario_id === RS.id, 'reparador SEM especialidade de obra se candidata (201) — regra de 25/11', r.status === 201 ? r.body.status : r)
+  r = await rodar('post', '/obras/:id/candidatura', { id: NL.id, params: { id: OBRA }, body: {}, soGates: false })
+  ok(r.status === 403 && r.body.codigo === 'TIER_INCORRETO', 'prestador com tipo NULL não se candidata (403), nada gravado', r)
   const nCand = (await db.query(`SELECT count(*)::int AS n FROM candidaturas WHERE obra_id = $1`, [OBRA])).rows[0].n
-  ok(nCand === 2, 'candidaturas na obra: a de RC (semente) + a de RO', nCand)
+  ok(nCand === 3, 'candidaturas na obra: a de RC (semente) + a de RO + a de RS', nCand)
 
   // ═══ 5. pode_obras / tem_candidaturas nas respostas ═══════════════════════════════════════
   const linha = async (id) => (await db.query(`SELECT * FROM usuarios WHERE id = $1`, [id])).rows[0]
@@ -360,9 +367,9 @@ const main = async () => {
   s = await sessao(RO)
   ok(s.pode_obras === true && s.tem_candidaturas === true && s.tipo_prestador === 'reparador', 'login REPARADOR com obra (já candidato): pode_obras true, tem_candidaturas true; tipo_prestador segue "reparador"', { pode_obras: s.pode_obras, tem_candidaturas: s.tem_candidaturas })
   s = await sessao(RS)
-  ok(s.pode_obras === false && s.tem_candidaturas === false, 'login reparador sem obra: os dois false', { pode_obras: s.pode_obras, tem_candidaturas: s.tem_candidaturas })
+  ok(s.pode_obras === true && s.pode_servicos === true && s.tem_candidaturas === true, 'login reparador sem obra: pode_obras e pode_servicos TRUE (já candidato acima)', { pode_obras: s.pode_obras, tem_candidaturas: s.tem_candidaturas })
   s = await sessao(RC)
-  ok(s.pode_obras === false && s.tem_candidaturas === true, 'login reparador sem obra com proposta em andamento: pode_obras false, tem_candidaturas TRUE', { pode_obras: s.pode_obras, tem_candidaturas: s.tem_candidaturas })
+  ok(s.pode_obras === true && s.tem_candidaturas === true, 'login reparador sem obra com proposta em andamento: pode_obras true, tem_candidaturas TRUE', { pode_obras: s.pode_obras, tem_candidaturas: s.tem_candidaturas })
   s = await sessao(DONO)
   ok(s.pode_obras === false && s.tem_candidaturas === false, 'login dono: os dois false')
   s = await sessao(NL)
@@ -376,7 +383,7 @@ const main = async () => {
   ok(r.status === 200 && r.body.pode_obras === true && r.body.tem_candidaturas === true && r.body.tem_obras === false && Array.isArray(r.body.contas),
      'GET /auth/contas (reparador com obra): pode_obras + tem_candidaturas, tem_obras e contas intactos', r.body)
   r = await chamar(authCtrl.listarContas, { usuario: await linha(RS.id) })
-  ok(r.status === 200 && r.body.pode_obras === false && r.body.tem_candidaturas === false, 'GET /auth/contas (reparador sem obra): false/false', r.body)
+  ok(r.status === 200 && r.body.pode_obras === true && r.body.pode_servicos === true, 'GET /auth/contas (reparador sem obra): pode_obras e pode_servicos true', r.body)
   r = await chamar(authCtrl.listarContas, { usuario: await linha(DONO.id) })
   ok(r.status === 200 && r.body.tem_obras === true && r.body.pode_obras === false, 'GET /auth/contas (dono): tem_obras true como antes, pode_obras false', r.body)
 

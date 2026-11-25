@@ -1999,6 +1999,12 @@ const exigirPrestador = async (req, res, next) => {
   }
 }
 
+// REGRA PERMANENTE (dono, 25/11/2026): os gates abaixo deixaram de olhar especialidade e tipo de
+// conta — TODA conta profissional (pintor ou reparador, qualquer especialidade, inclusive só
+// 'outros') passa nos DOIS (utils/capacidadeObras.podeObras / podeServicos = ehProfissional).
+// Continuam de fora, com o mesmo 403 TIER_INCORRETO: prestador com tipo_prestador NULL (legado) e
+// os outros roles. O histórico abaixo descreve as fases anteriores (por tipo, depois por capacidade).
+//
 // Enforça o TIER do prestador no servidor (não só na UI). Nasceu por TIPO (pintor só em obras,
 // reparador só em reparos — exigirPintor / exigirReparador); desde as Fases 2a/2b é por
 // CAPACIDADE: pintor/construtor participa de OBRAS e, se marcou especialidade de serviço, de

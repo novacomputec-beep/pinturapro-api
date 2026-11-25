@@ -92,6 +92,8 @@ const sqlCasaCategorias = (param) =>
 //               especialidades, como qualquer reparador.
 //   qualquer outro valor → ninguém (falha fechado).
 // Prestador com tipo_prestador NULL (legado) não entra em nenhum dos dois, como sempre.
+// 25/11/2026: os GATES e os FEEDS deixaram de usar esta regra (todo profissional vê tudo —
+// utils/capacidadeObras.ehProfissional); os AVISOS daqui continuam por especialidade, inalterados.
 // O lado obra continua SEM filtro de especialidade por demanda (obras.categoria é residencial/
 // comercial/…, não um ofício): qualquer especialidade de obra recebe toda obra da cidade.
 const { sqlPodeObras, sqlPodeServicos } = require('../utils/capacidadeObras')
