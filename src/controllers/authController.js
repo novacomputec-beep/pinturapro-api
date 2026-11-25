@@ -9,6 +9,7 @@ const { validarEspecialidades } = require('../utils/especialidades')
 // pode_obras / pode_servicos / tem_candidaturas / tem_interesses das respostas de sessão e perfil
 // (Fases 2a e 2b — utils/capacidadeObras), por PESSOA: contas profissionais do mesmo CPF.
 const { podeObras, podeServicos, capacidadesDaPessoa } = require('../utils/capacidadeObras')
+const { temTelefone } = require('../utils/telefoneAoPublicar')
 const { MAX_CONTAS_POR_EMAIL, sqlTipoConta, tipoDaLinha, tipoDeTipoConta, tipoDoCadastro, colunasDoTipo, multiplasContasAtivo, sqlDonoDaPessoa } = require('../utils/tipoConta')
 const { registrarPlataforma, detectarPlataforma } = require('../utils/plataforma')
 const { registrarReinstalacao } = require('../utils/desinstalacoes')
@@ -752,6 +753,8 @@ const montarSessao = async (usuario, req, contas = []) => {
       nome: usuario.nome,
       email: usuario.email,
       telefone: usuario.telefone || null,
+      // A conta tem telefone? (utils/telefoneAoPublicar) — sem ele o app pede ao publicar um pedido.
+      tem_telefone: temTelefone(usuario.telefone),
       cidade: usuario.cidade || null,
       role: usuario.role,
       foto_url: usuario.foto_url || null,
@@ -861,6 +864,8 @@ const perfil = async (req, res) => {
     if (usuario) {
       Object.assign(usuario, camposReferencias(usuario.referencias, usuario))
       delete usuario.referencias
+      // Mesmo campo do login: a conta tem telefone? (utils/telefoneAoPublicar)
+      usuario.tem_telefone = temTelefone(usuario.telefone)
       // Mesmos campos do login (montarSessao): abas Obras/Serviços por capacidade, "Minhas
       // candidaturas"/"Meus interesses" por histórico — por PESSOA, lidos do banco.
       Object.assign(usuario, await capacidadesDaPessoa(usuario.id))

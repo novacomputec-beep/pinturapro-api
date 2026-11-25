@@ -40,6 +40,8 @@ const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQ
 // "Liberar WhatsApp" (arte "Ela chegou? v2"): o dono libera o próprio número ao escolhido antes do "Estou a caminho".
 // Pedidos salvos (❤️) e pedido que parece anúncio (dono, 24/11/2026).
 const { migrarDemandasSalvas, anexarSalvo, anexarSalvosCount } = require('../utils/demandasSalvas')
+// Telefone do dono informado ao publicar (utils/telefoneAoPublicar): grava na conta que não tem.
+const { avaliarTelefoneAoPublicar, gravarTelefoneDoDono } = require('../utils/telefoneAoPublicar')
 const { migrarSuspeitaAnuncio, avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita, anexarEspecialidadeProfissionalDoDono } = require('../utils/suspeitaAnuncio')
 const { migrarPenalidadesAuto, verificarPenalidadeAvaliacoes, verificarPenalidadeDenuncias, exigirNaoSuspensoSalvoAvaliacoes, exigirPodePublicar, sqlNotaBaixaAntes } = require('../utils/penalidadesAuto')
 const { handler: liberarWhatsappHandler, whatsappLiberado, migrarWhatsappLiberado } = require('../services/liberarWhatsappService')
@@ -3105,6 +3107,9 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
       return res.status(400).json({ erro: MENSAGEM_REJEICAO, codigo: CODIGO_REJEICAO })
     }
     const { titulo, descricao } = moderacao
+    // `telefone` (opcional) de dono SEM telefone na conta: celular inválido → 400, nada gravado.
+    const telefoneObra = await avaliarTelefoneAoPublicar(req.usuario.id, req.body.telefone)
+    if (telefoneObra.erro) return res.status(400).json(telefoneObra.erro)
     // Pedido que parece anúncio (utils/suspeitaAnuncio): sobre o texto ORIGINAL. O app que mandou
     // confirmar_pedido_real sem ser true recebe o 409 com a marca, nada gravado; os demais publicam
     // com a marca gravada para o painel.
@@ -3165,6 +3170,7 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
       [req.usuario.id, titulo, categoria, valor, cidade, bairro, ufFinal, metragem, prazo_execucao_dias, expira_em.toISOString(), descricao, tags || [], endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, horasExpiracao, prazoModo, prazoZona, valorObra.valor_a_combinar, aceitouAcordoNoCorpo(req.body)]
     )
     let obra = result.rows[0]
+    if (await gravarTelefoneDoDono(req.usuario.id, telefoneObra.gravar)) invalidarCachesUsuario(req.usuario.id)
     if (suspeitaObra.marcar) await gravarSuspeita('obras', obra, suspeitaObra.motivos)
     // Especialidades inferidas do título + descrição (utils/especialidadesInferidas): gravadas já na
     // criação, antes da publicação — é o que acrescenta encanador/eletricista/… ao aviso de obra nova
@@ -4890,6 +4896,9 @@ const criarReparoDono = async (req, res) => {
       return res.status(400).json({ erro: MENSAGEM_REJEICAO, codigo: CODIGO_REJEICAO })
     }
     const { titulo, descricao } = moderacao
+    // `telefone` (opcional) de dono SEM telefone na conta — mesma regra do POST /obras/dono.
+    const telefoneReparo = await avaliarTelefoneAoPublicar(req.usuario.id, req.body.telefone)
+    if (telefoneReparo.erro) return res.status(400).json(telefoneReparo.erro)
     // Valor obrigatório e > 0 (utils/valorDemanda). Até 09/11/2026 o corpo ia direto ao INSERT:
     // serviço sem valor, com 0 ou '' era gravado e publicado (caso "Depilação na cera", valor 0).
     // Depois da moderação, para o anúncio continuar recebendo a mensagem dele.
@@ -4977,6 +4986,7 @@ const criarReparoDono = async (req, res) => {
        RETURNING *`,
       [req.usuario.id, titulo, categoriaPrincipal, descricao, valor_estimado, cidade, bairro, ufFinal, tags || [], expira_em.toISOString(), horasExpiracao, endereco_obra, ponto_referencia, latFinal, lngFinal, coordOrigem, client_request_id || null, prazoModo, prazoZona, listaCategorias, localAtendimento.valor, valorServico.valor_a_combinar, aceitouAcordoNoCorpo(req.body)]
     )
+    if (await gravarTelefoneDoDono(req.usuario.id, telefoneReparo.gravar)) invalidarCachesUsuario(req.usuario.id)
     if (suspeitaReparo.marcar) await gravarSuspeita('reparos', result.rows[0], suspeitaReparo.motivos)
     res.status(201).json(result.rows[0])
     // ESTE e o unico envio que dispara no fluxo real, e por isso ele FICA. O INSERT acima
