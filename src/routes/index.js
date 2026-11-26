@@ -48,7 +48,7 @@ const { migrarOrcamentoVisita, lerProposta, lerOrcamento, textoVisita, ehVisita,
 // Prazo curto × texto que fala de outro dia (utils/prazoIncoerente) e colunas do prazo acabando (services/prazoCurtoService).
 const { avaliarPrazoIncoerente } = require('../utils/prazoIncoerente')
 // Anti-contato (utils/contatoNoTexto): contato no texto do pedido, da pergunta e da resposta.
-const { migrarContatoNoTexto, detectarContatoNoPedido, decidirContato, gravarContatoNoTexto, mascararContatos, migrarAvisosManuais, anexarAvisoContato } = require('../utils/contatoNoTexto')
+const { migrarContatoNoTexto, detectarContatoNoPedidoComIA, decidirContato, gravarContatoNoTexto, mascararContatosComIA, migrarAvisosManuais, anexarAvisoContato } = require('../utils/contatoNoTexto')
 const { migrarSuspeitaAnuncio, avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita, anexarEspecialidadeProfissionalDoDono } = require('../utils/suspeitaAnuncio')
 const { migrarPenalidadesAuto, verificarPenalidadeAvaliacoes, verificarPenalidadeDenuncias, exigirNaoSuspensoSalvoAvaliacoes, exigirPodePublicar, sqlNotaBaixaAntes } = require('../utils/penalidadesAuto')
 const { handler: liberarWhatsappHandler, whatsappLiberado, migrarWhatsappLiberado } = require('../services/liberarWhatsappService')
@@ -3118,7 +3118,7 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
     // Anti-contato (utils/contatoNoTexto), sobre o texto ORIGINAL: o app que manda
     // suporta_contato_no_texto recebe o 409 com o trecho, nada gravado; os demais publicam como
     // sempre (com a máscara da moderação) e o pedido fica marcado para o painel.
-    const contatoObra = decidirContato(req.body, detectarContatoNoPedido(req.body))
+    const contatoObra = decidirContato(req.body, await detectarContatoNoPedidoComIA(req.body))
     if (contatoObra.barrar && !moderacao.rejeitar) return res.status(409).json(contatoObra.barrar)
     // Prazo de 4 h ou menos com texto que fala de outro dia (utils/prazoIncoerente): o app que manda
     // suporta_prazo_check sem confirmar_prazo recebe o 409 com o trecho, nada gravado.
@@ -3534,7 +3534,7 @@ router.patch('/obras/dono/:id/ponto-referencia', autenticar, async (req, res) =>
     // e os dois viram 404 — 403 confirmaria que a obra existe para quem não é o dono.
     // Anti-contato (utils/contatoNoTexto): app com suporte → 409 com o trecho, nada gravado; os
     // demais gravam e o pedido fica marcado.
-    const contato = decidirContato(req.body, detectarContatoNoPedido({ ponto_referencia: valor }))
+    const contato = decidirContato(req.body, await detectarContatoNoPedidoComIA({ ponto_referencia: valor }))
     if (contato.barrar) return res.status(409).json(contato.barrar)
     const upd = await pool.query(
       `UPDATE obras SET ponto_referencia = $2 WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$3')}
@@ -3898,13 +3898,14 @@ const RESPOSTA_MAX = 300
 // Lê um campo de texto do body: string obrigatória (aparada), teto de tamanho medido no que o
 // usuário digitou, contatos removidos no que vai ao banco. Devolve { texto, removido } ou
 // { erro }; removido = true quando o sanitizador mexeu (o handler registra a tentativa).
-const lerTextoPergunta = (valor, campo, max) => {
+const lerTextoPergunta = async (valor, campo, max) => {
   const texto = typeof valor === 'string' ? valor.trim() : ''
   if (!texto) return { erro: `${campo} é obrigatória` }
   if (texto.length > max) return { erro: `${campo} deve ter no máximo ${max} caracteres` }
   // Anti-contato (utils/contatoNoTexto): o trecho vira "••••"; o que sobrar ainda passa pelo
   // sanitizador de sempre.
-  const limpo = sanitizarTexto(mascararContatos(texto).texto)
+  // Regras e, se nada pegarem, a IA (services/contatoIAService — 3 s, fail-open).
+  const limpo = sanitizarTexto((await mascararContatosComIA(texto)).texto)
   // conta: contato CLARO (pesa na penalidade); removido sem conta = mascarado, sem punir.
   return { texto: limpo, removido: limpo !== texto, conta: temContatoClaro(texto) }
 }
@@ -3978,7 +3979,7 @@ const listarPerguntas = async (tipo, demandaId, leitorId, { dono = false } = {})
 const criarHandlerPergunta = (tabela) => async (req, res) => {
   const lado = LADOS_PERGUNTA[tabela]
   try {
-    const lidoBruto = lerTextoPergunta(req.body?.pergunta, 'pergunta', PERGUNTA_MAX)
+    const lidoBruto = await lerTextoPergunta(req.body?.pergunta, 'pergunta', PERGUNTA_MAX)
     if (lidoBruto.erro) return res.status(400).json({ erro: lidoBruto.erro })
     if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ erro: lado.erro404 })
     if (await ehDemandaPropria(tabela, req.params.id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
@@ -4032,7 +4033,7 @@ const criarHandlerPergunta = (tabela) => async (req, res) => {
 // profissional. Devolve { status, body } (o que a rota responde); lança só em erro inesperado.
 const responderPergunta = async ({ tabela, demandaId, perguntaId, usuarioId, resposta }) => {
   const lado = LADOS_PERGUNTA[tabela]
-  const lidoBruto = lerTextoPergunta(resposta, 'resposta', RESPOSTA_MAX)
+  const lidoBruto = await lerTextoPergunta(resposta, 'resposta', RESPOSTA_MAX)
   if (lidoBruto.erro) return { status: 400, body: { erro: lidoBruto.erro } }
   if (!UUID_RE.test(String(demandaId))) return { status: 404, body: { erro: lado.erro404 } }
   if (!UUID_RE.test(String(perguntaId))) return { status: 404, body: { erro: 'Pergunta não encontrada' } }
@@ -4951,7 +4952,7 @@ const criarReparoDono = async (req, res) => {
     // Aviso ao moderador fire-and-forget nos dois casos. Antes de categoria/teto/rede.
     const moderacao = moderarDemanda({ titulo: req.body.titulo, descricao: req.body.descricao, valor: req.body.valor_estimado })
     // Anti-contato (utils/contatoNoTexto) — mesma regra do POST /obras/dono.
-    const contatoReparo = decidirContato(req.body, detectarContatoNoPedido(req.body))
+    const contatoReparo = decidirContato(req.body, await detectarContatoNoPedidoComIA(req.body))
     if (contatoReparo.barrar && !moderacao.rejeitar) return res.status(409).json(contatoReparo.barrar)
     // Prazo curto × texto que fala de outro dia — mesma regra do POST /obras/dono.
     const prazoReparo = moderacao.rejeitar ? null : avaliarPrazoIncoerente(req.body, { horas: prazo_atendimento_horas, modo: req.body?.prazo_modo, titulo: req.body.titulo, descricao: req.body.descricao })
@@ -5234,7 +5235,7 @@ router.patch('/reparos/dono/:id/ponto-referencia', autenticar, async (req, res) 
     if (erro) return res.status(400).json({ erro })
 
     // Anti-contato (utils/contatoNoTexto) — mesma regra do PATCH /obras/dono/:id/ponto-referencia.
-    const contato = decidirContato(req.body, detectarContatoNoPedido({ ponto_referencia: valor }))
+    const contato = decidirContato(req.body, await detectarContatoNoPedidoComIA({ ponto_referencia: valor }))
     if (contato.barrar) return res.status(409).json(contato.barrar)
     const upd = await pool.query(
       `UPDATE reparos SET ponto_referencia = $2 WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$3')}

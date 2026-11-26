@@ -6,7 +6,7 @@ const { pool } = require('../utils/supabase')
 const { notificarPintoresSobreNovaObra, dispararPushNovoComClaim } = require('../services/alertaService')
 // Valor obrigatório e > 0 ao criar e ao editar ("Informe quanto quer pagar").
 const { resolverValorDemanda } = require('../utils/valorDemanda')
-const { detectarContatoNoPedido, corpoRecusa } = require('../utils/contatoNoTexto')
+const { detectarContatoNoPedido, detectarContatoNoPedidoComIA, corpoRecusa } = require('../utils/contatoNoTexto')
 const { anexarPermiteVisita } = require('../utils/orcamentoVisita')
 const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra } = require('../utils/totalExtensao')
@@ -310,7 +310,7 @@ const editar = async (req, res) => {
         ...(tem('titulo') || tem('descricao') ? { titulo: tem('titulo') ? titulo : atual.titulo, descricao: tem('descricao') ? descricao : atual.descricao } : {}),
         ...(tem('bairro') ? { bairro } : {}), ...(tem('tags') ? { tags } : {}),
       }
-      const achado = detectarContatoNoPedido(editado)
+      const achado = await detectarContatoNoPedidoComIA(editado) // regras e, se passar, IA (fail-open)
       if (achado) return res.status(409).json(corpoRecusa(achado))
       if (!detectarContatoNoPedido({ ...atual, ...editado })) sets.push('contato_no_texto=false', 'contato_no_texto_trecho=NULL', 'contato_no_texto_telefone=NULL', 'contato_no_texto_em=NULL')
     }
