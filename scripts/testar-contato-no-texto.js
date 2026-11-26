@@ -385,6 +385,91 @@ const main = async () => {
   for (let i = 0; i < 3; i++) await passo()
   ok(f.enviados.length === 2 && (await fila(`ref_id = '${V6}'`)).length === 0, 'pedido que deixou de estar marcado antes do envio: sai da fila sem enviar')
 
+  // ═══ 6. AJUSTES DE 27/11/2026 ═══════════════════════════════════════════════════════════════
+  // 6a. Ponto de referência, bairro e tags: mesma regra do título/descrição.
+  const ana = await usr(20, 'Ana Campos', 'dono_obra')
+  const bia = await usr(21, 'Bia Antiga', 'dono_obra')
+  ok(K.detectarContatoNoPedido({ titulo: 'Pintar 3 portas', descricao: 'sala de 12 m2', ponto_referencia: 'Próximo à escola, casa 120', bairro: 'Setor 2', tags: ['urgente', '2 quartos'] }) === null
+     && K.detectarContatoNoPedido({ titulo: 'Pintar', ponto_referencia: '9 9 7190304' })?.campo === 'ponto_referencia'
+     && K.detectarContatoNoPedido({ titulo: 'Pintar 34 9988', ponto_referencia: '1 7102' }) === null
+     && K.detectarContatoNoPedido({ titulo: 'me chama', ponto_referencia: '9 9 7190304' })?.campo === 'texto',
+     'detector por campo: título+descrição juntos; ponto de referência, bairro e tags um a um (campos diferentes não emendam)')
+  r = await chamar('post', '/reparos/dono', { usuario: ana, body: corpoReparo({ ponto_referencia: 'Perto da padaria, 9 9 7190304', suporta_contato_no_texto: true }) })
+  ok(r.status === 409 && r.body.codigo === 'CONTATO_NO_TEXTO' && r.body.campo === 'ponto_referencia' && r.body.trecho === '9 9 7190304' && /ponto de referência/.test(r.body.erro) && (await contar('reparos', ana)) === 0,
+     'POST /reparos/dono com telefone no ponto de referência (app com suporte): 409 com o trecho e o campo, nada gravado', r.body)
+  r = await chamar('post', '/obras/dono', { usuario: ana, body: corpoObra({ bairro: 'Centro zap 34998817102', suporta_contato_no_texto: true }) })
+  ok(r.status === 409 && r.body.campo === 'bairro' && (await contar('obras', ana)) === 0, 'POST /obras/dono com contato no bairro: 409, nada gravado', r.body?.trecho)
+  r = await chamar('post', '/reparos/dono', { usuario: ana, body: corpoReparo({ tags: ['urgente', 'whats 34998817102'], suporta_contato_no_texto: true }) })
+  ok(r.status === 409 && r.body.campo === 'tags' && (await contar('reparos', ana)) === 0, 'contato nas tags: 409, nada gravado', r.body?.trecho)
+  r = await chamar('post', '/reparos/dono', { usuario: ana, body: corpoReparo({ ponto_referencia: 'Perto da padaria, casa 120', bairro: 'Setor 2', tags: ['urgente'], suporta_contato_no_texto: true }) })
+  ok(r.status === 201 && r.body.contato_no_texto === false, 'ponto de referência, bairro e tags comuns: publica sem marca', r.status)
+  const R_ANA = r.body.id
+  r = await chamar('post', '/reparos/dono', { usuario: bia, body: corpoReparo({ ponto_referencia: 'Perto da padaria, 9 9 7190304' }) })
+  d = (await q(`SELECT * FROM reparos WHERE criado_por = $1`, [bia.id])).rows[0]
+  ok(r.status === 201 && d.contato_no_texto === true && d.contato_no_texto_trecho === '9 9 7190304' && d.ponto_referencia === 'Perto da padaria, 9 9 7190304', 'app antigo com telefone no ponto de referência: publica e fica marcado', { s: r.status, t: d?.contato_no_texto_trecho })
+  // PATCH do ponto de referência (reparo e obra).
+  const PR = '/reparos/dono/:id/ponto-referencia', PO = '/obras/dono/:id/ponto-referencia'
+  r = await chamar('patch', PR, { usuario: ana, params: { id: R_ANA }, body: { ponto_referencia: 'me chama no zap', suporta_contato_no_texto: true } })
+  d = await linha('reparos', R_ANA)
+  ok(r.status === 409 && r.body.codigo === 'CONTATO_NO_TEXTO' && r.body.campo === 'ponto_referencia' && d.ponto_referencia === 'Perto da padaria, casa 120' && d.contato_no_texto === false, 'PATCH ponto de referência com contato (app com suporte): 409, nada gravado', r.body)
+  r = await chamar('patch', PR, { usuario: ana, params: { id: R_ANA }, body: { ponto_referencia: 'Em frente ao mercado, portão azul', suporta_contato_no_texto: true } })
+  ok(r.status === 200 && r.body.ponto_referencia === 'Em frente ao mercado, portão azul' && (await linha('reparos', R_ANA)).contato_no_texto === false, 'PATCH com ponto de referência comum: grava, sem marca', r.status)
+  r = await chamar('patch', PR, { usuario: ana, params: { id: R_ANA }, body: { ponto_referencia: 'ligar tres quatro 99881 sete um zero dois' } })
+  d = await linha('reparos', R_ANA)
+  ok(r.status === 200 && d.contato_no_texto === true && d.contato_no_texto_trecho === 'tres quatro 99881 sete um zero dois' && d.contato_no_texto_telefone === '+5534998817102', 'PATCH de app antigo com contato: grava e o pedido fica marcado', { s: r.status, t: d.contato_no_texto_trecho })
+  r = await chamar('patch', PR, { usuario: bia, params: { id: R_ANA }, body: { ponto_referencia: 'zap 34998817102' } })
+  ok(r.status === 404 && (await linha('reparos', R_ANA)).contato_no_texto_trecho === 'tres quatro 99881 sete um zero dois', 'PATCH de quem não é o dono: 404 e a marca do pedido não muda', r.status)
+  r = await chamar('patch', PO, { usuario: maria, params: { id: OBRA_MARIA }, body: { ponto_referencia: 'meu email maria arroba gmail ponto com', suporta_contato_no_texto: true } })
+  const r2 = await chamar('patch', PO, { usuario: maria, params: { id: OBRA_MARIA }, body: { ponto_referencia: 'whats 34998817102' } })
+  d = await linha('obras', OBRA_MARIA)
+  ok(r.status === 409 && r.body.campo === 'ponto_referencia' && r2.status === 200 && d.contato_no_texto === true && d.contato_no_texto_trecho === 'whats', 'PATCH da obra: 409 com suporte; app antigo grava e marca', { a: r.status, b: r2.status })
+  r = await chamar('put', '/obras/:id', { usuario: ADM, params: { id: V5 }, body: { bairro: 'Centro, insta @ze.obras' } })
+  ok(r.status === 409 && r.body.campo === 'bairro', 'PUT /obras/:id com contato no bairro: 409', r.body?.trecho)
+  r = await chamar('put', '/obras/:id', { usuario: ADM, params: { id: V5 }, body: { bairro: 'Centro' } })
+  ok(r.status === 200 && r.body.bairro === 'Centro' && (await linha('obras', V5)).contato_no_texto === true, 'PUT só do bairro em obra já marcada pelo título: grava, e a marca fica', r.status)
+
+  // 6b. 2ª varredura única: ponto de referência, bairro e tags dos abertos ainda não marcados.
+  const cfgCampos = (await q(`SELECT valor FROM configuracoes WHERE chave = $1`, [K.CHAVE_VARREDURA_CAMPOS])).rows[0]
+  ok(!!cfgCampos && JSON.parse(cfgCampos.valor).marcados === 0, 'a migração já tinha feito a 2ª varredura (nada a marcar naquele momento)', cfgCampos?.valor)
+  await q(`DELETE FROM configuracoes WHERE chave = $1`, [K.CHAVE_VARREDURA_CAMPOS])
+  const C1 = await demanda('reparos', ana, 'Trocar fechadura', { ponto_referencia: 'Ao lado da igreja 9 9 7190304' })
+  const C2 = await demanda('obras', ana, 'Muro novo', { ponto_referencia: 'Ao lado da igreja', bairro: 'Centro', tags: ['muro'] })
+  silenciar(true)
+  const v3 = await K.migrarContatoNoTexto(shim); const v4 = await K.migrarContatoNoTexto(shim)
+  silenciar(false)
+  const feita = JSON.parse((await q(`SELECT valor FROM configuracoes WHERE chave = $1`, [K.CHAVE_VARREDURA_CAMPOS])).rows[0].valor)
+  ok(v3 === null && v4 === null && feita.marcados === 1 && (await linha('reparos', C1)).contato_no_texto_trecho === '9 9 7190304' && (await linha('obras', C2)).contato_no_texto === false,
+     '2ª varredura única: marca o pedido aberto com telefone no ponto de referência; roda uma vez só', feita)
+
+  // 6c. Aviso manual (avulsa) vale como o aviso do robô: nunca manda de novo.
+  const leo = await usr(22, 'Leo Manual', 'dono_obra')
+  const MANUAL = await demanda('reparos', leo, 'Infiltração na laje', { codigo_publico: 'B4YYD', contato_no_texto: true, contato_no_texto_trecho: 'WhatsApp' })
+  await q(`INSERT INTO whatsapp_mensagens (tipo, usuario_id, telefone, texto, ref_tabela, ref_id, status, enviada_em, entregue_em)
+           VALUES ('avulsa', $1, '+5534990000022', 'Olá! 👋 Aqui é o *ProTudo*.', 'reparos', $2, 'entregue', '2026-11-26T11:00:00Z', '2026-11-26T11:00:05Z')`, [leo.id, MANUAL])
+  silenciar(true)
+  const m1 = await K.migrarAvisosManuais(shim); const m2 = await K.migrarAvisosManuais(shim)
+  silenciar(false)
+  const avulsa = (await q(`SELECT tipo, chave_dedupe, status FROM whatsapp_mensagens WHERE ref_id = $1`, [MANUAL])).rows
+  ok(m1 === 1 && m2 === 0 && avulsa.length === 1 && avulsa[0].tipo === 'avulsa' && avulsa[0].chave_dedupe === SC.chaveDoAviso('reparos', MANUAL), 'B4YYD: a avulsa enviada à mão ganha a chave do aviso (idempotente)', avulsa)
+  e = await job()
+  ok((await q(`SELECT count(*)::int AS n FROM whatsapp_mensagens WHERE ref_id = $1`, [MANUAL])).rows[0].n === 1 && e.enfileiradas >= 1, 'robô ligado: os outros marcados entram na fila, B4YYD nunca mais', e)
+
+  // 6d. Painel: contato_no_texto_aviso { status, em } nas quatro listas.
+  r = await chamar('get', '/reparos/admin', { usuario: ADM, query: { filtro: 'abertas' } })
+  const lista = r.body?.reparos || []
+  const aV1 = lista.find(x => x.id === V1)?.contato_no_texto_aviso, aManual = lista.find(x => x.id === MANUAL)?.contato_no_texto_aviso
+  ok(aV1?.status === 'respondida' && !!aV1.em && Object.keys(aV1).sort().join() === 'em,status' && lista.find(x => x.id === V3)?.contato_no_texto_aviso === null,
+     'GET /reparos/admin: contato_no_texto_aviso = { status, em } da mensagem do robô; null sem aviso', aV1)
+  ok(aManual?.status === 'entregue' && new Date(aManual.em).toISOString() === '2026-11-26T11:00:00.000Z', 'B4YYD no painel: o aviso manual aparece como o aviso do pedido (status e hora do envio)', aManual)
+  const naFila = lista.find(x => x.contato_no_texto_aviso?.status === 'fila')
+  ok(!!naFila && !!naFila.contato_no_texto_aviso.em, 'aviso ainda na fila: status "fila" e a hora em que entrou', naFila?.contato_no_texto_aviso)
+  r = await chamar('get', '/obras/admin', { usuario: ADM, query: { filtro: 'abertas' } })
+  ok((r.body?.obras || []).find(x => x.id === O_SEMTEL)?.contato_no_texto_aviso?.status === 'enviada' && (r.body.obras.find(x => x.id === C2)?.contato_no_texto_aviso === null), 'GET /obras/admin: idem', (r.body?.obras || []).find(x => x.id === O_SEMTEL)?.contato_no_texto_aviso)
+  r = await chamar('get', '/obras-aprovacao', { usuario: ADM })
+  const r3 = await chamar('get', '/reparos/aprovacao', { usuario: ADM })
+  ok((r.body?.obras || []).length > 0 && r.body.obras.every(x => x.contato_no_texto_aviso === null) && r3.status === 200 && (r3.body.reparos || []).every(x => 'contato_no_texto_aviso' in x),
+     'GET /obras-aprovacao e /reparos/aprovacao: o campo vem (null sem aviso)', { obras: r.body?.obras?.length, reparos: r3.body?.reparos?.length })
+
   ok(erros.filter(x => !/ENOTFOUND|geoBusca|sem banco/.test(x)).length === 0, 'nenhum erro inesperado no log', erros.filter(x => !/ENOTFOUND|geoBusca|sem banco/.test(x)).slice(0, 5))
   logOrig(falhas === 0 ? '\nTUDO OK' : `\n${falhas} FALHA(S)`)
   process.exit(falhas ? 1 : 0)

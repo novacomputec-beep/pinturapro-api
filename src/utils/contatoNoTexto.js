@@ -19,6 +19,8 @@
 //     gravado; app antigo (sem o campo) publica como sempre e o pedido fica MARCADO
 //     (contato_no_texto + trecho) para o painel;
 //   - pergunta e resposta: o trecho vira "••••" e o texto é gravado;
+//   - ponto de referência, bairro e tags (27/11/2026): mesma regra ao publicar e nos PATCH
+//     /reparos|obras/dono/:id/ponto-referencia (detectarContatoNoPedido; o 409 diz o `campo`);
 //   - varredura ÚNICA dos pedidos abertos (boot): marca os que já têm contato no texto;
 //   - robô de WhatsApp, tipo 'contato_no_texto' (services/whatsappContatoNoTextoService).
 const { TLDS } = require('./moderacaoDemanda')
@@ -31,6 +33,7 @@ const MAX_LINHAS = 3
 const MAX_VAO = 20            // caracteres ignorados entre um dígito e o seguinte
 const MAX_TRECHO = 160
 const CHAVE_VARREDURA = 'contato_no_texto_varredura'
+const CHAVE_VARREDURA_CAMPOS = 'contato_no_texto_varredura_campos'
 const TABELAS = ['reparos', 'obras']
 
 // Dobra SEM mudar o tamanho: cada unidade do original vira exatamente uma (letra/dígito ASCII em
@@ -193,9 +196,25 @@ const mascararContatos = (bruto) => {
   return { texto: saida + texto.slice(cursor), removido: true, trechos: achados.map(a => a.trecho) }
 }
 
+// Os campos de texto livre que o dono escreve no pedido (27/11/2026). Título + descrição valem como
+// UM texto; ponto de referência, bairro e tags são olhados um a um (o número da casa de um campo
+// não emenda no do outro). O endereço fica de fora: número da casa + CEP parecem telefone.
+// Só entram as chaves PRESENTES no objeto (edição parcial). Devolve o achado com `campo`
+// ('texto' | 'ponto_referencia' | 'bairro' | 'tags'), ou null.
+const ROTULO_CAMPO = { texto: 'no texto', ponto_referencia: 'no ponto de referência', bairro: 'no bairro', tags: 'nas tags' }
+const detectarContatoNoPedido = (pedido) => {
+  const p = pedido || {}
+  const tags = Array.isArray(p.tags) ? p.tags.filter(t => typeof t === 'string').join(', ') : p.tags
+  for (const [campo, textos] of [['texto', [p.titulo, p.descricao]], ['ponto_referencia', [p.ponto_referencia]], ['bairro', [p.bairro]], ['tags', [tags]]]) {
+    const achado = detectarContato(...textos)
+    if (achado) return { ...achado, campo }
+  }
+  return null
+}
+
 const corpoRecusa = (achado) => ({
-  erro: `Seu pedido tem um contato no texto: "${achado.trecho}". Retire telefone, e-mail, redes sociais e links. As dúvidas dos profissionais chegam pelas perguntas do pedido, dentro do app.`,
-  codigo: CODIGO_CONTATO, contato_no_texto: true, tipo: achado.tipo, trecho: achado.trecho, trechos: achado.trechos,
+  erro: `Seu pedido tem um contato ${ROTULO_CAMPO[achado.campo] || ROTULO_CAMPO.texto}: "${achado.trecho}". Retire telefone, e-mail, redes sociais e links. As dúvidas dos profissionais chegam pelas perguntas do pedido, dentro do app.`,
+  codigo: CODIGO_CONTATO, contato_no_texto: true, tipo: achado.tipo, campo: achado.campo || 'texto', trecho: achado.trecho, trechos: achado.trechos,
 })
 const appSuporta = (body) => body?.suporta_contato_no_texto === true || body?.suporta_contato_no_texto === 'true'
 // Publicação: {} (nada achado), { barrar: corpo do 409 } (app que suporta) ou { marcar: achado }.
@@ -218,6 +237,75 @@ const gravarContatoNoTexto = async (tabela, linha, achado, db) => {
 
 // Colunas + a varredura ÚNICA dos pedidos abertos (a chave em configuracoes guarda o resultado e
 // impede a segunda passada). Devolve o resultado da varredura, ou null se ela já tinha rodado.
+// 2ª varredura ÚNICA (27/11/2026): ponto de referência, bairro e tags dos pedidos abertos ainda
+// não marcados (a 1ª só olhou título + descrição).
+const varrerCamposLivres = async (client) => {
+  const ja = await client.query(`SELECT 1 FROM configuracoes WHERE chave = $1`, [CHAVE_VARREDURA_CAMPOS])
+  if (ja.rows.length > 0) return null
+  const resultado = { em: new Date().toISOString(), analisados: 0, marcados: 0, reparos: 0, obras: 0 }
+  for (const tabela of TABELAS) {
+    const r = await client.query(
+      `SELECT id, ponto_referencia, bairro, tags FROM ${tabela}
+        WHERE NOT contato_no_texto AND (status = 'aberta' OR (status = 'rascunho' AND status_aprovacao = 'pendente'))`)
+    for (const d of r.rows) {
+      resultado.analisados++
+      const achado = detectarContatoNoPedido({ ponto_referencia: d.ponto_referencia, bairro: d.bairro, tags: d.tags })
+      if (!achado) continue
+      await client.query(
+        `UPDATE ${tabela} SET contato_no_texto = true, contato_no_texto_trecho = $2, contato_no_texto_telefone = $3, contato_no_texto_em = NOW() WHERE id = $1`,
+        [d.id, achado.trecho, achado.telefone])
+      resultado.marcados++
+      resultado[tabela]++
+    }
+  }
+  await client.query(`INSERT INTO configuracoes (chave, valor) VALUES ($1, $2)`, [CHAVE_VARREDURA_CAMPOS, JSON.stringify(resultado)])
+  console.log(`[contato no texto] varredura única (ponto de referência, bairro, tags): ${resultado.marcados} de ${resultado.analisados} pedidos abertos marcados`)
+  return resultado
+}
+
+// Pedidos cujo dono JÁ recebeu o texto do aviso à mão, por mensagem avulsa do painel: a linha da
+// avulsa ganha a chave de dedupe do aviso ('contato:<tabela>:<pedido>'), e o robô nunca manda de
+// novo. Roda DEPOIS de whatsapp/migracao (a tabela precisa existir). Idempotente.
+//   B4YYD — avulsa de 26/11/2026 07:17 (dono, 27/11/2026).
+const AVISOS_MANUAIS = [{ tabela: 'reparos', codigo: 'B4YYD' }]
+const migrarAvisosManuais = async (client) => {
+  let marcados = 0
+  for (const a of AVISOS_MANUAIS) {
+    const r = await client.query(
+      `UPDATE whatsapp_mensagens m SET chave_dedupe = 'contato:${a.tabela}:' || d.id::text
+         FROM ${a.tabela} d
+        WHERE d.codigo_publico = $1 AND m.ref_tabela = '${a.tabela}' AND m.ref_id = d.id AND m.tipo = 'avulsa' AND m.chave_dedupe IS NULL
+          AND m.id = (SELECT MIN(x.id) FROM whatsapp_mensagens x WHERE x.ref_tabela = '${a.tabela}' AND x.ref_id = d.id AND x.tipo = 'avulsa' AND x.chave_dedupe IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM whatsapp_mensagens y WHERE y.chave_dedupe = 'contato:${a.tabela}:' || d.id::text)
+      RETURNING m.id`, [a.codigo])
+    if (r.rows.length > 0) { marcados++; console.log(`[contato no texto] ${a.codigo}: aviso manual (mensagem ${r.rows[0].id}) vale como o aviso do robô`) }
+  }
+  return marcados
+}
+
+// Painel: em cada linha (que tem `id`), contato_no_texto_aviso = { status, em } da mensagem do robô
+// para aquele pedido (a da chave 'contato:<tabela>:<pedido>' — o tipo 'contato_no_texto' ou o aviso
+// manual acima); null quando não há. em = quando saiu (ou, ainda na fila, quando entrou). Nunca lança.
+const anexarAvisoContato = async (tabela, linhas, db) => {
+  const lista = Array.isArray(linhas) ? linhas : []
+  for (const l of lista) l.contato_no_texto_aviso = null
+  if (lista.length === 0 || !TABELAS.includes(tabela)) return linhas
+  try {
+    const r = await (db || require('./supabase').pool).query(
+      `SELECT ref_id, status, COALESCE(enviada_em, criado_em) AS em FROM whatsapp_mensagens
+        WHERE chave_dedupe = ANY($1::text[])`, [lista.map(l => `contato:${tabela}:${l.id}`)])
+    const porId = new Map(r.rows.map(x => [x.ref_id, x]))
+    for (const l of lista) {
+      const x = porId.get(l.id)
+      if (x) l.contato_no_texto_aviso = { status: x.status, em: x.em }
+    }
+  } catch (err) {
+    // Robô não instalado (a migração dele roda em SAVEPOINT e pode ter falhado): sem aviso, sem barulho.
+    if (err.code !== '42P01' && !/whatsapp_mensagens.*does not exist/.test(String(err.message))) console.error(`[contato no texto] aviso do robô (${tabela}):`, err.message)
+  }
+  return linhas
+}
+
 const migrarContatoNoTexto = async (client) => {
   for (const tabela of TABELAS) {
     await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS contato_no_texto BOOLEAN NOT NULL DEFAULT false`)
@@ -226,7 +314,7 @@ const migrarContatoNoTexto = async (client) => {
     await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS contato_no_texto_em TIMESTAMPTZ`)
   }
   const ja = await client.query(`SELECT 1 FROM configuracoes WHERE chave = $1`, [CHAVE_VARREDURA])
-  if (ja.rows.length > 0) return null
+  if (ja.rows.length > 0) { await varrerCamposLivres(client); return null }
   const resultado = { em: new Date().toISOString(), analisados: 0, marcados: 0, reparos: 0, obras: 0 }
   for (const tabela of TABELAS) {
     // Aberto = no ar, ou obra esperando aprovação.
@@ -246,10 +334,12 @@ const migrarContatoNoTexto = async (client) => {
   }
   await client.query(`INSERT INTO configuracoes (chave, valor) VALUES ($1, $2)`, [CHAVE_VARREDURA, JSON.stringify(resultado)])
   console.log(`[contato no texto] varredura única: ${resultado.marcados} de ${resultado.analisados} pedidos abertos marcados (${resultado.reparos} serviços, ${resultado.obras} obras)`)
+  await varrerCamposLivres(client)
   return resultado
 }
 
 module.exports = {
   CODIGO_CONTATO, MASCARA, CHAVE_VARREDURA, dobrar, sequenciasDeDigitos, encontrarContatos, detectarContato, mascararContatos,
   corpoRecusa, decidirContato, gravarContatoNoTexto, migrarContatoNoTexto,
+  CHAVE_VARREDURA_CAMPOS, AVISOS_MANUAIS, detectarContatoNoPedido, migrarAvisosManuais, anexarAvisoContato,
 }
