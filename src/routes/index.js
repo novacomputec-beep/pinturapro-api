@@ -44,7 +44,7 @@ const { migrarDemandasSalvas, anexarSalvo, anexarSalvosCount } = require('../uti
 const { avaliarTelefoneAoPublicar, gravarTelefoneDoDono } = require('../utils/telefoneAoPublicar')
 // Proposta de visita para orçamento (utils/orcamentoVisita): tipo_proposta, visita aceita, orçamento.
 const { migrarOrcamentoVisita, lerProposta, lerOrcamento, textoVisita, ehVisita, visitaSemOrcamento, visitaLiberaEndereco, aceitarVisita, gravarOrcamento,
-        apresentar: apresentarProposta, anexarCamposProposta, cancelarVisitaAceita, STATUS_ORCAMENTO, STATUS_ORCAMENTO_ENVIADO } = require('../utils/orcamentoVisita')
+        apresentar: apresentarProposta, anexarCamposProposta, cancelarVisitaAceita, permiteVisita, anexarPermiteVisita, ERRO_VISITA_NAO_PERMITIDA, STATUS_ORCAMENTO, STATUS_ORCAMENTO_ENVIADO } = require('../utils/orcamentoVisita')
 // Anti-contato (utils/contatoNoTexto): contato no texto do pedido, da pergunta e da resposta.
 const { migrarContatoNoTexto, detectarContatoNoPedido, decidirContato, gravarContatoNoTexto, mascararContatos, migrarAvisosManuais, anexarAvisoContato } = require('../utils/contatoNoTexto')
 const { migrarSuspeitaAnuncio, avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita, anexarEspecialidadeProfissionalDoDono } = require('../utils/suspeitaAnuncio')
@@ -4236,6 +4236,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // coordenadas arredondadas e endereco_liberado:false (utils/privacidadeDemanda).
     // …e o profissional cuja VISITA para orçamento o dono aceitou (utils/orcamentoVisita).
     aplicarPrivacidadeLocal(obra, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPintorDoMatch, visitaAceita: visitaLiberaEndereco(minhaCandidaturaResult.rows[0]) })
+    // permite_visita: este pedido aceita proposta de visita para orçamento? (toda obra aceita)
+    obra.permite_visita = permiteVisita('obras', obra)
 
     // Advisory: quanto o dono pode estender POR REQUISIÇÃO — a janela original da obra
     // (horas_para_expirar, COALESCE 720), com piso de 24h porque o modal manda dias × 24. É o
@@ -5861,6 +5863,7 @@ router.get('/reparos', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirPrest
     // tratamento de GET /reparos/:id. Só o título sai no card do feed.
     // Coordenadas ARREDONDADAS (utils/privacidadeDemanda): o feed é descoberta — ninguém aqui tem
     // horário combinado; o filtro por raio acima já rodou nas colunas exatas.
+    anexarPermiteVisita('reparos', result.rows) // permite_visita em cada card (utils/orcamentoVisita)
     res.json({ reparos: ofuscarCoordenadasLista(mascararLista(result.rows, ['titulo'])), page, limit, filtro: filtroMeta, escopo, ancora })
   } catch (err) {
     console.error('Erro ao buscar reparos:', err)
@@ -5886,6 +5889,11 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
     const { demanda, recusa } = await travarDemandaAberta(client, 'reparos', req.params.id)
     if (recusa) { await client.query('ROLLBACK'); return res.status(recusa.status).json(recusa.corpo) }
     // Serviço "valor a combinar": quem dá o preço é o profissional — valor_proposto obrigatório e > 0.
+    // Visita só nas categorias que a aceitam (utils/orcamentoVisita.permiteVisita); toda obra aceita.
+    if (proposta.tipo === 'visita') {
+      const cat = await client.query(`SELECT categoria, categorias FROM reparos WHERE id = $1`, [req.params.id])
+      if (!permiteVisita('reparos', cat.rows[0])) { await client.query('ROLLBACK'); return res.status(400).json(ERRO_VISITA_NAO_PERMITIDA) }
+    }
     const semValorReparo = proposta.tipo === 'visita' ? null : await exigirValorPropostaSeACombinar(client, 'reparos', req.params.id, valor_proposto)
     if (semValorReparo) { await client.query('ROLLBACK'); return res.status(400).json(semValorReparo) }
     const existente = await client.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
@@ -7276,6 +7284,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // endereço/ponto nulos, coordenadas arredondadas e endereco_liberado:false (utils/privacidadeDemanda).
     // …e o profissional cuja VISITA para orçamento o dono aceitou (utils/orcamentoVisita).
     aplicarPrivacidadeLocal(reparo, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPrestadorDoMatch, visitaAceita: visitaLiberaEndereco(interesse.rows[0]) })
+    // permite_visita: este pedido aceita proposta de visita para orçamento? (pelas categorias)
+    reparo.permite_visita = permiteVisita('reparos', reparo)
 
     // Advisory: quanto o dono pode estender POR REQUISIÇÃO — a janela original do reparo
     // (prazo_atendimento_horas, COALESCE 720), o MESMO número que POST /reparos/:id/estender

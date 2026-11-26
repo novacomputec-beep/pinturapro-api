@@ -25,6 +25,9 @@
 // 6) LEITURA: anexarCamposProposta põe em cada proposta tipo_proposta, visita_*, orcamento_* e
 //    mensagem_profissional (nunca lança; esquema sem as colunas → tudo 'valor'/null).
 const { pool } = require('./supabase')
+const { GRUPOS_RELACIONADOS } = require('./gruposCategorias')
+const { GRUPO_OBRAS_REPARADOR } = require('./especialidades')
+const { categoriasDoReparo } = require('./categoriasApp')
 
 const VALOR_MINIMO = 20
 const TZ = 'America/Sao_Paulo'
@@ -44,6 +47,26 @@ const LADOS = {
   obras:   { tabela: 'obras',   proposta: 'candidaturas',      fk: 'obra_id',   chave: 'obra_id',   idPush: 'candidatura_id', rotulo: 'obras' },
   reparos: { tabela: 'reparos', proposta: 'interesse_reparos', fk: 'reparo_id', chave: 'reparo_id', idPush: 'interesse_id',   rotulo: 'reparos' },
 }
+
+// QUAIS PEDIDOS ACEITAM VISITA (dono, 26/11/2026). Toda OBRA aceita. Um serviço (reparo) aceita
+// quando ALGUMA das suas categorias está em: "Obras de Construção Civil" (as 6 especialidades do
+// grupo e os 4 papéis de obra), "Consertos da casa", "Limpeza e jardim", ou é mudancas,
+// placas_fachadas, decoracao_festas ou outros. As listas vêm das canônicas (gruposCategorias,
+// especialidades): categoria nova num desses grupos passa a aceitar visita sozinha. Fora disso, a
+// proposta de visita leva 400 VISITA_NAO_PERMITIDA; permite_visita sai no detalhe e no feed.
+const GRUPOS_COM_VISITA = ['Obras de Construção Civil', 'Consertos da casa', 'Limpeza e jardim']
+const AVULSAS_COM_VISITA = ['mudancas', 'placas_fachadas', 'decoracao_festas', 'outros']
+const SLUGS_COM_VISITA = Object.freeze([...new Set([
+  ...GRUPOS_COM_VISITA.flatMap(g => { if (!GRUPOS_RELACIONADOS[g]) throw new Error(`orcamentoVisita: grupo "${g}" não existe`); return GRUPOS_RELACIONADOS[g] }),
+  ...GRUPO_OBRAS_REPARADOR.categorias, ...AVULSAS_COM_VISITA])])
+const CONJUNTO_COM_VISITA = new Set(SLUGS_COM_VISITA)
+const permiteVisita = (tabela, demanda) => tabela === 'obras' || categoriasDoReparo(demanda).some(s => CONJUNTO_COM_VISITA.has(s))
+// permite_visita em cada linha (reparo: precisa de categoria/categorias na linha). Muta e devolve.
+const anexarPermiteVisita = (tabela, linhas) => {
+  for (const l of (Array.isArray(linhas) ? linhas : [linhas])) if (l) l.permite_visita = permiteVisita(tabela, l)
+  return linhas
+}
+const ERRO_VISITA_NAO_PERMITIDA = Object.freeze({ erro: 'Este tipo de pedido aceita apenas valor fechado.', codigo: 'VISITA_NAO_PERMITIDA' })
 
 const ERRO_VALOR_MINIMO = Object.freeze({
   erro: 'Valor abaixo de R$ 20. Se ainda não sabe o preço, envie uma visita para orçamento.', codigo: 'VALOR_MINIMO', valor_minimo: VALOR_MINIMO })
@@ -334,5 +357,6 @@ module.exports = {
   suporta, lerDataHora, quandoLegivel, textoVisita, textoOrcamento, lerProposta, lerOrcamento,
   ehVisita, visitaSemOrcamento, visitaLiberaEndereco, aceitarVisita, gravarOrcamento, apresentar, anexarCamposProposta,
   migrarOrcamentoVisita, lembrarOrcamentos,
+  GRUPOS_COM_VISITA, SLUGS_COM_VISITA, permiteVisita, anexarPermiteVisita, ERRO_VISITA_NAO_PERMITIDA,
   TITULO_VISITA_CANCELADA, CORPO_VISITA_CANCELADA, visitaAceitaAtiva, avisarVisitasCanceladas, cancelarVisitaAceita,
 }

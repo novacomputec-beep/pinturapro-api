@@ -109,6 +109,12 @@ const puras = () => {
   const o = O.lerOrcamento({ valor: '1500,50', prazo_dias: '5', data_inicio: '2026-12-02', observacao: ' Material incluso ' }, a)
   ok(o.valor === 1500.5 && o.prazo_dias === 5 && o.data_inicio === '2026-12-02' && o.observacao === 'Material incluso'
      && O.textoOrcamento(o) === '💰 Orçamento: R$ 1.500,50 · prazo de 5 dias · início em 02/12.\nMaterial incluso\n(Atualize o app ProTudo para aceitar ou recusar este orçamento.)', 'orçamento: leitura e texto legível (com o aviso para o app antigo)', O.textoOrcamento(o))
+  const LISTA = 'arquiteto,decoracao_interiores,paisagismo,azulejista,telhados,impermeabilizacao,eletrica,eletronica,climatizacao,hidraulica,alvenaria,gesseiro,marcenaria,serralheria,vidraceiro,chaveiro,estofamento,montagem_moveis,seguranca_eletronica,conserto_celular,eletrodomesticos,desentupimento,piscineiro,faxina,dedetizacao,jardineiro,lavanderia,higienizacao,cortinas,pedreiro_servente,pintor,construtor,engenheiro,mudancas,placas_fachadas,decoracao_festas,outros'
+  const pv = (cats) => O.permiteVisita('reparos', { categoria: cats[0], categorias: cats })
+  ok(O.SLUGS_COM_VISITA.join() === LISTA && pv(['eletrica']) && pv(['faxina']) && pv(['arquiteto']) && pv(['mudancas']) && pv(['placas_fachadas']) && pv(['decoracao_festas']) && pv(['outros'])
+     && !pv(['cabelo']) && !pv(['motorista']) && !pv(['aluguel_festas']) && !pv(['panfletagem']) && !pv(['aula_particular']) && pv(['cabelo', 'faxina']) && !pv([])
+     && O.permiteVisita('reparos', { categoria: 'hidraulica' }) && O.permiteVisita('obras', { categoria: 'residencial' }) && O.permiteVisita('obras', {}),
+     'quem aceita visita: toda obra; serviço com ALGUMA categoria de Obras de Construção Civil, Consertos da casa, Limpeza e jardim, ou mudancas/placas_fachadas/decoracao_festas/outros (37 slugs)', O.SLUGS_COM_VISITA.length)
   const e = (b) => O.lerOrcamento({ valor: 100, prazo_dias: 3, data_inicio: '2026-12-02', ...b }, a).erro?.codigo
   ok(e({ valor: 19 }) === 'VALOR_MINIMO' && e({ prazo_dias: 0 }) === 'PRAZO_INVALIDO' && e({ prazo_dias: 2.5 }) === 'PRAZO_INVALIDO' && e({ data_inicio: '02/12/2026' }) === 'DATA_INICIO_INVALIDA'
      && e({ data_inicio: '2026-02-31' }) === 'DATA_INICIO_INVALIDA' && e({ data_inicio: '2026-11-25' }) === 'DATA_INICIO_NO_PASSADO' && e({ data_inicio: '2026-11-26' }) === undefined && e({ observacao: 'x'.repeat(501) }) === 'OBSERVACAO_LONGA',
@@ -371,6 +377,38 @@ const main = async () => {
     await quando(L4, new Date(MEIO_DIA.getTime() - 30 * 3600000))
     n = await O.lembrarOrcamentos({ avisarUsuario }, shim, MEIO_DIA)
     ok(n === 0, 'lembrete: pedido fechado não gera lembrete', n)
+
+    // 7) VISITA SÓ NAS CATEGORIAS QUE A ACEITAM — permite_visita no detalhe e no feed.
+    {
+      const proV = await usr('Vera Pro', 'prestador', { especialidades: ['cabelo', 'faxina', 'eletrica'] })
+      const visitaEm = (id, extra = {}) => enviar(proV, { suporta_orcamento: true, tipo_proposta: 'visita', visita_quando: QUANDO, ...extra }, id)
+      if (L.tabela === 'reparos') {
+        const SALAO = await demanda('reparos', dono, 'Corte e escova', { categoria: 'cabelo', categorias: ['cabelo'] })
+        const MISTO = await demanda('reparos', dono, 'Cabelo e faxina', { categoria: 'cabelo', categorias: ['cabelo', 'faxina'] })
+        const OUTROS = await demanda('reparos', dono, 'Um serviço diferente', { categoria: 'outros', categorias: ['outros'] })
+        r = await visitaEm(SALAO)
+        ok(r.status === 400 && r.body.codigo === 'VISITA_NAO_PERMITIDA' && r.body.erro === 'Este tipo de pedido aceita apenas valor fechado.'
+           && (await q('SELECT count(*)::int AS n FROM interesse_reparos WHERE reparo_id = $1', [SALAO])).rows[0].n === 0, 'visita em categoria fora da lista (cabelo): 400 VISITA_NAO_PERMITIDA com a mensagem pedida, nada gravado', r.body)
+        r = await enviar(proV, { tipo_proposta: 'visita', valor_proposto: 80 }, SALAO)
+        ok(r.status === 201 && r.body.tipo_proposta === 'valor', 'app antigo no mesmo pedido: nada muda (proposta de valor entra)', r.status)
+        r = await visitaEm(MISTO); const r2 = await visitaEm(OUTROS)
+        ok(r.status === 201 && r.body.tipo_proposta === 'visita' && r2.status === 201, 'visita permitida quando ALGUMA categoria aceita (cabelo + faxina) e em "outros"', { misto: r.status, outros: r2.status })
+        const d1 = await detalhe(proV, SALAO), d2 = await detalhe(dono, MISTO), d3 = await detalhe(proV, DEM)
+        ok(d1.body.reparo.permite_visita === false && d2.body.reparo.permite_visita === true && d3.body.reparo.permite_visita === true, 'detalhe do reparo: permite_visita true/false', [d1.body.reparo?.permite_visita, d2.body.reparo?.permite_visita])
+        r = await chamar('get', '/reparos', { usuario: proV, query: {} })
+        const feed = r.body?.reparos || [], fs1 = feed.find(x => x.id === SALAO), fo = feed.find(x => x.id === OUTROS)
+        ok(r.status === 200 && feed.length > 0 && feed.every(x => typeof x.permite_visita === 'boolean') && (!fs1 || fs1.permite_visita === false) && (!fo || fo.permite_visita === true) && (!!fs1 || !!fo),
+           'feed de serviços: permite_visita em cada card', { n: feed.length, salao: fs1?.permite_visita, outros: fo?.permite_visita })
+      } else {
+        const OBRA2 = await demanda('obras', dono, 'Galpão novo', { categoria: 'galpao' })
+        r = await visitaEm(OBRA2)
+        const d1 = await detalhe(proV, OBRA2)
+        ok(r.status === 201 && r.body.tipo_proposta === 'visita' && d1.body.obra.permite_visita === true, 'toda obra aceita visita; detalhe da obra com permite_visita true', { s: r.status, p: d1.body.obra?.permite_visita })
+        r = await chamar('get', '/obras', { usuario: proV, query: {} })
+        const feed = r.body?.obras || []
+        ok(r.status === 200 && feed.length > 0 && feed.every(x => x.permite_visita === true), 'feed de obras: permite_visita true em cada card', { s: r.status, n: feed.length })
+      }
+    }
 
     // 6) LISTA DO PROFISSIONAL
     if (L.tabela === 'reparos') {
