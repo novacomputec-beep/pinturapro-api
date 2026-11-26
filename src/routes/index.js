@@ -45,6 +45,8 @@ const { avaliarTelefoneAoPublicar, gravarTelefoneDoDono } = require('../utils/te
 // Proposta de visita para orçamento (utils/orcamentoVisita): tipo_proposta, visita aceita, orçamento.
 const { migrarOrcamentoVisita, lerProposta, lerOrcamento, textoVisita, ehVisita, visitaSemOrcamento, visitaLiberaEndereco, aceitarVisita, gravarOrcamento,
         apresentar: apresentarProposta, anexarCamposProposta, cancelarVisitaAceita, permiteVisita, anexarPermiteVisita, ERRO_VISITA_NAO_PERMITIDA, STATUS_ORCAMENTO, STATUS_ORCAMENTO_ENVIADO } = require('../utils/orcamentoVisita')
+// Prazo curto × texto que fala de outro dia (utils/prazoIncoerente) e colunas do prazo acabando (services/prazoCurtoService).
+const { avaliarPrazoIncoerente } = require('../utils/prazoIncoerente')
 // Anti-contato (utils/contatoNoTexto): contato no texto do pedido, da pergunta e da resposta.
 const { migrarContatoNoTexto, detectarContatoNoPedido, decidirContato, gravarContatoNoTexto, mascararContatos, migrarAvisosManuais, anexarAvisoContato } = require('../utils/contatoNoTexto')
 const { migrarSuspeitaAnuncio, avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita, anexarEspecialidadeProfissionalDoDono } = require('../utils/suspeitaAnuncio')
@@ -778,6 +780,8 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     await migrarContatoNoTexto(client)
     // Visita para orçamento (utils/orcamentoVisita): colunas novas em candidaturas e interesse_reparos.
     await migrarOrcamentoVisita(client)
+    // Prazo acabando / extensão automática (services/prazoCurtoService): prazo_acabando_em, auto_extensao_em, auto_extensao_aviso_em.
+    await require('../services/prazoCurtoService').migrarPrazoCurto(client)
     for (const v of valoresACombinar) console.log(`[migration] valor a combinar: ${v.tabela} ${v.id} "${v.titulo}" (valor era ${v.valor_antes})`)
     // Instante em que o push "nova obra/novo serviço disponível" foi disparado. NULL = ainda
     // não avisado. Escrito UMA vez pelo claim atômico de POST /:id/midias-prontas (o app
@@ -3116,6 +3120,10 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
     // sempre (com a máscara da moderação) e o pedido fica marcado para o painel.
     const contatoObra = decidirContato(req.body, detectarContatoNoPedido(req.body))
     if (contatoObra.barrar && !moderacao.rejeitar) return res.status(409).json(contatoObra.barrar)
+    // Prazo de 4 h ou menos com texto que fala de outro dia (utils/prazoIncoerente): o app que manda
+    // suporta_prazo_check sem confirmar_prazo recebe o 409 com o trecho, nada gravado.
+    const prazoObra = moderacao.rejeitar ? null : avaliarPrazoIncoerente(req.body, { horas: horas_para_expirar, modo: req.body?.prazo_modo, titulo: req.body.titulo, descricao: req.body.descricao })
+    if (prazoObra) return res.status(409).json(prazoObra)
     if (moderacao.rejeitar || moderacao.sanitizado.length > 0) {
       avisarModeracao({ lado: 'obra', dono: req.usuario, original: { titulo: req.body.titulo, descricao: req.body.descricao, valor: req.body.valor }, resultado: moderacao })
     }
@@ -4945,6 +4953,9 @@ const criarReparoDono = async (req, res) => {
     // Anti-contato (utils/contatoNoTexto) — mesma regra do POST /obras/dono.
     const contatoReparo = decidirContato(req.body, detectarContatoNoPedido(req.body))
     if (contatoReparo.barrar && !moderacao.rejeitar) return res.status(409).json(contatoReparo.barrar)
+    // Prazo curto × texto que fala de outro dia — mesma regra do POST /obras/dono.
+    const prazoReparo = moderacao.rejeitar ? null : avaliarPrazoIncoerente(req.body, { horas: prazo_atendimento_horas, modo: req.body?.prazo_modo, titulo: req.body.titulo, descricao: req.body.descricao })
+    if (prazoReparo) return res.status(409).json(prazoReparo)
     if (moderacao.rejeitar || moderacao.sanitizado.length > 0) {
       avisarModeracao({ lado: 'reparo', dono: req.usuario, original: { titulo: req.body.titulo, descricao: req.body.descricao, valor: req.body.valor_estimado }, resultado: moderacao })
     }
