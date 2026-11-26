@@ -42,6 +42,8 @@ const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQ
 const { migrarDemandasSalvas, anexarSalvo, anexarSalvosCount } = require('../utils/demandasSalvas')
 // Telefone do dono informado ao publicar (utils/telefoneAoPublicar): grava na conta que não tem.
 const { avaliarTelefoneAoPublicar, gravarTelefoneDoDono } = require('../utils/telefoneAoPublicar')
+// Anti-contato (utils/contatoNoTexto): contato no texto do pedido, da pergunta e da resposta.
+const { migrarContatoNoTexto, detectarContato, decidirContato, gravarContatoNoTexto, mascararContatos } = require('../utils/contatoNoTexto')
 const { migrarSuspeitaAnuncio, avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita, anexarEspecialidadeProfissionalDoDono } = require('../utils/suspeitaAnuncio')
 const { migrarPenalidadesAuto, verificarPenalidadeAvaliacoes, verificarPenalidadeDenuncias, exigirNaoSuspensoSalvoAvaliacoes, exigirPodePublicar, sqlNotaBaixaAntes } = require('../utils/penalidadesAuto')
 const { handler: liberarWhatsappHandler, whatsappLiberado, migrarWhatsappLiberado } = require('../services/liberarWhatsappService')
@@ -769,6 +771,8 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     // Pedidos salvos (utils/demandasSalvas) e marca de anúncio + ocorrências (utils/suspeitaAnuncio).
     await migrarDemandasSalvas(client)
     await migrarSuspeitaAnuncio(client)
+    // Anti-contato (utils/contatoNoTexto): colunas contato_no_texto* e a varredura ÚNICA dos pedidos abertos.
+    await migrarContatoNoTexto(client)
     for (const v of valoresACombinar) console.log(`[migration] valor a combinar: ${v.tabela} ${v.id} "${v.titulo}" (valor era ${v.valor_antes})`)
     // Instante em que o push "nova obra/novo serviço disponível" foi disparado. NULL = ainda
     // não avisado. Escrito UMA vez pelo claim atômico de POST /:id/midias-prontas (o app
@@ -3100,6 +3104,11 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
     // "[contato removido]" ANTES de gravar. Aviso ao moderador fire-and-forget nos dois casos.
     // Fica ANTES do teto de demandas e de qualquer ida à rede, como o guard de título do reparo.
     const moderacao = moderarDemanda({ titulo: req.body.titulo, descricao: req.body.descricao, valor: req.body.valor })
+    // Anti-contato (utils/contatoNoTexto), sobre o texto ORIGINAL: o app que manda
+    // suporta_contato_no_texto recebe o 409 com o trecho, nada gravado; os demais publicam como
+    // sempre (com a máscara da moderação) e o pedido fica marcado para o painel.
+    const contatoObra = decidirContato(req.body, detectarContato(req.body.titulo, req.body.descricao))
+    if (contatoObra.barrar && !moderacao.rejeitar) return res.status(409).json(contatoObra.barrar)
     if (moderacao.rejeitar || moderacao.sanitizado.length > 0) {
       avisarModeracao({ lado: 'obra', dono: req.usuario, original: { titulo: req.body.titulo, descricao: req.body.descricao, valor: req.body.valor }, resultado: moderacao })
     }
@@ -3172,6 +3181,7 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
     let obra = result.rows[0]
     if (await gravarTelefoneDoDono(req.usuario.id, telefoneObra.gravar)) invalidarCachesUsuario(req.usuario.id)
     if (suspeitaObra.marcar) await gravarSuspeita('obras', obra, suspeitaObra.motivos)
+    if (contatoObra.marcar) await gravarContatoNoTexto('obras', obra, contatoObra.marcar)
     // Especialidades inferidas do título + descrição (utils/especialidadesInferidas): gravadas já na
     // criação, antes da publicação — é o que acrescenta encanador/eletricista/… ao aviso de obra nova
     // e mostra a obra no feed deles.
@@ -3190,7 +3200,8 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
         // Ausente/false (painel, app antigo): aviso imediato, como sempre.
         const teraMidias = req.body?.tera_midias === true || req.body?.tera_midias === 'true'
         const publicada = await aprovarEPublicarObra(obra.id, { avisarPintores: !teraMidias, automatica: true })
-        if (publicada) obra = { ...publicada, suspeita_anuncio: obra.suspeita_anuncio === true, suspeita_anuncio_motivos: obra.suspeita_anuncio_motivos ?? null }
+        if (publicada) obra = { ...publicada, suspeita_anuncio: obra.suspeita_anuncio === true, suspeita_anuncio_motivos: obra.suspeita_anuncio_motivos ?? null,
+          contato_no_texto: obra.contato_no_texto === true, contato_no_texto_trecho: obra.contato_no_texto_trecho ?? null }
       }
     } catch (err) {
       console.error('[obras/dono] aprovacao automatica falhou:', err.message)
@@ -3386,6 +3397,8 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
       SELECT o.id, o.codigo_publico, o.titulo, o.categoria, o.valor, o.valor_a_combinar, o.cidade, o.uf, o.bairro,
              -- Parece anúncio (utils/suspeitaAnuncio): marca da publicação e quando o admin tirou do ar.
              o.suspeita_anuncio, o.suspeita_anuncio_motivos, o.anuncio_em,
+             -- Contato no texto (utils/contatoNoTexto): marca e o trecho achado.
+             o.contato_no_texto, o.contato_no_texto_trecho,
              o.metragem, o.prazo_execucao_dias, o.expira_em, o.tags, o.status,
              o.criado_em, o.horas_para_expirar, o.prazo_modo,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
@@ -3866,7 +3879,9 @@ const lerTextoPergunta = (valor, campo, max) => {
   const texto = typeof valor === 'string' ? valor.trim() : ''
   if (!texto) return { erro: `${campo} é obrigatória` }
   if (texto.length > max) return { erro: `${campo} deve ter no máximo ${max} caracteres` }
-  const limpo = sanitizarTexto(texto)
+  // Anti-contato (utils/contatoNoTexto): o trecho vira "••••"; o que sobrar ainda passa pelo
+  // sanitizador de sempre.
+  const limpo = sanitizarTexto(mascararContatos(texto).texto)
   // conta: contato CLARO (pesa na penalidade); removido sem conta = mascarado, sem punir.
   return { texto: limpo, removido: limpo !== texto, conta: temContatoClaro(texto) }
 }
@@ -4889,6 +4904,9 @@ const criarReparoDono = async (req, res) => {
     // mensagem que o app já exibe; contato no texto vira "[contato removido]" antes do INSERT.
     // Aviso ao moderador fire-and-forget nos dois casos. Antes de categoria/teto/rede.
     const moderacao = moderarDemanda({ titulo: req.body.titulo, descricao: req.body.descricao, valor: req.body.valor_estimado })
+    // Anti-contato (utils/contatoNoTexto) — mesma regra do POST /obras/dono.
+    const contatoReparo = decidirContato(req.body, detectarContato(req.body.titulo, req.body.descricao))
+    if (contatoReparo.barrar && !moderacao.rejeitar) return res.status(409).json(contatoReparo.barrar)
     if (moderacao.rejeitar || moderacao.sanitizado.length > 0) {
       avisarModeracao({ lado: 'reparo', dono: req.usuario, original: { titulo: req.body.titulo, descricao: req.body.descricao, valor: req.body.valor_estimado }, resultado: moderacao })
     }
@@ -4988,6 +5006,7 @@ const criarReparoDono = async (req, res) => {
     )
     if (await gravarTelefoneDoDono(req.usuario.id, telefoneReparo.gravar)) invalidarCachesUsuario(req.usuario.id)
     if (suspeitaReparo.marcar) await gravarSuspeita('reparos', result.rows[0], suspeitaReparo.motivos)
+    if (contatoReparo.marcar) await gravarContatoNoTexto('reparos', result.rows[0], contatoReparo.marcar)
     res.status(201).json(result.rows[0])
     // ESTE e o unico envio que dispara no fluxo real, e por isso ele FICA. O INSERT acima
     // grava status_aprovacao='aprovada' direto: reparo nasce publicado, nao passa por fila de
@@ -5492,6 +5511,8 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
       SELECT r.id, r.codigo_publico, r.titulo, r.categoria, r.categorias, r.valor_estimado, r.valor_a_combinar, r.cidade, r.uf, r.bairro,
              -- Parece anúncio (utils/suspeitaAnuncio): marca da publicação e quando o admin tirou do ar.
              r.suspeita_anuncio, r.suspeita_anuncio_motivos, r.anuncio_em,
+             -- Contato no texto (utils/contatoNoTexto): marca e o trecho achado.
+             r.contato_no_texto, r.contato_no_texto_trecho,
              r.expira_em, r.status, r.criado_em, r.prazo_atendimento_horas,
              u.nome AS dono_nome, u.email AS dono_email, u.telefone AS dono_telefone,
              ${sqlExpiradaPainel('r')} AS expirada,

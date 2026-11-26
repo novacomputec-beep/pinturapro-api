@@ -469,7 +469,11 @@ CREATE TABLE IF NOT EXISTS "obras" (
   "suspeita_anuncio" boolean DEFAULT false NOT NULL,
   "suspeita_anuncio_motivos" text[],
   "anuncio_em" timestamp with time zone,
-  "anuncio_por" uuid
+  "anuncio_por" uuid,
+  "contato_no_texto" boolean DEFAULT false NOT NULL,
+  "contato_no_texto_trecho" text,
+  "contato_no_texto_telefone" text,
+  "contato_no_texto_em" timestamp with time zone
 );
 
 CREATE TABLE IF NOT EXISTS "pedidos_suporte" (
@@ -665,7 +669,11 @@ CREATE TABLE IF NOT EXISTS "reparos" (
   "suspeita_anuncio" boolean DEFAULT false NOT NULL,
   "suspeita_anuncio_motivos" text[],
   "anuncio_em" timestamp with time zone,
-  "anuncio_por" uuid
+  "anuncio_por" uuid,
+  "contato_no_texto" boolean DEFAULT false NOT NULL,
+  "contato_no_texto_trecho" text,
+  "contato_no_texto_telefone" text,
+  "contato_no_texto_em" timestamp with time zone
 );
 
 CREATE TABLE IF NOT EXISTS "respostas_equipe" (

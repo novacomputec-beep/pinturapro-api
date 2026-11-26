@@ -6,6 +6,7 @@ const { pool } = require('../utils/supabase')
 const { notificarPintoresSobreNovaObra, dispararPushNovoComClaim } = require('../services/alertaService')
 // Valor obrigatório e > 0 ao criar e ao editar ("Informe quanto quer pagar").
 const { resolverValorDemanda } = require('../utils/valorDemanda')
+const { detectarContato, corpoRecusa } = require('../utils/contatoNoTexto')
 const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra } = require('../utils/totalExtensao')
 const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
@@ -294,6 +295,15 @@ const editar = async (req, res) => {
 
     if (sets.length === 0) {
       return res.status(400).json({ erro: 'Nenhum campo para atualizar' })
+    }
+
+    // Anti-contato (utils/contatoNoTexto): título/descrição editados com contato → 409, nada
+    // gravado; texto limpo desfaz a marca do pedido.
+    if (tem('titulo') || tem('descricao')) {
+      const atual = (await pool.query(`SELECT titulo, descricao FROM obras WHERE id = $1`, [req.params.id])).rows[0] || {}
+      const achado = detectarContato(tem('titulo') ? titulo : atual.titulo, tem('descricao') ? descricao : atual.descricao)
+      if (achado) return res.status(409).json(corpoRecusa(achado))
+      sets.push('contato_no_texto=false', 'contato_no_texto_trecho=NULL', 'contato_no_texto_telefone=NULL', 'contato_no_texto_em=NULL')
     }
 
     valores.push(req.params.id)

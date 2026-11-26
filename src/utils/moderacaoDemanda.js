@@ -245,4 +245,5 @@ module.exports = {
   MARCA_CONTATO,
   EMAIL_MODERACAO,
   PALAVRAS_VENDA,
+  TLDS,
 }
