@@ -226,7 +226,8 @@ const avisarPrazoEstendido = async (tabela, demandaId, atorId) => {
 // (5) Prazo aumentado ANTES de vencer (dono, 16/11/2026): push neutro, sem e-mail, a cada
 // interessado ainda ativo. Fire-and-forget depois do UPDATE do /estender; nunca lança. O dia é o
 // do novo expira_em em São Paulo. Quem estendeu (atorId) nunca recebe. Devolve quantos pushes saíram.
-const STATUS_ATIVOS_PRAZO = ['pendente', 'contraproposta_dono']
+// + visita aceita e orçamento enviado (utils/orcamentoVisita): também estão na disputa.
+const STATUS_ATIVOS_PRAZO = ['pendente', 'contraproposta_dono', 'visita_aceita', 'orcamento_enviado']
 const TITULO_PRAZO_AUMENTADO = '⏰ Prazo aumentado'
 const FMT_DIA_MES_SP = new Intl.DateTimeFormat('pt-BR', { timeZone: TZ_AGENDA, day: '2-digit', month: '2-digit' })
 const corpoPrazoAumentado = (titulo, expiraEm) => `"${titulo}" ficou aberto até ${FMT_DIA_MES_SP.format(new Date(expiraEm))}. Sua proposta continua valendo.`

@@ -8,6 +8,7 @@ const { enviarPushNotificacao, avisarMatchFeito, avisarUsuario } = require('../s
 const { SQL_ZERAR_AGENDA } = require('../utils/agendamento')
 // Máscara de leitura do texto livre que o dono vê (utils/tentativasContato).
 const { mascararLista } = require('../utils/tentativasContato')
+const { anexarCamposProposta } = require('../utils/orcamentoVisita')
 // Selo "bem avaliado" (3× 5★) nos candidatos que o dono vê (utils/etiquetasAvaliacao).
 const { sqlSeloBemAvaliado } = require('../utils/etiquetasAvaliacao')
 // compromissos_nao_cumpridos_90d / cumpriu_todos do candidato (utils/responsabilidade), como em GET /obras/:id.
@@ -71,6 +72,8 @@ const minhas = async (req, res) => {
        LIMIT $2 OFFSET $3`,
       [req.usuario.id, limit, offset]
     )
+    // tipo_proposta, visita_*, orcamento_* (utils/orcamentoVisita).
+    await anexarCamposProposta('obras', result.rows)
     res.json({ candidaturas: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar candidaturas' })
@@ -115,6 +118,7 @@ const porObra = async (req, res) => {
       [req.params.obra_id, limit, offset]
     )
     // Texto livre do candidato mascarado na leitura (linha antiga, anterior ao filtro de contato).
+    await anexarCamposProposta('obras', result.rows)
     res.json({ candidaturas: mascararLista(result.rows, ['mensagem_oferta', 'referencias']), page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar candidaturas' })

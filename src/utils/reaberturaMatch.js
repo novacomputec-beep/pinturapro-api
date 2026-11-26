@@ -8,7 +8,8 @@
 //     boot de routes; repetida IF NOT EXISTS para os esquemas de teste);
 //   - SQL que devolve as propostas rebaixadas pelo match ao status que tinham (a MESMA regra de
 //     desfazerEscolhaService) e a lista de status "valendo" que recebem o aviso de reabertura.
-const STATUS_VALENDO = ['pendente', 'contraproposta_dono']
+// + visita aceita e orçamento enviado (utils/orcamentoVisita): também estão na disputa.
+const STATUS_VALENDO = ['pendente', 'contraproposta_dono', 'visita_aceita', 'orcamento_enviado']
 const LADOS = {
   obras:   { proposta: 'candidaturas',      coluna: 'obra_id',   chave: 'obra_id',   tipoPushInteressado: 'nova_obra' },
   reparos: { proposta: 'interesse_reparos', coluna: 'reparo_id', chave: 'reparo_id', tipoPushInteressado: 'novo_reparo' },

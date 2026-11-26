@@ -841,6 +841,10 @@ const iniciarAgendador = () => {
   //   profissionais na região → até 5 deles, os mais próximos (services/whatsappEspecialidadeRaraService).
   const whatsappRara = require('./src/services/whatsappEspecialidadeRaraService')
   setInterval(job('whatsappEspecialidadeRara', whatsappPerguntas.semSobrepor('especialidade_rara', () => whatsappRara.enfileirarEspecialidadeRara())), whatsappRara.INTERVALO_MS)
+  // Visita para orçamento (utils/orcamentoVisita): no dia seguinte ao da visita aceita, sem orçamento
+  // enviado → um lembrete ao profissional, uma vez, fora do silêncio noturno.
+  const orcamentoVisita = require('./src/utils/orcamentoVisita')
+  setInterval(job('lembrarOrcamentos', whatsappPerguntas.semSobrepor('lembrete_orcamento', () => orcamentoVisita.lembrarOrcamentos({ avisarUsuario: require('./src/services/alertaService').avisarUsuario }))), orcamentoVisita.INTERVALO_LEMBRETE_MS)
   //   1 min: pedido aberto MARCADO com contato no texto → o dono recebe o pedido de retirar, uma
   //   vez por pedido (services/whatsappContatoNoTextoService; só com o tipo ligado no painel).
   const whatsappContato = require('./src/services/whatsappContatoNoTextoService')

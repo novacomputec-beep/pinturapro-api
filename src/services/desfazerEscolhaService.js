@@ -73,7 +73,8 @@ const MOTIVO_ESCOLHEU_OUTRO = 'escolheu_outro'
 const LEMBRETES_PARA_ESCOLHER_OUTRO = 2
 const MODOS = ['desfazer', 'escolher_outro']
 const MOTIVO_FALTA = MOTIVO_FALTA_SEM_HORARIO // 'não marcou horário' — o mesmo do cronômetro
-const STATUS_VALENDO = ['pendente', 'contraproposta_dono']
+// + visita aceita e orçamento enviado (utils/orcamentoVisita): também estão na disputa.
+const STATUS_VALENDO = ['pendente', 'contraproposta_dono', 'visita_aceita', 'orcamento_enviado']
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const LADOS = {
