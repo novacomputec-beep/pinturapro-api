@@ -7,6 +7,7 @@ const { notificarPintoresSobreNovaObra, dispararPushNovoComClaim } = require('..
 // Valor obrigatório e > 0 ao criar e ao editar ("Informe quanto quer pagar").
 const { resolverValorDemanda } = require('../utils/valorDemanda')
 const { detectarContatoNoPedido, corpoRecusa } = require('../utils/contatoNoTexto')
+const { anexarPermiteVisita } = require('../utils/orcamentoVisita')
 const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra } = require('../utils/totalExtensao')
 const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
@@ -129,6 +130,8 @@ const listar = async (req, res) => {
     const result = await pool.query(query, params)
     // salvo: true/false — o profissional salvou (❤️) esta obra (utils/demandasSalvas).
     await anexarSalvo('obras', result.rows, req.usuario.id)
+    // permite_visita: toda obra aceita proposta de visita para orçamento (utils/orcamentoVisita).
+    anexarPermiteVisita('obras', result.rows)
 
     // Título mascarado na leitura (linha antiga, gravada antes do filtro de contato) — o mesmo
     // tratamento de GET /obras/:id. Só o título sai no card do feed.
