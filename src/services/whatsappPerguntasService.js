@@ -26,12 +26,12 @@ const { pool } = require('../utils/supabase')
 const { comOrigem } = require('../utils/auditoriaDemanda')
 const { enfileirar } = require('./whatsappFilaService')
 const { lerConfig, sqlPerguntaPendente, TIPO_PERGUNTA, TIPO_INTERESSADO } = require('../whatsapp/fila')
-const { TIPO_RESPOSTA, TIPO_AVULSA, TIPO_CONTATO, ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela } = require('../whatsapp/config')
+const { TIPO_RESPOSTA, TIPO_AVULSA, TIPO_CONTATO, TIPO_PRAZO, ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela } = require('../whatsapp/config')
 const T = require('../whatsapp/textos')
 
 // Tipos cuja resposta fica só na linha (painel): avulsa e o aviso de contato no texto ("Qualquer
 // dúvida, é só responder aqui") — nunca é entregue no app como resposta a uma pergunta.
-const TIPOS_RESPOSTA_GUARDADA = [TIPO_AVULSA, TIPO_CONTATO]
+const TIPOS_RESPOSTA_GUARDADA = [TIPO_AVULSA, TIPO_CONTATO, TIPO_PRAZO]
 const MIDIAS_COM_RESPOSTA = ['audio', 'imagem', 'video', 'documento', 'figurinha']
 // Resposta a uma mensagem nossa vale por até 7 dias depois do envio.
 const VALIDADE_RESPOSTA_DIAS = 7

@@ -353,7 +353,7 @@ const main = async () => {
   const tipos = (await chamar('get', '/admin/whatsapp/tipos')).body.tipos
   const lista = (await chamar('get', '/admin/whatsapp/mensagens', { status: 'respondida', limit: '100' })).body
   const m7 = lista.mensagens.find(x => x.itens.some(i => i.ref_id === P(7)))
-  ok(tipos.map(x => x.tipo).join() === 'pergunta_sem_resposta,novo_interessado,especialidade_rara,contato_no_texto,prazo_acabando,escolhido,horario_aguardando,teste' && tipos[0].implementado === true && tipos[0].ligado === true && tipos.slice(4, 7).every(x => !x.implementado)
+  ok(tipos.map(x => x.tipo).join() === 'pergunta_sem_resposta,novo_interessado,especialidade_rara,contato_no_texto,prazo_acabando,escolhido,horario_aguardando,teste' && tipos[0].implementado === true && tipos[0].ligado === true && tipos.slice(5, 7).every(x => !x.implementado)
      && m7 && m7.itens.find(i => i.ref_id === P(7)).resposta === 'pode sim, de manhã' && m7.papel === 'dono' && m7.resumo.startsWith('Pergunta sem resposta · ') && lista.mensagens.every(x => x.resposta),
      'painel: pergunta_sem_resposta implementado = true; /mensagens traz a resposta dada pelo WhatsApp', [tipos[0], m7 && m7.itens])
 

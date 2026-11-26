@@ -193,7 +193,13 @@ const avisarExpirou = async (lado) => {
 
 const verificarEscolhaPendente = semSobreposicao('verificarEscolhaPendente', async () => {
   for (const lado of LADOS) {
-    for (const passo of [avisarExpirou, avisarAntesDeExpirar, lembrarDiario]) {
+    // Extensão automática de 24 h (services/prazoCurtoService) ANTES do aviso de vencimento: o
+    // pedido que venceu com interessados e sem escolhido ganha um dia em vez de expirar (uma vez).
+    const prazoCurto = require('./prazoCurtoService')
+    const lp = prazoCurto.LADOS.find(l => l.tabela === lado.tabela)
+    const estenderAutomaticamente = () => prazoCurto.estenderAutomaticamente(lp)
+    const avisarExtensoesAutomaticas = () => prazoCurto.avisarExtensoesAutomaticas(lp)
+    for (const passo of [estenderAutomaticamente, avisarExtensoesAutomaticas, avisarExpirou, avisarAntesDeExpirar, lembrarDiario]) {
       try { await passo(lado) } catch (err) { console.error(`[EscolhaPendente] ${passo.name} ${lado.tabela}:`, err.message) }
     }
   }

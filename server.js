@@ -841,6 +841,10 @@ const iniciarAgendador = () => {
   //   profissionais na região → até 5 deles, os mais próximos (services/whatsappEspecialidadeRaraService).
   const whatsappRara = require('./src/services/whatsappEspecialidadeRaraService')
   setInterval(job('whatsappEspecialidadeRara', whatsappPerguntas.semSobrepor('especialidade_rara', () => whatsappRara.enfileirarEspecialidadeRara())), whatsappRara.INTERVALO_MS)
+  //   1 min: 'prazo_acabando' — pedido com interessados e sem escolhido a 30 minutos do fim → push e
+  //   WhatsApp ao dono, uma vez por pedido (services/prazoCurtoService; só com o tipo ligado no painel).
+  const prazoCurto = require('./src/services/prazoCurtoService')
+  setInterval(job('whatsappPrazoAcabando', whatsappPerguntas.semSobrepor('prazo_acabando', () => prazoCurto.avisarPrazoAcabando())), INTERVALO_CRONOMETRO)
   // Visita para orçamento (utils/orcamentoVisita): no dia seguinte ao da visita aceita, sem orçamento
   // enviado → um lembrete ao profissional, uma vez, fora do silêncio noturno.
   const orcamentoVisita = require('./src/utils/orcamentoVisita')

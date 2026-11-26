@@ -78,6 +78,11 @@ const textoEspecialidadeRara = (dados, { primeira = false, agora = new Date() } 
 const textoContatoNoTexto = (titulo) =>
   `Olá! 👋 Aqui é o *ProTudo*.\n\nVimos seu pedido *"${titulo}"* e queremos te ajudar a aproveitar melhor o app. 😊\n\nO ProTudo *tem sim* espaço para tirar dúvidas: os profissionais interessados enviam *perguntas* no seu pedido, você recebe uma notificação e responde por lá. As perguntas e respostas ficam no seu pedido e vão deixando tudo mais claro para todos.\n\nPor isso, pedimos que você *retire seu telefone da descrição*. E mesmo que combine algo com um profissional pelo WhatsApp, peça para ele *manifestar interesse dentro do app* e sigam por lá. Assim *os dois ficam protegidos* pela plataforma.\n\nNo ProTudo, conferimos a identidade, os documentos e as *referências* de cada profissional. Em breve teremos *cursos* em todas as especialidades, e quem concluir ganha o selo de *especialista*, o que ajuda você na hora de escolher.\n\nQualquer dúvida, é só responder aqui. Obrigado por usar o ProTudo! 🧡`
 
+// PRAZO ACABANDO (dono, 26/11/2026) — para o dono do pedido, a 30 minutos do fim. Texto aprovado
+// pelo dono: sai assim, sem rodapé. dados = { titulo, interessados, codigo }.
+const textoPrazoAcabando = ({ titulo, interessados, codigo }) =>
+  `⏰ Seu pedido *"${titulo}"* termina em 30 minutos e tem *${Number(interessados) === 1 ? '1 interessado' : `${Number(interessados)} interessados`}*. Escolha um profissional agora ou estenda o prazo no app: protudo.app.br/p/${codigo}`
+
 // "1 ou 2", "1, 2 ou 3"…
 const listaNumeros = (numeros) => {
   const ns = [...numeros].sort((a, b) => a - b)
@@ -98,4 +103,4 @@ const lerNumeroInicial = (texto) => {
 }
 
 module.exports = { RODAPE_SAIR, primeiroNome, textoPerguntas, textoNaoEntendi, TEXTO_NAO_ENTENDI_SEM_NUMERO, TEXTO_SO_ESCRITA, textoEntregue, textoNaoEntregue, lerNumeroInicial, listaNumeros,
-  textoContatoNoTexto, tempoRestante, textoEspecialidadeRara, textoInteressados, linkAbrir, DICA_NOTIFICACOES, TEXTO_RESPOSTA_INTERESSADO }
+  textoContatoNoTexto, textoPrazoAcabando, tempoRestante, textoEspecialidadeRara, textoInteressados, linkAbrir, DICA_NOTIFICACOES, TEXTO_RESPOSTA_INTERESSADO }
