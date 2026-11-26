@@ -136,8 +136,8 @@ const main = async () => {
   await q('BEGIN'); await migrarWhatsapp(shim); await q('COMMIT')
   await O.migrarOrcamentoVisita(shim); await O.migrarOrcamentoVisita(shim)
   const colunas = (await q(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name IN ('candidaturas', 'interesse_reparos')
-                             AND column_name IN ('tipo_proposta','visita_gratis','visita_valor','visita_quando','visita_aceita_em','mensagem_original','orcamento_prazo_dias','orcamento_data_inicio','orcamento_observacao','orcamento_enviado_em','orcamento_lembrete_em')`)).rows[0].n
-  ok(colunas === 22, 'migração (2x, idempotente): 11 colunas em candidaturas e em interesse_reparos', colunas)
+                             AND column_name IN ('tipo_proposta','visita_gratis','visita_valor','visita_quando','visita_aceita_em','mensagem_original','orcamento_prazo_dias','orcamento_data_inicio','orcamento_observacao','orcamento_enviado_em','orcamento_lembrete_em','visita_cancelada_em','visita_cancelada_aviso_em')`)).rows[0].n
+  ok(colunas === 26, 'migração (2x, idempotente): 13 colunas em candidaturas e em interesse_reparos', colunas)
 
   let nUsr = 0
   const usr = async (nome, role, extra = {}) => {
@@ -295,6 +295,30 @@ const main = async () => {
     d = await dem()
     ok(r.status === 200 && (await prop(P2)).status === 'recusado' && d.status === 'aberta' && d.match_usuario_id === null && (await prop(P1)).status === 'orcamento_enviado' && (await prop(P3)).status === 'pendente',
        'dono recusa uma visita aceita: só ela vira recusado; pedido e demais propostas intactos', r.body)
+    // VISITA CANCELADA: aviso próprio, fora do silêncio noturno, uma vez; sem o aviso genérico de recusa.
+    const DIA12 = new Date(`${HOJE_SP}T15:00:00Z`), NOITE02 = new Date(DIA12.getTime() + 14 * 3600000), MANHA08 = new Date(NOITE02.getTime() + 6 * 3600000)
+    const canceladas = (u) => pushDe(u, /^📋 Visita cancelada: /)
+    await O.avisarVisitasCanceladas({ avisarUsuario }, shim, DIA12); await assentar()   // se a recusa caiu no silêncio de verdade, sai aqui
+    let pc = canceladas(pro2)
+    ok(pc.length === 1 && pc[0].title === '📋 Visita cancelada: Reforma do banheiro' && pc[0].body === 'O cliente desistiu da visita. Obrigado pela disponibilidade!' && pc[0].data.tipo === 'visita_cancelada'
+       && pushDe(pro2, /não aceita|não foi selecionad/i).length === 0 && !!(await prop(P2)).visita_cancelada_em && !!(await prop(P2)).visita_cancelada_aviso_em,
+       'visita aceita recusada: "📋 Visita cancelada: {título}" com o texto pedido, no lugar do aviso genérico de recusa', pushes.filter(x => x.to === pro2.token).map(x => [x.title, x.body]))
+    ok((await O.avisarVisitasCanceladas({ avisarUsuario }, shim, DIA12)) === 0 && canceladas(pro2).length === 1, 'visita cancelada: um aviso só')
+    // Silêncio noturno: às 02:00 fica devido; às 08:00 sai.
+    await q(`UPDATE ${L.prop} SET visita_cancelada_aviso_em = NULL WHERE id = $1`, [P2])
+    let nc = await O.avisarVisitasCanceladas({ avisarUsuario }, shim, NOITE02); await assentar()
+    ok(nc === 0 && canceladas(pro2).length === 1 && (await prop(P2)).visita_cancelada_aviso_em === null, 'visita cancelada no silêncio noturno (02:00): o aviso fica devido, não sai', nc)
+    nc = await O.avisarVisitasCanceladas({ avisarUsuario }, shim, MANHA08); await assentar()
+    ok(nc === 1 && canceladas(pro2).length === 2, 'visita cancelada: o aviso devido sai às 08:00', nc)
+    // O lembrete do orçamento morre com a visita cancelada.
+    await q(`UPDATE ${L.prop} SET visita_quando = $2::timestamptz WHERE id = $1`, [P2, new Date(DIA12.getTime() - 30 * 3600000).toISOString()])
+    ok((await O.lembrarOrcamentos({ avisarUsuario }, shim, DIA12)) === 0 && (await prop(P2)).orcamento_lembrete_em === null && pushDe(pro2, /Falta o seu orçamento/).length === 0, 'visita cancelada: nenhum lembrete de orçamento')
+    // Recusar uma visita ainda PENDENTE continua com o aviso de sempre.
+    pushes.length = 0
+    r = await responder(P3, { action: 'recusar' })
+    await O.avisarVisitasCanceladas({ avisarUsuario }, shim, DIA12); await assentar()
+    ok(r.status === 200 && (await prop(P3)).status === 'recusado' && (await prop(P3)).visita_cancelada_em === null && canceladas(pro3).length === 0 && pushDe(pro3, /não aceita/i).length === 1, 'visita ainda pendente recusada: o aviso genérico de sempre, sem "Visita cancelada"', pushes.map(x => x.title))
+    await q(`UPDATE ${L.prop} SET status = 'pendente' WHERE id = $1`, [P3])   // volta à disputa para o resto do roteiro
     r = await detalhe(pro2); dd = r.body.obra || r.body.reparo
     ok(dd.endereco_liberado === false && dd[L.endereco] === null, 'visita recusada: o profissional deixa de ver o endereço', dd.endereco_liberado)
     // Orçamento recusado também não mexe em nada (em outro pedido).
@@ -308,6 +332,7 @@ const main = async () => {
     r = await responder(Q1, { action: 'recusar' }, dono, DEM2)
     d = await dem(DEM2)
     ok(r.status === 200 && (await prop(Q1)).status === 'recusado' && (await prop(Q2)).status === 'pendente' && d.status === 'aberta' && d.match_usuario_id === null, 'dono recusa o orçamento: só ele vira recusado; nada mais muda', r.body)
+    ok((await prop(Q1)).visita_cancelada_em === null && pushDe(pro1, /^📋 Visita cancelada/).length === 0 && pushDe(pro1, /não aceita/i).length === 1, 'orçamento recusado: aviso genérico de sempre (não é visita cancelada)', pushes.filter(x => x.to === pro1.token).map(x => x.title))
 
     // Aceitar o orçamento = o aceite de sempre.
     pushes.length = 0
