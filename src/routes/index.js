@@ -43,7 +43,7 @@ const { migrarDemandasSalvas, anexarSalvo, anexarSalvosCount } = require('../uti
 // Telefone do dono informado ao publicar (utils/telefoneAoPublicar): grava na conta que não tem.
 const { avaliarTelefoneAoPublicar, gravarTelefoneDoDono } = require('../utils/telefoneAoPublicar')
 // Anti-contato (utils/contatoNoTexto): contato no texto do pedido, da pergunta e da resposta.
-const { migrarContatoNoTexto, detectarContato, decidirContato, gravarContatoNoTexto, mascararContatos } = require('../utils/contatoNoTexto')
+const { migrarContatoNoTexto, detectarContatoNoPedido, decidirContato, gravarContatoNoTexto, mascararContatos, migrarAvisosManuais, anexarAvisoContato } = require('../utils/contatoNoTexto')
 const { migrarSuspeitaAnuncio, avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita, anexarEspecialidadeProfissionalDoDono } = require('../utils/suspeitaAnuncio')
 const { migrarPenalidadesAuto, verificarPenalidadeAvaliacoes, verificarPenalidadeDenuncias, exigirNaoSuspensoSalvoAvaliacoes, exigirPodePublicar, sqlNotaBaixaAntes } = require('../utils/penalidadesAuto')
 const { handler: liberarWhatsappHandler, whatsappLiberado, migrarWhatsappLiberado } = require('../services/liberarWhatsappService')
@@ -1955,6 +1955,8 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     await client.query('SAVEPOINT robo_whatsapp')
     try {
       await require('../whatsapp/migracao').migrarWhatsapp(client)
+      // Anti-contato: pedido cujo dono já recebeu o aviso à mão (utils/contatoNoTexto.AVISOS_MANUAIS).
+      await migrarAvisosManuais(client)
       await client.query('RELEASE SAVEPOINT robo_whatsapp')
     } catch (err) {
       await client.query('ROLLBACK TO SAVEPOINT robo_whatsapp')
@@ -3107,7 +3109,7 @@ router.post('/obras/dono', autenticar, exigirNaoSuspensoSalvoAvaliacoes, exigirP
     // Anti-contato (utils/contatoNoTexto), sobre o texto ORIGINAL: o app que manda
     // suporta_contato_no_texto recebe o 409 com o trecho, nada gravado; os demais publicam como
     // sempre (com a máscara da moderação) e o pedido fica marcado para o painel.
-    const contatoObra = decidirContato(req.body, detectarContato(req.body.titulo, req.body.descricao))
+    const contatoObra = decidirContato(req.body, detectarContatoNoPedido(req.body))
     if (contatoObra.barrar && !moderacao.rejeitar) return res.status(409).json(contatoObra.barrar)
     if (moderacao.rejeitar || moderacao.sanitizado.length > 0) {
       avisarModeracao({ lado: 'obra', dono: req.usuario, original: { titulo: req.body.titulo, descricao: req.body.descricao, valor: req.body.valor }, resultado: moderacao })
@@ -3228,6 +3230,8 @@ router.get('/obras-aprovacao', autenticar, exigirAdmin, async (req, res) => {
     )
     // dono_profissional_especialidade(_rotulo): o dono também é profissional DESTA especialidade (utils/suspeitaAnuncio).
     await anexarEspecialidadeProfissionalDoDono('obras', result.rows)
+    // contato_no_texto_aviso: { status, em } do aviso do robô (utils/contatoNoTexto), ou null.
+    await anexarAvisoContato('obras', result.rows)
     res.json({ obras: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar obras para aprovação' })
@@ -3421,6 +3425,7 @@ router.get('/obras/admin', autenticar, exigirAdmin, async (req, res) => {
       LIMIT 200
     `)
     await anexarEspecialidadeProfissionalDoDono('obras', result.rows)
+    await anexarAvisoContato('obras', result.rows)
     res.json({ obras: result.rows })
   } catch (err) {
     console.error('Erro ao listar obras (admin):', err)
@@ -3514,12 +3519,17 @@ router.patch('/obras/dono/:id/ponto-referencia', autenticar, async (req, res) =>
     // Posse DENTRO do UPDATE (mesmo padrão de DELETE /obras/dono/:id e do estender): sem
     // SELECT antes, sem janela entre checar e escrever. rowCount 0 = não é dele OU não existe,
     // e os dois viram 404 — 403 confirmaria que a obra existe para quem não é o dono.
+    // Anti-contato (utils/contatoNoTexto): app com suporte → 409 com o trecho, nada gravado; os
+    // demais gravam e o pedido fica marcado.
+    const contato = decidirContato(req.body, detectarContatoNoPedido({ ponto_referencia: valor }))
+    if (contato.barrar) return res.status(409).json(contato.barrar)
     const upd = await pool.query(
       `UPDATE obras SET ponto_referencia = $2 WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$3')}
        RETURNING ponto_referencia`,
       [req.params.id, valor, req.usuario.id]
     )
     if (upd.rowCount === 0) return res.status(404).json({ erro: 'Obra não encontrada' })
+    if (contato.marcar) await gravarContatoNoTexto('obras', { id: req.params.id }, contato.marcar)
     res.json({ ponto_referencia: upd.rows[0].ponto_referencia })
   } catch (err) {
     console.error('[obras/ponto-referencia]', err.message)
@@ -4905,7 +4915,7 @@ const criarReparoDono = async (req, res) => {
     // Aviso ao moderador fire-and-forget nos dois casos. Antes de categoria/teto/rede.
     const moderacao = moderarDemanda({ titulo: req.body.titulo, descricao: req.body.descricao, valor: req.body.valor_estimado })
     // Anti-contato (utils/contatoNoTexto) — mesma regra do POST /obras/dono.
-    const contatoReparo = decidirContato(req.body, detectarContato(req.body.titulo, req.body.descricao))
+    const contatoReparo = decidirContato(req.body, detectarContatoNoPedido(req.body))
     if (contatoReparo.barrar && !moderacao.rejeitar) return res.status(409).json(contatoReparo.barrar)
     if (moderacao.rejeitar || moderacao.sanitizado.length > 0) {
       avisarModeracao({ lado: 'reparo', dono: req.usuario, original: { titulo: req.body.titulo, descricao: req.body.descricao, valor: req.body.valor_estimado }, resultado: moderacao })
@@ -5184,12 +5194,16 @@ router.patch('/reparos/dono/:id/ponto-referencia', autenticar, async (req, res) 
     const { erro, valor } = normalizarPontoReferencia(ponto_referencia)
     if (erro) return res.status(400).json({ erro })
 
+    // Anti-contato (utils/contatoNoTexto) — mesma regra do PATCH /obras/dono/:id/ponto-referencia.
+    const contato = decidirContato(req.body, detectarContatoNoPedido({ ponto_referencia: valor }))
+    if (contato.barrar) return res.status(409).json(contato.barrar)
     const upd = await pool.query(
       `UPDATE reparos SET ponto_referencia = $2 WHERE id = $1 AND ${sqlDonoDaPessoa('criado_por', '$3')}
        RETURNING ponto_referencia`,
       [req.params.id, valor, req.usuario.id]
     )
     if (upd.rowCount === 0) return res.status(404).json({ erro: 'Serviço não encontrado' })
+    if (contato.marcar) await gravarContatoNoTexto('reparos', { id: req.params.id }, contato.marcar)
     res.json({ ponto_referencia: upd.rows[0].ponto_referencia })
   } catch (err) {
     console.error('[reparos/ponto-referencia]', err.message)
@@ -5406,6 +5420,7 @@ router.get('/reparos/aprovacao', autenticar, exigirAdmin, async (req, res) => {
       [limit, offset]
     )
     await anexarEspecialidadeProfissionalDoDono('reparos', result.rows)
+    await anexarAvisoContato('reparos', result.rows)
     res.json({ reparos: result.rows, page, limit })
   } catch (err) {
     res.status(500).json({ erro: 'Erro ao buscar reparos' })
@@ -5532,6 +5547,7 @@ router.get('/reparos/admin', autenticar, exigirAdmin, async (req, res) => {
       LIMIT 200
     `)
     await anexarEspecialidadeProfissionalDoDono('reparos', result.rows)
+    await anexarAvisoContato('reparos', result.rows)
     res.json({ reparos: result.rows })
   } catch (err) {
     console.error('Erro ao listar reparos (admin):', err)

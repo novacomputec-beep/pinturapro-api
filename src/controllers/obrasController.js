@@ -6,7 +6,7 @@ const { pool } = require('../utils/supabase')
 const { notificarPintoresSobreNovaObra, dispararPushNovoComClaim } = require('../services/alertaService')
 // Valor obrigatório e > 0 ao criar e ao editar ("Informe quanto quer pagar").
 const { resolverValorDemanda } = require('../utils/valorDemanda')
-const { detectarContato, corpoRecusa } = require('../utils/contatoNoTexto')
+const { detectarContatoNoPedido, corpoRecusa } = require('../utils/contatoNoTexto')
 const { ufDeCidade } = require('../utils/localidade')
 const { sqlTotalExtensaoObra } = require('../utils/totalExtensao')
 const { resolverBusca, montarFiltroGeo } = require('../utils/geoBusca')
@@ -299,11 +299,17 @@ const editar = async (req, res) => {
 
     // Anti-contato (utils/contatoNoTexto): título/descrição editados com contato → 409, nada
     // gravado; texto limpo desfaz a marca do pedido.
-    if (tem('titulo') || tem('descricao')) {
-      const atual = (await pool.query(`SELECT titulo, descricao FROM obras WHERE id = $1`, [req.params.id])).rows[0] || {}
-      const achado = detectarContato(tem('titulo') ? titulo : atual.titulo, tem('descricao') ? descricao : atual.descricao)
+    if (tem('titulo') || tem('descricao') || tem('bairro') || tem('tags')) {
+      const atual = (await pool.query(`SELECT titulo, descricao, bairro, tags, ponto_referencia FROM obras WHERE id = $1`, [req.params.id])).rows[0] || {}
+      // Só o que está sendo editado é recusado (título e descrição valem juntos): mexer no bairro
+      // de um pedido já marcado pelo título não é barrado. A marca só sai com o pedido inteiro limpo.
+      const editado = {
+        ...(tem('titulo') || tem('descricao') ? { titulo: tem('titulo') ? titulo : atual.titulo, descricao: tem('descricao') ? descricao : atual.descricao } : {}),
+        ...(tem('bairro') ? { bairro } : {}), ...(tem('tags') ? { tags } : {}),
+      }
+      const achado = detectarContatoNoPedido(editado)
       if (achado) return res.status(409).json(corpoRecusa(achado))
-      sets.push('contato_no_texto=false', 'contato_no_texto_trecho=NULL', 'contato_no_texto_telefone=NULL', 'contato_no_texto_em=NULL')
+      if (!detectarContatoNoPedido({ ...atual, ...editado })) sets.push('contato_no_texto=false', 'contato_no_texto_trecho=NULL', 'contato_no_texto_telefone=NULL', 'contato_no_texto_em=NULL')
     }
 
     valores.push(req.params.id)
