@@ -270,6 +270,63 @@ const mascararTelefone = (e164) => {
   return d.length < 12 ? '' : `+${d.slice(0, 2)} ${d.slice(2, 4)} ${'*'.repeat(d.length - 8)}-${d.slice(-4)}`
 }
 
+// AVULSA PARA OS INTERESSADOS (dono, 26/11/2026) — POST /admin/whatsapp/avulsa { codigo, texto,
+// alvo: 'interessados' }: UMA mensagem para CADA profissional com proposta na disputa naquele pedido
+// (desistencias.STATUS_ATIVOS: pendente, contraproposta_dono, visita_aceita, orcamento_enviado),
+// reparo ou obra. "{primeiro nome}" no texto (também {primeiro_nome} e {nome}) vira o primeiro nome
+// de cada destinatário. Cada linha é uma avulsa como as outras (mesma fila, janela 08–21h, pausa,
+// trava de teste, ritmo de 20–40 s, SAIR, lista e contadores do painel; a resposta fica na linha).
+// Por destinatário, as MESMAS recusas do envio ao dono — sem telefone válido, respondeu SAIR, fora
+// da trava de teste, mesmo texto nas últimas 24 h, texto final acima de 1000 caracteres — só que
+// aqui quem não pode receber é listado em nao_enviadas e os demais seguem.
+// Devolve { codigo, alvo, enfileiradas, nomes, destinatarios: [{ id, nome, telefone (mascarado),
+// status: 'fila' }], nao_enviadas: [{ nome, motivo }], mensagem }.
+const ALVO_DONO = 'dono'
+const ALVO_INTERESSADOS = 'interessados'
+const RE_PRIMEIRO_NOME = /\{\s*(?:primeiro[\s_]nome|nome)\s*\}/gi
+const primeiroNomeDe = (nome) => String(nome ?? '').trim().split(/\s+/)[0] || ''
+const enviarAvulsaAosInteressados = async ({ codigo, texto, pedido }) => {
+  const lado = pedido.tabela === 'obras' ? { proposta: 'candidaturas', fk: 'obra_id' } : { proposta: 'interesse_reparos', fk: 'reparo_id' }
+  const { STATUS_ATIVOS } = require('../utils/desistencias')
+  const pros = (await pool.query(
+    `SELECT DISTINCT ON (u.id) u.id, u.nome, u.telefone, u.whatsapp_avisos
+       FROM ${lado.proposta} x JOIN usuarios u ON u.id = x.usuario_id
+      WHERE x.${lado.fk} = $1 AND x.status = ANY($2::text[])
+      ORDER BY u.id`, [pedido.id, STATUS_ATIVOS])).rows
+    .sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR'))
+  const e = await pool.query(`SELECT trava FROM whatsapp_estado WHERE id = 1`)
+  const trava = lerTrava({ WHATSAPP_SOMENTE_PARA: e.rows[0]?.trava || '' })
+  const destinatarios = [], nao_enviadas = []
+  for (const p of pros) {
+    const nome = p.nome || null
+    const recusar = (motivo) => nao_enviadas.push({ nome, motivo })
+    const destino = normalizarTelefone(p.telefone)
+    if (!destino) { recusar('sem telefone válido no cadastro'); continue }
+    if (p.whatsapp_avisos === false) { recusar('pediu para não receber mensagens do robô (SAIR)'); continue }
+    if (!travaPermite(trava, destino)) { recusar('a trava de teste (WHATSAPP_SOMENTE_PARA) não libera este número'); continue }
+    const textoDele = texto.replace(RE_PRIMEIRO_NOME, primeiroNomeDe(p.nome)).trim()
+    if (textoDele.length > MAX_TEXTO_AVULSA) { recusar(`com o nome, o texto passa de ${MAX_TEXTO_AVULSA} caracteres`); continue }
+    const rep = await pool.query(
+      `SELECT id FROM whatsapp_mensagens
+        WHERE tipo = $1 AND texto = $2 AND (usuario_id = $3::uuid OR telefone = ANY($4::text[]))
+          AND criado_em > NOW() - INTERVAL '${DEDUPE_AVULSA_HORAS} hours'
+          AND status NOT IN ('falha', 'sem_whatsapp', 'saiu')
+        LIMIT 1`, [TIPO_AVULSA, textoDele, p.id, variantesTelefone(destino)])
+    if (rep.rows.length) { recusar(`esta mesma mensagem já foi para esta pessoa nas últimas ${DEDUPE_AVULSA_HORAS} h`); continue }
+    const r = await enfileirar({ tipo: TIPO_AVULSA, usuarioId: p.id, telefone: destino, texto: textoDele, refTabela: pedido.tabela, refId: pedido.id, dados: { alvo: ALVO_INTERESSADOS } })
+    if (!r.ok) { recusar(`não entrou na fila: ${r.motivo}`); continue }
+    destinatarios.push({ id: r.id, nome, telefone: mascararTelefone(destino), status: 'fila' })
+  }
+  const config = await lerConfig(pool)
+  const quando = config.pausado ? 'O robô está pausado: saem quando for retomado.'
+    : dentroDaJanela(new Date()) ? 'Saem uma a uma, em instantes.' : `Fora do horário de envio: saem a partir das ${String(HORA_INICIO).padStart(2, '0')}h.`
+  const n = destinatarios.length
+  const mensagem = pros.length === 0 ? 'Este pedido não tem profissional com proposta na disputa: nada foi enviado.'
+    : n === 0 ? 'Nenhum dos interessados pode receber esta mensagem.'
+      : `${n} ${n === 1 ? 'mensagem na fila' : 'mensagens na fila'}. ${quando}`
+  return { codigo, alvo: ALVO_INTERESSADOS, enfileiradas: n, nomes: destinatarios.map(x => x.nome), destinatarios, nao_enviadas, mensagem }
+}
+
 // POST /admin/whatsapp/avulsa { codigo, texto } — UMA mensagem escrita à mão para o DONO do pedido
 // (reparo ou obra) com esse código curto. Tipo 'avulsa': sempre ligado (fora do liga/desliga por
 // tipo), mas atrás da pausa global, da janela 08–21h e da trava de teste; o worker confere o número
@@ -283,6 +340,15 @@ router.post('/admin/whatsapp/avulsa', autenticar, exigirSuperAdmin, async (req, 
     if (!codigo) return res.status(400).json({ erro: 'Informe o código do pedido.' })
     if (!texto) return res.status(400).json({ erro: 'Informe o texto da mensagem.' })
     if (texto.length > MAX_TEXTO_AVULSA) return res.status(400).json({ erro: `O texto tem ${texto.length} caracteres; o máximo é ${MAX_TEXTO_AVULSA}.` })
+    // alvo: 'dono' (padrão — o comportamento de sempre) ou 'interessados' (ver enviarAvulsaAosInteressados).
+    const alvo = req.body?.alvo === undefined || req.body?.alvo === null || req.body?.alvo === '' ? ALVO_DONO : String(req.body.alvo).trim().toLowerCase()
+    if (alvo !== ALVO_DONO && alvo !== ALVO_INTERESSADOS) return res.status(400).json({ erro: "alvo deve ser 'dono' ou 'interessados'." })
+    if (alvo === ALVO_INTERESSADOS) {
+      const e0 = await pool.query(`SELECT trava FROM whatsapp_estado WHERE id = 1`)
+      if (lerTrava({ WHATSAPP_SOMENTE_PARA: e0.rows[0]?.trava || '' }).modo === 'ausente') {
+        return res.status(409).json({ erro: 'O robô está sem a trava WHATSAPP_SOMENTE_PARA (ou ainda não iniciou): nada pode ser enviado.' })
+      }
+    }
     const d = await pool.query(
       `SELECT d.tabela, d.id, d.criado_por, u.nome, u.telefone, u.whatsapp_avisos
          FROM (SELECT 'reparos' AS tabela, id, criado_por, codigo_publico FROM reparos
@@ -293,6 +359,7 @@ router.post('/admin/whatsapp/avulsa', autenticar, exigirSuperAdmin, async (req, 
         LIMIT 1`, [codigo])
     const pedido = d.rows[0]
     if (!pedido) return res.status(404).json({ erro: `Nenhum pedido com o código ${codigo}.` })
+    if (alvo === ALVO_INTERESSADOS) return res.json(await enviarAvulsaAosInteressados({ codigo, texto, pedido }))
     const para = pedido.nome || null
     const destino = normalizarTelefone(pedido.telefone)
     if (!destino) return res.status(422).json({ erro: 'O dono deste pedido não tem telefone válido no cadastro.', para })
