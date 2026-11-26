@@ -249,7 +249,53 @@ const migrarOrcamentoVisita = async (client) => {
     await client.query(`ALTER TABLE ${proposta} ADD COLUMN IF NOT EXISTS orcamento_observacao TEXT`)
     await client.query(`ALTER TABLE ${proposta} ADD COLUMN IF NOT EXISTS orcamento_enviado_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE ${proposta} ADD COLUMN IF NOT EXISTS orcamento_lembrete_em TIMESTAMPTZ`)
+    // Visita aceita que o dono recusou depois: quando, e quando o profissional foi avisado.
+    await client.query(`ALTER TABLE ${proposta} ADD COLUMN IF NOT EXISTS visita_cancelada_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE ${proposta} ADD COLUMN IF NOT EXISTS visita_cancelada_aviso_em TIMESTAMPTZ`)
   }
+}
+
+// VISITA CANCELADA (dono, 26/11/2026): o dono recusa ('recusar') uma proposta em 'visita_aceita' →
+// 'recusado' + visita_cancelada_em, e o profissional recebe "📋 Visita cancelada: {título}" (push +
+// e-mail, o caminho de sempre) no lugar do aviso genérico de proposta não aceita. Fora do silêncio
+// noturno (22h–7h de São Paulo) sai na hora; dentro dele fica devido e o job de server.js o envia a
+// partir das 7h. visita_cancelada_aviso_em é o claim: um aviso por visita. O lembrete do orçamento
+// morre junto (ele só olha 'visita_aceita'). Orçamento já enviado recusado segue com o aviso genérico.
+const TITULO_VISITA_CANCELADA = (titulo) => `📋 Visita cancelada: ${titulo}`
+const CORPO_VISITA_CANCELADA = 'O cliente desistiu da visita. Obrigado pela disponibilidade!'
+const visitaAceitaAtiva = (proposta) => ehVisita(proposta) && proposta.status === STATUS_VISITA_ACEITA
+const avisarVisitasCanceladas = async ({ avisarUsuario }, db = pool, agora = new Date()) => {
+  let enviados = 0
+  const iso = agora.toISOString()
+  for (const [tabela, lado] of Object.entries(LADOS)) {
+    const r = await db.query(
+      `UPDATE ${lado.proposta} p SET visita_cancelada_aviso_em = $1::timestamptz
+         FROM ${lado.tabela} d
+        WHERE d.id = p.${lado.fk} AND p.visita_cancelada_em IS NOT NULL AND p.visita_cancelada_aviso_em IS NULL
+          AND EXTRACT(HOUR FROM $1::timestamptz AT TIME ZONE '${TZ}') >= 7 AND EXTRACT(HOUR FROM $1::timestamptz AT TIME ZONE '${TZ}') < 22
+      RETURNING p.id, p.usuario_id, d.id AS demanda_id, d.titulo, d.criado_por`, [iso])
+    for (const l of r.rows) {
+      avisarUsuario(l.usuario_id, {
+        ator_id: l.criado_por,
+        titulo: TITULO_VISITA_CANCELADA(l.titulo), corpo: CORPO_VISITA_CANCELADA,
+        data: { tipo: 'visita_cancelada', [lado.chave]: l.demanda_id, [lado.idPush]: l.id },
+        rotulo: `visita cancelada ${tabela} ${l.demanda_id}`,
+      })
+      enviados++
+    }
+  }
+  return enviados
+}
+// Dono recusa a visita aceita. Devolve true se era uma visita aceita e foi cancelada aqui (quem
+// chama então NÃO manda o aviso genérico de recusa).
+const cancelarVisitaAceita = async ({ tabela, proposta }, dep, db = pool) => {
+  if (!visitaAceitaAtiva(proposta)) return false
+  const r = await db.query(
+    `UPDATE ${LADOS[tabela].proposta} SET status = 'recusado', visita_cancelada_em = NOW() WHERE id = $1 AND status = '${STATUS_VISITA_ACEITA}' RETURNING id`, [proposta.id])
+  if (r.rows.length === 0) return false
+  // Na hora, se não for silêncio; nunca derruba a resposta ao dono.
+  avisarVisitasCanceladas(dep, db).catch(err => console.error('[orçamento] aviso de visita cancelada:', err.message))
+  return true
 }
 
 // LEMBRETE do orçamento: visita aceita cujo DIA (em São Paulo) já passou, sem orçamento, pedido
@@ -288,4 +334,5 @@ module.exports = {
   suporta, lerDataHora, quandoLegivel, textoVisita, textoOrcamento, lerProposta, lerOrcamento,
   ehVisita, visitaSemOrcamento, visitaLiberaEndereco, aceitarVisita, gravarOrcamento, apresentar, anexarCamposProposta,
   migrarOrcamentoVisita, lembrarOrcamentos,
+  TITULO_VISITA_CANCELADA, CORPO_VISITA_CANCELADA, visitaAceitaAtiva, avisarVisitasCanceladas, cancelarVisitaAceita,
 }

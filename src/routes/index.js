@@ -44,7 +44,7 @@ const { migrarDemandasSalvas, anexarSalvo, anexarSalvosCount } = require('../uti
 const { avaliarTelefoneAoPublicar, gravarTelefoneDoDono } = require('../utils/telefoneAoPublicar')
 // Proposta de visita para orçamento (utils/orcamentoVisita): tipo_proposta, visita aceita, orçamento.
 const { migrarOrcamentoVisita, lerProposta, lerOrcamento, textoVisita, ehVisita, visitaSemOrcamento, visitaLiberaEndereco, aceitarVisita, gravarOrcamento,
-        apresentar: apresentarProposta, anexarCamposProposta, STATUS_ORCAMENTO, STATUS_ORCAMENTO_ENVIADO } = require('../utils/orcamentoVisita')
+        apresentar: apresentarProposta, anexarCamposProposta, cancelarVisitaAceita, STATUS_ORCAMENTO, STATUS_ORCAMENTO_ENVIADO } = require('../utils/orcamentoVisita')
 // Anti-contato (utils/contatoNoTexto): contato no texto do pedido, da pergunta e da resposta.
 const { migrarContatoNoTexto, detectarContatoNoPedido, decidirContato, gravarContatoNoTexto, mascararContatos, migrarAvisosManuais, anexarAvisoContato } = require('../utils/contatoNoTexto')
 const { migrarSuspeitaAnuncio, avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita, anexarEspecialidadeProfissionalDoDono } = require('../utils/suspeitaAnuncio')
@@ -4429,6 +4429,8 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
       if (!['pendente', 'contraproposta_dono', ...STATUS_ORCAMENTO].includes(cand.status)) {
         return res.status(409).json({ erro: 'Esta candidatura não está mais em negociação.' })
       }
+      // Visita aceita recusada = visita CANCELADA: aviso próprio ("📋 Visita cancelada"), fora do silêncio noturno (utils/orcamentoVisita).
+      if (await cancelarVisitaAceita({ tabela: 'obras', proposta: cand }, depOrcamento())) return res.json({ mensagem: 'Candidatura recusada.' })
       await pool.query(`UPDATE candidaturas SET status = 'recusado' WHERE id = $1`, [candidaturaId])
       avisarUsuario(cand.usuario_id, {
         ator_id: req.usuario.id,
@@ -6135,6 +6137,8 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
       if (!['pendente', 'contraproposta_dono', ...STATUS_ORCAMENTO].includes(int.status)) {
         return res.status(409).json({ erro: 'Esta proposta não está mais em negociação.' })
       }
+      // Visita aceita recusada = visita CANCELADA — mesma regra do lado obra (utils/orcamentoVisita).
+      if (await cancelarVisitaAceita({ tabela: 'reparos', proposta: int }, depOrcamento())) return res.json({ mensagem: 'Proposta recusada.' })
       await pool.query(`UPDATE interesse_reparos SET status = 'recusado' WHERE id = $1`, [interesse_id])
       avisarUsuario(int.usuario_id, {
         ator_id: req.usuario.id,
