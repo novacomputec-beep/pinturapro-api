@@ -40,7 +40,8 @@ const ROTULO_DESISTENCIA = {
   atraso_chegada: 'Não chegou no prazo combinado',
 }
 const ROTULO_CONTA_EXCLUIDA_F = 'A profissional excluiu a conta e não vai mais fazer o serviço.'
-const STATUS_ATIVOS = ['pendente', 'contraproposta_dono']
+// + visita aceita e orçamento enviado (utils/orcamentoVisita): também estão na disputa.
+const STATUS_ATIVOS = ['pendente', 'contraproposta_dono', 'visita_aceita', 'orcamento_enviado']
 
 const primeiroNome = (nome) => String(nome || '').trim().split(/\s+/)[0] || null
 const rotuloMotivo = (motivo, genero = null) => {

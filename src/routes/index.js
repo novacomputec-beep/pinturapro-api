@@ -42,6 +42,9 @@ const { handlers: cancelamentoHandlers, pedidoCancelamento, cancelarPorAdmin, SQ
 const { migrarDemandasSalvas, anexarSalvo, anexarSalvosCount } = require('../utils/demandasSalvas')
 // Telefone do dono informado ao publicar (utils/telefoneAoPublicar): grava na conta que não tem.
 const { avaliarTelefoneAoPublicar, gravarTelefoneDoDono } = require('../utils/telefoneAoPublicar')
+// Proposta de visita para orçamento (utils/orcamentoVisita): tipo_proposta, visita aceita, orçamento.
+const { migrarOrcamentoVisita, lerProposta, lerOrcamento, textoVisita, ehVisita, visitaSemOrcamento, visitaLiberaEndereco, aceitarVisita, gravarOrcamento,
+        apresentar: apresentarProposta, anexarCamposProposta, STATUS_ORCAMENTO, STATUS_ORCAMENTO_ENVIADO } = require('../utils/orcamentoVisita')
 // Anti-contato (utils/contatoNoTexto): contato no texto do pedido, da pergunta e da resposta.
 const { migrarContatoNoTexto, detectarContatoNoPedido, decidirContato, gravarContatoNoTexto, mascararContatos, migrarAvisosManuais, anexarAvisoContato } = require('../utils/contatoNoTexto')
 const { migrarSuspeitaAnuncio, avaliarSuspeitaAnuncio, decidirPublicacao, gravarSuspeita, anexarEspecialidadeProfissionalDoDono } = require('../utils/suspeitaAnuncio')
@@ -773,6 +776,8 @@ const migracaoPronta = require('../utils/auditoriaDemanda').comOrigem({ origem: 
     await migrarSuspeitaAnuncio(client)
     // Anti-contato (utils/contatoNoTexto): colunas contato_no_texto* e a varredura ÚNICA dos pedidos abertos.
     await migrarContatoNoTexto(client)
+    // Visita para orçamento (utils/orcamentoVisita): colunas novas em candidaturas e interesse_reparos.
+    await migrarOrcamentoVisita(client)
     for (const v of valoresACombinar) console.log(`[migration] valor a combinar: ${v.tabela} ${v.id} "${v.titulo}" (valor era ${v.valor_antes})`)
     // Instante em que o push "nova obra/novo serviço disponível" foi disparado. NULL = ainda
     // não avisado. Escrito UMA vez pelo claim atômico de POST /:id/midias-prontas (o app
@@ -2937,7 +2942,7 @@ router.get('/obras/minhas', autenticar, async (req, res) => {
         (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id) as total_interessados,
         -- Conta 'pendente' E 'contraproposta_dono': uma obra em negociação (contraproposta
         -- enviada, aguardando o pintor) continua tendo interessado, e antes aparecia como zero.
-        (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id AND status IN ('pendente', 'contraproposta_dono')) as candidaturas_pendentes,
+        (SELECT COUNT(*) FROM candidaturas WHERE obra_id = o.id AND status IN ('pendente', 'contraproposta_dono', 'visita_aceita', 'orcamento_enviado')) as candidaturas_pendentes,
         -- Candidatura pendente mais recente: deixa o app chavear o modal de nova proposta
         -- por candidatura, não por obra. Ordena por criado_em (id é UUID aleatório, então
         -- MAX(id) não é "a mais nova"); id DESC só desempata criado_em idêntico. NULL se
@@ -4209,6 +4214,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
       candidatos = mascararLista(candidatosResult.rows, ['mensagem', 'pergunta', 'resposta'])
     }
     mascararLista(minhaCandidaturaResult.rows, ['mensagem', 'mensagem_oferta'])
+    // tipo_proposta, visita_*, orcamento_*, mensagem_profissional (utils/orcamentoVisita).
+    await anexarCamposProposta('obras', [...minhaCandidaturaResult.rows, ...candidatos])
 
     // dono_nome ("Luiz M.") e dono_foto_url (avatar otimizado): SÓ para o pintor do match;
     // null para qualquer outro leitor (dono, admin, assinante). Nunca e-mail nem endereço.
@@ -4227,7 +4234,8 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // pintor do match DEPOIS do horário combinado (chegada_prevista_em); para os demais — inclusive
     // o pintor do match antes do horário e o candidato com aceite — endereço/ponto nulos,
     // coordenadas arredondadas e endereco_liberado:false (utils/privacidadeDemanda).
-    aplicarPrivacidadeLocal(obra, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPintorDoMatch })
+    // …e o profissional cuja VISITA para orçamento o dono aceitou (utils/orcamentoVisita).
+    aplicarPrivacidadeLocal(obra, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPintorDoMatch, visitaAceita: visitaLiberaEndereco(minhaCandidaturaResult.rows[0]) })
 
     // Advisory: quanto o dono pode estender POR REQUISIÇÃO — a janela original da obra
     // (horas_para_expirar, COALESCE 720), com piso de 24h porque o modal manda dias × 24. É o
@@ -4289,6 +4297,9 @@ router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssin
   let client
   try {
     const { mensagem, valor_proposto } = req.body
+    // Visita para orçamento (utils/orcamentoVisita): valor (mínimo R$ 20) ou visita — só com suporta_orcamento no corpo.
+    const proposta = lerProposta(req.body)
+    if (proposta.erro) return res.status(400).json(proposta.erro)
     if (await ehDemandaPropria('obras', req.params.id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
     // Contato na mensagem vira "[contato removido]" antes de gravar (+ linha em tentativas_contato).
     const { valores: limpos, registrar: registrarContato } = limparCamposEscrita({ mensagem }, { usuario_id: req.usuario.id, tipo: 'candidatura', demanda_id: req.params.id })
@@ -4300,14 +4311,19 @@ router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssin
     const { demanda, recusa } = await travarDemandaAberta(client, 'obras', req.params.id)
     if (recusa) { await client.query('ROLLBACK'); return res.status(recusa.status).json(recusa.corpo) }
     // Obra "valor a combinar": quem dá o preço é o profissional — valor_proposto obrigatório e > 0.
-    const semValorObra = await exigirValorPropostaSeACombinar(client, 'obras', req.params.id, valor_proposto)
+    const semValorObra = proposta.tipo === 'visita' ? null : await exigirValorPropostaSeACombinar(client, 'obras', req.params.id, valor_proposto)
     if (semValorObra) { await client.query('ROLLBACK'); return res.status(400).json(semValorObra) }
     const existente = await client.query(
       `SELECT id FROM candidaturas WHERE obra_id = $1 AND usuario_id = $2`,
       [req.params.id, req.usuario.id]
     )
     if (existente.rows.length > 0) { await client.query('ROLLBACK'); return res.status(409).json(req.contaLogada ? ERRO_PROPOSTA_OUTRO_PERFIL : { erro: 'Você já se candidatou nesta obra' }) }
-    const result = await client.query(
+    // Visita: `mensagem` guarda o texto legível para o app antigo; o que o profissional escreveu vai em mensagem_original.
+    const result = proposta.tipo === 'visita' ? await client.query(
+      `INSERT INTO candidaturas (obra_id, usuario_id, mensagem, mensagem_original, valor_proposto, status, tipo_proposta, visita_gratis, visita_valor, visita_quando)
+       VALUES ($1, $2, $3, $4, NULL, 'pendente', 'visita', $5::boolean, $6::numeric, $7::timestamptz) RETURNING *`,
+      [req.params.id, req.usuario.id, textoVisita(proposta, limpos.mensagem), limpos.mensagem ?? null, proposta.visita_gratis, proposta.visita_valor, proposta.visita_quando]
+    ) : await client.query(
       `INSERT INTO candidaturas (obra_id, usuario_id, mensagem, valor_proposto, status) VALUES ($1, $2, $3, $4, 'pendente') RETURNING *`,
       [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
     )
@@ -4316,12 +4332,12 @@ router.post('/obras/:id/candidatura', autenticar, exigirNaoSuspenso, exigirAssin
     // Push + e-mail sempre (política de 29/10/2026); candidatura_id distingue os candidatos no dedupe.
     avisarUsuario(demanda.criado_por, {
       ator_id: req.usuario.id,
-      titulo: '🎨 Novo candidato!',
-      corpo: `Um profissional se candidatou na obra "${demanda.titulo}"`,
+      titulo: proposta.tipo === 'visita' ? '📋 Proposta de visita para orçamento' : '🎨 Novo candidato!',
+      corpo: proposta.tipo === 'visita' ? `Um profissional quer visitar para fazer o orçamento de "${demanda.titulo}"` : `Um profissional se candidatou na obra "${demanda.titulo}"`,
       data: { tipo: 'nova_candidatura', obra_id: req.params.id, candidatura_id: result.rows[0].id },
       rotulo: `nova candidatura obras ${req.params.id}`,
     })
-    res.status(201).json(result.rows[0])
+    res.status(201).json(apresentarProposta(result.rows[0]))
   } catch (err) {
     if (client) { try { await client.query('ROLLBACK') } catch {} }
     console.error('Erro ao candidatar:', err)
@@ -4348,6 +4364,12 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
     )
     if (candidatura.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' })
     const cand = candidatura.rows[0]
+    // Visita para orçamento (utils/orcamentoVisita): 'aceitar_visita' — ou o 'aceitar' do app antigo numa visita ainda
+    // sem orçamento — aceita a VISITA: o pedido continua aberto e só este profissional vê o endereço.
+    if (action === 'aceitar_visita' || (action === 'aceitar' && visitaSemOrcamento(cand))) {
+      const r = await aceitarVisita({ tabela: 'obras', demandaId: obra_id, demanda: obra.rows[0], proposta: cand, donoId: req.usuario.id }, depOrcamento())
+      return res.status(r.status).json(r.body)
+    }
     if (action === 'aceitar') {
       // Idempotência de retry: já aceita → devolve sucesso sem reprocessar (sem repetir
       // push nem o UPDATE do match). Sem isto o jaAceito abaixo não pega o próprio
@@ -4361,7 +4383,8 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
       if (!obraAbertaParaNegociar) {
         return res.status(409).json({ erro: 'Esta obra não está mais aberta para negociação.' })
       }
-      if (cand.status !== 'pendente') {
+      // 'orcamento_enviado' (visita com orçamento): o aceite é o de sempre.
+      if (!['pendente', STATUS_ORCAMENTO_ENVIADO].includes(cand.status)) {
         return res.status(409).json({ erro: 'Esta candidatura não está mais disponível para aceite.' })
       }
       // Prazo vencido (utils/demandaAberta): 409 antes de qualquer escrita — o dono aumenta o prazo.
@@ -4403,7 +4426,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
       if (cand.status === 'aceito' || obra.rows[0].match_usuario_id === cand.usuario_id) {
         return res.status(409).json({ erro: "Este profissional já foi escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
       }
-      if (!['pendente', 'contraproposta_dono'].includes(cand.status)) {
+      if (!['pendente', 'contraproposta_dono', ...STATUS_ORCAMENTO].includes(cand.status)) {
         return res.status(409).json({ erro: 'Esta candidatura não está mais em negociação.' })
       }
       await pool.query(`UPDATE candidaturas SET status = 'recusado' WHERE id = $1`, [candidaturaId])
@@ -4417,6 +4440,7 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
     }
     if (action === 'contraproposta') {
       if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
+      if (ehVisita(cand)) return res.status(409).json(ERRO_PROPOSTA_DE_VISITA)
       // Guarda de estado (D8): contrapropor só numa obra viva e sobre candidatura 'pendente'.
       // Bloqueia reescrever o valor depois de aceito, recusado, expirado ou já fechado.
       if (!obraAbertaParaNegociar) {
@@ -4860,7 +4884,7 @@ router.get('/reparos/minhas', autenticar, async (req, res) => {
         (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id) as total_interessados,
         -- Conta 'pendente' E 'contraproposta_dono': um reparo em negociação (contraproposta
         -- enviada, aguardando o prestador) continua tendo interessado, e antes aparecia como zero.
-        (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id AND status IN ('pendente', 'contraproposta_dono')) as interesses_pendentes,
+        (SELECT COUNT(*) FROM interesse_reparos WHERE reparo_id = r.id AND status IN ('pendente', 'contraproposta_dono', 'visita_aceita', 'orcamento_enviado')) as interesses_pendentes,
         -- Interesse pendente mais recente: deixa o app chavear o modal de nova proposta
         -- por interesse, não por reparo. Ordena por criado_em (id é UUID aleatório, então
         -- MAX(id) não é "o mais novo"); id DESC só desempata criado_em idêntico. NULL se
@@ -5600,6 +5624,7 @@ router.get('/reparos/meus-interesses', autenticar, async (req, res) => {
       WHERE ${sqlProfissionalDaPessoa('ir.usuario_id', '$1')}
       ORDER BY ir.criado_em DESC
     `, [req.usuario.id])
+    await anexarCamposProposta('reparos', result.rows)
     const agora = new Date()
     // Arquiva por dois motivos independentes. O primeiro é o interesse em si: quem foi
     // recusado (inclusive em massa por rejeitarConcorrentes, quando o dono fecha match
@@ -5845,6 +5870,9 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
   let client
   try {
     const { mensagem, valor_proposto } = req.body
+    // Visita para orçamento (utils/orcamentoVisita) — mesma regra do POST /obras/:id/candidatura.
+    const proposta = lerProposta(req.body)
+    if (proposta.erro) return res.status(400).json(proposta.erro)
     if (await ehDemandaPropria('reparos', req.params.id, req.usuario.id)) return res.status(400).json(ERRO_DEMANDA_PROPRIA)
     // Contato na mensagem vira "[contato removido]" antes de gravar (+ linha em tentativas_contato).
     const { valores: limpos, registrar: registrarContato } = limparCamposEscrita({ mensagem }, { usuario_id: req.usuario.id, tipo: 'interesse', demanda_id: req.params.id })
@@ -5856,11 +5884,15 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
     const { demanda, recusa } = await travarDemandaAberta(client, 'reparos', req.params.id)
     if (recusa) { await client.query('ROLLBACK'); return res.status(recusa.status).json(recusa.corpo) }
     // Serviço "valor a combinar": quem dá o preço é o profissional — valor_proposto obrigatório e > 0.
-    const semValorReparo = await exigirValorPropostaSeACombinar(client, 'reparos', req.params.id, valor_proposto)
+    const semValorReparo = proposta.tipo === 'visita' ? null : await exigirValorPropostaSeACombinar(client, 'reparos', req.params.id, valor_proposto)
     if (semValorReparo) { await client.query('ROLLBACK'); return res.status(400).json(semValorReparo) }
     const existente = await client.query(`SELECT id FROM interesse_reparos WHERE reparo_id = $1 AND usuario_id = $2`, [req.params.id, req.usuario.id])
     if (existente.rows.length > 0) { await client.query('ROLLBACK'); return res.status(409).json(req.contaLogada ? ERRO_PROPOSTA_OUTRO_PERFIL : { erro: 'Você já demonstrou interesse neste serviço' }) }
-    const result = await client.query(
+    const result = proposta.tipo === 'visita' ? await client.query(
+      `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem, mensagem_original, valor_proposto, rodada, tipo_proposta, visita_gratis, visita_valor, visita_quando)
+       VALUES ($1, $2, $3, $4, NULL, 1, 'visita', $5::boolean, $6::numeric, $7::timestamptz) RETURNING *`,
+      [req.params.id, req.usuario.id, textoVisita(proposta, limpos.mensagem), limpos.mensagem ?? null, proposta.visita_gratis, proposta.visita_valor, proposta.visita_quando]
+    ) : await client.query(
       `INSERT INTO interesse_reparos (reparo_id, usuario_id, mensagem, valor_proposto, rodada) VALUES ($1, $2, $3, $4, 1) RETURNING *`,
       [req.params.id, req.usuario.id, limpos.mensagem, valor_proposto || null]
     )
@@ -5870,12 +5902,12 @@ router.post('/reparos/:id/interesse', autenticar, exigirNaoSuspenso, exigirPrest
     // interessados no dedupe.
     avisarUsuario(demanda.criado_por, {
       ator_id: req.usuario.id,
-      titulo: '🔧 Novo interesse!',
-      corpo: `Um prestador demonstrou interesse no serviço "${demanda.titulo}"`,
+      titulo: proposta.tipo === 'visita' ? '📋 Proposta de visita para orçamento' : '🔧 Novo interesse!',
+      corpo: proposta.tipo === 'visita' ? `Um profissional quer visitar para fazer o orçamento de "${demanda.titulo}"` : `Um prestador demonstrou interesse no serviço "${demanda.titulo}"`,
       data: { tipo: 'novo_interesse', reparo_id: req.params.id, interesse_id: result.rows[0].id },
       rotulo: `novo interesse reparos ${req.params.id}`,
     })
-    res.status(201).json(result.rows[0])
+    res.status(201).json(apresentarProposta(result.rows[0]))
   } catch (err) {
     if (client) { try { await client.query('ROLLBACK') } catch {} }
     console.error('Erro ao registrar interesse:', err.message)
@@ -6040,6 +6072,11 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
     if (interesse.rows.length === 0) return res.status(404).json({ erro: 'Interesse não encontrado' })
     const int = interesse.rows[0]
 
+    // Visita para orçamento (utils/orcamentoVisita) — mesma regra do lado obra.
+    if (action === 'aceitar_visita' || (action === 'aceitar' && visitaSemOrcamento(int))) {
+      const r = await aceitarVisita({ tabela: 'reparos', demandaId: reparo_id, demanda: reparo.rows[0], proposta: int, donoId: req.usuario.id }, depOrcamento())
+      return res.status(r.status).json(r.body)
+    }
     if (action === 'aceitar') {
       // Idempotência de retry: já aceito → devolve sucesso sem reprocessar (sem repetir
       // push nem o UPDATE do match). Sem isto o jaAceito abaixo não pega o próprio
@@ -6052,7 +6089,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
       if (!reparoAbertoParaNegociar) {
         return res.status(409).json({ erro: 'Este serviço não está mais aberto para negociação.' })
       }
-      if (int.status !== 'pendente') {
+      if (!['pendente', STATUS_ORCAMENTO_ENVIADO].includes(int.status)) {
         return res.status(409).json({ erro: 'Esta proposta não está mais disponível para aceite.' })
       }
       // Prazo vencido (utils/demandaAberta): 409 antes de qualquer escrita — o dono aumenta o prazo.
@@ -6095,7 +6132,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
       if (int.status === 'aceito' || reparo.rows[0].match_usuario_id === int.usuario_id) {
         return res.status(409).json({ erro: "Este profissional já foi escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
       }
-      if (!['pendente', 'contraproposta_dono'].includes(int.status)) {
+      if (!['pendente', 'contraproposta_dono', ...STATUS_ORCAMENTO].includes(int.status)) {
         return res.status(409).json({ erro: 'Esta proposta não está mais em negociação.' })
       }
       await pool.query(`UPDATE interesse_reparos SET status = 'recusado' WHERE id = $1`, [interesse_id])
@@ -6110,6 +6147,7 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
 
     if (action === 'contraproposta') {
       if (!valor) return res.status(400).json({ erro: 'Informe o valor da contraproposta' })
+      if (ehVisita(int)) return res.status(409).json(ERRO_PROPOSTA_DE_VISITA)
       // Guarda de estado (D8): contrapropor só num serviço vivo e sobre interesse 'pendente'.
       if (!reparoAbertoParaNegociar) {
         return res.status(409).json({ erro: 'Este serviço não está mais aberto para negociação.' })
@@ -7213,6 +7251,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       // Mensagem/pergunta do interessado mascaradas na leitura (linhas antigas, anteriores ao filtro).
       interessados = mascararLista(result2.rows, ['mensagem', 'pergunta', 'resposta'])
     }
+    // tipo_proposta, visita_*, orcamento_*, mensagem_profissional (utils/orcamentoVisita).
+    await anexarCamposProposta('reparos', [...interesse.rows, ...interessados])
 
     // dono_nome ("Luiz M.") e dono_foto_url (avatar otimizado): SÓ para o prestador do match;
     // null para qualquer outro leitor (dono, admin, assinante). Nunca e-mail nem endereço.
@@ -7230,7 +7270,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // Local exato (endereco_reparo, ponto_referencia, coordenadas exatas) só para dono, admin e o
     // prestador do match DEPOIS do horário combinado (chegada_prevista_em); demais leitores recebem
     // endereço/ponto nulos, coordenadas arredondadas e endereco_liberado:false (utils/privacidadeDemanda).
-    aplicarPrivacidadeLocal(reparo, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPrestadorDoMatch })
+    // …e o profissional cuja VISITA para orçamento o dono aceitou (utils/orcamentoVisita).
+    aplicarPrivacidadeLocal(reparo, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPrestadorDoMatch, visitaAceita: visitaLiberaEndereco(interesse.rows[0]) })
 
     // Advisory: quanto o dono pode estender POR REQUISIÇÃO — a janela original do reparo
     // (prazo_atendimento_horas, COALESCE 720), o MESMO número que POST /reparos/:id/estender
@@ -8903,6 +8944,43 @@ router.post('/candidaturas', autenticar, exigirNaoSuspenso, exigirAssinaturaAtiv
     res.status(500).json({ erro: 'Erro ao registrar candidatura' })
   }
 })
+
+// Visita para orçamento (utils/orcamentoVisita) — peças das rotas.
+const ERRO_PROPOSTA_DE_VISITA = Object.freeze({ erro: 'Esta proposta é uma visita para orçamento: aceite ou recuse a visita.', codigo: 'PROPOSTA_DE_VISITA' })
+const depOrcamento = () => ({ estaSuspenso, prazoVencido, avisarUsuario, ERRO_ACEITE_SUSPENSO, ERRO_PRAZO_VENCIDO })
+// POST /obras/:id/candidatura/:propostaId/orcamento e POST /reparos/:id/interesse/:propostaId/orcamento
+// — body { valor, prazo_dias, data_inicio (AAAA-MM-DD), observacao? }. Só o profissional da proposta,
+// só com a visita aceita ('visita_aceita'): a proposta vira 'orcamento_enviado' (valor_proposto =
+// valor) e o dono recebe "💰 Orçamento recebido". Pedido fora de 'aberta' → 409 PEDIDO_INDISPONIVEL.
+const criarHandlerOrcamento = (tabela) => async (req, res) => {
+  let client
+  try {
+    const orc = lerOrcamento(req.body)
+    if (orc.erro) return res.status(400).json(orc.erro)
+    const { id: demandaId, propostaId } = req.params
+    if (!UUID_RE.test(String(demandaId)) || !UUID_RE.test(String(propostaId))) return res.status(404).json({ erro: 'Proposta não encontrada' })
+    // Contato na observação vira "[contato removido]" antes de gravar (+ linha em tentativas_contato).
+    const { valores: limpos, registrar: registrarContato } = limparCamposEscrita({ observacao: orc.observacao }, { usuario_id: req.usuario.id, tipo: 'orcamento', demanda_id: demandaId })
+    client = await pool.connect()
+    await client.query('BEGIN')
+    const { demanda, recusa } = await travarDemandaAberta(client, tabela, demandaId)
+    if (recusa) { await client.query('ROLLBACK'); return res.status(recusa.status).json(recusa.corpo) }
+    const r = await gravarOrcamento({ tabela, demandaId, demanda, propostaId, usuarioId: req.usuario.id, orc: { ...orc, observacao: limpos.observacao ?? null } }, depOrcamento(), client)
+    if (r.status !== 200) { await client.query('ROLLBACK'); return res.status(r.status).json(r.body) }
+    await client.query('COMMIT')
+    registrarContato()
+    r.avisar()
+    res.json(r.body)
+  } catch (err) {
+    if (client) { try { await client.query('ROLLBACK') } catch {} }
+    console.error(`[orcamento] ${tabela} ${req.params.id}/${req.params.propostaId}:`, err.message)
+    res.status(500).json({ erro: 'Erro ao enviar o orçamento' })
+  } finally {
+    if (client) client.release()
+  }
+}
+router.post('/obras/:id/candidatura/:propostaId/orcamento', autenticar, exigirNaoSuspenso, exigirPodeObrasOuCandidato, criarHandlerOrcamento('obras'))
+router.post('/reparos/:id/interesse/:propostaId/orcamento', autenticar, exigirNaoSuspenso, exigirPodeServicosOuInteressado, criarHandlerOrcamento('reparos'))
 
 router.get('/candidaturas/minhas',        autenticar, candidaturasCtrl.minhas)
 router.get('/candidaturas/pendentes',     autenticar, exigirAdmin, candidaturasCtrl.pendentes)

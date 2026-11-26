@@ -36,8 +36,9 @@ const ofuscarCoordenadas = (linha) => {
 const ofuscarCoordenadasLista = (linhas) => { for (const l of linhas) ofuscarCoordenadas(l); return linhas }
 
 // Quem pode ver o local exato: dono/admin sempre; o profissional do match só com horário combinado.
-const localLiberado = ({ ehDono = false, ehAdmin = false, ehProfissionalDoMatch = false, demanda }) =>
-  ehDono || ehAdmin || (ehProfissionalDoMatch && !!demanda?.chegada_prevista_em)
+// visitaAceita (utils/orcamentoVisita): o profissional cuja visita para orçamento o dono aceitou.
+const localLiberado = ({ ehDono = false, ehAdmin = false, ehProfissionalDoMatch = false, visitaAceita = false, demanda }) =>
+  ehDono || ehAdmin || visitaAceita || (ehProfissionalDoMatch && !!demanda?.chegada_prevista_em)
 
 // Aplica a regra inteira à linha de detalhe: endereço/ponto de referência + coordenadas +
 // endereco_liberado. Muta e devolve a própria linha. Procura os dois nomes de coluna de endereço
