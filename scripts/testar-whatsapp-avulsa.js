@@ -206,6 +206,67 @@ const main = async () => {
   const ct = (await chamar('get', '/admin/whatsapp/contadores')).body
   ok(ct.por_tipo.avulsa && ct.por_tipo.avulsa.sete_dias.respondida === 2, '/contadores: avulsa conta como os demais tipos', ct.por_tipo.avulsa && ct.por_tipo.avulsa.sete_dias)
 
+  // ═══════════ AVULSA PARA OS INTERESSADOS (alvo: 'interessados' — 26/11/2026) ═══════════
+  const paraInteressados = (codigo, texto, alvo = 'interessados') => chamar('post', '/admin/whatsapp/avulsa', { body: { codigo, texto, alvo } })
+  const R_INT = D(21)
+  await pedido('reparos', R_INT, 'Reforma do banheiro', DONO, 'KKKK9')
+  const pro = async (n, nome, telefone, status, tabela = 'reparos', demandaId = R_INT, extra = {}) => {
+    await usr(U(100 + n), nome, 'prestador', telefone, extra)
+    await q(`INSERT INTO ${tabela === 'obras' ? 'candidaturas (obra_id' : 'interesse_reparos (reparo_id'}, usuario_id, status) VALUES ($1, $2, $3)`, [demandaId, U(100 + n), status])
+  }
+  await pro(1, 'Bruno Reis', '34991110002', 'contraproposta_dono')
+  await pro(2, 'ana lima', '(34) 99111-0001', 'pendente')
+  await pro(3, 'Carla Sá', '34991110003', 'visita_aceita', 'reparos', R_INT, { whatsapp_avisos: false })
+  await pro(4, 'Davi Luz', null, 'orcamento_enviado')
+  await pro(5, 'Eva Paz', '34991110005', 'recusado')
+  await pro(6, 'Fábio Maia', '34991110006', 'pendente', 'obras', O1)
+  const antesInt = (await linhas()).length
+  const invalido = await paraInteressados('KKKK9', 'oi', 'todos'), longo = await paraInteressados('KKKK9', 'x'.repeat(1001)), semCodigo = await paraInteressados('ZZZZ9', 'oi')
+  ok(invalido.status === 400 && /alvo/.test(invalido.body.erro) && longo.status === 400 && semCodigo.status === 404 && (await linhas()).length === antesInt, "alvo desconhecido → 400; texto acima de 1000 → 400; código inexistente → 404; nada na fila")
+  await trava('')
+  const semTravaInt = await paraInteressados('KKKK9', 'oi')
+  ok(semTravaInt.status === 409 && (await linhas()).length === antesInt, 'interessados sem a trava do worker: 409, nada na fila', semTravaInt.body)
+  await trava('TODOS')
+  const vazio = await paraInteressados('HHHH8', 'Olá, {primeiro nome}!')
+  ok(vazio.status === 200 && vazio.body.enfileiradas === 0 && vazio.body.nomes.length === 0 && /não tem profissional/.test(vazio.body.mensagem), 'pedido sem proposta na disputa: 200 com enfileiradas 0', vazio.body)
+  const TXT = 'Oi, {primeiro nome}! O cliente do pedido de reforma ainda não escolheu. Sua proposta continua valendo.'
+  const i1 = await paraInteressados('kkkk9', TXT)
+  const filaInt = await linhas(`ref_id = '${R_INT}' AND tipo = 'avulsa'`)
+  ok(i1.status === 200 && i1.body.alvo === 'interessados' && i1.body.codigo === 'KKKK9' && i1.body.enfileiradas === 2 && JSON.stringify(i1.body.nomes) === '["ana lima","Bruno Reis"]'
+     && i1.body.destinatarios.every(x => x.status === 'fila' && /^\+55 34 \*+-000\d$/.test(x.telefone) && x.id) && /2 mensagens na fila/.test(i1.body.mensagem),
+     "alvo 'interessados': uma mensagem para cada profissional com proposta na disputa — devolve a quantidade e os nomes", i1.body)
+  ok(i1.body.nao_enviadas.length === 2 && i1.body.nao_enviadas.some(x => x.nome === 'Carla Sá' && /SAIR/.test(x.motivo)) && i1.body.nao_enviadas.some(x => x.nome === 'Davi Luz' && /sem telefone/.test(x.motivo))
+     && !JSON.stringify(i1.body).includes('Eva'), 'quem respondeu SAIR e quem não tem telefone ficam em nao_enviadas; proposta recusada nem entra', i1.body.nao_enviadas)
+  const lAna = filaInt.find(l => l.usuario_id === U(102)), lBruno = filaInt.find(l => l.usuario_id === U(101))
+  ok(filaInt.length === 2 && lAna.texto === TXT.replace('{primeiro nome}', 'ana') && lBruno.texto === TXT.replace('{primeiro nome}', 'Bruno') && lAna.telefone === '+5534991110001' && lAna.tipo === 'avulsa'
+     && lAna.status === 'fila' && lAna.ref_tabela === 'reparos' && lAna.sandbox === false,
+     'fila: uma linha avulsa por profissional, com {primeiro nome} trocado pelo primeiro nome de cada um', filaInt.map(l => l.texto.slice(0, 12)))
+  const i2 = await paraInteressados('KKKK9', TXT)
+  ok(i2.status === 200 && i2.body.enfileiradas === 0 && i2.body.nao_enviadas.filter(x => /mesma mensagem/.test(x.motivo)).length === 2 && (await linhas(`ref_id = '${R_INT}'`)).length === 2,
+     'mesma mensagem de novo em 24 h: ninguém recebe em dobro', i2.body.nao_enviadas.map(x => x.motivo))
+  await trava(TRAVA)
+  const i3 = await paraInteressados('KKKK9', 'Outro recado, {nome}.')
+  ok(i3.status === 200 && i3.body.enfileiradas === 0 && i3.body.nao_enviadas.filter(x => /trava de teste/.test(x.motivo)).length === 2, 'trava de teste em lista: número fora dela não entra na fila', i3.body.nao_enviadas.map(x => x.motivo))
+  await trava('TODOS')
+  const i4 = await paraInteressados('FFFF6', 'Olá { Primeiro_Nome }, a obra segue aberta.')
+  const lFabio = (await linhas(`ref_id = '${O1}' AND usuario_id = '${U(106)}'`))[0]
+  ok(i4.status === 200 && i4.body.enfileiradas === 1 && i4.body.nomes[0] === 'Fábio Maia' && lFabio.texto === 'Olá Fábio, a obra segue aberta.' && lFabio.ref_tabela === 'obras', 'obra: vale para as candidaturas; {primeiro_nome} também é aceito', i4.body.nomes)
+  const dono2 = await chamar('post', '/admin/whatsapp/avulsa', { body: { codigo: 'KKKK9', texto: 'Oi, {primeiro nome}, aqui é do ProTudo.', alvo: 'dono' } })
+  const lDono2 = (await linhas(`id = ${Number(dono2.body.id) || 0}`))[0]
+  ok(dono2.status === 200 && dono2.body.para === 'Luiz Melo' && lDono2.usuario_id === DONO && lDono2.texto === 'Oi, {primeiro nome}, aqui é do ProTudo.', "alvo 'dono' (ou sem alvo): o envio de sempre, texto exatamente como veio", [dono2.status, lDono2 && lDono2.texto])
+  // Worker: cada uma sai sozinha, com o texto do seu destinatário; fora da janela não sai.
+  const ENV_TODOS = { WHATSAPP_SOMENTE_PARA: 'TODOS' }
+  const antesEnv = f.enviados.length
+  const noiteInt = await passo(em(13 * 60 + 5), ENV_TODOS)
+  for (let i = 0; i < 8; i++) await passo(em(400 + i), ENV_TODOS)
+  const sairam = f.enviados.slice(antesEnv).map(x => x.texto)
+  ok(noiteInt.motivo === 'fora_do_horario' && sairam.includes(TXT.replace('{primeiro nome}', 'ana')) && sairam.includes(TXT.replace('{primeiro nome}', 'Bruno')) && sairam.includes('Olá Fábio, a obra segue aberta.')
+     && sairam.length === 4 && (await linhas(`ref_id = '${R_INT}' AND status = 'enviada'`)).length === 3,
+     'worker: fora de 08–21h nada sai; depois, uma mensagem por destinatário (nunca agrupadas), cada uma com o seu nome', sairam.map(t => t.slice(0, 14)))
+  const listaInt = (await chamar('get', '/admin/whatsapp/mensagens', { query: { tipo: 'avulsa', limit: '100' } })).body
+  const mAna = (listaInt.mensagens || []).find(x => x.texto === TXT.replace('{primeiro nome}', 'ana'))
+  ok(mAna && mAna.codigo === 'KKKK9' && mAna.status === 'enviada' && mAna.usuario_nome === 'ana lima', 'painel /mensagens: as avulsas dos interessados aparecem como as outras, com o pedido e o destinatário', mAna && [mAna.resumo, mAna.usuario_nome, mAna.papel])
+
   console.log(falhas === 0 ? '\nTUDO OK' : `\n${falhas} FALHA(S)`)
   process.exit(falhas ? 1 : 0)
 }
