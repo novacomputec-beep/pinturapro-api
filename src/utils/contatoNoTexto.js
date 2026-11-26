@@ -11,7 +11,10 @@
 //     CPF e intervalo de anos.
 //   - E-MAIL (inclusive "fulano arroba gmail ponto com"), @perfil, link (http, www, domínio, wa.me,
 //     "site ponto com") e frases de convite (zap, whats, me chama, meu número, liga pra mim…).
-// CAMADA 2 (IA) — NÃO construída: depende de ANTHROPIC_API_KEY, que não existe nos serviços.
+// CAMADA 2 (IA) — services/contatoIAService: o texto que PASSA pela camada 1 vai ao Haiku mais
+//   barato da Anthropic (3 s, fail-open). detectarContatoNoPedidoComIA e mascararContatosComIA são
+//   as portas de entrada das rotas: regras primeiro, IA só se as regras não acharam nada; o
+//   resultado da IA segue o MESMO caminho (409, "••••", marca). Sem ANTHROPIC_API_KEY, só a camada 1.
 //
 // ONDE VALE:
 //   - publicar (POST /reparos/dono, POST /obras/dono) e editar (PUT /obras/:id) título + descrição:
@@ -212,6 +215,35 @@ const detectarContatoNoPedido = (pedido) => {
   return null
 }
 
+// ── CAMADA 2 (IA) ─────────────────────────────────────────────────────────────────────────────
+// Mesmos campos de detectarContatoNoPedido; a IA só é consultada (uma chamada, com todos os campos)
+// quando as regras não acharam nada. Achado da IA: tipo 'ia', com o trecho copiado do texto.
+const detectarContatoNoPedidoComIA = async (pedido) => {
+  const achado = detectarContatoNoPedido(pedido)
+  if (achado) return achado
+  const p = pedido || {}
+  const str = (v) => (typeof v === 'string' && v.trim() ? v : null)
+  const tags = Array.isArray(p.tags) ? p.tags.filter(t => typeof t === 'string').join(', ') : p.tags
+  const campos = [['texto', [str(p.titulo), str(p.descricao)].filter(Boolean).join('\n')], ['ponto_referencia', str(p.ponto_referencia)], ['bairro', str(p.bairro)], ['tags', str(tags)]]
+    .filter(([, v]) => v)
+  if (campos.length === 0) return null
+  const ia = await require('../services/contatoIAService').verificarContatoIA(campos.map(([, v]) => v).join('\n'))
+  if (!ia) return null
+  const campo = campos.find(([, v]) => v.normalize('NFC').includes(ia.trecho))?.[0] || 'texto'
+  return { tipo: 'ia', trecho: ia.trecho, trechos: [ia.trecho], telefone: null, campo }
+}
+// Pergunta/resposta: máscara das regras; se elas não mexeram, a IA olha e o trecho dela vira "••••".
+const mascararContatosComIA = async (bruto) => {
+  const m = mascararContatos(bruto)
+  if (m.removido || typeof bruto !== 'string') return m
+  const ia = await require('../services/contatoIAService').verificarContatoIA(bruto)
+  if (!ia) return m
+  const texto = bruto.normalize('NFC')
+  const i = texto.indexOf(ia.trecho)
+  if (i < 0) return m
+  return { texto: texto.slice(0, i) + MASCARA + texto.slice(i + ia.trecho.length), removido: true, trechos: [ia.trecho], ia: true }
+}
+
 const corpoRecusa = (achado) => ({
   erro: `Seu pedido tem um contato ${ROTULO_CAMPO[achado.campo] || ROTULO_CAMPO.texto}: "${achado.trecho}". Retire telefone, e-mail, redes sociais e links. As dúvidas dos profissionais chegam pelas perguntas do pedido, dentro do app.`,
   codigo: CODIGO_CONTATO, contato_no_texto: true, tipo: achado.tipo, campo: achado.campo || 'texto', trecho: achado.trecho, trechos: achado.trechos,
@@ -341,5 +373,6 @@ const migrarContatoNoTexto = async (client) => {
 module.exports = {
   CODIGO_CONTATO, MASCARA, CHAVE_VARREDURA, dobrar, sequenciasDeDigitos, encontrarContatos, detectarContato, mascararContatos,
   corpoRecusa, decidirContato, gravarContatoNoTexto, migrarContatoNoTexto,
+  detectarContatoNoPedidoComIA, mascararContatosComIA,
   CHAVE_VARREDURA_CAMPOS, AVISOS_MANUAIS, detectarContatoNoPedido, migrarAvisosManuais, anexarAvisoContato,
 }
