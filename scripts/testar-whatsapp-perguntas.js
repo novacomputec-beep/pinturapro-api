@@ -248,7 +248,7 @@ const main = async () => {
   // contato na resposta: mesmo sanitizador do app
   rec = await recebe({ texto: 'Branco. Me liga 34 99888-7766', citada: idPortao })
   await passo(em(3 * RODADA + 4))
-  ok(rec.resultado === 'entregue' && /contato removido/.test((await pq(9)).resposta) && !/99888/.test((await pq(9)).resposta), 'telefone na resposta vira "[contato removido]" (mesmo sanitizador do app)', (await pq(9)).resposta)
+  ok(rec.resultado === 'entregue' && (await pq(9)).resposta === 'Branco. •••• ••••' && !/99888/.test((await pq(9)).resposta), 'telefone na resposta vira "••••" (anti-contato — o mesmo caminho do app)', (await pq(9)).resposta)
 
   // ═══════════ RESPONDIDA NO APP ANTES DO ENVIO ═══════════
   await pergunta(10, 'reparo', R1, CAIO, 'Fornece o material?', 50)
@@ -353,7 +353,7 @@ const main = async () => {
   const tipos = (await chamar('get', '/admin/whatsapp/tipos')).body.tipos
   const lista = (await chamar('get', '/admin/whatsapp/mensagens', { status: 'respondida', limit: '100' })).body
   const m7 = lista.mensagens.find(x => x.itens.some(i => i.ref_id === P(7)))
-  ok(tipos.map(x => x.tipo).join() === 'pergunta_sem_resposta,novo_interessado,especialidade_rara,prazo_acabando,escolhido,horario_aguardando,teste' && tipos[0].implementado === true && tipos[0].ligado === true && tipos.slice(3, 6).every(x => !x.implementado)
+  ok(tipos.map(x => x.tipo).join() === 'pergunta_sem_resposta,novo_interessado,especialidade_rara,contato_no_texto,prazo_acabando,escolhido,horario_aguardando,teste' && tipos[0].implementado === true && tipos[0].ligado === true && tipos.slice(4, 7).every(x => !x.implementado)
      && m7 && m7.itens.find(i => i.ref_id === P(7)).resposta === 'pode sim, de manhã' && m7.papel === 'dono' && m7.resumo.startsWith('Pergunta sem resposta · ') && lista.mensagens.every(x => x.resposta),
      'painel: pergunta_sem_resposta implementado = true; /mensagens traz a resposta dada pelo WhatsApp', [tipos[0], m7 && m7.itens])
 

@@ -26,9 +26,12 @@ const { pool } = require('../utils/supabase')
 const { comOrigem } = require('../utils/auditoriaDemanda')
 const { enfileirar } = require('./whatsappFilaService')
 const { lerConfig, sqlPerguntaPendente, TIPO_PERGUNTA, TIPO_INTERESSADO } = require('../whatsapp/fila')
-const { TIPO_RESPOSTA, TIPO_AVULSA, ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela } = require('../whatsapp/config')
+const { TIPO_RESPOSTA, TIPO_AVULSA, TIPO_CONTATO, ESPERA_PERGUNTA_MIN, IDADE_MAXIMA_PERGUNTA_HORAS, normalizarTelefone, variantesTelefone, lerTrava, travaPermite, dentroDaJanela } = require('../whatsapp/config')
 const T = require('../whatsapp/textos')
 
+// Tipos cuja resposta fica só na linha (painel): avulsa e o aviso de contato no texto ("Qualquer
+// dúvida, é só responder aqui") — nunca é entregue no app como resposta a uma pergunta.
+const TIPOS_RESPOSTA_GUARDADA = [TIPO_AVULSA, TIPO_CONTATO]
 const MIDIAS_COM_RESPOSTA = ['audio', 'imagem', 'video', 'documento', 'figurinha']
 // Resposta a uma mensagem nossa vale por até 7 dias depois do envio.
 const VALIDADE_RESPOSTA_DIAS = 7
@@ -189,7 +192,7 @@ const guardarRespostaDeAvulsa = async (db, rec, formas) => {
         WHERE wa_message_id = $1 AND (wa_jid = $2 OR telefone = ANY($3::text[]))
         ORDER BY (agrupada_em IS NULL) DESC, id LIMIT 1`,
       [rec.citada_wa_message_id, rec.wa_jid, formas])
-    if (c.rows[0] && c.rows[0].tipo !== TIPO_AVULSA) return false
+    if (c.rows[0] && !TIPOS_RESPOSTA_GUARDADA.includes(c.rows[0].tipo)) return false
     alvo = c.rows[0] || null
   }
   if (!alvo) {
@@ -199,7 +202,7 @@ const guardarRespostaDeAvulsa = async (db, rec, formas) => {
           AND enviada_em > NOW() - INTERVAL '${VALIDADE_RESPOSTA_DIAS} days'
         ORDER BY enviada_em DESC, id DESC LIMIT 1`,
       [TIPO_RESPOSTA, rec.wa_jid, formas])
-    if (u.rows[0]?.tipo !== TIPO_AVULSA) return false
+    if (!TIPOS_RESPOSTA_GUARDADA.includes(u.rows[0]?.tipo)) return false
     alvo = u.rows[0]
   }
   if (!rec.midia && !String(rec.texto || '').trim()) { await concluir(db, rec, 'ignorada (vazia)', alvo.id); return true }
@@ -210,7 +213,7 @@ const guardarRespostaDeAvulsa = async (db, rec, formas) => {
             resposta = left(CASE WHEN resposta IS NULL THEN $2 ELSE resposta || E'\n' || $2 END, ${MAX_RESPOSTA_SIMULACAO})
       WHERE id = $1::bigint AND status IN ('enviada', 'entregue', 'lida', 'respondida')`,
     [alvo.id, texto.slice(0, MAX_RESPOSTA_SIMULACAO)])
-  await concluir(db, rec, 'avulsa (guardada)', alvo.id)
+  await concluir(db, rec, `${alvo.tipo} (guardada)`, alvo.id)
   return true
 }
 

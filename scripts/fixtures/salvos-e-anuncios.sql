@@ -15,3 +15,12 @@ CREATE TABLE IF NOT EXISTS demandas_salvas (
 CREATE TABLE IF NOT EXISTS anuncios_ocorrencias (
   id bigserial PRIMARY KEY, usuario_id uuid NOT NULL, tabela text NOT NULL, demanda_id uuid NOT NULL,
   titulo text, admin_id uuid, criado_em timestamptz NOT NULL DEFAULT now(), UNIQUE (tabela, demanda_id));
+-- Anti-contato (utils/contatoNoTexto) — 26/11/2026.
+ALTER TABLE IF EXISTS reparos ADD COLUMN IF NOT EXISTS contato_no_texto boolean NOT NULL DEFAULT false;
+ALTER TABLE IF EXISTS reparos ADD COLUMN IF NOT EXISTS contato_no_texto_trecho text;
+ALTER TABLE IF EXISTS reparos ADD COLUMN IF NOT EXISTS contato_no_texto_telefone text;
+ALTER TABLE IF EXISTS reparos ADD COLUMN IF NOT EXISTS contato_no_texto_em timestamptz;
+ALTER TABLE IF EXISTS obras ADD COLUMN IF NOT EXISTS contato_no_texto boolean NOT NULL DEFAULT false;
+ALTER TABLE IF EXISTS obras ADD COLUMN IF NOT EXISTS contato_no_texto_trecho text;
+ALTER TABLE IF EXISTS obras ADD COLUMN IF NOT EXISTS contato_no_texto_telefone text;
+ALTER TABLE IF EXISTS obras ADD COLUMN IF NOT EXISTS contato_no_texto_em timestamptz;
