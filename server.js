@@ -849,6 +849,8 @@ const iniciarAgendador = () => {
   // enviado → um lembrete ao profissional, uma vez, fora do silêncio noturno.
   const orcamentoVisita = require('./src/utils/orcamentoVisita')
   setInterval(job('lembrarOrcamentos', whatsappPerguntas.semSobrepor('lembrete_orcamento', () => orcamentoVisita.lembrarOrcamentos({ avisarUsuario: require('./src/services/alertaService').avisarUsuario }))), orcamentoVisita.INTERVALO_LEMBRETE_MS)
+  //   1 min: "📋 Você está na visita?" na hora da visita aceita, sem orçamento, uma vez, fora do silêncio.
+  setInterval(job('avisarHoraDaVisita', whatsappPerguntas.semSobrepor('hora_da_visita', () => orcamentoVisita.avisarHoraDaVisita({ avisarUsuario: require('./src/services/alertaService').avisarUsuario }))), INTERVALO_CRONOMETRO)
   //   1 min: "📋 Visita cancelada" que ficou devida no silêncio noturno (sai a partir das 7h).
   setInterval(job('avisarVisitasCanceladas', whatsappPerguntas.semSobrepor('visita_cancelada', () => orcamentoVisita.avisarVisitasCanceladas({ avisarUsuario: require('./src/services/alertaService').avisarUsuario }))), INTERVALO_CRONOMETRO)
   //   1 min: pedido aberto MARCADO com contato no texto → o dono recebe o pedido de retirar, uma

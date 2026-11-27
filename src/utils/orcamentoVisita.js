@@ -24,6 +24,8 @@
 //    valor do pedido". O app novo usa os campos estruturados e mensagem_profissional.
 // 6) LEITURA: anexarCamposProposta põe em cada proposta tipo_proposta, visita_*, orcamento_* e
 //    mensagem_profissional (nunca lança; esquema sem as colunas → tudo 'valor'/null).
+// 7) PÓS-VISITA ('contratei', aviso na hora da visita, contratou_visitante, visitante_ativo): ver o
+//    bloco "PÓS-VISITA" no fim do arquivo.
 const { pool } = require('./supabase')
 const { GRUPOS_RELACIONADOS } = require('./gruposCategorias')
 const { GRUPO_OBRAS_REPARADOR } = require('./especialidades')
@@ -275,6 +277,16 @@ const migrarOrcamentoVisita = async (client) => {
     // Visita aceita que o dono recusou depois: quando, e quando o profissional foi avisado.
     await client.query(`ALTER TABLE ${proposta} ADD COLUMN IF NOT EXISTS visita_cancelada_em TIMESTAMPTZ`)
     await client.query(`ALTER TABLE ${proposta} ADD COLUMN IF NOT EXISTS visita_cancelada_aviso_em TIMESTAMPTZ`)
+    // Pós-visita (arte pos-visita-previa): claim do "📋 Você está na visita?" e o valor que o dono
+    // registrou no 'contratei' (também copiado para valor_proposto — é o que valorAcordado lê).
+    await client.query(`ALTER TABLE ${proposta} ADD COLUMN IF NOT EXISTS visita_hora_aviso_em TIMESTAMPTZ`)
+    await client.query(`ALTER TABLE ${proposta} ADD COLUMN IF NOT EXISTS valor_combinado NUMERIC(12,2)`)
+  }
+  for (const { tabela } of Object.values(LADOS)) {
+    // origem_match: 'contratado_apos_visita' quando o match veio do 'contratei'; NULL no aceite comum.
+    await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS origem_match TEXT`)
+    // Métrica: no cancelamento pelo dono de pedido com visitante ativo, ele contratou o visitante por fora?
+    await client.query(`ALTER TABLE ${tabela} ADD COLUMN IF NOT EXISTS contratou_visitante BOOLEAN`)
   }
 }
 
@@ -351,7 +363,106 @@ const lembrarOrcamentos = async ({ avisarUsuario }, db = pool, agora = new Date(
   return enviados
 }
 
+// ── PÓS-VISITA (dono, 27/11/2026 — arte aprovada "pos-visita-previa") ──────────────────────────
+// 1) 'CONTRATEI' (POST …/responder, action 'contratei', valor_combinado opcional >= R$ 20): o dono
+//    registra que contratou o profissional da visita (proposta em 'visita_aceita' ou
+//    'orcamento_enviado'). É o aceite de SEMPRE (match, demais propostas recusadas, regras de
+//    contato, avaliações); muda só: o valor acordado (valor_combinado, ou o orçamento já enviado)
+//    vai para valor_proposto + valor_combinado, o pedido ganha origem_match 'contratado_apos_visita'
+//    e o push ao profissional é "✅ {primeiro nome} registrou que contratou você para "{título}"".
+const ORIGEM_CONTRATADO_APOS_VISITA = 'contratado_apos_visita'
+const ACTION_CONTRATEI = 'contratei'
+const tituloContratado = (primeiroNome, titulo) => `✅ ${primeiroNome} registrou que contratou você para "${titulo}"`
+const CORPO_CONTRATADO = 'Toque para ver os detalhes do serviço.'
+// proposta = linha inteira; body = corpo do responder. → { erro: { status, body } } ou { valor } (valor acordado
+// ou null = sem valor: valorAcordado cai no valor do pedido, como no aceite comum sem proposta de valor).
+const lerContratei = (proposta, body) => {
+  if (!ehVisita(proposta) || !STATUS_ORCAMENTO.includes(proposta.status)) {
+    return { erro: { status: 409, body: erro('Só dá para registrar a contratação de um profissional com visita aceita ou orçamento enviado.', 'CONTRATEI_INDISPONIVEL') } }
+  }
+  const bruto = body?.valor_combinado
+  if (!vazio(bruto)) {
+    const n = numero(bruto)
+    if (!Number.isFinite(n) || n < VALOR_MINIMO) return { erro: { status: 400, body: { erro: 'O valor combinado precisa ser de pelo menos R$ 20.', codigo: 'VALOR_MINIMO', valor_minimo: VALOR_MINIMO } } }
+    return { valor: n }
+  }
+  if (proposta.status === STATUS_ORCAMENTO_ENVIADO && proposta.valor_proposto != null) return { valor: Number(proposta.valor_proposto) }
+  return { valor: null }
+}
+
+// 2) NA HORA DA VISITA: "📋 Você está na visita?" — uma vez por proposta (visita_hora_aviso_em é o
+//    claim), a partir de visita_quando e por até JANELA_AVISO_VISITA_H horas (visita antiga não
+//    dispara em deploy), fora do silêncio noturno (22h–7h de São Paulo). Só proposta ainda em
+//    'visita_aceita' (orçamento enviado, visita cancelada ou contratado = outro status → não sai)
+//    num pedido aberto e sem escolhido.
+const TITULO_HORA_VISITA = '📋 Você está na visita?'
+const corpoHoraVisita = (titulo) => `Envie o orçamento de "${titulo}" agora, pelo app.`
+const JANELA_AVISO_VISITA_H = 6
+const avisarHoraDaVisita = async ({ avisarUsuario }, db = pool, agora = new Date()) => {
+  let enviados = 0
+  const iso = agora.toISOString()
+  for (const [tabela, lado] of Object.entries(LADOS)) {
+    const r = await db.query(
+      `UPDATE ${lado.proposta} p SET visita_hora_aviso_em = $1::timestamptz
+         FROM ${lado.tabela} d
+        WHERE d.id = p.${lado.fk} AND p.tipo_proposta = '${TIPO_VISITA}' AND p.status = '${STATUS_VISITA_ACEITA}'
+          AND p.visita_hora_aviso_em IS NULL AND p.visita_cancelada_em IS NULL AND p.orcamento_enviado_em IS NULL
+          AND p.visita_quando <= $1::timestamptz AND p.visita_quando > $1::timestamptz - INTERVAL '${JANELA_AVISO_VISITA_H} hours'
+          AND d.status = 'aberta' AND d.match_usuario_id IS NULL
+          AND EXTRACT(HOUR FROM $1::timestamptz AT TIME ZONE '${TZ}') >= 7 AND EXTRACT(HOUR FROM $1::timestamptz AT TIME ZONE '${TZ}') < 22
+      RETURNING p.id, p.usuario_id, d.id AS demanda_id, d.titulo`, [iso])
+    for (const l of r.rows) {
+      avisarUsuario(l.usuario_id, {
+        titulo: TITULO_HORA_VISITA, corpo: corpoHoraVisita(l.titulo),
+        data: { tipo: 'hora_da_visita', [lado.chave]: l.demanda_id, [lado.idPush]: l.id },
+        rotulo: `hora da visita ${tabela} ${l.demanda_id}`,
+      })
+      enviados++
+    }
+  }
+  return enviados
+}
+
+// 3) VISITANTE ATIVO (payload do dono): a proposta de visita em 'visita_aceita'/'orcamento_enviado'
+//    mais recente do pedido → { proposta_id, nome (primeiro nome) } ou null.
+const SQL_TEM_VISITANTE = (lado, demandaExpr) =>
+  `EXISTS (SELECT 1 FROM ${lado.proposta} v WHERE v.${lado.fk} = ${demandaExpr} AND v.tipo_proposta = '${TIPO_VISITA}' AND v.status = ANY('{${STATUS_ORCAMENTO.join(',')}}'::text[]))`
+const visitanteAtivo = async (tabela, demandaId, db = pool) => {
+  const lado = LADOS[tabela]
+  try {
+    const r = await db.query(
+      `SELECT p.id, u.nome FROM ${lado.proposta} p JOIN usuarios u ON u.id = p.usuario_id
+        WHERE p.${lado.fk} = $1 AND p.tipo_proposta = '${TIPO_VISITA}' AND p.status = ANY($2::text[])
+        ORDER BY p.visita_aceita_em DESC NULLS LAST LIMIT 1`, [demandaId, STATUS_ORCAMENTO])
+    if (r.rows.length === 0) return null
+    return { proposta_id: r.rows[0].id, nome: String(r.rows[0].nome || '').trim().split(/\s+/)[0] || null }
+  } catch (err) {
+    // Esquema sem as colunas de visita (teste): null em silêncio, como anexarCamposProposta.
+    if (err.code !== '42703' && !/does not exist/.test(String(err.message))) console.error(`[orçamento] visitante ativo (${tabela} ${demandaId}):`, err.message)
+    return null
+  }
+}
+
+// 4) CANCELAMENTO PELO DONO com contratou_visitante: true|false (corpo ou query, como
+//    motivo_cancelamento). Só é gravado quando o pedido tem visitante ativo; outro valor = ignorado.
+const lerContratouVisitante = (req) => {
+  const v = req.body?.contratou_visitante ?? req.query?.contratou_visitante
+  if (v === true || v === 'true') return true
+  if (v === false || v === 'false') return false
+  return null
+}
+const registrarContratouVisitante = async (tabela, demandaId, valor, db = pool) => {
+  if (valor === null) return false
+  const lado = LADOS[tabela]
+  const r = await db.query(
+    `UPDATE ${lado.tabela} d SET contratou_visitante = $2 WHERE d.id = $1 AND ${SQL_TEM_VISITANTE(lado, 'd.id')} RETURNING d.id`, [demandaId, valor])
+  return r.rows.length > 0
+}
+
 module.exports = {
+  ORIGEM_CONTRATADO_APOS_VISITA, ACTION_CONTRATEI, tituloContratado, CORPO_CONTRATADO, lerContratei,
+  TITULO_HORA_VISITA, corpoHoraVisita, JANELA_AVISO_VISITA_H, avisarHoraDaVisita,
+  visitanteAtivo, lerContratouVisitante, registrarContratouVisitante,
   VALOR_MINIMO, TIPO_VALOR, TIPO_VISITA, STATUS_VISITA_ACEITA, STATUS_ORCAMENTO_ENVIADO, STATUS_ORCAMENTO, LADOS,
   ERRO_VALOR_MINIMO, ERRO_ORCAMENTO_MINIMO, MSG_VISITA_ACEITA, TITULO_LEMBRETE, corpoLembrete, INTERVALO_LEMBRETE_MS,
   suporta, lerDataHora, quandoLegivel, textoVisita, textoOrcamento, lerProposta, lerOrcamento,
