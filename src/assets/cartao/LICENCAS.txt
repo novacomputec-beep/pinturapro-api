@@ -1,0 +1,6 @@
+Assets do cartão de compartilhamento (src/services/cartaoDemanda.js)
+
+fontes/montserrat-*.woff — Montserrat (The Montserrat Project Authors), SIL Open Font License 1.1.
+  Origem: @fontsource/montserrat 5.0.19, subconjunto latin.
+emoji/*.svg — Twemoji (Twitter, Inc. e colaboradores; fork jdecked/twemoji 15.1.0), CC-BY 4.0.
+  Baixados por scripts/baixar-emojis-cartao.js.

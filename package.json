@@ -12,6 +12,7 @@
   "license": "ISC",
   "dependencies": {
     "@anthropic-ai/sdk": "^1.14.0",
+    "@resvg/resvg-js": "^2.6.2",
     "@supabase/supabase-js": "^2.39.0",
     "baileys": "7.0.0-rc14",
     "bcrypt": "^5.1.1",
@@ -29,6 +30,8 @@
     "nodemailer": "^8.0.7",
     "pdfkit": "^0.18.0",
     "pg": "^8.20.0",
+    "qrcode": "^1.5.4",
+    "satori": "^0.63.2",
     "sib-api-v3-sdk": "^8.5.0",
     "speakeasy": "^2.0.0",
     "uuid": "^14.0.0"
