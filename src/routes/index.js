@@ -44,7 +44,9 @@ const { migrarDemandasSalvas, anexarSalvo, anexarSalvosCount } = require('../uti
 const { avaliarTelefoneAoPublicar, gravarTelefoneDoDono } = require('../utils/telefoneAoPublicar')
 // Proposta de visita para orçamento (utils/orcamentoVisita): tipo_proposta, visita aceita, orçamento.
 const { migrarOrcamentoVisita, lerProposta, lerOrcamento, textoVisita, ehVisita, visitaSemOrcamento, visitaLiberaEndereco, aceitarVisita, gravarOrcamento,
-        apresentar: apresentarProposta, anexarCamposProposta, cancelarVisitaAceita, permiteVisita, anexarPermiteVisita, ERRO_VISITA_NAO_PERMITIDA, STATUS_ORCAMENTO, STATUS_ORCAMENTO_ENVIADO } = require('../utils/orcamentoVisita')
+        apresentar: apresentarProposta, anexarCamposProposta, cancelarVisitaAceita, permiteVisita, anexarPermiteVisita, ERRO_VISITA_NAO_PERMITIDA, STATUS_ORCAMENTO, STATUS_ORCAMENTO_ENVIADO,
+        ACTION_CONTRATEI, ORIGEM_CONTRATADO_APOS_VISITA, lerContratei, tituloContratado, CORPO_CONTRATADO,
+        visitanteAtivo, lerContratouVisitante, registrarContratouVisitante } = require('../utils/orcamentoVisita')
 // Prazo curto × texto que fala de outro dia (utils/prazoIncoerente) e colunas do prazo acabando (services/prazoCurtoService).
 const { avaliarPrazoIncoerente } = require('../utils/prazoIncoerente')
 // Anti-contato (utils/contatoNoTexto): contato no texto do pedido, da pergunta e da resposta.
@@ -3481,6 +3483,8 @@ router.delete('/obras/dono/:id', autenticar, async (req, res) => {
       }
       return res.status(409).json({ erro: "Já existe um profissional escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
     }
+    // Pós-visita (utils/orcamentoVisita): contratou_visitante true|false, só com visitante ativo (métrica).
+    await registrarContratouVisitante('obras', req.params.id, lerContratouVisitante(req))
     // encerrado_em: mesmo motivo do recusar acima — libera a obra cancelada para a limpeza
     // de mídia depois de 7 dias. COALESCE não reinicia contagem já iniciada.
     await pool.query(`UPDATE obras SET status = 'cancelada', status_aprovacao = 'cancelada', cancelada_por = 'cliente', motivo_cancelamento = $2,
@@ -4284,13 +4288,15 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // interessados_ativos (ainda na disputa): SÓ dono (utils/desistencias); null para os demais.
     const desistencias = ehDono ? await listarDesistencias('obras', req.params.id) : null
     const interessados_ativos = ehDono ? await contarInteressadosAtivos('obras', req.params.id) : null
+    // visitante_ativo (pós-visita, utils/orcamentoVisita): SÓ dono — { proposta_id, nome } da visita aceita/orçamento, ou null.
+    const visitante_ativo = ehDono ? await visitanteAtivo('obras', req.params.id) : null
     // prazo_chegada / tolerancia_ate / atrasado / pedido_atraso / pedidos_atraso_restantes
     // (atrasoChegadaService.camposAtraso): relógio do servidor, mesmo limite que o cron lê.
     // encerramento_automatico_em: quando o cron fecha sozinho a solicitação pendente do pintor
     // (solicitado_em + 2 dias — alertaService.encerramentoAutomaticoEm); null sem solicitação.
     // Pedidos salvos: o dono vê quantos salvaram (salvos_count); os demais, se salvaram (salvo).
     if (ehDono) await anexarSalvosCount('obras', [obra]); else await anexarSalvo('obras', [obra], req.usuario.id)
-    res.json({ obra, ...(await identidadeNaDemanda(req, obra, ehDono)), whatsapp_liberado: (ehDono || ehPintorDoMatch) ? whatsappLiberado(obra) : null, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, pode_escolher_outro, motivo_escolher_outro, desistencias, interessados_ativos, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
+    res.json({ obra, ...(await identidadeNaDemanda(req, obra, ehDono)), whatsapp_liberado: (ehDono || ehPintorDoMatch) ? whatsappLiberado(obra) : null, midias: midias.rows, minha_candidatura: minhaCandidaturaResult.rows[0] || null, candidatos, dono_telefone, dono_nome, dono_foto_url, sugestoes_restantes, extensao_maxima_horas, pode_aumentar_valor, valor_minimo_aumento, perguntas, profissionais_avisados, pedido_cancelamento, desfazer_liberado_em, lembretes_agendar_enviados, proximo_lembrete_agendar_em, pode_escolher_outro, motivo_escolher_outro, desistencias, interessados_ativos, visitante_ativo, ...camposAtraso(obra), encerramento_automatico_em: encerramentoAutomaticoEm('obras', obra) })
 
     // Contador de visitas — só incrementa um contador EM MEMÓRIA; quem grava é o flush
     // periódico (src/utils/visitas.js). Síncrono e sem I/O: nenhum lock de linha e nenhuma
@@ -4381,21 +4387,26 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
       const r = await aceitarVisita({ tabela: 'obras', demandaId: obra_id, demanda: obra.rows[0], proposta: cand, donoId: req.usuario.id }, depOrcamento())
       return res.status(r.status).json(r.body)
     }
-    if (action === 'aceitar') {
+    // 'contratei' (pós-visita, utils/orcamentoVisita): o aceite de sempre, com valor acordado,
+    // origem_match 'contratado_apos_visita' e o push "✅ … registrou que contratou você".
+    const contratei = action === ACTION_CONTRATEI
+    if (action === 'aceitar' || contratei) {
       // Idempotência de retry: já aceita → devolve sucesso sem reprocessar (sem repetir
       // push nem o UPDATE do match). Sem isto o jaAceito abaixo não pega o próprio
       // registro (id != $2). Espelha o guard de .../pintor-responder.
       if (cand.status === 'aceito') {
         return res.json({ mensagem: 'Candidatura aceita! O contrato chega por e-mail quando o horário for combinado.' })
       }
+      const ct = contratei ? lerContratei(cand, req.body) : null
+      if (ct?.erro) return res.status(ct.erro.status).json(ct.erro.body)
       // Guarda de estado (D8): só uma candidatura 'pendente' pode ser aceita. Isto bloqueia
       // o dono aceitar a PRÓPRIA contraproposta ('contraproposta_dono' — é a vez do pintor) e
       // ressuscitar 'recusado'/'expirado'. Recusa clara, nunca 500 nem no-op silencioso.
       if (!obraAbertaParaNegociar) {
         return res.status(409).json({ erro: 'Esta obra não está mais aberta para negociação.' })
       }
-      // 'orcamento_enviado' (visita com orçamento): o aceite é o de sempre.
-      if (!['pendente', STATUS_ORCAMENTO_ENVIADO].includes(cand.status)) {
+      // 'orcamento_enviado' (visita com orçamento): o aceite é o de sempre. 'contratei': visita aceita ou orçamento.
+      if (!(contratei ? STATUS_ORCAMENTO : ['pendente', STATUS_ORCAMENTO_ENVIADO]).includes(cand.status)) {
         return res.status(409).json({ erro: 'Esta candidatura não está mais disponível para aceite.' })
       }
       // Prazo vencido (utils/demandaAberta): 409 antes de qualquer escrita — o dono aumenta o prazo.
@@ -4412,15 +4423,25 @@ router.post('/obras/:id/candidatura/:candidaturaId/responder', autenticar, async
       if (await estaSuspenso(cand.usuario_id)) {
         return res.status(409).json(ERRO_ACEITE_SUSPENSO)
       }
-      await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
+      if (contratei) {
+        await pool.query(`UPDATE candidaturas SET status = 'aceito', valor_proposto = $2, valor_combinado = $2 WHERE id = $1`, [candidaturaId, ct.valor])
+      } else {
+        await pool.query(`UPDATE candidaturas SET status = 'aceito' WHERE id = $1`, [candidaturaId])
+      }
       // O aceite já casa o profissional com a obra. Guard match_usuario_id IS NULL: torna o
       // write idempotente em retry e impede que um segundo aceite roube um match existente.
       await pool.query(
-        `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW(), ${SQL_LIMPAR_CHEGADA}
+        `UPDATE obras SET match_usuario_id = $1, match_feito_em = NOW(), ${contratei ? `origem_match = '${ORIGEM_CONTRATADO_APOS_VISITA}', ` : ''}${SQL_LIMPAR_CHEGADA}
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [cand.usuario_id, obra_id]
       )
-      if (cand.push_token) {
+      if (contratei) {
+        avisarUsuario(cand.usuario_id, {
+          ator_id: req.usuario.id,
+          titulo: tituloContratado(await primeiroNome(req.usuario.id), obra.rows[0].titulo), corpo: CORPO_CONTRATADO,
+          data: { tipo: 'contratado_apos_visita', obra_id, candidatura_id: candidaturaId }, rotulo: `contratado após visita obras ${obra_id}`,
+        })
+      } else if (cand.push_token) {
         enviarPushNotificacao(cand.push_token, '🎉 Deu match!',
           `Parabéns! Você fechou negócio em "${obra.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'candidatura_aceita', obra_id }).catch(() => {})
@@ -5199,6 +5220,8 @@ router.delete('/reparos/dono/:id', autenticar, async (req, res) => {
       return res.status(409).json({ erro: "Já existe um profissional escolhido. Use 'Cancelar serviço' na tela do pedido.", codigo: 'MATCH_ATIVO' })
     }
     if (reparo.rows[0].match_usuario_id) console.log(`[reparos/dono DELETE] ${req.params.id}: match órfão (${reparo.rows[0].match_usuario_id}) limpo na exclusão`)
+    // Pós-visita (utils/orcamentoVisita): contratou_visitante true|false, só com visitante ativo (métrica).
+    await registrarContratouVisitante('reparos', req.params.id, lerContratouVisitante(req))
     // CANCELA em vez de apagar, alinhando com DELETE /obras/dono/:id. Apagar a linha custava
     // duas coisas:
     //   - a mídia saía do banco antes de o cron poder limpá-la, então o arquivo ficava no
@@ -6099,19 +6122,23 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
       const r = await aceitarVisita({ tabela: 'reparos', demandaId: reparo_id, demanda: reparo.rows[0], proposta: int, donoId: req.usuario.id }, depOrcamento())
       return res.status(r.status).json(r.body)
     }
-    if (action === 'aceitar') {
+    // 'contratei' (pós-visita) — mesma regra do lado obra.
+    const contratei = action === ACTION_CONTRATEI
+    if (action === 'aceitar' || contratei) {
       // Idempotência de retry: já aceito → devolve sucesso sem reprocessar (sem repetir
       // push nem o UPDATE do match). Sem isto o jaAceito abaixo não pega o próprio
       // registro (id != $2). Espelha o guard de .../prestador-responder.
       if (int.status === 'aceito') {
         return res.json({ mensagem: 'Proposta aceita! O contrato chega por e-mail quando o horário for combinado.' })
       }
+      const ct = contratei ? lerContratei(int, req.body) : null
+      if (ct?.erro) return res.status(ct.erro.status).json(ct.erro.body)
       // Guarda de estado (D8): só um interesse 'pendente' pode ser aceito — bloqueia aceitar a
       // própria contraproposta do dono, e ressuscitar 'recusado'/'expirado'.
       if (!reparoAbertoParaNegociar) {
         return res.status(409).json({ erro: 'Este serviço não está mais aberto para negociação.' })
       }
-      if (!['pendente', STATUS_ORCAMENTO_ENVIADO].includes(int.status)) {
+      if (!(contratei ? STATUS_ORCAMENTO : ['pendente', STATUS_ORCAMENTO_ENVIADO]).includes(int.status)) {
         return res.status(409).json({ erro: 'Esta proposta não está mais disponível para aceite.' })
       }
       // Prazo vencido (utils/demandaAberta): 409 antes de qualquer escrita — o dono aumenta o prazo.
@@ -6127,15 +6154,25 @@ router.post('/reparos/:id/interesse/:interesse_id/responder', autenticar, async 
       if (await estaSuspenso(int.usuario_id)) {
         return res.status(409).json(ERRO_ACEITE_SUSPENSO)
       }
-      await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
+      if (contratei) {
+        await pool.query(`UPDATE interesse_reparos SET status = 'aceito', valor_proposto = $2, valor_combinado = $2 WHERE id = $1`, [interesse_id, ct.valor])
+      } else {
+        await pool.query(`UPDATE interesse_reparos SET status = 'aceito' WHERE id = $1`, [interesse_id])
+      }
       // O aceite já casa o prestador com o reparo. Guard match_usuario_id IS NULL: torna o
       // write idempotente em retry e impede que um segundo aceite roube um match existente.
       await pool.query(
-        `UPDATE reparos SET match_usuario_id = $1, match_feito_em = NOW(), ${SQL_LIMPAR_CHEGADA}
+        `UPDATE reparos SET match_usuario_id = $1, match_feito_em = NOW(), ${contratei ? `origem_match = '${ORIGEM_CONTRATADO_APOS_VISITA}', ` : ''}${SQL_LIMPAR_CHEGADA}
          WHERE id = $2 AND match_usuario_id IS NULL`,
         [int.usuario_id, reparo_id]
       )
-      if (int.push_token) {
+      if (contratei) {
+        avisarUsuario(int.usuario_id, {
+          ator_id: req.usuario.id,
+          titulo: tituloContratado(await primeiroNome(req.usuario.id), reparo.rows[0].titulo), corpo: CORPO_CONTRATADO,
+          data: { tipo: 'contratado_apos_visita', reparo_id, interesse_id }, rotulo: `contratado após visita reparos ${reparo_id}`,
+        })
+      } else if (int.push_token) {
         enviarPushNotificacao(int.push_token, '🎉 Deu match!',
           `Parabéns! Você fechou negócio em "${reparo.rows[0].titulo}"! Toque para ver os detalhes.`,
           { tipo: 'interesse_aceito', reparo_id }).catch(() => {})
@@ -7334,6 +7371,8 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // interessados_ativos (ainda na disputa): SÓ dono (utils/desistencias); null para os demais.
     const desistencias = ehDono ? await listarDesistencias('reparos', req.params.id) : null
     const interessados_ativos = ehDono ? await contarInteressadosAtivos('reparos', req.params.id) : null
+    // visitante_ativo: ver o detalhe da obra.
+    const visitante_ativo = ehDono ? await visitanteAtivo('reparos', req.params.id) : null
     // PALIATIVO app 1.2.2/1.2.3: as colunas do pedido de acordo não vão ao app (ninguém abaixo as lê).
     semColunasPedidoCancelamentoParaApp('reparos', reparo, req)
     // Pedidos salvos: o dono vê quantos salvaram (salvos_count); os demais, se salvaram (salvo).
@@ -7347,6 +7386,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
       interessados,
       desistencias,
       interessados_ativos,
+      visitante_ativo,
       // Pedido de acordo de cancelamento vigente (quem, motivo, expira_em) — só dono e prestador do match.
       // PALIATIVO app < 1.2.4 (cancelamentoMatchService, por X-App-Version): sai null, e o reparo sem cancelamento_pedido_*.
       pedido_cancelamento: pedidoCancelamentoParaApp('reparos', reparo, req.usuario.id, ehDono, req),
