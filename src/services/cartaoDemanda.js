@@ -91,11 +91,24 @@ const carregarFontes = () => {
   }
   return fontes
 }
-// Logo: cópia do "icon" de pinturapro-app/app.json (1024x1024), desenhada com TAM_LOGO px.
+// Logo: o "icon" de pinturapro-app/app.json, recortado (margem quase preta fora, folga pequena).
 const ARQ_LOGO = path.join(__dirname, '..', '..', 'assets', 'cartao', 'logo-protudo.png')
-const TAM_LOGO = 120
+// Arquivo já recortado (margem escura quase toda fora); altura fixa, largura pela proporção do PNG.
+const ALTURA_LOGO = 230
 let logo = null
-const logoDataUri = () => (logo ??= `data:image/png;base64,${fs.readFileSync(ARQ_LOGO).toString('base64')}`)
+const logoDoCartao = () => {
+  if (!logo) {
+    const buf = fs.readFileSync(ARQ_LOGO)
+    const w = buf.readUInt32BE(16), hPng = buf.readUInt32BE(20) // IHDR
+    logo = { uri: `data:image/png;base64,${buf.toString('base64')}`, largura: Math.round(ALTURA_LOGO * w / hPng), altura: ALTURA_LOGO }
+  }
+  return logo
+}
+// Versão do render: entra na chave do cache e no ?v= da URL do cartão (routes/paginaPublica
+// redireciona para a URL com a versão atual). Deploy novo = versão nova = nenhum render antigo
+// servido, nem do cache em memória nem de cache HTTP (WhatsApp, navegador). No Railway é o commit;
+// fora dele, o instante do boot.
+const VERSAO_CARTAO = String(process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || Date.now().toString(36)
 const fotos = new Map()
 const fotoDoGrupo = (slug) => {
   if (!fotos.has(slug)) {
@@ -155,8 +168,9 @@ const arvoreCartao = ({ grupo, foto, categoria, titulo, valor, local, prazo, urg
     backgroundImage: `linear-gradient(180deg, rgba(14,14,16,0.35) 0%, rgba(14,14,16,0) 18%, rgba(14,14,16,0) 30%, ${rgba(grupo.cor, 0.55)} 46%, ${rgba('#0e0e10', 0.92)} 58%, ${FUNDO} 66%, ${FUNDO} 100%)` })
 
   // Logo oficial 3D (o ícone do app, assets/cartao/logo-protudo.png), sem pílula atrás.
-  const logo = { type: 'img', props: { src: logoDataUri(), width: TAM_LOGO, height: TAM_LOGO,
-    style: { width: TAM_LOGO, height: TAM_LOGO, borderRadius: 28, boxShadow: '0 8px 28px rgba(0,0,0,0.45)' } } }
+  const { uri: logoUri, largura: wLogo, altura: hLogo } = logoDoCartao()
+  const logo = { type: 'img', props: { src: logoUri, width: wLogo, height: hLogo,
+    style: { width: wLogo, height: hLogo, borderRadius: 40, boxShadow: '0 10px 32px rgba(0,0,0,0.5)' } } }
   const etiqueta = h('div', { display: 'flex', alignItems: 'center', background: LARANJA, color: '#fff', borderRadius: 999,
     padding: '16px 32px', fontSize: 34, fontWeight: 900, letterSpacing: 2, boxShadow: '0 6px 24px rgba(0,0,0,0.35)' },
     urgente ? 'URGENTE' : 'NOVO PEDIDO')
@@ -217,5 +231,5 @@ const cartaoEmCache = (chave, gerar, agora = Date.now()) => {
   return promessa
 }
 
-module.exports = { renderizarCartao, cartaoEmCache, textoLegenda, linkPedido, categoriaDaDemanda, grupoDoCartao, TTL_MS }
+module.exports = { renderizarCartao, cartaoEmCache, textoLegenda, linkPedido, categoriaDaDemanda, grupoDoCartao, TTL_MS, VERSAO_CARTAO }
 module.exports._interno = { GRUPOS_CARTAO, slugDoGrupoCartao, codigoTwemoji, EMOJIS_FIXOS, ehUrgente, cache, MAX_CACHE, fotoDoGrupo }

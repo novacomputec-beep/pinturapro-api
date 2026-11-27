@@ -28,13 +28,15 @@ const cartao = require(path.join(REPO, 'src/services/cartaoDemanda'))
 const { slugDoGrupoCartao, ehUrgente, cache, fotoDoGrupo } = cartao._interno
 
 const handlerDe = (p) => router.stack.find(l => l.route && l.route.path === p).route.stack[0].handle
-const chamar = (p, codigo, { c, ua = 'Mozilla/5.0 (Linux; Android 14)' } = {}) => new Promise(resolve => {
+// O cartão é pedido já com a versão atual (?v=), como depois do redirect; v: null = sem versão.
+const chamar = (p, codigo, { c, ua = 'Mozilla/5.0 (Linux; Android 14)', v = cartao.VERSAO_CARTAO } = {}) => new Promise(resolve => {
   const res = {
     statusCode: 200, cabecalhos: {}, tipo: null,
     status(s) { this.statusCode = s; return this }, set(k, v) { this.cabecalhos[k] = v; return this }, type(t) { this.tipo = t; return this },
     send(corpo) { resolve({ status: this.statusCode, corpo, cab: this.cabecalhos, tipo: this.tipo }) },
+    redirect(s, local) { resolve({ status: s, local, cab: this.cabecalhos }) },
   }
-  handlerDe(p)({ params: { codigo }, query: c === undefined ? {} : { c }, protocol: 'https', get: (h) => (h === 'host' ? 'protudo.app.br' : ua) }, res)
+  handlerDe(p)({ params: { codigo }, query: { ...(c === undefined ? {} : { c }), ...(p.endsWith('cartao.png') && v != null ? { v } : {}) }, protocol: 'https', get: (h) => (h === 'host' ? 'protudo.app.br' : ua) }, res)
 })
 let falhas = 0
 const ok = (cond, rot, extra) => { if (!cond) falhas++; console.log(`${cond ? 'OK  ' : 'FAIL'} ${rot}${extra !== undefined ? ' | ' + JSON.stringify(extra) : ''}`) }
@@ -109,14 +111,18 @@ const main = async () => {
   r = await chamar('/:codigo/cartao.png', 'URGEN', { c: 'xyz234' })
   ok(r.corpo === primeiro && Date.now() - t < 50 && urlsQr.length === 1, 'cartão: segunda chamada vem do cache (mesmo buffer, sem render)')
   r = await chamar('/:codigo/cartao.png', 'URGEN', { c: 'ABCDEF' })
-  ok(r.status === 200 && urlsQr.at(-1) === 'https://protudo.app.br/p/URGEN' && cache.has('URGEN|') && !cache.has('URGEN|ABCDEF'), 'cartão: ?c= com formato válido mas inexistente → sem indicação (não vira chave de cache)', urlsQr.at(-1))
+  ok(r.status === 200 && urlsQr.at(-1) === 'https://protudo.app.br/p/URGEN' && cache.has(`URGEN||${cartao.VERSAO_CARTAO}`) && !cache.has(`URGEN|ABCDEF|${cartao.VERSAO_CARTAO}`), 'cartão: ?c= com formato válido mas inexistente → sem indicação (não vira chave de cache)', urlsQr.at(-1))
   r = await chamar('/:codigo/cartao.png', 'SEMBA')
   d = dimensoes(r.corpo)
   ok(r.status === 200 && d.w === 1080 && d.h === 1350, 'cartão: grupo sem foto (degradê) também renderiza')
   r = await chamar('/:codigo/cartao.png', 'XBRAA')
   ok(r.status === 200 && dimensoes(r.corpo).w === 1080, 'cartão: obra')
   r = await chamar('/:codigo/cartao.png', 'CANCD')
-  ok(r.status === 404 && !cache.has('CANCD|'), 'cartão: cancelado → 404 e não fica no cache')
+  ok(r.status === 404 && !cache.has(`CANCD||${cartao.VERSAO_CARTAO}`), 'cartão: cancelado → 404 e não fica no cache')
+  r = await chamar('/:codigo/cartao.png', 'URGEN', { c: 'xyz234', v: null })
+  ok(r.status === 302 && r.local === `/p/URGEN/cartao.png?c=XYZ234&v=${cartao.VERSAO_CARTAO}` && r.cab['Cache-Control'] === 'no-cache', 'cartão: sem ?v= → 302 para a URL com a versão atual', r.local)
+  r = await chamar('/:codigo/cartao.png', 'SEMBA', { v: 'velha12' })
+  ok(r.status === 302 && r.local === `/p/SEMBA/cartao.png?v=${cartao.VERSAO_CARTAO}`, 'cartão: versão de outro deploy → 302 para a atual', r.local)
   r = await chamar('/:codigo/cartao.png', 'abc')
   ok(r.status === 404, 'cartão: código malformado → 404')
 

@@ -36,7 +36,7 @@ const { apresentacaoReparo, apresentacaoReparoLista, apresentacaoObra } = requir
 const { PRAZO_MODO_HOJE } = require('../utils/faixasPrazo')
 const { sqlTemProfissionalEscolhido, sqlSemProfissionalEscolhido } = require('../utils/profissionalEscolhido')
 const { normalizarCodigo } = require('../utils/indicacoes')
-const { renderizarCartao, cartaoEmCache, textoLegenda, categoriaDaDemanda, TTL_MS } = require('../services/cartaoDemanda')
+const { renderizarCartao, cartaoEmCache, textoLegenda, categoriaDaDemanda, TTL_MS, VERSAO_CARTAO } = require('../services/cartaoDemanda')
 
 const router = express.Router()
 
@@ -326,7 +326,13 @@ router.get('/:codigo/cartao.png', async (req, res) => {
   if (!RE_CODIGO.test(codigo)) return res.status(404).type('text').send('Pedido não encontrado')
   try {
     const ref = await indicacaoExistente(normalizarCodigo(req.query?.c))
-    const png = await cartaoEmCache(`${codigo}|${ref || ''}`, async () => {
+    // URL sem a versão atual (link antigo, de outro deploy, ou sem ?v=) → redireciona para a atual,
+    // sem cache: o que fica em cache HTTP é só a URL versionada.
+    if (req.query?.v !== VERSAO_CARTAO) {
+      res.set('Cache-Control', 'no-cache')
+      return res.redirect(302, `/p/${codigo}/cartao.png?${ref ? `c=${ref}&` : ''}v=${VERSAO_CARTAO}`)
+    }
+    const png = await cartaoEmCache(`${codigo}|${ref || ''}|${VERSAO_CARTAO}`, async () => {
       const achado = await buscarDemanda(codigo)
       if (!achado || !achado.demanda.aberta) return null
       return renderizarCartao({ ...dadosDoCartao(achado), codigo, ref })
