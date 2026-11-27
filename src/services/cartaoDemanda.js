@@ -28,7 +28,6 @@ const LARGURA = 1080
 const ALTURA = 1350
 const FUNDO = '#0e0e10'
 const LARANJA = '#F5891F'
-const AZUL = '#4FB2FF'
 const AMARELO = '#FFD23F'
 const DOMINIO = 'protudo.app.br'
 const TTL_MS = 10 * 60 * 1000
@@ -92,6 +91,11 @@ const carregarFontes = () => {
   }
   return fontes
 }
+// Logo: cópia do "icon" de pinturapro-app/app.json (1024x1024), desenhada com TAM_LOGO px.
+const ARQ_LOGO = path.join(__dirname, '..', '..', 'assets', 'cartao', 'logo-protudo.png')
+const TAM_LOGO = 120
+let logo = null
+const logoDataUri = () => (logo ??= `data:image/png;base64,${fs.readFileSync(ARQ_LOGO).toString('base64')}`)
 const fotos = new Map()
 const fotoDoGrupo = (slug) => {
   if (!fotos.has(slug)) {
@@ -150,9 +154,9 @@ const arvoreCartao = ({ grupo, foto, categoria, titulo, valor, local, prazo, urg
   const veu = h('div', { position: 'absolute', top: 0, left: 0, width: LARGURA, height: ALTURA, display: 'flex',
     backgroundImage: `linear-gradient(180deg, rgba(14,14,16,0.35) 0%, rgba(14,14,16,0) 18%, rgba(14,14,16,0) 30%, ${rgba(grupo.cor, 0.55)} 46%, ${rgba('#0e0e10', 0.92)} 58%, ${FUNDO} 66%, ${FUNDO} 100%)` })
 
-  const logo = h('div', { display: 'flex', alignItems: 'center', background: 'rgba(14,14,16,0.85)', borderRadius: 999,
-      padding: '16px 34px', fontSize: 46, fontWeight: 900, letterSpacing: -1 },
-    h('span', { color: AZUL }, 'P'), h('span', { color: '#fff' }, 'ro'), h('span', { color: LARANJA }, 'T'), h('span', { color: '#fff' }, 'udo'))
+  // Logo oficial 3D (o ícone do app, assets/cartao/logo-protudo.png), sem pílula atrás.
+  const logo = { type: 'img', props: { src: logoDataUri(), width: TAM_LOGO, height: TAM_LOGO,
+    style: { width: TAM_LOGO, height: TAM_LOGO, borderRadius: 28, boxShadow: '0 8px 28px rgba(0,0,0,0.45)' } } }
   const etiqueta = h('div', { display: 'flex', alignItems: 'center', background: LARANJA, color: '#fff', borderRadius: 999,
     padding: '16px 32px', fontSize: 34, fontWeight: 900, letterSpacing: 2, boxShadow: '0 6px 24px rgba(0,0,0,0.35)' },
     urgente ? 'URGENTE' : 'NOVO PEDIDO')
