@@ -22,6 +22,11 @@
 // OG (WhatsApp/Telegram preview): título, "Pedido aberto em <cidade> · R$ <valor>" e o logo
 // servido por /p/logo.png (preview não aceita data URI). Na própria página o logo vai inline
 // (base64) para o HTML ser auto-suficiente. noindex: página de demanda não é para buscador.
+//
+// ?c=<código de indicação> (link compartilhado por um profissional): vai para a Play Store como
+// install referrer e aparece na página, como em protudo.app.br/baixar?c=. Mesma rota ganhou
+// /p/:codigo/cartao.png (arte 1080x1350 para compartilhar) e /p/:codigo/legenda — ver
+// services/cartaoDemanda.
 const express = require('express')
 const fs = require('fs')
 const path = require('path')
@@ -30,6 +35,8 @@ const { MARCA } = require('../utils/marca')
 const { apresentacaoReparo, apresentacaoReparoLista, apresentacaoObra } = require('../utils/categoriasApp')
 const { PRAZO_MODO_HOJE } = require('../utils/faixasPrazo')
 const { sqlTemProfissionalEscolhido, sqlSemProfissionalEscolhido } = require('../utils/profissionalEscolhido')
+const { normalizarCodigo } = require('../utils/indicacoes')
+const { renderizarCartao, cartaoEmCache, textoLegenda, categoriaDaDemanda, TTL_MS } = require('../services/cartaoDemanda')
 
 const router = express.Router()
 
@@ -123,18 +130,22 @@ const tempoRestante = (expira_em) => {
   if (h >= 1) return `faltam ${h}h${min % 60 ? ` ${min % 60}min` : ''}`
   return `faltam ${min} min`
 }
+// Código de indicação (?c=) que veio no link compartilhado: o mesmo tratamento de protudo.app.br/
+// baixar?c= — na Play Store vai como install referrer (`referrer=c%3D<código>`) e a página mostra o
+// código para quem está no iPhone digitar no cadastro. Formato inválido = ignorado (sem consulta).
+const playComIndicacao = (ref) => (ref ? `${URL_PLAY}&referrer=${encodeURIComponent(`c=${ref}`)}` : URL_PLAY)
 // Loja por aparelho: iOS → App Store; Android e desktop/outros → Play Store (na web).
-const linkLoja = (ua = '') => (/iPhone|iPad|iPod/i.test(ua) ? URL_APP_STORE : URL_PLAY)
+const linkLoja = (ua = '', ref = null) => (/iPhone|iPad|iPod/i.test(ua) ? URL_APP_STORE : playComIndicacao(ref))
 // Link do botão. Com scheme: Android abre o app via intent: (fallback na Play Store); iOS não
 // tem fallback de loja num link só, então vai à App Store. Sem scheme: sempre a loja.
-const linkAbrirApp = (ua = '') => {
+const linkAbrirApp = (ua = '', ref = null) => {
   if (APP_TEM_SCHEME && /Android/i.test(ua)) return URL_INTENT_ANDROID
-  return linkLoja(ua)
+  return linkLoja(ua, ref)
 }
 // Texto do botão e linha de apoio abaixo dele, por variante. `aba` = 'Serviços' | 'Obras' na
 // aberta; null na encerrada ("veja os pedidos abertos").
-const botaoEApoio = ({ ua, aba }) => {
-  const href = linkAbrirApp(ua)
+const botaoEApoio = ({ ua, aba, ref = null }) => {
+  const href = linkAbrirApp(ua, ref)
   const ondeVer = aba ? `veja na aba ${aba}` : 'veja os pedidos abertos'
   if (APP_TEM_SCHEME) {
     return { href, texto: aba ? `Abrir no app ${MARCA}` : 'Ver pedidos abertos no app', apoio: aba ? `O pedido está na aba ${aba}` : null }
@@ -166,16 +177,17 @@ const CSS = `
   .lojas{display:flex;gap:10px;justify-content:center;margin:18px 0 6px}
   .loja{flex:1;max-width:190px;display:flex;align-items:center;justify-content:center;gap:8px;background:#0a0a0a;color:#fff;text-decoration:none;border-radius:10px;padding:10px 12px;font-size:13px;font-weight:700}
   .loja small{display:block;font-weight:400;font-size:10px;opacity:.8}
+  .cod{margin:14px auto 0;max-width:360px;border:1px dashed ${LARANJA};border-radius:10px;padding:10px 12px;text-align:center;color:#9a4a0a;font-size:14px;font-weight:700;background:#fff8f2}
   footer{margin-top:22px;text-align:center;color:#777;font-size:12.5px;line-height:1.45}
 `
 
-const badgesLojas = () => `
+const badgesLojas = (ref = null) => `
       <div class="lojas">
-        <a class="loja" href="${URL_PLAY}" rel="noopener">▶ <span><small>DISPONÍVEL NO</small>Google Play</span></a>
+        <a class="loja" href="${escapar(playComIndicacao(ref))}" rel="noopener">▶ <span><small>DISPONÍVEL NO</small>Google Play</span></a>
         <a class="loja" href="${URL_APP_STORE}" rel="noopener"> <span><small>BAIXAR NA</small>App Store</span></a>
       </div>`
 
-const paginaHtml = ({ og, kicker, kickerOff, heading, card, botao, base }) => `<!doctype html>
+const paginaHtml = ({ og, kicker, kickerOff, heading, card, botao, base, ref = null }) => `<!doctype html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
@@ -197,19 +209,20 @@ const paginaHtml = ({ og, kicker, kickerOff, heading, card, botao, base }) => `<
     <div class="kicker${kickerOff ? ' off' : ''}">${escapar(kicker)}</div>
     <h1>${escapar(heading)}</h1>
     ${card}
-    <a class="btn" href="${botao.href}">${escapar(botao.texto)}</a>
+    <a class="btn" href="${escapar(botao.href)}">${escapar(botao.texto)}</a>
     ${botao.apoio ? `<p class="aba">${escapar(botao.apoio)}</p>` : ''}
-    ${badgesLojas()}
+    ${badgesLojas(ref)}
+    ${ref ? `<div class="cod">Seu código de indicação: ${escapar(ref)} (use no cadastro)</div>` : ''}
     <footer>Nome, telefone e endereço do cliente só aparecem no app, depois que vocês combinarem.</footer>
   </main>
 </body>
 </html>`
 
-const renderAberta = ({ lado, demanda, base, url, ua }) => {
+const renderAberta = ({ lado, demanda, base, url, ua, ref = null }) => {
   const valor = formatarValor(demanda.valor)
   const local = [demanda.bairro, demanda.cidade].filter(s => s && String(s).trim()).join(' · ')
   return paginaHtml({
-    base,
+    base, ref,
     og: { titulo: demanda.titulo, descricao: `Pedido aberto em ${demanda.cidade} · ${valor || 'Valor a combinar'}`, url },
     kicker: `Pedido aberto · ${demanda.cidade}`,
     heading: 'Tem cliente esperando por um profissional!',
@@ -222,15 +235,15 @@ const renderAberta = ({ lado, demanda, base, url, ua }) => {
       <div class="valor">${escapar(valor || 'Valor a combinar')}</div>
       ${demanda.interesses === 0 ? '<div class="faixa">Ninguém respondeu ainda — chegue primeiro!</div>' : ''}
     </div>`,
-    botao: botaoEApoio({ ua, aba: lado.aba }),
+    botao: botaoEApoio({ ua, aba: lado.aba, ref }),
   })
 }
 
-const renderEncerrada = ({ lado, demanda, base, url, ua }) => {
+const renderEncerrada = ({ lado, demanda, base, url, ua, ref = null }) => {
   const cidade = demanda?.cidade || ''
   const titulo = demanda?.titulo || 'Este pedido não está mais disponível'
   return paginaHtml({
-    base,
+    base, ref,
     og: { titulo: 'Pedido encerrado', descricao: cidade ? `Veja os pedidos abertos em ${cidade} no app ${MARCA}` : `Veja os pedidos abertos no app ${MARCA}`, url },
     kicker: cidade ? `Pedido encerrado · ${cidade}` : 'Pedido encerrado',
     kickerOff: true,
@@ -241,7 +254,7 @@ const renderEncerrada = ({ lado, demanda, base, url, ua }) => {
       <div class="titulo">${escapar(titulo)}</div>
       ${cidade ? `<div class="linha">📍 ${escapar(cidade)}</div>` : ''}
     </div>`,
-    botao: botaoEApoio({ ua, aba: null }),
+    botao: botaoEApoio({ ua, aba: null, ref }),
   })
 }
 
@@ -249,10 +262,10 @@ const renderEncerrada = ({ lado, demanda, base, url, ua }) => {
 // foi, sem valor, prazo nem contagem de interesses — o card apagado só repete chip, título e
 // cidade. Botão como na encerrada ("veja os pedidos abertos").
 const TEXTO_COM_PROFISSIONAL = 'Este pedido já tem um profissional escolhido.'
-const renderComProfissional = ({ lado, demanda, base, url, ua }) => {
+const renderComProfissional = ({ lado, demanda, base, url, ua, ref = null }) => {
   const cidade = demanda?.cidade || ''
   return paginaHtml({
-    base,
+    base, ref,
     og: { titulo: 'Pedido com profissional escolhido', descricao: cidade ? `Veja os pedidos abertos em ${cidade} no app ${MARCA}` : `Veja os pedidos abertos no app ${MARCA}`, url },
     kicker: cidade ? `Pedido em andamento · ${cidade}` : 'Pedido em andamento',
     kickerOff: true,
@@ -263,7 +276,7 @@ const renderComProfissional = ({ lado, demanda, base, url, ua }) => {
       <div class="titulo">${escapar(demanda.titulo)}</div>
       ${cidade ? `<div class="linha">📍 ${escapar(cidade)}</div>` : ''}
     </div>`,
-    botao: botaoEApoio({ ua, aba: null }),
+    botao: botaoEApoio({ ua, aba: null, ref }),
   })
 }
 
@@ -277,17 +290,72 @@ router.get('/:codigo', async (req, res) => {
   const base = `${req.protocol}://${req.get('host')}`
   const url = `${base}/p/${encodeURIComponent(codigo)}`
   const ua = req.get('user-agent') || ''
+  const ref = normalizarCodigo(req.query?.c)
   res.set('Cache-Control', 'no-cache')
   res.type('html')
   try {
     const achado = RE_CODIGO.test(codigo) ? await buscarDemanda(codigo) : null
-    if (!achado) return res.status(404).send(renderEncerrada({ base, url, ua }))
+    if (!achado) return res.status(404).send(renderEncerrada({ base, url, ua, ref }))
     const { lado, demanda } = achado
     const render = demanda.aberta ? renderAberta : (demanda.com_profissional ? renderComProfissional : renderEncerrada)
-    return res.send(render({ lado, demanda, base, url, ua }))
+    return res.send(render({ lado, demanda, base, url, ua, ref }))
   } catch (err) {
     console.error(`[PaginaPublica] erro em /p/${codigo}:`, err.message)
-    return res.status(500).send(renderEncerrada({ base, url, ua }))
+    return res.status(500).send(renderEncerrada({ base, url, ua, ref }))
+  }
+})
+
+// ── Cartão de compartilhamento e legenda (services/cartaoDemanda) ──────────────────────────
+// Só para demanda ABERTA (mesma regra da página); qualquer outro estado ou código → 404, sem
+// desenho. Valor e prazo com os MESMOS rótulos da página.
+const dadosDoCartao = ({ lado, demanda }) => ({
+  tabela: lado.tabela, demanda,
+  valor: formatarValor(demanda.valor) || 'A combinar',
+  prazo: rotuloPrazo(demanda),
+})
+// Indicação no CARTÃO: além do formato, o código precisa existir (conta ativa). Cada ?c= distinto
+// é um render novo (~1 s de CPU) e uma entrada de cache — inventar códigos não pode multiplicar isso.
+const indicacaoExistente = async (ref) => {
+  if (!ref) return null
+  const r = await pool.query(`SELECT 1 FROM usuarios WHERE codigo_indicacao = $1 AND ativo = true`, [ref])
+  return r.rows.length > 0 ? ref : null
+}
+
+router.get('/:codigo/cartao.png', async (req, res) => {
+  const codigo = String(req.params.codigo || '').trim().toUpperCase()
+  if (!RE_CODIGO.test(codigo)) return res.status(404).type('text').send('Pedido não encontrado')
+  try {
+    const ref = await indicacaoExistente(normalizarCodigo(req.query?.c))
+    const png = await cartaoEmCache(`${codigo}|${ref || ''}`, async () => {
+      const achado = await buscarDemanda(codigo)
+      if (!achado || !achado.demanda.aberta) return null
+      return renderizarCartao({ ...dadosDoCartao(achado), codigo, ref })
+    })
+    if (!png) return res.status(404).type('text').send('Pedido não disponível')
+    res.set('Cache-Control', `public, max-age=${TTL_MS / 1000}`)
+    // helmet põe CORP same-origin; o cartão é feito para ser exibido/baixado de qualquer lugar.
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin')
+    return res.type('png').send(png)
+  } catch (err) {
+    console.error(`[PaginaPublica] erro em /p/${codigo}/cartao.png:`, err.message)
+    return res.status(500).type('text').send('Erro ao gerar o cartão')
+  }
+})
+
+router.get('/:codigo/legenda', async (req, res) => {
+  const codigo = String(req.params.codigo || '').trim().toUpperCase()
+  const ref = normalizarCodigo(req.query?.c)
+  res.set('Cache-Control', 'no-cache')
+  res.type('text/plain; charset=utf-8')
+  try {
+    const achado = RE_CODIGO.test(codigo) ? await buscarDemanda(codigo) : null
+    if (!achado || !achado.demanda.aberta) return res.status(404).send('Pedido não disponível')
+    const { tabela, demanda, valor, prazo } = dadosDoCartao(achado)
+    const { emoji } = categoriaDaDemanda(tabela, demanda)
+    return res.send(textoLegenda({ codigo, ref, emoji, titulo: demanda.titulo, bairro: demanda.bairro, cidade: demanda.cidade, valor, prazo }))
+  } catch (err) {
+    console.error(`[PaginaPublica] erro em /p/${codigo}/legenda:`, err.message)
+    return res.status(500).send('Erro ao gerar a legenda')
   }
 })
 
@@ -296,4 +364,4 @@ module.exports = router
 // usa a MESMA regra, para os dois caminhos aceitarem e recusarem os mesmos códigos.
 module.exports.RE_CODIGO = RE_CODIGO
 // Só para teste/dry-run (render sem servidor): não são API pública do módulo.
-module.exports._interno = { buscarDemanda, renderAberta, renderEncerrada, renderComProfissional, TEXTO_COM_PROFISSIONAL, linkAbrirApp, botaoEApoio, RE_CODIGO, APP_TEM_SCHEME }
+module.exports._interno = { buscarDemanda, renderAberta, renderEncerrada, renderComProfissional, TEXTO_COM_PROFISSIONAL, linkAbrirApp, botaoEApoio, playComIndicacao, RE_CODIGO, APP_TEM_SCHEME }
