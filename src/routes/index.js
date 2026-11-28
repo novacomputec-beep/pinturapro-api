@@ -46,7 +46,7 @@ const { avaliarTelefoneAoPublicar, gravarTelefoneDoDono } = require('../utils/te
 const { migrarOrcamentoVisita, lerProposta, lerOrcamento, textoVisita, ehVisita, visitaSemOrcamento, visitaLiberaEndereco, aceitarVisita, gravarOrcamento,
         apresentar: apresentarProposta, anexarCamposProposta, cancelarVisitaAceita, permiteVisita, anexarPermiteVisita, ERRO_VISITA_NAO_PERMITIDA, STATUS_ORCAMENTO, STATUS_ORCAMENTO_ENVIADO,
         ACTION_CONTRATEI, ORIGEM_CONTRATADO_APOS_VISITA, lerContratei, tituloContratado, CORPO_CONTRATADO,
-        visitanteAtivo, lerContratouVisitante, registrarContratouVisitante } = require('../utils/orcamentoVisita')
+        visitanteAtivo, lerContratouVisitante, registrarContratouVisitante, pendenciasDoUsuario } = require('../utils/orcamentoVisita')
 // Prazo curto × texto que fala de outro dia (utils/prazoIncoerente) e colunas do prazo acabando (services/prazoCurtoService).
 const { avaliarPrazoIncoerente } = require('../utils/prazoIncoerente')
 // Anti-contato (utils/contatoNoTexto): contato no texto do pedido, da pergunta e da resposta.
@@ -4248,7 +4248,7 @@ router.get('/obras/:id', autenticar, async (req, res) => {
     // o pintor do match antes do horário e o candidato com aceite — endereço/ponto nulos,
     // coordenadas arredondadas e endereco_liberado:false (utils/privacidadeDemanda).
     // …e o profissional cuja VISITA para orçamento o dono aceitou (utils/orcamentoVisita).
-    aplicarPrivacidadeLocal(obra, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPintorDoMatch, visitaAceita: visitaLiberaEndereco(minhaCandidaturaResult.rows[0]) })
+    aplicarPrivacidadeLocal(obra, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPintorDoMatch, visitaAceita: visitaLiberaEndereco(minhaCandidaturaResult.rows[0], ehPintorDoMatch) })
     // permite_visita: este pedido aceita proposta de visita para orçamento? (toda obra aceita)
     obra.permite_visita = permiteVisita('obras', obra)
 
@@ -7332,7 +7332,7 @@ router.get('/reparos/:id', autenticar, async (req, res) => {
     // prestador do match DEPOIS do horário combinado (chegada_prevista_em); demais leitores recebem
     // endereço/ponto nulos, coordenadas arredondadas e endereco_liberado:false (utils/privacidadeDemanda).
     // …e o profissional cuja VISITA para orçamento o dono aceitou (utils/orcamentoVisita).
-    aplicarPrivacidadeLocal(reparo, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPrestadorDoMatch, visitaAceita: visitaLiberaEndereco(interesse.rows[0]) })
+    aplicarPrivacidadeLocal(reparo, { ehDono, ehAdmin: req.usuario.role === 'admin', ehProfissionalDoMatch: ehPrestadorDoMatch, visitaAceita: visitaLiberaEndereco(interesse.rows[0], ehPrestadorDoMatch) })
     // permite_visita: este pedido aceita proposta de visita para orçamento? (pelas categorias)
     reparo.permite_visita = permiteVisita('reparos', reparo)
 
@@ -9047,6 +9047,17 @@ const criarHandlerOrcamento = (tabela) => async (req, res) => {
 }
 router.post('/obras/:id/candidatura/:propostaId/orcamento', autenticar, exigirNaoSuspenso, exigirPodeObrasOuCandidato, criarHandlerOrcamento('obras'))
 router.post('/reparos/:id/interesse/:propostaId/orcamento', autenticar, exigirNaoSuspenso, exigirPodeServicosOuInteressado, criarHandlerOrcamento('reparos'))
+// GET /me/pendencias — banners do topo (ajustes da visita, utils/orcamentoVisita.pendenciasDoUsuario):
+// { pendencias: [{ tipo: 'visita_aceita', obra_id|reparo_id, proposta_id, titulo, visita_quando }
+//               | { tipo: 'orcamento_recebido', obra_id|reparo_id, proposta_id, titulo, valor }] }, até 3.
+router.get('/me/pendencias', autenticar, async (req, res) => {
+  try {
+    res.json({ pendencias: await pendenciasDoUsuario(req.usuario.id) })
+  } catch (err) {
+    console.error('[pendencias]', err.message)
+    res.status(500).json({ erro: 'Erro ao carregar as pendências' })
+  }
+})
 
 router.get('/candidaturas/minhas',        autenticar, candidaturasCtrl.minhas)
 router.get('/candidaturas/pendentes',     autenticar, exigirAdmin, candidaturasCtrl.pendentes)
