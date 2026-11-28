@@ -8575,6 +8575,14 @@ router.get('/config', async (req, res) => {
 // GET /config/grupos-categorias — PÚBLICO (a tela de novo serviço monta o seletor de até 3
 // categorias pré-login/pós-login sem token, como /config): o mapa grupo → slugs de
 // utils/gruposCategorias, o teto por reparo e se a expansão por grupo está ligada.
+// GET /perguntas-guia — público, sem token, cache de 1h. Perguntas que ajudam o dono a descrever o
+// pedido: { grupos: { <chave do grupo>: [..] }, especialidades: { <slug>: [..] } } — a especialidade
+// listada substitui o seu grupo. Dado estático em src/data/perguntasGuia.js.
+router.get('/perguntas-guia', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=3600')
+  res.json(require('../data/perguntasGuia').PERGUNTAS_GUIA)
+})
+
 router.get('/config/grupos-categorias', async (req, res) => {
   try {
     res.set('Cache-Control', 'public, max-age=300')
