@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // AJUSTES DA VISITA (utils/orcamentoVisita — arte aprovada "visita-ajustes-previa", dono 27/11/2026). Nos DOIS lados:
-//  1) POST …/orcamento antes de visita_quando → 409 ORCAMENTO_ANTES_DA_VISITA ("O orçamento libera no horário da visita: dd/mm às HHh.");
+//  1) POST …/orcamento antes de visita_quando − 1h (orcamento_libera_em) → 409 ORCAMENTO_ANTES_DA_VISITA
+//     ("O orçamento libera em dd/mm às HHh, 1 hora antes da visita.");
 //  2) 'contratei' só em visita_aceita E a partir de visita_quando; pode_enviar_orcamento / pode_contratei em cada proposta;
 //  3) GET /me/pendencias (profissional: visita_aceita; dono: orcamento_recebido; mais recentes primeiro, até 3);
 //  4) match que veio de visita (orçamento aceito ou 'contratei'): endereço completo já visível ao profissional.
@@ -161,16 +162,40 @@ const main = async () => {
     const P1 = await visita(pro1, DEM)
     pushes.length = 0
     let r = await orcarJa(pro1, P1, ORC, DEM)
-    const esperado = `O orçamento libera no horário da visita: ${O.quandoCurto(QUANDO)}.`
-    ok(r.status === 409 && r.body.codigo === 'ORCAMENTO_ANTES_DA_VISITA' && r.body.erro === esperado && /^O orçamento libera no horário da visita: \d{2}\/\d{2} às 14h\.$/.test(r.body.erro)
-       && r.body.visita_quando === QUANDO && (await prop(P1)).status === 'visita_aceita' && pushes.length === 0,
-       'orçamento antes do horário da visita: 409 ORCAMENTO_ANTES_DA_VISITA, "… dd/mm às 14h.", nada muda', r.body)
+    const LIBERA = new Date(new Date(QUANDO).getTime() - 3600000).toISOString()   // 13:00 em São Paulo
+    const esperado = `O orçamento libera em ${O.quandoCurto(LIBERA)}, 1 hora antes da visita.`
+    ok(r.status === 409 && r.body.codigo === 'ORCAMENTO_ANTES_DA_VISITA' && r.body.erro === esperado && /^O orçamento libera em \d{2}\/\d{2} às 13h, 1 hora antes da visita\.$/.test(r.body.erro)
+       && r.body.visita_quando === QUANDO && r.body.orcamento_libera_em === LIBERA && (await prop(P1)).status === 'visita_aceita' && pushes.length === 0,
+       'orçamento antes da liberação: 409 ORCAMENTO_ANTES_DA_VISITA, "… às 13h, 1 hora antes da visita.", orcamento_libera_em, nada muda', r.body)
     r = await detalhe(pro1, DEM)
-    ok(minha(r.body)?.pode_enviar_orcamento === false && minha(r.body)?.pode_contratei === false, 'antes do horário: pode_enviar_orcamento e pode_contratei false', minha(r.body))
+    ok(minha(r.body)?.pode_enviar_orcamento === false && minha(r.body)?.pode_contratei === false && minha(r.body)?.orcamento_libera_em === LIBERA,
+       'antes da liberação: pode_enviar_orcamento e pode_contratei false; orcamento_libera_em = visita − 1h', minha(r.body))
     r = await detalhe(dono, DEM)
-    ok(lista(r.body).find(x => x.id === P1)?.pode_contratei === false, 'antes do horário (lista do dono): pode_contratei false')
+    ok(lista(r.body).find(x => x.id === P1)?.pode_contratei === false && lista(r.body).find(x => x.id === P1)?.orcamento_libera_em === LIBERA, 'antes do horário (lista do dono): pode_contratei false, orcamento_libera_em')
     r = await responder(P1, { action: 'contratei' }, DEM)
     ok(r.status === 409 && r.body.codigo === 'CONTRATEI_INDISPONIVEL' && (await dem(DEM)).match_usuario_id === null, "'contratei' antes do horário: 409 CONTRATEI_INDISPONIVEL", r.body)
+
+    // Janela de 1h antes: visita daqui a 61 min → ainda fechado; daqui a 30 min → orçamento liberado, 'contratei' não.
+    const emMin = (pid, min) => q(`UPDATE ${L.prop} SET visita_quando = NOW() + ($2::int * INTERVAL '1 minute') WHERE id = $1`, [pid, min])
+    const DEMj = await demanda(L.tabela, dono, 'Janela de uma hora')
+    const PJ = await visita(pro2, DEMj)
+    await emMin(PJ, 61)
+    r = await orcarJa(pro2, PJ, ORC, DEMj)
+    const m61 = minha((await detalhe(pro2, DEMj)).body)
+    ok(r.status === 409 && r.body.codigo === 'ORCAMENTO_ANTES_DA_VISITA' && m61?.pode_enviar_orcamento === false
+       && m61?.orcamento_libera_em === new Date(new Date(m61.visita_quando).getTime() - 3600000).toISOString(),
+       'visita daqui a 61 min: orçamento ainda 409, pode_enviar_orcamento false', { s: r.status, l: m61?.orcamento_libera_em })
+    await emMin(PJ, 30)
+    const m30 = minha((await detalhe(pro2, DEMj)).body)
+    ok(m30?.pode_enviar_orcamento === true && m30?.pode_contratei === false && new Date(m30.orcamento_libera_em).getTime() < Date.now(),
+       'visita daqui a 30 min: pode_enviar_orcamento true, pode_contratei false (contratei segue no horário)', m30 && [m30.pode_enviar_orcamento, m30.pode_contratei])
+    r = await responder(PJ, { action: 'contratei' }, DEMj)
+    ok(r.status === 409 && r.body.codigo === 'CONTRATEI_INDISPONIVEL', "visita daqui a 30 min: 'contratei' ainda 409", r.body)
+    r = await orcarJa(pro2, PJ, ORC, DEMj)
+    ok(r.status === 200 && r.body.status === 'orcamento_enviado' && r.body.pode_enviar_orcamento === false && typeof r.body.orcamento_libera_em === 'string',
+       'visita daqui a 30 min: orçamento aceito (200); a resposta traz orcamento_libera_em', r.body.status)
+    ok(O.orcamentoLiberaEm({ visita_quando: '2026-11-28T17:00:00Z' }) === '2026-11-28T16:00:00.000Z' && O.orcamentoLiberaEm({}) === null && O.orcamentoLiberaEm({ visita_quando: 'x' }) === null,
+       'orcamentoLiberaEm: visita − 1h em ISO; sem visita_quando → null')
 
     await chegou(P1)
     r = await detalhe(pro1, DEM)
@@ -184,7 +209,7 @@ const main = async () => {
     const PV = (await enviar(pro2, { suporta_orcamento: true, valor_proposto: 250 }, DEM)).body.id
     r = await detalhe(dono, DEM)
     const lv = lista(r.body).find(x => x.id === PV)
-    ok(lv?.pode_enviar_orcamento === false && lv?.pode_contratei === false, 'proposta de valor: os dois false', lv && [lv.pode_enviar_orcamento, lv.pode_contratei])
+    ok(lv?.pode_enviar_orcamento === false && lv?.pode_contratei === false && lv?.orcamento_libera_em === null, 'proposta de valor: os dois false, orcamento_libera_em null', lv && [lv.pode_enviar_orcamento, lv.pode_contratei, lv.orcamento_libera_em])
 
     // ── 4) ENDEREÇO para o match que veio da visita ──
     pushes.length = 0
