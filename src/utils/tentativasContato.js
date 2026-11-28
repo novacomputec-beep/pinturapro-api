@@ -33,6 +33,25 @@ const AVISOS_ANTES_DE_SUSPENDER = 2
 const DIAS_SUSPENSAO_CONTATO = 7
 const MOTIVO_SUSPENSAO_CONTATO = 'Tentativa de compartilhar contato'
 
+// CONTAS DE TESTE ISENTAS da penalidade (dono, 28/11/2026): a conta oficial do ProTudo e as contas
+// de teste do dono (as quatro do mesmo e-mail: dono e profissional). Para elas o contato
+// continua detectado, mascarado e recusado (409) como para qualquer um, e o envio continua no
+// log do admin — mas com conta = false: não vira strike, não gera aviso nem suspensão. Para
+// incluir mais: acrescentar o id aqui ou na env CONTATO_ISENTOS_IDS (ids separados por vírgula).
+const IDS_ISENTOS_PENALIDADE_CONTATO = Object.freeze([
+  '88e50935-5564-4d85-937d-96b797496357', // ProTudo Oficial
+  '0cd37980-bcc2-4621-be49-be5b067cd045', // conta de teste do dono (prestador)
+  '010c1378-a321-401c-b12d-eb6e52008284', // conta de teste do dono (prestador)
+  'c8200b20-96cf-4f77-86af-c77276284f39', // conta de teste do dono (dono_obra)
+  '37f39c2b-ade1-4f2f-9d47-73f81a90f2d4', // conta de teste do dono (dono_obra)
+])
+const idsIsentosDaEnv = () => String(process.env.CONTATO_ISENTOS_IDS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+const isentoPenalidadeContato = (usuarioId) => {
+  if (!usuarioId) return false
+  const id = String(usuarioId).toLowerCase()
+  return IDS_ISENTOS_PENALIDADE_CONTATO.includes(id) || idsIsentosDaEnv().includes(id)
+}
+
 const TITULO_AVISO = '⚠️ Contato não permitido'
 const CORPO_AVISO_1 = `Não é permitido enviar telefone, e-mail ou link pelo ${MARCA}. O contato é liberado no 'Estou a caminho'. Na 3ª tentativa, sua conta será suspensa.`
 const CORPO_AVISO_2 = `Último aviso: a próxima tentativa suspende sua conta por ${DIAS_SUSPENSAO_CONTATO} dias.`
@@ -48,6 +67,7 @@ const entregarSempre = (args) => require('../services/alertaService').entregarPu
 
 // Conta as tentativas do usuário na janela e aplica o degrau correspondente. Nunca lança.
 const aplicarPenalidadeContato = async (usuarioId, db = pool) => {
+  if (isentoPenalidadeContato(usuarioId)) return 'isento'
   try {
     // conta = true: só contato CLARO (telefone em algarismos, e-mail, link) pesa na régua;
     // dígitos por extenso e afins ficam na lista do admin (conta = false) sem punir.
@@ -94,15 +114,18 @@ const aplicarPenalidadeContato = async (usuarioId, db = pool) => {
 // claro: temContatoClaro). Chamar DEPOIS de o INSERT do envio ter entrado: um envio recusado
 // (409 de duplicidade etc.) não é tentativa. Nunca rejeita.
 const registrarTentativaContato = async ({ usuario_id, tipo, demanda_id, campo, conta = true }, db = pool) => {
+  // Conta isenta: a linha entra no log do admin, mas nunca como strike (conta = false).
+  const isento = isentoPenalidadeContato(usuario_id)
   try {
     await db.query(
       `INSERT INTO tentativas_contato (usuario_id, tipo, demanda_id, campo, conta) VALUES ($1, $2, $3, $4, $5)`,
-      [usuario_id, tipo, demanda_id || null, campo, !!conta]
+      [usuario_id, tipo, demanda_id || null, campo, !!conta && !isento]
     )
   } catch (err) {
     console.error(`[TentativaContato] ${tipo}/${campo} de ${usuario_id}:`, err.message)
     return null
   }
+  if (isento && conta) return 'isento'
   if (!conta) return 'sem_penalidade'
   return aplicarPenalidadeContato(usuario_id, db)
 }
@@ -187,6 +210,7 @@ const mascararLinha = (linha, campos) => {
 const mascararLista = (linhas, campos) => (Array.isArray(linhas) ? linhas.map(l => mascararLinha(l, campos)) : linhas)
 
 module.exports = {
+  IDS_ISENTOS_PENALIDADE_CONTATO, isentoPenalidadeContato,
   JANELA_PENALIDADE_DIAS, AVISOS_ANTES_DE_SUSPENDER, DIAS_SUSPENSAO_CONTATO, MOTIVO_SUSPENSAO_CONTATO,
   registrarTentativaContato, aplicarPenalidadeContato, liberarSuspensoesContato, temContatoClaro,
   limparProfundo, limparCamposEscrita, mascararLinha, mascararLista,
