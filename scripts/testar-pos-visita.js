@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // PÓS-VISITA (utils/orcamentoVisita — arte aprovada "pos-visita-previa", dono 27/11/2026). Nos DOIS lados:
-//  1) 'contratei' no …/responder (visita_aceita ou orcamento_enviado; valor_combinado opcional >= R$ 20):
+//  1) 'contratei' no …/responder (visita_aceita a partir de visita_quando; valor_combinado opcional >= R$ 20):
 //     aceite de sempre + valor acordado + origem_match 'contratado_apos_visita' + push "✅ … contratou você";
 //  2) "📋 Você está na visita?" na hora da visita, uma vez, fora do silêncio noturno;
 //  3) cancelamento do dono com contratou_visitante (só com visitante ativo) e visitante_ativo no detalhe do dono.
@@ -135,7 +135,10 @@ const main = async () => {
     const dem = async (id) => (await q(`SELECT * FROM ${L.tabela} WHERE id = $1`, [id])).rows[0]
     const enviar = (u, body, id) => chamar('post', L.criar, { usuario: u, params: { id }, body })
     const responder = (pid, body, id, u = dono) => chamar('post', L.responder, { usuario: u, params: { id, [L.pid]: pid }, body })
-    const orcar = (u, pid, body, id) => chamar('post', L.orc, { usuario: u, params: { id, propostaId: pid }, body })
+    // Ajustes da visita: o orçamento e o 'contratei' só liberam no horário da visita → leva a visita
+    // para o passado antes (o bloqueio em si está em testar-visita-ajustes.js).
+    const chegou = (pid) => q(`UPDATE ${L.prop} SET visita_quando = NOW() - INTERVAL '5 minutes' WHERE id = $1 AND visita_quando > NOW()`, [pid])
+    const orcar = async (u, pid, body, id) => { await chegou(pid); return chamar('post', L.orc, { usuario: u, params: { id, propostaId: pid }, body }) }
     const detalhe = (u, id) => chamar('get', L.detalhe, { usuario: u, params: { id } })
     const visita = async (u, id, aceitar = true) => {
       const x = await enviar(u, { suporta_orcamento: true, tipo_proposta: 'visita', visita_quando: QUANDO }, id)
@@ -159,6 +162,7 @@ const main = async () => {
     r = await detalhe(pro1, DEM)
     ok(r.status === 200 && r.body.visitante_ativo === null, 'detalhe do profissional: visitante_ativo null', r.body.visitante_ativo)
 
+    await chegou(P1); await chegou(P4)
     r = await responder(P4, { action: 'contratei' }, DEM)
     const rValor = await responder(P3, { action: 'contratei' }, DEM)
     ok(r.status === 409 && r.body.codigo === 'CONTRATEI_INDISPONIVEL' && rValor.status === 409 && rValor.body.codigo === 'CONTRATEI_INDISPONIVEL' && (await dem(DEM)).match_usuario_id === null,
@@ -184,16 +188,18 @@ const main = async () => {
     r = await detalhe(dono, DEM)
     ok(r.body.visitante_ativo === null, 'depois do contratei: visitante_ativo null', r.body.visitante_ativo)
 
-    // Orçamento enviado, sem valor_combinado → o valor do orçamento.
+    // Orçamento enviado: 'contratei' não vale mais (ajustes da visita) — o dono usa o 'aceitar' de sempre.
     const DEM2 = await demanda(L.tabela, dono, 'Pintura do muro')
     const Q1 = await visita(pro1, DEM2); await orcar(pro1, Q1, ORC, DEM2)
     r = await responder(Q1, { action: 'contratei' }, DEM2)
+    ok(r.status === 409 && r.body.codigo === 'CONTRATEI_INDISPONIVEL' && (await prop(Q1)).status === 'orcamento_enviado', "'contratei' com orçamento enviado: 409 CONTRATEI_INDISPONIVEL", r.body)
+    r = await responder(Q1, { action: 'aceitar' }, DEM2)
     p = await prop(Q1)
-    ok(r.status === 200 && p.status === 'aceito' && Number(p.valor_combinado) === 1500 && Number(await acordado(DEM2)) === 1500 && (await dem(DEM2)).origem_match === 'contratado_apos_visita',
-       "'contratei' com orçamento enviado e sem valor_combinado: valor acordado = orçamento (1500)", { v: p.valor_combinado })
+    ok(r.status === 200 && p.status === 'aceito' && Number(await acordado(DEM2)) === 1500 && (await dem(DEM2)).origem_match === null,
+       "orçamento enviado + 'aceitar': aceite de sempre, valor acordado = orçamento (1500)", { v: p.valor_proposto })
     // Visita aceita, sem valor → sem valor próprio (o acordado cai no valor do pedido, como no aceite comum).
     const DEM3 = await demanda(L.tabela, dono, 'Troca do telhado')
-    const Q2 = await visita(pro2, DEM3)
+    const Q2 = await visita(pro2, DEM3); await chegou(Q2)
     r = await responder(Q2, { action: 'contratei' }, DEM3)
     p = await prop(Q2)
     ok(r.status === 200 && p.valor_combinado === null && p.valor_proposto === null && Number(await acordado(DEM3)) === (L.tabela === 'obras' ? 3000 : 300),

@@ -175,7 +175,12 @@ const main = async () => {
     const dem = async (id = DEM) => (await q(`SELECT * FROM ${L.tabela} WHERE id = $1`, [id])).rows[0]
     const enviar = (u, body, id = DEM) => chamar('post', L.criar, { usuario: u, params: { id }, body })
     const responder = (pid, body, u = dono, id = DEM) => chamar('post', L.responder, { usuario: u, params: { id, [L.pid]: pid }, body })
-    const orcar = (u, pid, body, id = DEM) => chamar('post', L.orc, { usuario: u, params: { id, propostaId: pid }, body })
+    // Ajustes da visita: o orçamento só libera no horário da visita → leva a visita para o passado antes
+    // (o bloqueio em si está em testar-visita-ajustes.js).
+    const orcar = async (u, pid, body, id = DEM) => {
+      await q(`UPDATE ${L.prop} SET visita_quando = NOW() - INTERVAL '5 minutes' WHERE id = $1 AND visita_quando > NOW()`, [pid])
+      return chamar('post', L.orc, { usuario: u, params: { id, propostaId: pid }, body })
+    }
     const detalhe = async (u, id = DEM) => { const r = await chamar('get', L.detalhe, { usuario: u, params: { id } }); return r }
     // A guarda do profissional é a MESMA função (anônima) da rota …-responder do lado.
     const guardaResponder = rota('post', L.responder.replace('/responder', L.tabela === 'obras' ? '/pintor-responder' : '/prestador-responder')).stack[1].handle

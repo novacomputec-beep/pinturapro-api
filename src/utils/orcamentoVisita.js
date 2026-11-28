@@ -26,6 +26,10 @@
 //    mensagem_profissional (nunca lança; esquema sem as colunas → tudo 'valor'/null).
 // 7) PÓS-VISITA ('contratei', aviso na hora da visita, contratou_visitante, visitante_ativo): ver o
 //    bloco "PÓS-VISITA" no fim do arquivo.
+// 8) AJUSTES DA VISITA (27/11/2026): orçamento e 'contratei' só a partir de visita_quando (409
+//    ORCAMENTO_ANTES_DA_VISITA / CONTRATEI_INDISPONIVEL), pode_enviar_orcamento e pode_contratei em
+//    cada proposta, GET /me/pendencias (pendenciasDoUsuario) e endereço liberado ao profissional do
+//    match que veio de uma visita (visitaLiberaEndereco).
 const { pool } = require('./supabase')
 const { GRUPOS_RELACIONADOS } = require('./gruposCategorias')
 const { GRUPO_OBRAS_REPARADOR } = require('./especialidades')
@@ -154,8 +158,28 @@ const lerOrcamento = (body, agora = new Date()) => {
 const ehVisita = (proposta) => proposta?.tipo_proposta === TIPO_VISITA
 // Visita que ainda não virou orçamento: o 'aceitar' do dono aqui aceita a VISITA, não fecha negócio.
 const visitaSemOrcamento = (proposta) => ehVisita(proposta) && ['pendente', STATUS_VISITA_ACEITA].includes(proposta.status)
-// O profissional desta proposta vê o endereço completo?
-const visitaLiberaEndereco = (proposta) => ehVisita(proposta) && STATUS_COM_ENDERECO.includes(proposta.status)
+// O profissional desta proposta vê o endereço completo? Visita aceita/orçamento enviado — e, AJUSTES
+// DA VISITA (dono, 27/11/2026), o profissional do match que veio de uma visita (orçamento aceito ou
+// 'contratei': proposta 'aceito'), já na hora, sem esperar o horário combinado. ehDoMatch é
+// obrigatório para o 'aceito': match desfeito não deixa o endereço aberto.
+const visitaLiberaEndereco = (proposta, ehDoMatch = false) =>
+  ehVisita(proposta) && (STATUS_COM_ENDERECO.includes(proposta.status) || (ehDoMatch && proposta.status === 'aceito'))
+
+// AJUSTES DA VISITA (dono, 27/11/2026 — arte aprovada "visita-ajustes-previa"): o orçamento e o
+// 'contratei' só liberam a partir do horário da visita (visita_quando). Comparação de instantes; o
+// texto do horário sai em America/Sao_Paulo.
+const visitaJaChegou = (proposta, agora = new Date()) =>
+  !!proposta?.visita_quando && new Date(proposta.visita_quando).getTime() <= agora.getTime()
+// Visita aceita que já chegou ao horário: o profissional pode mandar o orçamento, o dono pode 'contratei'.
+const visitaNoHorario = (proposta, agora = new Date()) => ehVisita(proposta) && proposta.status === STATUS_VISITA_ACEITA && visitaJaChegou(proposta, agora)
+// "28/11 às 14h" (ou "28/11 às 14h30").
+const quandoCurto = (quando) => {
+  const d = new Date(quando)
+  const [h, m] = fmtHora.format(d).split(':')
+  return `${fmtDiaMes.format(d)} às ${h}h${m === '00' ? '' : m}`
+}
+const erroOrcamentoAntesDaVisita = (quando) => ({
+  erro: `O orçamento libera no horário da visita: ${quandoCurto(quando)}.`, codigo: 'ORCAMENTO_ANTES_DA_VISITA', visita_quando: new Date(quando).toISOString() })
 
 const MSG_VISITA_ACEITA = 'Visita aceita! O profissional foi avisado e já vê o endereço. O pedido continua aberto para outras propostas.'
 // Dono aceita a visita. `demanda` = { criado_por, titulo, status, match_usuario_id }; `proposta` = a
@@ -186,7 +210,7 @@ const aceitarVisita = async ({ tabela, demandaId, demanda, proposta, donoId }, d
 // Profissional manda o orçamento, DENTRO da transação que travou o pedido (`client`). `orc` vem de
 // lerOrcamento (observação já sanitizada por quem chama). Devolve { status, body, avisar? } —
 // avisar() é chamado por quem chama DEPOIS do COMMIT.
-const gravarOrcamento = async ({ tabela, demandaId, demanda, propostaId, usuarioId, orc }, dep, client) => {
+const gravarOrcamento = async ({ tabela, demandaId, demanda, propostaId, usuarioId, orc, agora = new Date() }, dep, client) => {
   const lado = LADOS[tabela]
   const r = await client.query(`SELECT * FROM ${lado.proposta} WHERE id = $1 AND ${lado.fk} = $2 AND usuario_id = $3 FOR UPDATE`, [propostaId, demandaId, usuarioId])
   const p = r.rows[0]
@@ -194,6 +218,7 @@ const gravarOrcamento = async ({ tabela, demandaId, demanda, propostaId, usuario
   if (!ehVisita(p)) return { status: 409, body: erro('Esta proposta não é uma visita para orçamento.', 'NAO_E_VISITA') }
   if (p.status === STATUS_ORCAMENTO_ENVIADO) return { status: 409, body: erro('Você já enviou o orçamento deste pedido.', 'ORCAMENTO_JA_ENVIADO') }
   if (p.status !== STATUS_VISITA_ACEITA) return { status: 409, body: erro('O orçamento só pode ser enviado depois que o cliente aceita a visita.', 'VISITA_NAO_ACEITA') }
+  if (!visitaJaChegou(p, agora)) return { status: 409, body: erroOrcamentoAntesDaVisita(p.visita_quando) }
   const upd = await client.query(
     `UPDATE ${lado.proposta}
         SET status = '${STATUS_ORCAMENTO_ENVIADO}', valor_proposto = $2, orcamento_prazo_dias = $3, orcamento_data_inicio = $4::date,
@@ -216,6 +241,7 @@ const gravarOrcamento = async ({ tabela, demandaId, demanda, propostaId, usuario
 const CAMPOS_NULOS = Object.freeze({
   tipo_proposta: TIPO_VALOR, visita_gratis: null, visita_valor: null, visita_quando: null, visita_aceita_em: null,
   orcamento_valor: null, orcamento_prazo_dias: null, orcamento_data_inicio: null, orcamento_observacao: null, orcamento_enviado_em: null,
+  pode_enviar_orcamento: false, pode_contratei: false,
 })
 // Os campos do payload a partir da linha do banco (muta e devolve). Serve ao RETURNING * e à leitura.
 const apresentar = (linha, fonte = linha) => {
@@ -234,6 +260,10 @@ const apresentar = (linha, fonte = linha) => {
     orcamento_observacao: fonte.orcamento_observacao ?? null,
     orcamento_enviado_em: fonte.orcamento_enviado_em ?? null,
   })
+  // Ajustes da visita: o mesmo teste de POST …/orcamento e do 'contratei' (visita aceita + horário chegou).
+  const noHorario = visitaNoHorario({ tipo_proposta: fonte.tipo_proposta, status: fonte.status ?? linha.status, visita_quando: fonte.visita_quando })
+  linha.pode_enviar_orcamento = noHorario
+  linha.pode_contratei = noHorario
   // O que o profissional escreveu (na visita, `mensagem` é o texto montado para o app antigo).
   if ('mensagem' in fonte || visita) linha.mensagem_profissional = visita ? fonte.mensagem_original ?? null : fonte.mensagem ?? null
   // Visita ainda sem orçamento: valor_proposto nunca sai nulo (ver o item 5 do cabeçalho).
@@ -250,7 +280,7 @@ const anexarCamposProposta = async (tabela, linhas, db = pool) => {
   if (lista.length === 0 || !lado) return linhas
   try {
     const r = await db.query(
-      `SELECT id, tipo_proposta, visita_gratis, visita_valor, visita_quando, visita_aceita_em, valor_proposto, mensagem, mensagem_original,
+      `SELECT id, status, tipo_proposta, visita_gratis, visita_valor, visita_quando, visita_aceita_em, valor_proposto, mensagem, mensagem_original,
               orcamento_prazo_dias, orcamento_data_inicio::text AS orcamento_data_inicio, orcamento_observacao, orcamento_enviado_em
          FROM ${lado.proposta} WHERE id = ANY($1::uuid[])`, [lista.map(l => l.id)])
     const porId = new Map(r.rows.map(x => [x.id, x]))
@@ -365,8 +395,8 @@ const lembrarOrcamentos = async ({ avisarUsuario }, db = pool, agora = new Date(
 
 // ── PÓS-VISITA (dono, 27/11/2026 — arte aprovada "pos-visita-previa") ──────────────────────────
 // 1) 'CONTRATEI' (POST …/responder, action 'contratei', valor_combinado opcional >= R$ 20): o dono
-//    registra que contratou o profissional da visita (proposta em 'visita_aceita' ou
-//    'orcamento_enviado'). É o aceite de SEMPRE (match, demais propostas recusadas, regras de
+//    registra que contratou o profissional da visita (proposta em 'visita_aceita' e já no horário
+//    da visita — ajustes de 27/11; com orçamento enviado é o 'aceitar' de sempre). É o aceite de SEMPRE (match, demais propostas recusadas, regras de
 //    contato, avaliações); muda só: o valor acordado (valor_combinado, ou o orçamento já enviado)
 //    vai para valor_proposto + valor_combinado, o pedido ganha origem_match 'contratado_apos_visita'
 //    e o push ao profissional é "✅ {primeiro nome} registrou que contratou você para "{título}"".
@@ -376,9 +406,11 @@ const tituloContratado = (primeiroNome, titulo) => `✅ ${primeiroNome} registro
 const CORPO_CONTRATADO = 'Toque para ver os detalhes do serviço.'
 // proposta = linha inteira; body = corpo do responder. → { erro: { status, body } } ou { valor } (valor acordado
 // ou null = sem valor: valorAcordado cai no valor do pedido, como no aceite comum sem proposta de valor).
-const lerContratei = (proposta, body) => {
-  if (!ehVisita(proposta) || !STATUS_ORCAMENTO.includes(proposta.status)) {
-    return { erro: { status: 409, body: erro('Só dá para registrar a contratação de um profissional com visita aceita ou orçamento enviado.', 'CONTRATEI_INDISPONIVEL') } }
+// Ajustes da visita (27/11/2026): só 'visita_aceita' E a partir de visita_quando; com orçamento
+// enviado o dono usa o 'aceitar' de sempre.
+const lerContratei = (proposta, body, agora = new Date()) => {
+  if (!visitaNoHorario(proposta, agora)) {
+    return { erro: { status: 409, body: erro('Só dá para registrar a contratação a partir do horário de uma visita aceita.', 'CONTRATEI_INDISPONIVEL') } }
   }
   const bruto = body?.valor_combinado
   if (!vazio(bruto)) {
@@ -386,7 +418,6 @@ const lerContratei = (proposta, body) => {
     if (!Number.isFinite(n) || n < VALOR_MINIMO) return { erro: { status: 400, body: { erro: 'O valor combinado precisa ser de pelo menos R$ 20.', codigo: 'VALOR_MINIMO', valor_minimo: VALOR_MINIMO } } }
     return { valor: n }
   }
-  if (proposta.status === STATUS_ORCAMENTO_ENVIADO && proposta.valor_proposto != null) return { valor: Number(proposta.valor_proposto) }
   return { valor: null }
 }
 
@@ -459,7 +490,48 @@ const registrarContratouVisitante = async (tabela, demandaId, valor, db = pool) 
   return r.rows.length > 0
 }
 
+// ── PENDÊNCIAS (GET /me/pendencias — ajustes da visita, 27/11/2026) ─────────────────────────────
+// Banners do topo do app. Profissional (as propostas DESTA conta): { tipo: 'visita_aceita',
+// obra_id|reparo_id, proposta_id, titulo, visita_quando } — visita aceita, sem orçamento, de hoje
+// em diante (dia em São Paulo), pedido aberto e sem escolhido. Dono (pedidos de qualquer conta da
+// pessoa): { tipo: 'orcamento_recebido', obra_id|reparo_id, proposta_id, titulo, valor } — orçamento
+// ainda sem resposta, pedido aberto e sem escolhido. Mais recentes primeiro (visita_aceita_em /
+// orcamento_enviado_em), no máximo MAX_PENDENCIAS. Nunca lança: esquema sem as colunas → [].
+const MAX_PENDENCIAS = 3
+const pendenciasDoUsuario = async (usuarioId, db = pool, agora = new Date()) => {
+  const { sqlDonoDaPessoa } = require('./tipoConta')
+  const itens = []
+  try {
+    for (const lado of Object.values(LADOS)) {
+      const vis = await db.query(
+        `SELECT p.id, d.id AS demanda_id, d.titulo, p.visita_quando, p.visita_aceita_em AS evento_em
+           FROM ${lado.proposta} p JOIN ${lado.tabela} d ON d.id = p.${lado.fk}
+          WHERE p.usuario_id = $1 AND p.tipo_proposta = '${TIPO_VISITA}' AND p.status = '${STATUS_VISITA_ACEITA}'
+            AND p.orcamento_enviado_em IS NULL AND p.visita_cancelada_em IS NULL
+            AND (p.visita_quando AT TIME ZONE '${TZ}')::date >= ($2::timestamptz AT TIME ZONE '${TZ}')::date
+            AND d.status = 'aberta' AND d.match_usuario_id IS NULL
+          ORDER BY p.visita_aceita_em DESC NULLS LAST LIMIT ${MAX_PENDENCIAS}`, [usuarioId, agora.toISOString()])
+      for (const l of vis.rows) itens.push({ evento_em: l.evento_em, item: {
+        tipo: 'visita_aceita', [lado.chave]: l.demanda_id, proposta_id: l.id, titulo: l.titulo, visita_quando: new Date(l.visita_quando).toISOString() } })
+      const orc = await db.query(
+        `SELECT p.id, d.id AS demanda_id, d.titulo, p.valor_proposto, p.orcamento_enviado_em AS evento_em
+           FROM ${lado.proposta} p JOIN ${lado.tabela} d ON d.id = p.${lado.fk}
+          WHERE ${sqlDonoDaPessoa('d.criado_por', '$1')} AND p.tipo_proposta = '${TIPO_VISITA}' AND p.status = '${STATUS_ORCAMENTO_ENVIADO}'
+            AND d.status = 'aberta' AND d.match_usuario_id IS NULL
+          ORDER BY p.orcamento_enviado_em DESC NULLS LAST LIMIT ${MAX_PENDENCIAS}`, [usuarioId])
+      for (const l of orc.rows) itens.push({ evento_em: l.evento_em, item: {
+        tipo: 'orcamento_recebido', [lado.chave]: l.demanda_id, proposta_id: l.id, titulo: l.titulo, valor: l.valor_proposto == null ? null : Number(l.valor_proposto) } })
+    }
+  } catch (err) {
+    if (err.code !== '42703' && !/does not exist/.test(String(err.message))) console.error(`[orçamento] pendências (${usuarioId}):`, err.message)
+    return []
+  }
+  const t = (x) => (x.evento_em ? new Date(x.evento_em).getTime() : 0)
+  return itens.sort((a, b) => t(b) - t(a)).slice(0, MAX_PENDENCIAS).map(x => x.item)
+}
+
 module.exports = {
+  visitaJaChegou, visitaNoHorario, quandoCurto, erroOrcamentoAntesDaVisita, MAX_PENDENCIAS, pendenciasDoUsuario,
   ORIGEM_CONTRATADO_APOS_VISITA, ACTION_CONTRATEI, tituloContratado, CORPO_CONTRATADO, lerContratei,
   TITULO_HORA_VISITA, corpoHoraVisita, JANELA_AVISO_VISITA_H, avisarHoraDaVisita,
   visitanteAtivo, lerContratouVisitante, registrarContratouVisitante,
